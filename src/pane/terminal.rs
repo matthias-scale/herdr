@@ -418,7 +418,18 @@ impl PaneTerminal {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
-        self.ghostty.render(frame, area, show_cursor);
+        self.render_with_faint(frame, area, show_cursor, true);
+    }
+
+    pub fn render_with_faint(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        render_faint: bool,
+    ) {
+        self.ghostty
+            .render_with_faint(frame, area, show_cursor, render_faint);
     }
 
     pub fn collect_dirty_patch(
@@ -1822,6 +1833,16 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.render_with_faint(frame, area, show_cursor, true);
+    }
+
+    pub fn render_with_faint(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        render_faint: bool,
+    ) {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
@@ -1878,6 +1899,7 @@ impl GhosttyPaneTerminal {
                         default_bg,
                         resolved_fg,
                         resolved_bg,
+                        render_faint,
                     );
                     let symbol = match ghostty_buffer_symbol_into(
                         &cells,
@@ -2147,6 +2169,7 @@ fn ghostty_collect_dirty_patch(
                     default_bg,
                     resolved_fg,
                     resolved_bg,
+                    true,
                 );
                 let symbol = match ghostty_buffer_symbol_into(
                     &cells,
@@ -2661,6 +2684,7 @@ fn ghostty_cell_style(
     default_bg: Option<Color>,
     resolved_fg: Option<Color>,
     resolved_bg: Option<Color>,
+    render_faint: bool,
 ) -> Style {
     let mut fg = basic
         .style
@@ -2705,7 +2729,7 @@ fn ghostty_cell_style(
     if basic.style.italic {
         modifiers |= Modifier::ITALIC;
     }
-    if basic.style.faint {
+    if render_faint && basic.style.faint {
         modifiers |= Modifier::DIM;
     }
     if basic.style.blink {
@@ -5137,6 +5161,28 @@ mod tests {
         let style = terminal.backend().buffer()[(0, 0)].style();
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(style.underline_color, Some(Color::Rgb(17, 34, 51)));
+    }
+
+    #[test]
+    fn render_with_faint_disabled_keeps_pane_text_at_normal_intensity() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"\x1b[2mF");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render_with_faint(frame, Rect::new(0, 0, 20, 5), false, false))
+            .unwrap();
+
+        assert!(!terminal.backend().buffer()[(0, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::DIM));
     }
 
     #[test]

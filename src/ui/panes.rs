@@ -316,10 +316,11 @@ pub(super) fn render_panes(
                 && terminal_active
                 && !pane_is_scrolled_back(rt)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
-            rt.render(frame, info.inner_rect, show_cursor);
+            rt.render_with_faint(frame, info.inner_rect, show_cursor, app.render_faint);
             render_pane_scrollbar(app, frame, info, rt);
 
-            let should_dim = !info.is_focused && multi_pane && !terminal_active;
+            let should_dim =
+                app.dim_inactive_panes && !info.is_focused && multi_pane && !terminal_active;
             if should_dim {
                 let inner = info.inner_rect;
                 let buf = frame.buffer_mut();
@@ -425,7 +426,7 @@ pub(super) fn render_popup_pane(
         .style(Style::default().bg(app.palette.panel_bg));
     frame.render_widget(Clear, outer);
     frame.render_widget(block, outer);
-    rt.render(frame, inner, !pane_is_scrolled_back(rt));
+    rt.render_with_faint(frame, inner, !pane_is_scrolled_back(rt), app.render_faint);
 }
 
 #[derive(Clone, Copy, Default)]

@@ -137,6 +137,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Empty means $SHELL, then /bin/sh.
 # default_shell = ""
 
+# Preserve app-requested faint text (SGR 2) in embedded panes.
+# Set false when the outer terminal renders it less legibly than Ghostty.
+# render_faint = true
+
 # Startup mode for new interactive pane shells: "auto", "login", or "non_login".
 # "auto" uses login shells on macOS and keeps the current behavior elsewhere.
 # shell_mode = "auto"
@@ -306,6 +310,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Keep split panes visually separated instead of sharing divider borders.
 # pane_gaps = true
+
+# Dim inactive split panes while navigating Herdr UI.
+# Set false to preserve each pane's original terminal colors.
+# dim_inactive_panes = true
 
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false

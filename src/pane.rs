@@ -2608,6 +2608,17 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub fn render_with_faint(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        render_faint: bool,
+    ) {
+        self.terminal
+            .render_with_faint(frame, area, show_cursor, render_faint);
+    }
+
     pub(crate) fn collect_dirty_patch(
         &self,
         area_width: u16,
