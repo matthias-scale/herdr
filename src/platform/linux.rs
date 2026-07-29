@@ -98,6 +98,10 @@ fn status_local_date_time() -> (String, String) {
 
 fn status_memory() -> Option<(f32, f32)> {
     let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_status_memory(&contents)
+}
+
+fn parse_status_memory(contents: &str) -> Option<(f32, f32)> {
     let mut total_kib = None;
     let mut available_kib = None;
     for line in contents.lines() {
@@ -108,7 +112,8 @@ fn status_memory() -> Option<(f32, f32)> {
         }
     }
     let total = total_kib?;
-    let used = total.saturating_sub(available_kib.unwrap_or_default());
+    let available = available_kib?;
+    let used = total.saturating_sub(available);
     Some((used as f32 / 1_048_576.0, total as f32 / 1_048_576.0))
 }
 
@@ -329,6 +334,26 @@ mod status_metric_tests {
         assert_eq!(
             super::parse_default_interface(routes).as_deref(),
             Some("wlan0")
+        );
+    }
+
+    #[test]
+    fn memory_requires_valid_total_and_available_values() {
+        assert_eq!(
+            super::parse_status_memory(
+                "MemTotal:       16777216 kB\nMemAvailable:    8388608 kB\n"
+            ),
+            Some((8.0, 16.0))
+        );
+        assert_eq!(
+            super::parse_status_memory("MemTotal:       16777216 kB\n"),
+            None
+        );
+        assert_eq!(
+            super::parse_status_memory(
+                "MemTotal:       16777216 kB\nMemAvailable:    unavailable kB\n"
+            ),
+            None
         );
     }
 

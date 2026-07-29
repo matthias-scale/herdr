@@ -210,11 +210,6 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    // Project runtime-owned focus context during the mutation phase immediately
-    // before every render. `render()` remains pure, while pane/tab/workspace
-    // focus changes cannot leave the status row on the previous cwd.
-    app.sync_status_focused_cwd(terminal_runtimes);
-
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -604,6 +599,7 @@ mod tests {
     use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
     use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
 
     #[test]
     fn copy_feedback_offset_only_increases_when_toast_rect_overlaps() {
@@ -1045,6 +1041,19 @@ mod tests {
         assert_eq!(app.view.status_bar_rect, Rect::default());
         assert_eq!(app.view.sidebar_rect.y, 0);
         assert_eq!(app.view.sidebar_rect.height, 24);
+    }
+
+    #[test]
+    fn status_view_computation_keeps_the_scheduled_focused_cwd_projection() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        let projected = PathBuf::from("/scheduled/focused");
+        app.status_focused_cwd = Some(projected.clone());
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.status_focused_cwd, Some(projected));
     }
 
     #[test]

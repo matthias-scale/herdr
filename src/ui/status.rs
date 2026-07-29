@@ -900,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_change_projects_cwd_before_render_and_hides_stale_branch() {
+    fn scheduled_focus_projection_hides_stale_branch() {
         let root_cwd = PathBuf::from("/repo");
         let nested_cwd = root_cwd.join("nested");
         let mut workspace = crate::workspace::Workspace::test_new("status");
@@ -929,21 +929,13 @@ mod tests {
         app.active = Some(0);
         let runtimes = crate::terminal::TerminalRuntimeRegistry::default();
 
-        crate::ui::compute_view_with_runtime_registry(
-            &mut app,
-            &runtimes,
-            Rect::new(0, 0, 100, 20),
-        );
+        assert!(app.sync_status_focused_cwd(&runtimes));
         app.status_git_cwd = Some(root_cwd.clone());
         app.status_git_branch = Some("root-branch".into());
         assert_eq!(app.status_focused_cwd, Some(root_cwd));
 
         assert!(app.focus_pane_in_workspace(0, nested));
-        crate::ui::compute_view_with_runtime_registry(
-            &mut app,
-            &runtimes,
-            Rect::new(0, 0, 100, 20),
-        );
+        assert!(app.sync_status_focused_cwd(&runtimes));
         let (_, _, _, cwd, branch) = focused_identity(&app);
 
         assert_eq!(app.status_focused_cwd, Some(nested_cwd.clone()));

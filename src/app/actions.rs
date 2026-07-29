@@ -2684,7 +2684,8 @@ impl AppState {
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
-        let mut changed = self.sync_status_focused_cwd(terminal_runtimes);
+        let mut changed =
+            self.status_bar_enabled && self.sync_status_focused_cwd(terminal_runtimes);
         for result in results {
             let Some(ws_idx) = self
                 .workspaces
@@ -2694,10 +2695,13 @@ impl AppState {
                 continue;
             };
 
-            let focused_cwd = self
-                .active
-                .filter(|active| *active == ws_idx)
-                .and_then(|_| self.status_focused_cwd.clone());
+            let focused_cwd = if self.status_bar_enabled {
+                self.active
+                    .filter(|active| *active == ws_idx)
+                    .and_then(|_| self.status_focused_cwd.clone())
+            } else {
+                None
+            };
             if result.demand.branch && focused_cwd.as_ref() == Some(&result.resolved_identity_cwd) {
                 if self.status_git_cwd.as_ref() != Some(&result.resolved_identity_cwd) {
                     self.status_git_cwd = Some(result.resolved_identity_cwd.clone());
@@ -4073,6 +4077,35 @@ mod tests {
         assert!(state.sync_status_focused_cwd(&terminal_runtimes));
         assert_eq!(state.status_focused_cwd, expected);
         assert!(!state.sync_status_focused_cwd(&terminal_runtimes));
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_skips_status_projection_when_disabled() {
+        let mut state = app_with_workspaces(&["one"]);
+        state.status_bar_enabled = false;
+        let projected = std::path::PathBuf::from("/unchanged");
+        state.status_focused_cwd = Some(projected.clone());
+        let workspace_id = state.workspaces[0].id.clone();
+        let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "one".into(),
+                branch: Some("main".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+        );
+
+        assert_eq!(state.status_focused_cwd, Some(projected));
+        assert_eq!(state.status_git_cwd, None);
+        assert_eq!(state.status_git_branch, None);
     }
 
     #[test]

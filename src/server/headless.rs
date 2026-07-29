@@ -5799,6 +5799,38 @@ next_tab = ""
     }
 
     #[test]
+    fn detached_headless_server_does_not_start_status_metric_sampling() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(!server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn attached_app_client_starts_status_metric_sampling_immediately() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
     fn unchanged_git_refresh_does_not_request_headless_render() {
         let mut server = test_headless_server();
         server.app.git_refresh_in_flight = true;

@@ -288,6 +288,68 @@ mod tests {
     }
 
     #[test]
+    fn platform_sampling_source_contract_excludes_processes_and_network_clients() {
+        fn region<'a>(source: &'a str, end: Option<&str>) -> &'a str {
+            let source = source
+                .split_once("pub(crate) fn sample_status_metrics")
+                .expect("sampling entrypoint")
+                .1;
+            end.and_then(|marker| source.split_once(marker).map(|parts| parts.0))
+                .unwrap_or(source)
+        }
+
+        let sources = [
+            (
+                "macos",
+                region(
+                    include_str!("macos.rs"),
+                    Some("#[cfg(test)]\nmod status_metric_tests"),
+                ),
+            ),
+            (
+                "linux",
+                region(
+                    include_str!("linux.rs"),
+                    Some("#[cfg(test)]\nmod status_metric_tests"),
+                ),
+            ),
+            (
+                "windows",
+                region(
+                    include_str!("windows.rs"),
+                    Some("#[cfg(test)]\nmod status_metric_tests"),
+                ),
+            ),
+            ("fallback", region(include_str!("fallback.rs"), None)),
+            (
+                "shared",
+                include_str!("status_metrics.rs")
+                    .split_once("#[cfg(test)]\nmod tests")
+                    .expect("shared policy boundary")
+                    .0,
+            ),
+        ];
+        let forbidden = [
+            concat!("Command", "::new"),
+            concat!("std::process", "::Command"),
+            concat!("req", "west"),
+            concat!("ure", "q"),
+            concat!("Tcp", "Stream"),
+            concat!("http", "://"),
+            concat!("https", "://"),
+        ];
+
+        for (name, source) in sources {
+            for pattern in forbidden {
+                assert!(
+                    !source.contains(pattern),
+                    "{name} status sampling contains {pattern}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn metric_refresh_bounds_repaints_without_delaying_samples() {
         // AC5: 2s samples remain bounded while idle full-frame repaints are capped at 4s.
         let start = Instant::now();
