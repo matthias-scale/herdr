@@ -27,12 +27,14 @@ pub(crate) fn sample_status_metrics(
     let (mem_used_gib, mem_total_gib) = status_memory().unwrap_or((0.0, 0.0));
     let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
     let (battery_percent, battery_charging) = status_battery();
-    let (local_ip, tailscale_ip) = status_interface_ipv4s();
     let interface = status_default_interface();
+    let interfaces = status_interface_ipv4s(interface.as_deref());
     let (net_down_kib, net_up_kib) = interface
         .as_deref()
         .and_then(status_interface_bytes)
-        .and_then(|(rx, tx)| sampler.bandwidth_kib(rx, tx, std::time::Instant::now()))
+        .and_then(|(rx, tx)| {
+            sampler.bandwidth_kib(interface.as_deref()?, rx, tx, std::time::Instant::now())
+        })
         .map(|(down, up)| (Some(down), Some(up)))
         .unwrap_or((None, None));
 
@@ -42,13 +44,13 @@ pub(crate) fn sample_status_metrics(
         mem_total_gib: (mem_total_gib > 0.0).then_some(mem_total_gib),
         battery_percent,
         battery_charging,
-        local_ip,
-        tailscale_ip: tailscale_ip.clone(),
+        local_ip: interfaces.local_ip,
+        tailscale_ip: interfaces.tailscale_ip.clone(),
         public_ip: super::status_metrics::compatible_public_ip(),
         net_down_kib,
         net_up_kib,
         net_kind: status_net_kind(interface.as_deref()),
-        vpn_active: tailscale_ip.is_some() || status_vpn_active(),
+        vpn_active: interfaces.tailscale_ip.is_some() || status_vpn_active(),
         remote_session: super::status_metrics::remote_session_from_env(),
         hostname,
         username,
@@ -156,11 +158,25 @@ fn status_battery() -> (Option<u8>, Option<bool>) {
 
 fn status_default_interface() -> Option<String> {
     let contents = std::fs::read_to_string("/proc/net/route").ok()?;
-    contents.lines().skip(1).find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let interface = fields.next()?;
-        (fields.next()? == "00000000").then(|| interface.to_string())
-    })
+    parse_default_interface(&contents)
+}
+
+fn parse_default_interface(contents: &str) -> Option<String> {
+    contents
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let interface = *fields.first()?;
+            let destination = *fields.get(1)?;
+            let flags = u32::from_str_radix(fields.get(3)?, 16).ok()?;
+            let metric = fields.get(6)?.parse::<u64>().ok()?;
+            let mask = *fields.get(7)?;
+            (destination == "00000000" && mask == "00000000" && flags & 0x1 != 0)
+                .then_some((interface, metric))
+        })
+        .min_by_key(|(_, metric)| *metric)
+        .map(|(interface, _)| interface.to_owned())
 }
 
 fn status_interface_bytes(interface: &str) -> Option<(u64, u64)> {
@@ -211,13 +227,30 @@ fn status_vpn_active() -> bool {
         })
 }
 
-fn status_interface_ipv4s() -> (Option<String>, Option<String>) {
-    let mut local = None;
-    let mut tailscale = None;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusInterfaceIpv4 {
+    name: String,
+    address: std::net::Ipv4Addr,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StatusInterfaceSelection {
+    local_ip: Option<String>,
+    tailscale_ip: Option<String>,
+}
+
+fn status_tunnel_interface(name: &str) -> bool {
+    ["tailscale", "tun", "wg", "ppp", "ipsec"]
+        .iter()
+        .any(|needle| name.contains(needle))
+}
+
+fn status_interface_ipv4s(default_interface: Option<&str>) -> StatusInterfaceSelection {
+    let mut ipv4s = Vec::new();
     let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: libc owns the linked list until the paired `freeifaddrs`.
     if unsafe { libc::getifaddrs(&mut interfaces) } != 0 || interfaces.is_null() {
-        return (local, tailscale);
+        return StatusInterfaceSelection::default();
     }
     let mut current = interfaces;
     while !current.is_null() {
@@ -235,25 +268,52 @@ fn status_interface_ipv4s() -> (Option<String>, Option<String>) {
                     .to_string_lossy()
                     .into_owned()
             };
-            if !ip.is_loopback() && !ip.is_unspecified() {
-                let tunnel = ["tailscale", "tun", "wg", "ppp", "ipsec"]
-                    .iter()
-                    .any(|needle| name.contains(needle));
-                if tunnel && ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]) {
-                    tailscale.get_or_insert_with(|| ip.to_string());
-                } else if !tunnel {
-                    local.get_or_insert_with(|| ip.to_string());
-                }
-            }
+            ipv4s.push(StatusInterfaceIpv4 { name, address: ip });
         }
         current = interface.ifa_next;
     }
     unsafe { libc::freeifaddrs(interfaces) };
-    (local, tailscale)
+    select_status_interface_ipv4s(default_interface, ipv4s)
+}
+
+fn select_status_interface_ipv4s(
+    default_interface: Option<&str>,
+    ipv4s: Vec<StatusInterfaceIpv4>,
+) -> StatusInterfaceSelection {
+    let mut tailscale_ip = None;
+    let mut local_candidates = Vec::new();
+    for interface in ipv4s {
+        if interface.address.is_loopback() || interface.address.is_unspecified() {
+            continue;
+        }
+        if status_tunnel_interface(&interface.name) {
+            let octets = interface.address.octets();
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                tailscale_ip.get_or_insert_with(|| interface.address.to_string());
+            }
+        } else {
+            local_candidates.push(interface);
+        }
+    }
+    let selected = match default_interface {
+        Some(name) => local_candidates
+            .iter()
+            .find(|interface| interface.name == name),
+        None => local_candidates.first(),
+    };
+    let local_ip = selected.map(|interface| interface.address.to_string());
+    StatusInterfaceSelection {
+        local_ip,
+        tailscale_ip,
+    }
 }
 
 #[cfg(test)]
 mod status_metric_tests {
+    use std::net::Ipv4Addr;
+
+    use super::StatusInterfaceIpv4;
+
     #[test]
     fn platform_metric_sampler_returns_local_linux_snapshot() {
         // AC6: Linux collection stays in linux.rs and uses /proc, /sys, libc.
@@ -264,6 +324,51 @@ mod status_metric_tests {
         assert!(!metrics.username.is_empty());
         assert_eq!(metrics.date.len(), 10);
         assert_eq!(metrics.time.len(), 5);
+    }
+
+    #[test]
+    fn default_route_prefers_lowest_metric_up_route() {
+        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+                      eth0 00000000 0100000A 0003 0 0 200 00000000 0 0 0\n\
+                      wlan0 00000000 0100000A 0003 0 0 50 00000000 0 0 0\n\
+                      down0 00000000 0100000A 0002 0 0 1 00000000 0 0 0\n";
+        assert_eq!(
+            super::parse_default_interface(routes).as_deref(),
+            Some("wlan0")
+        );
+    }
+
+    #[test]
+    fn network_selection_keeps_local_ip_on_default_route_interface() {
+        let interfaces = vec![
+            StatusInterfaceIpv4 {
+                name: "eth0".into(),
+                address: Ipv4Addr::new(192, 168, 1, 20),
+            },
+            StatusInterfaceIpv4 {
+                name: "wlan0".into(),
+                address: Ipv4Addr::new(10, 0, 0, 9),
+            },
+            StatusInterfaceIpv4 {
+                name: "tailscale0".into(),
+                address: Ipv4Addr::new(100, 100, 20, 30),
+            },
+        ];
+
+        let selected = super::select_status_interface_ipv4s(Some("wlan0"), interfaces);
+        assert_eq!(selected.local_ip.as_deref(), Some("10.0.0.9"));
+        assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.20.30"));
+    }
+
+    #[test]
+    fn network_selection_does_not_mix_missing_default_route_with_another_ip() {
+        let interfaces = vec![StatusInterfaceIpv4 {
+            name: "eth0".into(),
+            address: Ipv4Addr::new(192, 168, 1, 20),
+        }];
+
+        let selected = super::select_status_interface_ipv4s(Some("wlan0"), interfaces);
+        assert_eq!(selected.local_ip, None);
     }
 }
 

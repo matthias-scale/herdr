@@ -29,8 +29,12 @@ pub(crate) fn sample_status_metrics(
     let (battery_percent, battery_charging) = status_battery();
     let interfaces = status_interface_ipv4s();
     let (net_down_kib, net_up_kib) = interfaces
-        .primary_bytes
-        .and_then(|(rx, tx)| sampler.bandwidth_kib(rx, tx, std::time::Instant::now()))
+        .primary
+        .as_deref()
+        .zip(interfaces.primary_bytes)
+        .and_then(|(interface, (rx, tx))| {
+            sampler.bandwidth_kib(interface, rx, tx, std::time::Instant::now())
+        })
         .map_or((None, None), |(down, up)| (Some(down), Some(up)));
 
     super::status_metrics::StatusMetrics {
