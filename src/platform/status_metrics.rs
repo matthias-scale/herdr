@@ -64,7 +64,7 @@ impl StatusMetricsSnapshot {
 pub(crate) struct StatusMetricSampler {
     previous_cpu: Option<(u64, u64)>,
     #[cfg(any(unix, test))]
-    previous_network: Option<(u64, u64, Instant)>,
+    previous_network: Option<(String, u64, u64, Instant)>,
 }
 
 impl StatusMetricSampler {
@@ -95,26 +95,33 @@ impl StatusMetricSampler {
     #[cfg(any(unix, test))]
     pub(super) fn bandwidth_kib(
         &mut self,
+        interface: &str,
         rx_bytes: u64,
         tx_bytes: u64,
         now: Instant,
     ) -> Option<(u64, u64)> {
         let result = self
             .previous_network
-            .and_then(|(previous_rx, previous_tx, previous_at)| {
-                if rx_bytes < previous_rx || tx_bytes < previous_tx {
-                    return Some((0, 0));
-                }
-                let seconds = now.duration_since(previous_at).as_secs_f64();
-                (seconds > 0.0).then(|| {
-                    (
-                        ((rx_bytes - previous_rx) as f64 / seconds / 1024.0).round() as u64,
-                        ((tx_bytes - previous_tx) as f64 / seconds / 1024.0).round() as u64,
-                    )
-                })
-            })
+            .as_ref()
+            .and_then(
+                |(previous_interface, previous_rx, previous_tx, previous_at)| {
+                    if previous_interface != interface
+                        || rx_bytes < *previous_rx
+                        || tx_bytes < *previous_tx
+                    {
+                        return Some((0, 0));
+                    }
+                    let seconds = now.duration_since(*previous_at).as_secs_f64();
+                    (seconds > 0.0).then(|| {
+                        (
+                            ((rx_bytes - previous_rx) as f64 / seconds / 1024.0).round() as u64,
+                            ((tx_bytes - previous_tx) as f64 / seconds / 1024.0).round() as u64,
+                        )
+                    })
+                },
+            )
             .or(Some((0, 0)));
-        self.previous_network = Some((rx_bytes, tx_bytes, now));
+        self.previous_network = Some((interface.to_owned(), rx_bytes, tx_bytes, now));
         result
     }
 }
@@ -385,10 +392,28 @@ mod tests {
         let now = Instant::now();
         assert_eq!(sampler.cpu_percent(20, 100), Some(0));
         assert_eq!(sampler.cpu_percent(30, 140), Some(75));
-        assert_eq!(sampler.bandwidth_kib(1000, 2000, now), Some((0, 0)));
+        assert_eq!(sampler.bandwidth_kib("eth0", 1000, 2000, now), Some((0, 0)));
         assert_eq!(
-            sampler.bandwidth_kib(2024, 3024, now + Duration::from_secs(1)),
+            sampler.bandwidth_kib("eth0", 2024, 3024, now + Duration::from_secs(1)),
             Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn network_interface_change_resets_rate_baseline() {
+        let mut sampler = StatusMetricSampler::new();
+        let now = Instant::now();
+        assert_eq!(
+            sampler.bandwidth_kib("eth0", 1_000, 2_000, now),
+            Some((0, 0))
+        );
+        assert_eq!(
+            sampler.bandwidth_kib("wlan0", 9_000_000, 8_000_000, now + Duration::from_secs(1)),
+            Some((0, 0))
+        );
+        assert_eq!(
+            sampler.bandwidth_kib("wlan0", 9_001_024, 8_002_048, now + Duration::from_secs(2)),
+            Some((1, 2))
         );
     }
 }
