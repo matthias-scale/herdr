@@ -622,6 +622,27 @@ pub struct WorkspaceCardArea {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCardArea {
+    pub ws_idx: usize,
+    pub tab_idx: usize,
+    pub pane_id: PaneId,
+    pub rect: Rect,
+}
+
+/// Attach-local sidebar state. The headless server swaps one instance into
+/// `AppState` while routing input or rendering for that client; the monolithic
+/// app keeps its own instance directly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SidebarPresentationState {
+    pub(crate) expanded_workspace_ids: std::collections::HashSet<String>,
+    pub(crate) known_workspace_ids: std::collections::HashSet<String>,
+    pub(crate) force_spaces_tree: bool,
+    pub(crate) workspace_scroll: usize,
+    pub(crate) agent_panel_scroll: usize,
+    pub(crate) mobile_switcher_scroll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
     pub source_checkout_path: std::path::PathBuf,
@@ -778,6 +799,7 @@ pub struct ViewState {
     pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub agent_card_areas: Vec<AgentCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -1478,6 +1500,7 @@ pub struct AppState {
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
     pub copy_mode: Option<CopyModeState>,
+    pub(crate) sidebar_presentation: SidebarPresentationState,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
@@ -1614,6 +1637,113 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
+        std::mem::swap(
+            &mut self.sidebar_presentation.expanded_workspace_ids,
+            &mut other.expanded_workspace_ids,
+        );
+        std::mem::swap(
+            &mut self.sidebar_presentation.known_workspace_ids,
+            &mut other.known_workspace_ids,
+        );
+        std::mem::swap(
+            &mut self.sidebar_presentation.force_spaces_tree,
+            &mut other.force_spaces_tree,
+        );
+        std::mem::swap(&mut self.workspace_scroll, &mut other.workspace_scroll);
+        std::mem::swap(&mut self.agent_panel_scroll, &mut other.agent_panel_scroll);
+        std::mem::swap(
+            &mut self.mobile_switcher_scroll,
+            &mut other.mobile_switcher_scroll,
+        );
+    }
+
+    pub(crate) fn reconcile_sidebar_presentation(&mut self) {
+        let current_ids = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let first_attach = self.sidebar_presentation.known_workspace_ids.is_empty();
+        let newly_added = current_ids
+            .difference(&self.sidebar_presentation.known_workspace_ids)
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+
+        self.sidebar_presentation
+            .expanded_workspace_ids
+            .retain(|workspace_id| current_ids.contains(workspace_id));
+        if let Some(active_id) = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .map(|workspace| workspace.id.clone())
+        {
+            if first_attach || newly_added.contains(&active_id) {
+                self.sidebar_presentation
+                    .expanded_workspace_ids
+                    .insert(active_id);
+            }
+        }
+        self.sidebar_presentation.known_workspace_ids = current_ids;
+    }
+
+    pub(crate) fn sidebar_shows_spaces_tree(&self) -> bool {
+        self.sidebar_presentation.force_spaces_tree
+            || (self.agent_view_override.is_none()
+                && self.agent_panel_sort == AgentPanelSort::Spaces)
+    }
+
+    pub(crate) fn begin_workspace_picker_presentation(&mut self) {
+        self.mobile_switcher_scroll = 0;
+        self.sidebar_presentation.force_spaces_tree = true;
+    }
+
+    pub(crate) fn end_workspace_picker_presentation(&mut self) {
+        self.sidebar_presentation.force_spaces_tree = false;
+    }
+
+    pub(crate) fn workspace_agents_expanded(&self, ws_idx: usize) -> bool {
+        self.workspaces.get(ws_idx).is_some_and(|workspace| {
+            (self.sidebar_presentation.known_workspace_ids.is_empty()
+                && self.active == Some(ws_idx))
+                || self
+                    .sidebar_presentation
+                    .expanded_workspace_ids
+                    .contains(&workspace.id)
+        })
+    }
+
+    pub(crate) fn toggle_workspace_agent_disclosure(&mut self, ws_idx: usize) -> bool {
+        let Some(workspace_id) = self
+            .workspaces
+            .get(ws_idx)
+            .map(|workspace| workspace.id.clone())
+        else {
+            return false;
+        };
+        if crate::ui::all_agent_panel_entries(self)
+            .iter()
+            .all(|entry| entry.ws_idx != ws_idx)
+        {
+            return false;
+        }
+        if !self
+            .sidebar_presentation
+            .expanded_workspace_ids
+            .remove(&workspace_id)
+        {
+            self.sidebar_presentation
+                .expanded_workspace_ids
+                .insert(workspace_id);
+        }
+        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+            self,
+            self.view.sidebar_rect,
+            self.workspace_scroll,
+        );
+        true
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -1856,6 +1986,7 @@ impl AppState {
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
             copy_mode: None,
+            sidebar_presentation: SidebarPresentationState::default(),
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             tab_scroll: 0,
@@ -1866,6 +1997,7 @@ impl AppState {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                agent_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),

@@ -14,13 +14,10 @@ impl AppState {
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {
-        let sidebar = self.view.sidebar_rect;
-        if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
+        if self.sidebar_collapsed || self.sidebar_shows_spaces_tree() {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
-        detail_area
+        self.workspace_list_rect()
     }
 
     pub(super) fn workspace_list_scrollbar_target_at(
@@ -150,21 +147,6 @@ impl AppState {
             .saturating_sub(offset_from_bottom);
     }
 
-    pub(super) fn scroll_agent_panel(&mut self, delta: i16) {
-        let area = self.agent_panel_rect();
-        let max_scroll = crate::ui::agent_panel_scroll_metrics(self, area).max_offset_from_bottom;
-        if delta.is_negative() {
-            self.agent_panel_scroll = self
-                .agent_panel_scroll
-                .saturating_sub(delta.unsigned_abs() as usize);
-        } else {
-            self.agent_panel_scroll = self
-                .agent_panel_scroll
-                .saturating_add(delta as usize)
-                .min(max_scroll);
-        }
-    }
-
     pub(crate) fn sidebar_footer_rect(&self) -> Rect {
         let ws_area = self.workspace_list_rect();
         if ws_area == Rect::default() {
@@ -192,7 +174,7 @@ impl AppState {
             6
         }
         .min(footer.width.max(1));
-        let x = footer.x + footer.width.saturating_sub(width);
+        let x = footer.x + footer.width.saturating_sub(width.saturating_add(1));
         Rect::new(x, footer.y, width, footer.height)
     }
 
@@ -327,7 +309,12 @@ impl AppState {
         }
 
         let idx = (row - ws_area.y) as usize;
-        (idx < self.workspaces.len()).then_some(idx)
+        crate::ui::sidebar_rows(self)
+            .get(idx)
+            .and_then(|entry| match entry {
+                crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
+                crate::ui::SidebarRow::Agent { .. } => None,
+            })
     }
 
     pub(super) fn collapsed_agent_detail_target_at(
@@ -338,24 +325,19 @@ impl AppState {
             return None;
         }
 
-        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
-        let detail_content_area = Rect::new(
-            detail_area.x,
-            detail_area.y,
-            detail_area.width,
-            detail_area.height.saturating_sub(1),
-        );
-        if detail_content_area == Rect::default()
-            || row < detail_content_area.y
-            || row >= detail_content_area.y + detail_content_area.height
-        {
+        let (content, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        if content == Rect::default() || row < content.y || row >= content.y + content.height {
             return None;
         }
-
-        let detail_idx = (row - detail_content_area.y) as usize;
-        let details = crate::ui::agent_panel_entries(self);
-        let detail = details.get(detail_idx)?;
-        Some((detail.ws_idx, detail.tab_idx, detail.pane_id))
+        let row_idx = (row - content.y) as usize;
+        crate::ui::sidebar_rows(self)
+            .get(row_idx)
+            .and_then(|entry| match entry {
+                crate::ui::SidebarRow::Agent { entry, .. } => {
+                    Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
+                }
+                crate::ui::SidebarRow::Workspace { .. } => None,
+            })
     }
 
     pub(super) fn workspace_drop_target_at_row(
@@ -470,11 +452,8 @@ impl AppState {
             return false;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
+        let area = self.workspace_list_rect();
+        let rect = crate::ui::agent_panel_toggle_rect(area, self.agent_panel_sort);
         rect.width > 0
             && col >= rect.x
             && col < rect.x + rect.width
@@ -490,34 +469,18 @@ impl AppState {
             return None;
         }
 
-        let detail_area = self.agent_panel_rect();
-        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
-        let body = crate::ui::agent_panel_body_rect(
-            detail_area,
-            crate::ui::should_show_scrollbar(metrics),
-        );
-        if body.height == 0 || row < body.y || row >= body.y + body.height {
-            return None;
-        }
-
-        let mut row_y = body.y;
-        let body_bottom = body.y + body.height;
-        let entries = crate::ui::agent_panel_entries(self);
-        let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-        for (index, detail) in entries.iter().enumerate().skip(scroll) {
-            let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
-            if row_y.saturating_add(height) > body_bottom {
-                break;
-            }
-            if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y
-                .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
-                .min(body_bottom);
-        }
-        None
+        let cards = if self.view.agent_card_areas.is_empty() {
+            crate::ui::compute_agent_card_areas(self, self.view.sidebar_rect)
+        } else {
+            self.view.agent_card_areas.clone()
+        };
+        cards.iter().find_map(|card| {
+            (row >= card.rect.y && row < card.rect.y + card.rect.height).then_some((
+                card.ws_idx,
+                card.tab_idx,
+                card.pane_id,
+            ))
+        })
     }
 }
 
@@ -728,8 +691,23 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.reconcile_sidebar_presentation();
+        app.state.view.agent_card_areas =
+            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = app
+            .state
+            .view
+            .agent_card_areas
+            .iter()
+            .find(|card| card.pane_id == second_pane)
+            .unwrap()
+            .rect;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 16));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x + 1,
+            target.y,
+        ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
@@ -775,6 +753,7 @@ mod tests {
             ],
         );
         app.state.sidebar_agents.row_gap = 1;
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
         let detail_area = app.state.agent_panel_rect();
         let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
         let body = crate::ui::agent_panel_body_rect(
@@ -897,15 +876,23 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.reconcile_sidebar_presentation();
+        assert!(app.state.toggle_workspace_agent_disclosure(1));
+        app.state.view.agent_card_areas =
+            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = app
+            .state
+            .view
+            .agent_card_areas
+            .iter()
+            .find(|card| card.ws_idx == 1 && card.pane_id == second_pane)
+            .unwrap()
+            .rect;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
-        );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            detail_area.x + 2,
-            detail_area.y + 6,
+            target.x + 1,
+            target.y,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -918,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_agent_panel_with_wheel_updates_agent_panel_scroll() {
+    fn scrolling_flat_agent_projection_with_wheel_updates_shared_scroll() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
@@ -957,10 +944,13 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 26, 8);
+        app.state.view.terminal_area = Rect::new(26, 0, 80, 8);
 
         let detail_area = app.state.agent_panel_rect();
         assert!(crate::ui::should_show_scrollbar(
-            crate::ui::agent_panel_scroll_metrics(&app.state, detail_area)
+            crate::ui::workspace_list_scroll_metrics(&app.state, detail_area)
         ));
 
         app.handle_mouse(mouse(
@@ -969,7 +959,7 @@ mod tests {
             detail_area.y + 4,
         ));
 
-        assert_eq!(app.state.agent_panel_scroll, 1);
+        assert_eq!(app.state.workspace_scroll, 1);
         assert_eq!(app.state.selected, 0);
     }
 
@@ -1026,14 +1016,22 @@ mod tests {
                 vec![crate::config::AgentSidebarToken::Workspace],
             ],
         );
-        app.state.agent_panel_scroll = 1;
-
-        let detail_area = app.state.agent_panel_rect();
-        let body = crate::ui::agent_panel_body_rect(detail_area, true);
+        app.state.reconcile_sidebar_presentation();
+        app.state.workspace_scroll = 1;
+        app.state.view.agent_card_areas =
+            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = app
+            .state
+            .view
+            .agent_card_areas
+            .iter()
+            .find(|card| card.pane_id == second_pane)
+            .unwrap()
+            .rect;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            body.x + 1,
-            body.y + 1,
+            target.x + 1,
+            target.y,
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, second_tab);
@@ -1075,13 +1073,23 @@ mod tests {
         app.state.sidebar_collapsed = true;
         app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
         app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+        app.state.reconcile_sidebar_presentation();
 
-        let (_, _, detail_area) =
-            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        let row = crate::ui::sidebar_rows(&app.state)
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    crate::ui::SidebarRow::Agent { entry, .. }
+                        if entry.pane_id == second_pane
+                )
+            })
+            .unwrap() as u16;
+        let (content, _, _) = crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            detail_area.x,
-            detail_area.y + 1,
+            content.x,
+            content.y + row,
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
@@ -1894,30 +1902,25 @@ mod tests {
     }
 
     #[test]
-    fn dragging_sidebar_section_divider_sets_split_ratio() {
+    fn removed_sidebar_section_divider_is_not_interactive() {
         let mut app = app_for_mouse_test();
-        let divider = crate::ui::sidebar_section_divider_rect(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
-        );
+        let original = app.state.sidebar_section_split;
+        let old_divider_row =
+            app.state.view.sidebar_rect.y + app.state.view.sidebar_rect.height / 2;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            divider.x + 1,
-            divider.y,
+            app.state.view.sidebar_rect.x + 1,
+            old_divider_row,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            divider.x + 1,
-            divider.y + 4,
+            app.state.view.sidebar_rect.x + 1,
+            old_divider_row + 4,
         ));
 
-        assert!(app.state.sidebar_section_split > 0.5);
-        let snapshot = capture_snapshot(&app.state);
-        assert_eq!(
-            snapshot.sidebar_section_split,
-            Some(app.state.sidebar_section_split)
-        );
+        assert_eq!(app.state.sidebar_section_split, original);
+        assert!(app.state.drag.is_none());
     }
 
     #[test]

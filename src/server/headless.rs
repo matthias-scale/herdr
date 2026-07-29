@@ -2680,7 +2680,23 @@ impl HeadlessServer {
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         // Client-local theme reports were applied above; routing them again would update every
         // pane once per palette entry instead of once per captured batch.
+        let mut sidebar_presentation = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .map(|client| std::mem::take(&mut client.sidebar_presentation))
+                .unwrap_or_default()
+        });
+        if let Some(presentation) = &mut sidebar_presentation {
+            self.app.state.swap_sidebar_presentation(presentation);
+            self.app.state.reconcile_sidebar_presentation();
+        }
         self.app.route_client_events_from(client_id, events, false);
+        if let Some(mut presentation) = sidebar_presentation {
+            self.app.state.swap_sidebar_presentation(&mut presentation);
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.sidebar_presentation = presentation;
+            }
+        }
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
         } else {
@@ -3787,6 +3803,15 @@ impl HeadlessServer {
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
                 ClientConnectionMode::App => {
+                    let mut sidebar_presentation = self
+                        .clients
+                        .get_mut(&client_id)
+                        .map(|client| std::mem::take(&mut client.sidebar_presentation))
+                        .unwrap_or_default();
+                    self.app
+                        .state
+                        .swap_sidebar_presentation(&mut sidebar_presentation);
+                    self.app.state.reconcile_sidebar_presentation();
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -3822,6 +3847,12 @@ impl HeadlessServer {
                         &hyperlinks,
                     );
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
+                    self.app
+                        .state
+                        .swap_sidebar_presentation(&mut sidebar_presentation);
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.sidebar_presentation = sidebar_presentation;
+                    }
                     frame
                 }
                 ClientConnectionMode::TerminalAttach { terminal_id }

@@ -1527,26 +1527,9 @@ impl AppState {
 
     #[cfg(test)]
     fn cycle_agent_entry(&mut self, forward: bool) {
-        let entries = crate::ui::agent_panel_entries(self);
-        if entries.is_empty() {
-            return;
+        if let Some((_idx, target)) = crate::ui::relative_agent_navigation_entry(self, forward) {
+            self.focus_pane_in_workspace(target.ws_idx, target.pane_id);
         }
-
-        let focused = self
-            .active
-            .and_then(|idx| self.workspaces.get(idx))
-            .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id));
-        let target_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % entries.len(),
-            (Some(0), false) => entries.len() - 1,
-            (Some(idx), false) => idx - 1,
-            (None, true) => 0,
-            (None, false) => entries.len() - 1,
-        };
-
-        self.focus_agent_entry(target_idx);
     }
 
     pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
@@ -4359,7 +4342,7 @@ mod tests {
     }
 
     #[test]
-    fn next_agent_cycles_priority_sorted_agent_panel_entries() {
+    fn next_agent_ignores_priority_sort_and_uses_canonical_order() {
         let mut first = Workspace::test_new("one");
         let first_root = first.tabs[0].root_pane;
         let first_second = first.test_split(Direction::Horizontal);
@@ -4377,9 +4360,16 @@ mod tests {
         set_agent_state(&mut state, 0, 0, first_root, AgentState::Idle);
         set_agent_state(&mut state, 0, 0, first_second, AgentState::Working);
         set_agent_state(&mut state, 1, 0, second_root, AgentState::Blocked);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0].pane_id,
+            second_root
+        );
 
         state.next_agent();
 
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_second));
+        state.next_agent();
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_root));
         state.assert_invariants_for_test();
@@ -4411,7 +4401,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_agent_keeps_wrapped_target_visible_in_agent_panel() {
+    fn previous_agent_wrap_does_not_mutate_agent_projection_scroll() {
         let mut workspace = Workspace::test_new("one");
         let root = workspace.tabs[0].root_pane;
         for idx in 1..8 {
@@ -4435,7 +4425,7 @@ mod tests {
 
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        assert!(state.agent_panel_scroll > 0);
+        assert_eq!(state.agent_panel_scroll, 0);
         state.assert_invariants_for_test();
     }
 

@@ -254,7 +254,9 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
+The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one workspace tree: each workspace keeps its roll-up row and can disclose its detected agents underneath. Linked-worktree and agent disclosure are independent. Compact and mobile navigation preserve the same ownership tree.
+
+Set `ui.agent_panel_sort = "priority"` to replace the tree with one flat attention-ordered Agent projection. A transient `agent.view.set` query likewise replaces it with one labeled filtered projection. Opening the workspace picker temporarily restores the Spaces tree without clearing either projection. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
 ### Status row
 
@@ -324,7 +326,7 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+`row_gap` controls blank terminal rows between Space roots and between Agent children or flat Agent entries. The Agent and Space values remain independent. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
@@ -367,7 +369,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
+Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep compact renderings of the same ownership and disclosure tree.
 
 ## Notifications
 
