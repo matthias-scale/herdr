@@ -240,7 +240,7 @@ fn status_home_dir() -> Option<std::path::PathBuf> {
     const KEYS: &[&str] = &["HOME"];
 
     KEYS.iter()
-        .filter_map(|key| std::env::var_os(key))
+        .filter_map(std::env::var_os)
         .find(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
 }

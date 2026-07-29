@@ -210,6 +210,11 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    // Project runtime-owned focus context during the mutation phase immediately
+    // before every render. `render()` remains pure, while pane/tab/workspace
+    // focus changes cannot leave the status row on the previous cwd.
+    app.sync_status_focused_cwd(terminal_runtimes);
+
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;

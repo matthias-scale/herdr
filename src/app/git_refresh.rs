@@ -144,21 +144,28 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        if let Some(ws) = self
-            .state
-            .active
-            .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
-        {
-            if let Some(cwd) = ws.focused_cwd_from(&self.state.terminals, &self.terminal_runtimes) {
-                let duplicate = items
-                    .iter()
-                    .any(|item| item.workspace_id == ws.id && item.resolved_identity_cwd == cwd);
-                if !duplicate {
-                    items.push(WorkspaceGitRefreshItem {
-                        workspace_id: ws.id.clone(),
-                        resolved_identity_cwd: cwd,
-                        cache_key_hint: None,
+        // Only the status row consumes a branch for a focused cwd that differs
+        // from the workspace identity. Sidebar branch/status tokens consume
+        // the workspace item above and must not create hidden extra work.
+        if self.state.status_bar_enabled && self.git_refresh_demand().branch {
+            if let Some(ws) = self
+                .state
+                .active
+                .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+            {
+                if let Some(cwd) =
+                    ws.focused_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+                {
+                    let duplicate = items.iter().any(|item| {
+                        item.workspace_id == ws.id && item.resolved_identity_cwd == cwd
                     });
+                    if !duplicate {
+                        items.push(WorkspaceGitRefreshItem {
+                            workspace_id: ws.id.clone(),
+                            resolved_identity_cwd: cwd,
+                            cache_key_hint: None,
+                        });
+                    }
                 }
             }
         }
@@ -461,6 +468,38 @@ mod tests {
             }
         );
         assert!(app.git_refresh_deadline().is_some());
+    }
+
+    #[test]
+    fn disabled_status_bar_sidebar_branch_skips_focused_cwd_refresh_item() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Branch]];
+        let mut app = test_app(&config);
+        let outer = PathBuf::from("/repo");
+        let nested = outer.join("nested");
+        let mut ws = Workspace::test_new("test");
+        ws.identity_cwd = outer.clone();
+        ws.cached_identity_cwd = outer.clone();
+        let root = ws.tabs[0].root_pane;
+        let root_terminal = ws.terminal_id(root).expect("root terminal").clone();
+        let focused = ws.test_split(ratatui::layout::Direction::Horizontal);
+        let focused_terminal = ws.terminal_id(focused).expect("focused terminal").clone();
+        app.state.terminals.insert(
+            root_terminal.clone(),
+            crate::terminal::TerminalState::new(root_terminal, outer.clone()),
+        );
+        app.state.terminals.insert(
+            focused_terminal.clone(),
+            crate::terminal::TerminalState::new(focused_terminal, nested),
+        );
+        app.state.workspaces.push(ws);
+        app.state.active = Some(0);
+
+        let items = app.workspace_git_refresh_items(false);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].resolved_identity_cwd, outer);
     }
 
     #[test]

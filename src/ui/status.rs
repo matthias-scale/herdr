@@ -266,15 +266,16 @@ fn right_segments(
         });
     }
 
-    // bandwidth: wifi/eth glyph + optional VPN lock + ↓/↑ KiB/s
+    // bandwidth: transport glyph/label + optional VPN lock + ↓/↑ KiB/s
     if let (Some(down), Some(up)) = (metrics.net_down_kib, metrics.net_up_kib) {
-        let kind_icon = match metrics.net_kind {
+        let kind_label = match metrics.net_kind {
             NetKind::Ethernet => "󰈀",
-            NetKind::Wifi | NetKind::Unknown => "",
+            NetKind::Wifi => "",
+            NetKind::Unknown => "NET",
         };
         let vpn = if metrics.vpn_active { " " } else { "" };
         out.push(Segment {
-            text: format!(" {kind_icon}{vpn} ↓{down}K/s ↑{up}K/s "),
+            text: format!(" {kind_label}{vpn} ↓{down}K/s ↑{up}K/s "),
             style: Style::default().fg(p.green),
             preserve_bg: false,
             elide_rank: Some(5),
@@ -899,6 +900,58 @@ mod tests {
     }
 
     #[test]
+    fn focus_change_projects_cwd_before_render_and_hides_stale_branch() {
+        let root_cwd = PathBuf::from("/repo");
+        let nested_cwd = root_cwd.join("nested");
+        let mut workspace = crate::workspace::Workspace::test_new("status");
+        workspace.identity_cwd = root_cwd.clone();
+        workspace.cached_identity_cwd = root_cwd.clone();
+        workspace.cached_git_branch = Some("root-branch".into());
+        let root = workspace.tabs[0].root_pane;
+        let root_terminal = workspace.terminal_id(root).expect("root terminal").clone();
+        let nested = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let nested_terminal = workspace
+            .terminal_id(nested)
+            .expect("nested terminal")
+            .clone();
+        workspace.tabs[0].layout.focus_pane(root);
+
+        let mut app = AppState::test_new();
+        app.terminals.insert(
+            root_terminal.clone(),
+            crate::terminal::TerminalState::new(root_terminal, root_cwd.clone()),
+        );
+        app.terminals.insert(
+            nested_terminal.clone(),
+            crate::terminal::TerminalState::new(nested_terminal, nested_cwd.clone()),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::default();
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &runtimes,
+            Rect::new(0, 0, 100, 20),
+        );
+        app.status_git_cwd = Some(root_cwd.clone());
+        app.status_git_branch = Some("root-branch".into());
+        assert_eq!(app.status_focused_cwd, Some(root_cwd));
+
+        assert!(app.focus_pane_in_workspace(0, nested));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &runtimes,
+            Rect::new(0, 0, 100, 20),
+        );
+        let (_, _, _, cwd, branch) = focused_identity(&app);
+
+        assert_eq!(app.status_focused_cwd, Some(nested_cwd.clone()));
+        assert_eq!(cwd, Some(nested_cwd));
+        assert_eq!(branch, None);
+    }
+
+    #[test]
     fn status_cwd_falls_back_to_workspace_identity_before_first_projection() {
         let mut workspace = crate::workspace::Workspace::test_new("status");
         workspace.identity_cwd = PathBuf::from("/repo");
@@ -925,6 +978,23 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("MEM --/-- GiB"));
         assert!(rendered.contains("CPU --%"));
+    }
+
+    #[test]
+    fn unknown_network_kind_uses_neutral_label() {
+        let metrics = StatusMetrics {
+            net_down_kib: Some(12),
+            net_up_kib: Some(3),
+            net_kind: NetKind::Unknown,
+            ..StatusMetrics::default()
+        };
+        let rendered = right_segments(&metrics, &Palette::catppuccin())
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+
+        assert!(rendered.contains(" NET ↓12K/s ↑3K/s"), "{rendered}");
+        assert!(!rendered.contains(''), "{rendered}");
     }
 
     #[test]
