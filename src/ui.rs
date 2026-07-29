@@ -1005,6 +1005,7 @@ mod tests {
 
     #[test]
     fn desktop_status_bar_spans_full_width_above_sidebar() {
+        // AC1 provenance is enforced by the merge-parent check; AC2 covers its geometry.
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
@@ -1047,7 +1048,7 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        // Fixture metrics (status_metrics_fixture) + identity segments.
+        // AC4: fixture metrics provide deterministic identity and segment-parity evidence.
         assert!(
             row0.contains("testhost"),
             "status bar missing hostname: {row0:?}"
@@ -1068,7 +1069,32 @@ mod tests {
         );
     }
 
-    fn collapsed_sidebar_keeps_active_workspace_highlight_in_terminal_mode() {
+    #[test]
+    fn status_bar_keeps_memory_and_cpu_legible_at_120_columns() {
+        // AC3/AC7: the ordinary-width renderer retains both required metric segments.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        let width = 120;
+        compute_view(&mut app, Rect::new(0, 0, width, 24));
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
+        assert!(row0.contains("CPU 12%"), "{row0:?}");
+    }
+
+    #[test]
+    fn collapsed_sidebar_status_geometry_keeps_active_workspace_highlight() {
+        // AC2/AC7: collapsed desktop content remains aligned below status row 0.
         let mut app = crate::app::state::AppState::test_new();
         app.sidebar_collapsed = true;
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];

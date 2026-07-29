@@ -1,6 +1,4 @@
 use std::path::{Path, PathBuf};
-#[cfg(not(test))]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -17,8 +15,7 @@ use crate::{
     app::AppState,
     config::{ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
-    platform::status_metrics::{status_metrics, NetKind},
-    session,
+    platform::status_metrics::{NetKind, StatusMetrics},
 };
 
 /// Full-width top status row — native parity with the user's tmux powerline.
@@ -37,56 +34,28 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     let bg = Style::default().bg(p.panel_bg);
     frame.render_widget(Paragraph::new("").style(bg), area);
 
-    let metrics = status_metrics();
+    let unavailable = StatusMetrics {
+        hostname: "--".into(),
+        username: "--".into(),
+        date: "----/--/--".into(),
+        time: "--:--".into(),
+        ..StatusMetrics::default()
+    };
+    let metrics = app
+        .status_metrics
+        .as_ref()
+        .map(|snapshot| &snapshot.metrics)
+        .unwrap_or(&unavailable);
     let prefix_active = app.mode == Mode::Prefix;
 
-    let left = left_segments(app, &metrics, prefix_active, p);
-    let right = right_segments(&metrics, p);
-
-    // Fit strategy (powerline-ish):
-    // 1) drop right-side segments from the tail (time → date → battery → …)
-    // 2) if still too wide, drop left-side segments from the tail (branch → cwd)
-    //    but never drop the session identity (+ prefix pill when present).
-    let width_of = |segs: &[Segment], n: usize| -> usize {
-        segs[..n].iter().map(|s| display_width(&s.text)).sum()
-    };
-    let min_left = {
-        let mut n = 0usize;
-        for (i, seg) in left.iter().enumerate() {
-            if seg.preserve_bg {
-                n = i + 1;
-                continue;
-            }
-            if seg.text.contains('') {
-                n = i + 1;
-                if left.get(i + 1).is_some_and(|s| s.text.starts_with(':')) {
-                    n = i + 2;
-                }
-                break;
-            }
-            n = i + 1;
-            break;
-        }
-        n.clamp(1, left.len().max(1))
-    };
-    let mut left_keep = left.len();
-    let mut right_keep = right.len();
-    loop {
-        let total = width_of(&left, left_keep) + width_of(&right, right_keep);
-        if total <= area.width as usize {
-            break;
-        }
-        if right_keep > 0 {
-            right_keep -= 1;
-        } else if left_keep > min_left {
-            left_keep -= 1;
-        } else {
-            break;
-        }
-    }
+    let (left, right) = fitted_segments(
+        left_segments(app, metrics, prefix_active, p),
+        right_segments(metrics, p),
+        area.width as usize,
+    );
 
     let mut spans: Vec<Span> = Vec::new();
-    for seg in &left[..left_keep] {
+    for seg in &left {
         let style = if seg.preserve_bg {
             seg.style
         } else {
@@ -94,15 +63,15 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         };
         spans.push(Span::styled(seg.text.clone(), style));
     }
-    let used_left = width_of(&left, left_keep);
-    let used_right = width_of(&right, right_keep);
+    let used_left = segment_width(&left);
+    let used_right = segment_width(&right);
     let pad = (area.width as usize)
         .saturating_sub(used_left)
         .saturating_sub(used_right);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
     }
-    for seg in &right[..right_keep] {
+    for seg in &right {
         let style = if seg.preserve_bg {
             seg.style
         } else {
@@ -118,6 +87,41 @@ struct Segment {
     style: Style,
     /// When true, `style` already carries its own background (prefix pill).
     preserve_bg: bool,
+    /// Lower values elide first; `None` is required at desktop widths.
+    elide_rank: Option<u8>,
+}
+
+fn segment_width(segments: &[Segment]) -> usize {
+    segments
+        .iter()
+        .map(|segment| display_width(&segment.text))
+        .sum()
+}
+
+fn fitted_segments(
+    mut left: Vec<Segment>,
+    mut right: Vec<Segment>,
+    width: usize,
+) -> (Vec<Segment>, Vec<Segment>) {
+    while segment_width(&left) + segment_width(&right) > width {
+        let candidate =
+            left.iter()
+                .enumerate()
+                .filter_map(|(index, segment)| segment.elide_rank.map(|rank| (rank, true, index)))
+                .chain(right.iter().enumerate().filter_map(|(index, segment)| {
+                    segment.elide_rank.map(|rank| (rank, false, index))
+                }))
+                .min_by_key(|(rank, _, _)| *rank);
+        let Some((_, is_left, index)) = candidate else {
+            break;
+        };
+        if is_left {
+            left.remove(index);
+        } else {
+            right.remove(index);
+        }
+    }
+    (left, right)
 }
 
 fn left_segments(
@@ -137,24 +141,24 @@ fn left_segments(
                 .bg(p.yellow)
                 .add_modifier(Modifier::BOLD),
             preserve_bg: true,
+            elide_rank: None,
         });
     }
 
-    let session = session::active_name()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| session::DEFAULT_SESSION_NAME.to_string());
-    let (ws_label, _tab_label, pane_label, cwd, branch) = focused_identity(app);
+    let (ws_label, tab_label, pane_label, cwd, branch) = focused_identity(app);
 
     // Powerline session_icon: " #S" + dimmed ":#I.#P".
     out.push(Segment {
-        text: format!("  {session}"),
+        text: format!("  {}", app.status_session_name),
         style: Style::default().fg(p.blue),
         preserve_bg: false,
+        elide_rank: None,
     });
     out.push(Segment {
-        text: format!(":{ws_label}.{pane_label} "),
+        text: format!(":{ws_label}.{tab_label}.{pane_label} "),
         style: Style::default().fg(p.overlay0),
         preserve_bg: false,
+        elide_rank: None,
     });
 
     // hostname_ssh: icon only when remote (SSH/mosh).
@@ -167,20 +171,23 @@ fn left_segments(
         text: host_text,
         style: Style::default().fg(p.green),
         preserve_bg: false,
+        elide_rank: Some(9),
     });
 
     out.push(Segment {
         text: format!("  {} ", metrics.username),
         style: Style::default().fg(p.teal),
         preserve_bg: false,
+        elide_rank: Some(8),
     });
 
     if let Some(cwd) = cwd {
-        let display = shorten_path(&cwd, 40);
+        let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 40);
         out.push(Segment {
             text: format!(" {display} "),
             style: Style::default().fg(p.mauve),
             preserve_bg: false,
+            elide_rank: Some(7),
         });
     }
 
@@ -190,6 +197,7 @@ fn left_segments(
             text: format!("  {branch} "),
             style: Style::default().fg(p.yellow),
             preserve_bg: false,
+            elide_rank: Some(6),
         });
     }
 
@@ -218,6 +226,7 @@ fn right_segments(
             text: format!(" {} ", ip_parts.join(" ")),
             style: Style::default().fg(p.teal),
             preserve_bg: false,
+            elide_rank: Some(4),
         });
     }
 
@@ -232,24 +241,30 @@ fn right_segments(
             text: format!(" {kind_icon}{vpn} ↓{down}K/s ↑{up}K/s "),
             style: Style::default().fg(p.green),
             preserve_bg: false,
+            elide_rank: Some(5),
         });
     }
 
-    if let (Some(used), Some(total)) = (metrics.mem_used_gb, metrics.mem_total_gb) {
-        out.push(Segment {
-            text: format!("  {used:.1}/{total:.0} GB "),
-            style: Style::default().fg(p.yellow),
-            preserve_bg: false,
-        });
-    }
+    let memory = match (metrics.mem_used_gib, metrics.mem_total_gib) {
+        (Some(used), Some(total)) => format!(" MEM {used:.1}/{total:.1} GiB "),
+        _ => " MEM --/-- GiB ".into(),
+    };
+    out.push(Segment {
+        text: memory,
+        style: Style::default().fg(p.yellow),
+        preserve_bg: false,
+        elide_rank: None,
+    });
 
-    if let Some(cpu) = metrics.cpu_percent {
-        out.push(Segment {
-            text: format!("  {cpu}% "),
-            style: Style::default().fg(p.red),
-            preserve_bg: false,
-        });
-    }
+    out.push(Segment {
+        text: metrics
+            .cpu_percent
+            .map(|cpu| format!(" CPU {cpu}% "))
+            .unwrap_or_else(|| " CPU --% ".into()),
+        style: Style::default().fg(p.red),
+        preserve_bg: false,
+        elide_rank: None,
+    });
 
     if let Some(pct) = metrics.battery_percent {
         let icon = match metrics.battery_charging {
@@ -260,19 +275,21 @@ fn right_segments(
             text: format!(" {icon} {pct}% "),
             style: Style::default().fg(p.blue),
             preserve_bg: false,
+            elide_rank: Some(3),
         });
     }
 
-    let (date, time) = local_date_time();
     out.push(Segment {
-        text: format!("  {date} "),
+        text: format!("  {} ", metrics.date),
         style: Style::default().fg(p.overlay0),
         preserve_bg: false,
+        elide_rank: Some(2),
     });
     out.push(Segment {
-        text: format!(" {time} "),
+        text: format!(" {} ", metrics.time),
         style: Style::default().fg(p.subtext0),
         preserve_bg: false,
+        elide_rank: Some(1),
     });
     out
 }
@@ -318,18 +335,22 @@ fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>,
                 .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
                 .map(|terminal| terminal.cwd.clone())
         })
-        .or_else(|| ws.resolved_identity_cwd())
         .or_else(|| Some(ws.identity_cwd.clone()));
     let branch = ws.cached_git_branch.clone();
     (ws_label, tab_label, pane_label, cwd, branch)
 }
 
-fn shorten_path(path: &Path, max_width: usize) -> String {
+fn shorten_path(path: &Path, home: Option<&Path>, max_width: usize) -> String {
     let raw = path.to_string_lossy();
-    let display = if let Ok(home) = std::env::var("HOME") {
-        if let Some(rest) = raw.strip_prefix(&home) {
+    let display = if let Some(home) = home {
+        if let Ok(rest) = path.strip_prefix(home) {
             // Powerline `pwd` collapses $HOME to `~` (keeping the slash as `~/…`).
-            format!("~{rest}")
+            let suffix = rest.to_string_lossy();
+            if suffix.is_empty() {
+                "~".into()
+            } else {
+                format!("~/{}", suffix.trim_start_matches(['/', '\\']))
+            }
         } else {
             raw.into_owned()
         }
@@ -386,41 +407,6 @@ fn shorten_branch(branch: &str, max_width: usize) -> String {
         branch.to_string()
     } else {
         truncate_end(branch, max_width)
-    }
-}
-
-fn local_date_time() -> (String, String) {
-    // Characterization tests hash the full frame; freeze wall-clock there.
-    #[cfg(test)]
-    {
-        return ("2026-01-02".into(), "03:04".into());
-    }
-
-    // Format via libc localtime to avoid a chrono dependency.
-    #[cfg(not(test))]
-    {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        #[cfg(unix)]
-        {
-            // SAFETY: localtime_r writes into our stack tm.
-            let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-            let t = secs as libc::time_t;
-            let rc = unsafe { libc::localtime_r(&t, &mut tm) };
-            if !rc.is_null() {
-                let date =
-                    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
-                let time = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
-                return (date, time);
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = secs;
-        }
-        ("----/--/--".into(), "--:--".into())
     }
 }
 
@@ -736,23 +722,10 @@ mod tests {
 
     #[test]
     fn shorten_path_uses_tilde_for_home() {
-        // Other tests mutate HOME; pin a private value for this assertion.
+        // AC4: cwd parity uses immutable state captured before rendering.
         let home = "/tmp/herdr-status-home-fixture";
-        // SAFETY: tests run single-threaded in CI for env-sensitive cases; we restore below.
-        let previous = std::env::var("HOME").ok();
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
         let path = PathBuf::from(format!("{home}/Code/personal/home"));
-        let display = shorten_path(&path, 80);
-        match previous {
-            Some(value) => unsafe {
-                std::env::set_var("HOME", value);
-            },
-            None => unsafe {
-                std::env::remove_var("HOME");
-            },
-        }
+        let display = shorten_path(&path, Some(Path::new(home)), 80);
         assert!(
             display.starts_with("~/") || display.starts_with("~\\"),
             "expected tilde-shortened path, got {display}"
@@ -761,12 +734,139 @@ mod tests {
     }
 
     #[test]
-    fn local_date_time_returns_plausible_shapes() {
-        let (date, time) = local_date_time();
-        assert_eq!(date.len(), 10, "YYYY-MM-DD");
-        assert_eq!(time.len(), 5, "HH:MM");
-        assert_eq!(&date[4..5], "-");
-        assert_eq!(&date[7..8], "-");
-        assert_eq!(&time[2..3], ":");
+    fn required_metrics_survive_optional_segment_elision() {
+        // AC3: MEM/CPU are required while optional right-tail segments elide by rank.
+        let palette = Palette::catppuccin();
+        let metrics = crate::platform::status_metrics::status_metrics_fixture();
+        let (left, right) = fitted_segments(
+            vec![Segment {
+                text: " session ".into(),
+                style: Style::default(),
+                preserve_bg: false,
+                elide_rank: None,
+            }],
+            right_segments(&metrics, &palette),
+            40,
+        );
+        let rendered = left
+            .iter()
+            .chain(&right)
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("MEM 8.0/16.0 GiB"));
+        assert!(rendered.contains("CPU 12%"));
+        assert!(!rendered.contains(&metrics.date));
+        assert!(!rendered.contains(&metrics.time));
+    }
+
+    #[test]
+    fn status_metrics_fallback_format_is_explicit() {
+        // AC3/AC5: unavailable snapshots render stable units without sampling in render.
+        let palette = Palette::catppuccin();
+        let segments = right_segments(&StatusMetrics::default(), &palette);
+        let rendered = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("MEM --/-- GiB"));
+        assert!(rendered.contains("CPU --%"));
+    }
+
+    #[test]
+    fn status_elision_drops_optional_tail_in_declared_order() {
+        // AC3: time, date, and battery elide before network and identity context.
+        let palette = Palette::catppuccin();
+        let metrics = crate::platform::status_metrics::status_metrics_fixture();
+        let full = right_segments(&metrics, &palette);
+        let full_width = segment_width(&full);
+        let time_width = display_width(full.last().expect("time segment").text.as_str());
+        let date_width = display_width(full[full.len() - 2].text.as_str());
+
+        let (_, without_time) = fitted_segments(
+            Vec::new(),
+            right_segments(&metrics, &palette),
+            full_width - time_width,
+        );
+        assert!(!without_time
+            .iter()
+            .any(|segment| segment.text.contains(&metrics.time)));
+        assert!(without_time
+            .iter()
+            .any(|segment| segment.text.contains(&metrics.date)));
+
+        let (_, without_date) = fitted_segments(
+            Vec::new(),
+            right_segments(&metrics, &palette),
+            full_width - time_width - date_width,
+        );
+        assert!(!without_date
+            .iter()
+            .any(|segment| segment.text.contains(&metrics.date)));
+        assert!(without_date
+            .iter()
+            .any(|segment| segment.text.contains("MEM ")));
+        assert!(without_date
+            .iter()
+            .any(|segment| segment.text.contains("CPU ")));
+    }
+
+    #[test]
+    fn status_identity_theme_network_battery_date_time_segments_match_state() {
+        // AC4: all parity values and colors derive from AppState plus the active palette.
+        let mut app = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("status");
+        workspace.identity_cwd = PathBuf::from("/home/test/work/status");
+        workspace.cached_git_branch = Some("feature/native-status".into());
+        workspace.test_add_tab(Some("logs"));
+        workspace.switch_tab(1);
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.status_session_name = "session".into();
+
+        let metrics = crate::platform::status_metrics::status_metrics_fixture();
+        let (workspace_label, tab_label, pane_label, _, _) = focused_identity(&app);
+        let left = left_segments(&app, &metrics, false, &app.palette);
+        let right = right_segments(&metrics, &app.palette);
+        let left_text = left
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        let right_text = right
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+
+        assert!(left_text.contains(&format!(
+            "session:{workspace_label}.{tab_label}.{pane_label}"
+        )));
+        assert!(left_text.contains("testhost"));
+        assert!(left_text.contains("testuser"));
+        assert!(left_text.contains("~/work/status"));
+        assert!(left_text.contains("feature/native-status"));
+        assert!(right_text.contains("10.0.0.2"));
+        assert!(right_text.contains("100.64.0.1"));
+        assert!(right_text.contains("↓120K/s ↑34K/s"));
+        assert!(right_text.contains("88%"));
+        assert!(right_text.contains("2026-01-02"));
+        assert!(right_text.contains("03:04"));
+        assert_eq!(left[0].style.fg, Some(app.palette.blue));
+        assert_eq!(
+            right
+                .iter()
+                .find(|segment| segment.text.contains("MEM "))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.yellow)
+        );
+        assert_eq!(
+            right
+                .iter()
+                .find(|segment| segment.text.contains("CPU "))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.red)
+        );
     }
 }

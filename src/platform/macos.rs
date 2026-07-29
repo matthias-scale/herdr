@@ -12,6 +12,282 @@ use super::{
     LimitedRead, Signal,
 };
 
+pub(crate) fn sample_status_metrics(
+    sampler: &mut super::status_metrics::StatusMetricSampler,
+) -> super::status_metrics::StatusMetrics {
+    let (hostname, username) = status_identity();
+    let (date, time) = status_local_date_time();
+    let total_bytes = status_sysctl_u64(c"hw.memsize");
+    let mem_total_gib = total_bytes.map(|value| value as f32 / 1_073_741_824.0);
+    let mem_used_gib = total_bytes
+        .and_then(status_used_memory_bytes)
+        .map(|value| value as f32 / 1_073_741_824.0);
+    let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
+    let interfaces = status_interface_ipv4s();
+    let (net_down_kib, net_up_kib) = interfaces
+        .primary_bytes
+        .and_then(|(rx, tx)| sampler.bandwidth_kib(rx, tx, std::time::Instant::now()))
+        .map_or((None, None), |(down, up)| (Some(down), Some(up)));
+
+    super::status_metrics::StatusMetrics {
+        cpu_percent,
+        mem_used_gib,
+        mem_total_gib,
+        local_ip: interfaces.local_ip,
+        tailscale_ip: interfaces.tailscale_ip.clone(),
+        public_ip: super::status_metrics::compatible_public_ip(),
+        net_down_kib,
+        net_up_kib,
+        net_kind: interfaces
+            .primary
+            .as_deref()
+            .map(|name| {
+                if name == "en0" {
+                    super::status_metrics::NetKind::Wifi
+                } else {
+                    super::status_metrics::NetKind::Ethernet
+                }
+            })
+            .unwrap_or_default(),
+        vpn_active: interfaces.tailscale_ip.is_some(),
+        remote_session: super::status_metrics::remote_session_from_env(),
+        hostname,
+        username,
+        date,
+        time,
+        ..super::status_metrics::StatusMetrics::default()
+    }
+}
+
+fn status_identity() -> (String, String) {
+    let mut hostname = [0u8; 256];
+    // SAFETY: `hostname` is writable for the length passed to libc.
+    let host = if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
+        let end = hostname
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(hostname.len());
+        super::status_metrics::short_hostname(&String::from_utf8_lossy(&hostname[..end]))
+    } else {
+        "localhost".into()
+    };
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    (host, user)
+}
+
+fn status_local_date_time() -> (String, String) {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
+    // SAFETY: `local` is valid writable storage and `now` is a valid time value.
+    if unsafe { libc::localtime_r(&now, &mut local) }.is_null() {
+        return ("----/--/--".into(), "--:--".into());
+    }
+    (
+        format!(
+            "{:04}-{:02}-{:02}",
+            local.tm_year + 1900,
+            local.tm_mon + 1,
+            local.tm_mday
+        ),
+        format!("{:02}:{:02}", local.tm_hour, local.tm_min),
+    )
+}
+
+fn status_sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
+    let mut value = 0u64;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: name and output pointers reference valid storage.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && size == std::mem::size_of::<u64>()).then_some(value)
+}
+
+fn status_used_memory_bytes(total: u64) -> Option<u64> {
+    const HOST_VM_INFO64: libc::c_int = 4;
+    #[repr(C)]
+    #[derive(Default)]
+    struct VmStatistics64 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        zero_fill_count: u64,
+        reactivations: u64,
+        pageins: u64,
+        pageouts: u64,
+        faults: u64,
+        cow_faults: u64,
+        lookups: u64,
+        hits: u64,
+        purges: u64,
+        purgeable_count: u32,
+        speculative_count: u32,
+        decompressions: u64,
+        compressions: u64,
+        swapins: u64,
+        swapouts: u64,
+        compressor_page_count: u32,
+        throttled_count: u32,
+        external_page_count: u32,
+        internal_page_count: u32,
+        total_uncompressed_pages_in_compressor: u64,
+    }
+    let mut stats = VmStatistics64::default();
+    let mut count = (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<libc::integer_t>())
+        as libc::mach_msg_type_number_t;
+    let result = unsafe {
+        status_host_statistics64(
+            status_mach_host_self(),
+            HOST_VM_INFO64,
+            (&raw mut stats).cast(),
+            &mut count,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    let page_size = status_sysctl_u64(c"hw.pagesize").unwrap_or(4096);
+    let pages = u64::from(stats.internal_page_count)
+        .saturating_add(u64::from(stats.wire_count))
+        .saturating_add(u64::from(stats.compressor_page_count));
+    Some(pages.saturating_mul(page_size).min(total))
+}
+
+fn status_cpu_ticks() -> Option<(u64, u64)> {
+    const HOST_CPU_LOAD_INFO: libc::c_int = 3;
+    #[repr(C)]
+    struct CpuLoad {
+        ticks: [u32; 4],
+    }
+    let mut load = CpuLoad { ticks: [0; 4] };
+    let mut count = 4;
+    let result = unsafe {
+        status_host_statistics(
+            status_mach_host_self(),
+            HOST_CPU_LOAD_INFO,
+            (&raw mut load).cast(),
+            &mut count,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    Some((
+        u64::from(load.ticks[2]),
+        load.ticks.iter().map(|tick| u64::from(*tick)).sum(),
+    ))
+}
+
+struct StatusNetworkInterfaces {
+    local_ip: Option<String>,
+    tailscale_ip: Option<String>,
+    primary: Option<String>,
+    primary_bytes: Option<(u64, u64)>,
+}
+
+fn status_interface_ipv4s() -> StatusNetworkInterfaces {
+    let mut local = None;
+    let mut tailscale = None;
+    let mut primary = None;
+    let mut primary_bytes = None;
+    let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 || interfaces.is_null() {
+        return StatusNetworkInterfaces {
+            local_ip: local,
+            tailscale_ip: tailscale,
+            primary,
+            primary_bytes,
+        };
+    }
+    let mut current = interfaces;
+    while !current.is_null() {
+        let interface = unsafe { &*current };
+        if !interface.ifa_addr.is_null()
+            && unsafe { (*interface.ifa_addr).sa_family as i32 } == libc::AF_INET
+        {
+            let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+            let name = if interface.ifa_name.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(interface.ifa_name) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                let tunnel = name.starts_with("utun")
+                    || name.starts_with("tun")
+                    || name.contains("tailscale");
+                if tunnel && ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]) {
+                    tailscale.get_or_insert_with(|| ip.to_string());
+                } else if !tunnel {
+                    local.get_or_insert_with(|| ip.to_string());
+                    if primary.is_none() {
+                        if !interface.ifa_data.is_null() {
+                            let data = unsafe { &*(interface.ifa_data.cast::<libc::if_data>()) };
+                            primary_bytes =
+                                Some((u64::from(data.ifi_ibytes), u64::from(data.ifi_obytes)));
+                        }
+                        primary = Some(name);
+                    }
+                }
+            }
+        }
+        current = interface.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(interfaces) };
+    StatusNetworkInterfaces {
+        local_ip: local,
+        tailscale_ip: tailscale,
+        primary,
+        primary_bytes,
+    }
+}
+
+unsafe extern "C" {
+    #[link_name = "mach_host_self"]
+    fn status_mach_host_self() -> libc::mach_port_t;
+    #[link_name = "host_statistics"]
+    fn status_host_statistics(
+        host: libc::mach_port_t,
+        flavor: libc::c_int,
+        output: *mut libc::integer_t,
+        count: *mut libc::mach_msg_type_number_t,
+    ) -> libc::c_int;
+    #[link_name = "host_statistics64"]
+    fn status_host_statistics64(
+        host: libc::mach_port_t,
+        flavor: libc::c_int,
+        output: *mut libc::integer_t,
+        count: *mut libc::mach_msg_type_number_t,
+    ) -> libc::c_int;
+}
+
+#[cfg(test)]
+mod status_metric_tests {
+    #[test]
+    fn platform_metric_sampler_returns_local_macos_snapshot() {
+        // AC6: macOS collection stays in macos.rs and uses native libc/Mach APIs.
+        let metrics = super::sample_status_metrics(
+            &mut crate::platform::status_metrics::StatusMetricSampler::new(),
+        );
+        assert!(!metrics.hostname.is_empty());
+        assert!(!metrics.username.is_empty());
+        assert_eq!(metrics.date.len(), 10);
+        assert_eq!(metrics.time.len(), 5);
+    }
+}
+
 const PROC_PGRP_ONLY: u32 = 2;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
 

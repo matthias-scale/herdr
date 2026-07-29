@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Desktop sessions now show a theme-derived, full-width native status row with focused session context, network details, memory, CPU, battery, date, and time. Metrics refresh in a bounded background sampler using platform-local data; public IP is displayed only from an existing fresh tmux-powerline cache and never fetched automatically.
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 

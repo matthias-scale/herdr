@@ -4034,7 +4034,7 @@ impl HeadlessServer {
     /// Similar to `App::handle_scheduled_tasks` but without resize polling
     /// (the server doesn't have a terminal to resize).
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
-        let mut changed = false;
+        let mut changed = self.app.schedule_status_metrics(now);
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
