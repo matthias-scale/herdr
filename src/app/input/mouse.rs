@@ -560,8 +560,15 @@ impl AppState {
 
                     let (cards, _) =
                         crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
+                    let agent_counts = crate::ui::agent_counts_by_workspace(
+                        &crate::ui::all_agent_panel_entries(self),
+                    );
                     if let Some(card) = cards.iter().find(|card| {
-                        let chevron = crate::ui::workspace_agent_chevron_rect(self, card);
+                        let chevron = crate::ui::workspace_agent_chevron_rect(
+                            self,
+                            card,
+                            agent_counts.contains_key(&card.ws_idx),
+                        );
                         mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
                     }) {
                         self.toggle_workspace_agent_disclosure(card.ws_idx);

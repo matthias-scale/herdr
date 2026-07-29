@@ -1180,59 +1180,52 @@ impl AppState {
             return;
         }
 
-        let entries = crate::ui::workspace_list_entries(self);
-        let Some(target_entry_idx) = entries.iter().position(|entry| {
-            matches!(
-                entry,
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx
-            )
-        }) else {
+        self.ensure_workspace_visible_in_sidebar(idx, self.view.sidebar_rect);
+    }
+
+    pub(crate) fn ensure_workspace_visible_in_sidebar(
+        &mut self,
+        idx: usize,
+        sidebar_area: ratatui::layout::Rect,
+    ) {
+        // `workspace_scroll` indexes the unified sidebar row list, so the target
+        // must be resolved in that space and not in the workspace-only list.
+        let Some(target_row_idx) = crate::ui::sidebar_row_index_for_workspace(self, idx) else {
             return;
         };
 
-        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
-            self,
-            self.view.sidebar_rect,
-            self.workspace_scroll,
-        );
-        let mut cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-        if cards.iter().any(|card| card.ws_idx == idx) {
-            return;
-        }
-
-        if target_entry_idx < self.workspace_scroll {
-            self.workspace_scroll = target_entry_idx;
-            return;
-        }
-
-        while !cards.iter().any(|card| card.ws_idx == idx) {
-            let previous_scroll = self.workspace_scroll;
-            self.workspace_scroll = self.workspace_scroll.saturating_add(1);
-            if self.workspace_scroll == previous_scroll {
-                break;
-            }
-            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
-                self,
-                self.view.sidebar_rect,
-                self.workspace_scroll,
-            );
-            if self.workspace_scroll == previous_scroll {
-                break;
-            }
-            cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-            if cards.is_empty() {
-                break;
-            }
-        }
+        let scroll =
+            crate::ui::normalized_workspace_scroll(self, sidebar_area, self.workspace_scroll);
+        self.workspace_scroll =
+            crate::ui::sidebar_row_scroll_for_target(self, sidebar_area, scroll, target_row_idx);
     }
 
-    fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
+    /// Active workspace this attach has not scrolled into view yet, if any.
+    ///
+    /// Focus can change outside the per-client sidebar presentation swap — the
+    /// JSON API and CLI both route through server-global state — so each attach
+    /// resolves the reveal itself while its own presentation is swapped in.
+    pub(crate) fn take_pending_workspace_reveal(&mut self) -> Option<usize> {
+        let active_id = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|workspace| workspace.id.clone());
+        if self.sidebar_presentation.revealed_workspace_id == active_id {
+            return None;
+        }
+        self.sidebar_presentation.revealed_workspace_id = active_id;
+        self.active
+    }
+
+    pub(crate) fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
         let viewport = crate::ui::mobile_switcher_areas(self).viewport;
         if viewport.height == 0 {
             return;
         }
 
-        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
+        let Some(row_range) = crate::ui::mobile_switcher_workspace_doc_range(self, idx) else {
+            return;
+        };
         let visible_start = self.mobile_switcher_scroll;
         let visible_end = visible_start.saturating_add(viewport.height as usize);
         if row_range.start < visible_start {
@@ -1706,9 +1699,11 @@ impl AppState {
                 self.selected = self.workspaces.len() - 1;
             }
             self.active = Some(self.selected);
-            self.workspace_scroll = self
-                .workspace_scroll
-                .min(self.workspaces.len().saturating_sub(1));
+            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                self,
+                self.view.sidebar_rect,
+                self.workspace_scroll,
+            );
             self.ensure_workspace_visible(self.selected);
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -3402,9 +3397,11 @@ impl AppState {
                 if self.selected >= self.workspaces.len() {
                     self.selected = self.workspaces.len() - 1;
                 }
-                self.workspace_scroll = self
-                    .workspace_scroll
-                    .min(self.workspaces.len().saturating_sub(1));
+                self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                    self,
+                    self.view.sidebar_rect,
+                    self.workspace_scroll,
+                );
                 self.ensure_workspace_visible(self.selected);
             }
         } else {
