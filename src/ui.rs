@@ -53,6 +53,8 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 #[cfg(test)]
+pub(crate) use self::sidebar::agent_panel_body_rect;
+#[cfg(test)]
 pub(crate) use self::sidebar::workspace_drop_indicator_row;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{
@@ -76,15 +78,15 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
-        agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
-        WorkspaceListEntry,
+        agent_panel_entries, agent_panel_scroll_for_target, agent_panel_scroll_metrics,
+        agent_panel_scrollbar_rect, agent_panel_toggle_rect, all_agent_panel_entries,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_agent_card_areas,
+        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
+        normalized_workspace_scroll, relative_agent_navigation_entry, sidebar_rows,
+        sidebar_section_divider_rect, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentPanelEntry, SidebarRow, WorkspaceListEntry,
     },
 };
 
@@ -210,6 +212,7 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    app.reconcile_sidebar_presentation();
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -236,9 +239,7 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        app.agent_panel_scroll = 0;
     } else {
         app.workspace_scroll = app
             .workspace_scroll
@@ -299,6 +300,11 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        agent_card_areas: if app.sidebar_collapsed {
+            Vec::new()
+        } else {
+            sidebar::compute_agent_card_areas(app, sidebar_area)
+        },
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -362,6 +368,7 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        agent_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),

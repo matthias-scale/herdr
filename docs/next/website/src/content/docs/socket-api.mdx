@@ -372,9 +372,12 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 `agent.view.set` installs one transient declarative projection for the built-in
 Agents view. The projection is reevaluated whenever agent facts or current UI
-context change. It controls the expanded and collapsed sidebar, mobile Agents
-list, mouse targets, indexed focus, and next/previous Agent navigation. It does
-not change `agent.list`, notifications, detection, or global attention counts.
+context change. It replaces the Spaces tree with one flat projection in the
+expanded and collapsed sidebar and mobile navigation, and controls its mouse
+targets and indexed focus. Configured next/previous Agent actions continue to
+use the canonical unfiltered workspace, tab, and pane order. The projection
+does not change `agent.list`, notifications, detection, or global attention
+counts.
 
 Show agents in the currently presented Space or agents needing attention
 elsewhere, then order by attention and most recent state transition:

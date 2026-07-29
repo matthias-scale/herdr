@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- The default sidebar is now one Spaces tree with independently disclosed Agent children; priority and API-filtered views remain one-at-a-time flat projections, while configured previous/next Agent actions traverse the canonical unfiltered list across all workspaces.
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 

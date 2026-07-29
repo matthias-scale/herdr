@@ -257,7 +257,7 @@ impl App {
                 }
             }
             NavigateAction::WorkspacePicker => {
-                self.state.mobile_switcher_scroll = 0;
+                self.state.begin_workspace_picker_presentation();
                 self.state.mode = Mode::Navigate;
             }
             NavigateAction::PreviousWorkspace => {
@@ -273,16 +273,14 @@ impl App {
                 }
             }
             NavigateAction::PreviousAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(false) {
+                if let Some((_idx, ws_idx, pane_id)) = self.relative_agent_entry(false) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
             NavigateAction::NextAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(true) {
+                if let Some((_idx, ws_idx, pane_id)) = self.relative_agent_entry(true) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
@@ -739,27 +737,8 @@ impl App {
     }
 
     fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
-        let entries = crate::ui::agent_panel_entries(&self.state);
-        if entries.is_empty() {
-            return None;
-        }
-        let focused = self
-            .state
-            .active
-            .and_then(|idx| self.state.workspaces.get(idx))
-            .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx = entries
-            .iter()
-            .position(|entry| Some(entry.pane_id) == focused);
-        let next_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % entries.len(),
-            (Some(0), false) => entries.len() - 1,
-            (Some(idx), false) => idx - 1,
-            (None, true) => 0,
-            (None, false) => entries.len() - 1,
-        };
-        let target = entries.get(next_idx)?;
-        Some((next_idx, target.ws_idx, target.pane_id))
+        crate::ui::relative_agent_navigation_entry(&self.state, forward)
+            .map(|(idx, target)| (idx, target.ws_idx, target.pane_id))
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -1803,6 +1782,7 @@ fn workspace_can_start_worktree_action(
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
+    state.end_workspace_picker_presentation();
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }

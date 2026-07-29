@@ -257,6 +257,19 @@ mod tests {
         format!("{:x}", Sha256::digest(encoded))
     }
 
+    fn frame_text(frame: &crate::protocol::FrameData) -> String {
+        frame
+            .cells
+            .chunks(usize::from(frame.width))
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn full_app_characterization_state(uri: &str) -> AppState {
         let mut workspace = Workspace::test_new("characterization");
         workspace.identity_cwd = std::path::PathBuf::from("characterization");
@@ -302,9 +315,16 @@ mod tests {
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        let text = frame_text(&frame);
+        assert!(text
+            .lines()
+            .any(|line| line.trim_start().starts_with("spaces")));
+        assert!(!text
+            .lines()
+            .any(|line| line.trim_start().starts_with("agents")));
         assert_eq!(
             frame_digest(&frame),
-            "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
+            "9e38aeb1766c885882326c783f93118afa45a58a26a15c53b2803d140a2b71fc"
         );
     }
 
