@@ -20,8 +20,8 @@ use crate::{
 
 /// Full-width top status row — native parity with the user's tmux powerline.
 ///
-/// Left:  [prefix]  session:ws.pane · host ·  user · cwd ·  branch
-/// Right: 󰛳 lan 󰌘 ts  wan ·  [] ↓/↑ ·  mem ·  cpu · battery ·  date · time
+/// Left:  [prefix]  session:workspace.tab.pane · host ·  user · cwd ·  branch
+/// Right: 󰛳 LAN 󰌘 Tailscale  WAN · transport [] ↓/↑ · MEM · CPU · battery · date · time
 ///
 /// Layout: spans the full client width above the sidebar. On narrow widths,
 /// right-side tail segments drop first, then non-essential left segments.

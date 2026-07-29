@@ -258,7 +258,9 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 ### Status row
 
-Desktop layouts show a full-width status row above the tab bar with the focused session's directory and Git branch, network details, memory, CPU, battery, date, and time. Segments are elided from the least important side first when the terminal is too narrow.
+Desktop layouts show a full-width status row above the tab bar with the focused session identity, directory, and Git branch; available network and battery details; and date and time. Literal `MEM` and `CPU` segments stay visible at desktop widths, use GiB and percent, and show `MEM --/-- GiB` or `CPU --%` when a sample is unavailable. As the terminal narrows, optional segments disappear in this order: time, date, battery, IP addresses, bandwidth, Git branch, directory, user, then host.
+
+The sampler starts immediately, refreshes every two seconds with at most one sample in flight, and retries failures at the next interval. Samples that reach four seconds old are discarded so unavailable values render instead. Platform metrics come from native APIs or local proc/sys files. A public IP appears only when Herdr can safely read a fresh, compatible tmux-powerline WAN cache; Herdr never sends a public-IP request.
 
 ```toml
 [ui.status_bar]
