@@ -501,6 +501,28 @@ impl AppState {
                     self.scroll_tabs_left();
                     return None;
                 }
+                if rect_contains(self.view.linear_context_hit_area, mouse.column, mouse.row) {
+                    if let Some(ticket) = self
+                        .active
+                        .and_then(|idx| self.workspaces.get(idx))
+                        .and_then(|workspace| workspace.branch())
+                        .as_deref()
+                        .and_then(crate::ui::linear_ticket_from_branch)
+                    {
+                        self.request_clipboard_write = Some(ticket.into_bytes());
+                    }
+                    return None;
+                }
+                if rect_contains(self.view.git_context_hit_area, mouse.column, mouse.row) {
+                    if let Some(branch) = self
+                        .active
+                        .and_then(|idx| self.workspaces.get(idx))
+                        .and_then(|workspace| workspace.branch())
+                    {
+                        self.request_clipboard_write = Some(branch.into_bytes());
+                    }
+                    return None;
+                }
                 if self.on_tab_scroll_right_button(mouse.column, mouse.row) {
                     self.scroll_tabs_right();
                     return None;
@@ -3390,6 +3412,49 @@ mod tests {
             tab_bar.y,
         ));
         assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn top_bar_context_actions_copy_exact_values_without_stealing_tab_clicks() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.cached_git_branch = Some("feat/SCA-2312-sidebar-copy".into());
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let git = app.state.view.git_context_hit_area;
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), git.x, git.y),
+        );
+        assert_eq!(
+            app.state.request_clipboard_write.as_deref(),
+            Some(b"feat/SCA-2312-sidebar-copy".as_slice())
+        );
+
+        app.state.request_clipboard_write = None;
+        let linear = app.state.view.linear_context_hit_area;
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), linear.x, linear.y),
+        );
+        assert_eq!(
+            app.state.request_clipboard_write.as_deref(),
+            Some(b"SCA-2312".as_slice())
+        );
+        assert!(app.state.tab_press.is_none());
+
+        app.state.request_clipboard_write = None;
+        let tab = app.state.view.tab_hit_areas[0];
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), tab.x, tab.y),
+        );
+        assert!(app.state.request_clipboard_write.is_none());
+        assert!(app.state.tab_press.is_some());
     }
 
     #[test]

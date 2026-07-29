@@ -9100,7 +9100,7 @@ next_tab = ""
     }
 
     #[test]
-    fn clipboard_write_targets_foreground_client_only() {
+    fn top_bar_context_copy_forwards_exact_payload_to_foreground_client() {
         let mut server = test_headless_server();
         let (background_tx, background_control_rx, _background_rx) = test_client_writer();
         let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
@@ -9133,7 +9133,7 @@ next_tab = ""
         server.sync_foreground_client_state();
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
-            content: b"test".to_vec(),
+            content: b"feat/SCA-2312-sidebar".to_vec(),
         });
 
         assert!(changed);
@@ -9151,7 +9151,9 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(100))
                 .expect("foreground clipboard message"),
         ) {
-            ServerMessage::Clipboard { data } => assert_eq!(data, "dGVzdA=="),
+            ServerMessage::Clipboard { data } => {
+                assert_eq!(data, "ZmVhdC9TQ0EtMjMxMi1zaWRlYmFy")
+            }
             other => panic!("expected clipboard message, got {other:?}"),
         }
         assert!(

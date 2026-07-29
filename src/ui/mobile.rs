@@ -1155,6 +1155,7 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
+            custom_tab_label: primary_tab_label.map(str::to_string),
             pane_label: None,
             terminal_title: None,
             terminal_title_stripped: None,

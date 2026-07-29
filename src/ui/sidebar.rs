@@ -25,6 +25,7 @@ pub(crate) struct AgentPanelEntry {
     pub pane_id: crate::layout::PaneId,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
+    pub custom_tab_label: Option<String>,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
@@ -85,17 +86,19 @@ fn collect_agent_panel_entries_with_runtimes(
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
-                    let show_tab = multi_tab
-                        || ws
-                            .tabs
-                            .get(detail.tab_idx)
-                            .is_some_and(|tab| !tab.is_auto_named());
+                    let custom_tab_label = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .is_some_and(|tab| !tab.is_auto_named())
+                        .then(|| detail.tab_label.clone());
+                    let show_tab = multi_tab || custom_tab_label.is_some();
                     AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: show_tab.then_some(detail.tab_label),
+                        custom_tab_label,
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
                         terminal_title_stripped: detail.terminal_title_stripped,
@@ -567,6 +570,23 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
 
 fn resolved_tree_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
     let status_label = tree_agent_status_label(entry.state, entry.seen);
+    if app.sidebar_agents == crate::config::AgentsSidebarConfig::default() {
+        let mut row = vec![ResolvedToken::new(
+            ResolvedTokenKind::StateIcon,
+            crate::config::SidebarTokenStyle::default(),
+        )];
+        if let Some(label) = status_label {
+            row.push(ResolvedToken::new(
+                ResolvedTokenKind::StateText(label.to_string()),
+                crate::config::SidebarTokenStyle::default(),
+            ));
+        }
+        row.push(ResolvedToken::new(
+            ResolvedTokenKind::Workspace(tree_agent_topic(entry)),
+            crate::config::SidebarTokenStyle::default(),
+        ));
+        return vec![row];
+    }
     let mut rows = resolved_agent_rows(app, entry)
         .into_iter()
         .filter_map(|row| {
@@ -621,6 +641,40 @@ fn resolved_tree_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<
     rows
 }
 
+fn tree_agent_topic(entry: &AgentPanelEntry) -> String {
+    [
+        entry.custom_tab_label.as_deref(),
+        entry.pane_label.as_deref(),
+        entry.terminal_title_stripped.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|candidate| !tree_agent_topic_is_generic(candidate, entry))
+    .unwrap_or("New conversation")
+    .to_string()
+}
+
+fn tree_agent_topic_is_generic(candidate: &str, entry: &AgentPanelEntry) -> bool {
+    if candidate.is_empty()
+        || candidate.eq_ignore_ascii_case("shell")
+        || candidate.eq_ignore_ascii_case(&entry.primary_label)
+    {
+        return true;
+    }
+    [
+        entry.agent_label.as_deref(),
+        entry.agent_kind_label.as_deref(),
+        Some("codex"),
+        Some("claude"),
+        Some("gemini"),
+        Some("pi"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|label| candidate.eq_ignore_ascii_case(label))
+}
+
 fn tree_agent_status_label(state: AgentState, seen: bool) -> Option<&'static str> {
     match (state, seen) {
         (AgentState::Working, _) => Some("Working"),
@@ -632,7 +686,8 @@ fn tree_agent_status_label(state: AgentState, seen: bool) -> Option<&'static str
 
 fn tree_agent_state_icon(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
     match (state, seen) {
-        (AgentState::Working, _) | (AgentState::Idle, false) => ("●", Style::default().fg(p.green)),
+        (AgentState::Working, _) => ("●", Style::default().fg(p.blue)),
+        (AgentState::Idle, false) => ("●", Style::default().fg(p.green)),
         (AgentState::Blocked, _) => ("●", Style::default().fg(p.red)),
         (AgentState::Idle, true) | (AgentState::Unknown, _) => ("", Style::default()),
     }
@@ -640,7 +695,8 @@ fn tree_agent_state_icon(state: AgentState, seen: bool, p: &Palette) -> (&'stati
 
 fn tree_agent_status_color(state: AgentState, seen: bool, p: &Palette) -> ratatui::style::Color {
     match (state, seen) {
-        (AgentState::Working, _) | (AgentState::Idle, false) => p.green,
+        (AgentState::Working, _) => p.blue,
+        (AgentState::Idle, false) => p.green,
         (AgentState::Blocked, _) => p.red,
         (AgentState::Idle, true) | (AgentState::Unknown, _) => p.overlay0,
     }
@@ -1255,8 +1311,17 @@ fn resolved_token_spans(
                 active[index] = false;
             }
         }
+        for index in 0..resolved.len() {
+            if !matches!(resolved[index].kind, ResolvedTokenKind::StateText(_)) {
+                continue;
+            }
+            active[index] = true;
+            if minimum_width(&active) > max_width {
+                active[index] = false;
+            }
+        }
         for index in (0..resolved.len()).rev() {
-            if flexible_widths[index] == 0 {
+            if flexible_widths[index] == 0 || active[index] {
                 continue;
             }
             active[index] = true;
@@ -1287,6 +1352,16 @@ fn resolved_token_spans(
     let mut remaining = max_width
         .saturating_sub(separator_width + fixed_width)
         .saturating_sub(minimum);
+    for (index, budget) in budgets.iter_mut().enumerate() {
+        if !matches!(resolved[index].kind, ResolvedTokenKind::StateText(_)) {
+            continue;
+        }
+        let growth = flexible_widths[index]
+            .saturating_sub(*budget)
+            .min(remaining);
+        *budget += growth;
+        remaining -= growth;
+    }
     while remaining > 0 {
         let mut grew = false;
         for (budget, width) in budgets.iter_mut().zip(&flexible_widths) {
@@ -1631,7 +1706,7 @@ fn render_workspace_list(
         let name_style = if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+            Style::default().fg(p.subtext0)
         };
         let status_style = Style::default()
             .fg(label_color)
@@ -1689,7 +1764,7 @@ fn render_workspace_list(
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         age,
-                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                        Style::default().fg(p.green).add_modifier(Modifier::DIM),
                     ))
                     .alignment(Alignment::Right),
                     Rect::new(
@@ -1823,9 +1898,13 @@ mod tests {
         let second_agent_row = row_text(buffer, agents[0].rect.y + 1, 25);
         assert!(space_row.contains("one"));
         assert!(!first_agent_row.contains("one"));
-        assert_eq!(second_agent_row, "   pi");
-        assert!(!first_agent_row.contains("working"));
-        assert!(!second_agent_row.contains("working"));
+        assert!(first_agent_row.contains("Working"));
+        assert!(
+            first_agent_row.contains("New"),
+            "agent row: {first_agent_row:?}"
+        );
+        assert!(!first_agent_row.to_ascii_lowercase().contains("pi"));
+        assert_eq!(second_agent_row, "");
         assert!((0..area.height).all(|row| !row_text(buffer, row, 25).contains("agents")));
 
         let workspace_x = find_symbol_x(buffer, cards[0].rect.y, cards[0].rect.width, "o");
@@ -1835,11 +1914,11 @@ mod tests {
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(workspace_style.bg, Some(app.palette.surface0));
 
-        let agent_x = find_symbol_x(buffer, agents[0].rect.y + 1, agents[0].rect.width, "p");
-        let agent_style = buffer[(agent_x, agents[0].rect.y + 1)].style();
-        assert_eq!(agent_style.fg, Some(app.palette.overlay0));
-        assert!(agent_style.add_modifier.contains(Modifier::DIM));
-        assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
+        let agent_x = find_symbol_x(buffer, agents[0].rect.y, agents[0].rect.width, "N");
+        let agent_style = buffer[(agent_x, agents[0].rect.y)].style();
+        assert_eq!(agent_style.fg, Some(app.palette.text));
+        assert!(!agent_style.add_modifier.contains(Modifier::DIM));
+        assert!(agent_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(agent_style.bg, Some(app.palette.surface_dim));
     }
 
@@ -3121,6 +3200,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             pane_id: crate::layout::PaneId::from_raw(1),
             primary_label: "space".into(),
             primary_tab_label: None,
+            custom_tab_label: None,
             pane_label: None,
             terminal_title: None,
             terminal_title_stripped: None,
@@ -3160,6 +3240,80 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(text(&entry).contains("● Blocked"));
         entry.state = AgentState::Unknown;
         assert!(!text(&entry).contains('●'));
+    }
+
+    #[test]
+    fn refined_tree_rows_are_compact_active_and_model_free() {
+        let app = AppState::test_new();
+        let mut entry = AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(1),
+            primary_label: "herdr".into(),
+            primary_tab_label: Some("Codex".into()),
+            custom_tab_label: Some("Codex".into()),
+            pane_label: Some("Improve sidebar topics".into()),
+            terminal_title: Some("codex".into()),
+            terminal_title_stripped: Some("codex".into()),
+            agent_label: Some("codex".into()),
+            agent_kind_label: Some("codex".into()),
+            agent: Some(Agent::Codex),
+            state: AgentState::Working,
+            seen: true,
+            last_agent_state_change_seq: Some(1),
+            last_agent_state_change_at: Some(std::time::Instant::now()),
+            state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
+        };
+        let rows = resolved_tree_agent_rows(&app, &entry);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0].last().map(|token| &token.kind),
+            Some(ResolvedTokenKind::Workspace(topic)) if topic == "Improve sidebar topics"
+        ));
+        assert_eq!(app.sidebar_agents.row_gap, 0);
+
+        entry.pane_label = Some("shell".into());
+        assert!(matches!(
+            resolved_tree_agent_rows(&app, &entry)[0]
+                .last()
+                .map(|token| &token.kind),
+            Some(ResolvedTokenKind::Workspace(topic)) if topic == "New conversation"
+        ));
+
+        entry.custom_tab_label = Some("123".into());
+        assert!(matches!(
+            resolved_tree_agent_rows(&app, &entry)[0]
+                .last()
+                .map(|token| &token.kind),
+            Some(ResolvedTokenKind::Workspace(topic)) if topic == "123"
+        ));
+    }
+
+    #[test]
+    fn refined_tree_status_and_age_colors_follow_palette() {
+        let app = AppState::test_new();
+        assert_eq!(
+            tree_agent_state_icon(AgentState::Working, true, &app.palette)
+                .1
+                .fg,
+            Some(app.palette.blue)
+        );
+        assert_eq!(
+            tree_agent_status_color(AgentState::Working, true, &app.palette),
+            app.palette.blue
+        );
+        assert_eq!(
+            tree_agent_state_icon(AgentState::Idle, false, &app.palette)
+                .1
+                .fg,
+            Some(app.palette.green)
+        );
+        assert_eq!(
+            tree_agent_status_color(AgentState::Idle, false, &app.palette),
+            app.palette.green
+        );
+        assert_eq!(tree_agent_status_label(AgentState::Idle, true), None);
     }
 
     // AC6

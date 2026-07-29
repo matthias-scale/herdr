@@ -324,4 +324,39 @@ mod tests {
             "b6272e70389c23ab98d438bc8174bd9562c3f0c77a8c05a41b74f976cabbfa11"
         );
     }
+
+    #[tokio::test]
+    async fn desktop_context_metadata_mobile_geometry_and_isolated_tui_boot_are_semantic() {
+        let mut desktop = full_app_characterization_state("https://example.com/context");
+        desktop.workspaces[0].cached_git_branch = Some("SCA-2312".into());
+        let (desktop_buffer, _desktop_cursor) = crate::server::render_stream::render_virtual(
+            &mut desktop,
+            Rect::new(0, 0, 106, 20),
+            true,
+        );
+        let desktop_text = desktop_buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(desktop_buffer.area, Rect::new(0, 0, 106, 20));
+        assert_eq!(desktop.view.git_context_hit_area, Rect::new(78, 0, 12, 1));
+        assert_eq!(
+            desktop.view.linear_context_hit_area,
+            Rect::new(91, 0, 15, 1)
+        );
+        assert!(desktop_text.contains("git:SCA-2312"));
+        assert!(desktop_text.contains("linear:SCA-2312"));
+        assert_eq!(desktop.view.terminal_area, Rect::new(26, 1, 80, 19));
+
+        let mut mobile = full_app_characterization_state("https://example.com/mobile-context");
+        mobile.workspaces[0].cached_git_branch = Some("feat/SCA-2312-sidebar".into());
+        mobile.mode = Mode::Navigate;
+        let mobile_frame = full_app_frame(&mut mobile, Rect::new(0, 0, 44, 20));
+        assert_eq!((mobile_frame.width, mobile_frame.height), (44, 20));
+        assert_eq!(mobile.view.mobile_header_rect, Rect::new(0, 0, 44, 2));
+        assert_eq!(mobile.view.terminal_area, Rect::new(0, 2, 44, 18));
+        assert_eq!(mobile.view.git_context_hit_area, Rect::default());
+        assert_eq!(mobile.view.linear_context_hit_area, Rect::default());
+    }
 }

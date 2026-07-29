@@ -5,13 +5,16 @@ use ratatui::{
     Frame,
 };
 
-use super::text::display_width_u16;
+use super::text::{display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 
 const MIN_TAB_WIDTH: u16 = 8;
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
+const MIN_TAB_RESERVE: u16 = 8;
+const MAX_GIT_CONTEXT_WIDTH: u16 = 24;
+const MIN_GIT_CONTEXT_WIDTH: u16 = 8;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TabBarView {
@@ -20,6 +23,103 @@ pub(crate) struct TabBarView {
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub git_context_hit_area: Rect,
+    pub linear_context_hit_area: Rect,
+}
+
+pub(crate) fn linear_ticket_from_branch(branch: &str) -> Option<String> {
+    let bytes = branch.as_bytes();
+    let boundary = |byte: u8| matches!(byte, b'/' | b'_' | b'.' | b'-');
+    let mut start = 0;
+    while start < bytes.len() {
+        if start > 0 && !boundary(bytes[start - 1]) {
+            start += 1;
+            continue;
+        }
+        let mut pos = start;
+        if !bytes[pos].is_ascii_uppercase() {
+            start += 1;
+            continue;
+        }
+        pos += 1;
+        let key_start = pos;
+        while pos < bytes.len()
+            && pos - start < 10
+            && (bytes[pos].is_ascii_uppercase() || bytes[pos].is_ascii_digit())
+        {
+            pos += 1;
+        }
+        if pos - key_start < 1 || pos >= bytes.len() || bytes[pos] != b'-' {
+            start += 1;
+            continue;
+        }
+        pos += 1;
+        let number_start = pos;
+        if pos >= bytes.len() || bytes[pos] == b'0' || !bytes[pos].is_ascii_digit() {
+            start += 1;
+            continue;
+        }
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos == number_start || (pos < bytes.len() && !boundary(bytes[pos])) {
+            start += 1;
+            continue;
+        }
+        return Some(branch[start..pos].to_string());
+    }
+    None
+}
+
+fn context_action_layout(
+    ws: &crate::workspace::Workspace,
+    area: Rect,
+    mouse_chrome: bool,
+) -> (Rect, Rect, Rect) {
+    let Some(branch) = ws.branch().filter(|branch| !branch.is_empty()) else {
+        return (area, Rect::default(), Rect::default());
+    };
+    let reserved = MIN_TAB_RESERVE.saturating_add(if mouse_chrome {
+        NEW_TAB_WIDTH.saturating_add(TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2))
+    } else {
+        0
+    });
+    let available = area.width.saturating_sub(reserved);
+    if available < MIN_GIT_CONTEXT_WIDTH {
+        return (area, Rect::default(), Rect::default());
+    }
+
+    let git_label = format!("git:{branch}");
+    let git_width = display_width_u16(&git_label)
+        .min(MAX_GIT_CONTEXT_WIDTH)
+        .min(available);
+    let linear_label = linear_ticket_from_branch(&branch).map(|ticket| format!("linear:{ticket}"));
+    let linear_width = linear_label
+        .as_deref()
+        .map(display_width_u16)
+        .filter(|width| width.saturating_add(1).saturating_add(git_width) <= available)
+        .unwrap_or(0);
+    let total = git_width
+        .saturating_add(linear_width)
+        .saturating_add(u16::from(linear_width > 0));
+    let context_x = area.x + area.width.saturating_sub(total);
+    let git_rect = Rect::new(context_x, area.y, git_width, 1);
+    let linear_x = context_x + git_width + u16::from(linear_width > 0);
+    let linear_rect = if linear_width > 0 {
+        Rect::new(linear_x, area.y, linear_width, 1)
+    } else {
+        Rect::default()
+    };
+    (
+        Rect::new(
+            area.x,
+            area.y,
+            context_x.saturating_sub(area.x),
+            area.height,
+        ),
+        git_rect,
+        linear_rect,
+    )
 }
 
 fn tab_width(ws: &crate::workspace::Workspace, tab_idx: usize) -> u16 {
@@ -118,22 +218,28 @@ pub(crate) fn compute_tab_bar_view(
         return TabBarView::default();
     }
 
+    let (tabs_and_controls_area, git_context_hit_area, linear_context_hit_area) =
+        context_action_layout(ws, area, mouse_chrome);
+
     if !mouse_chrome {
-        let max_scroll = max_tab_scroll(ws, area);
+        let max_scroll = max_tab_scroll(ws, tabs_and_controls_area);
         let scroll = if follow_active {
-            centered_tab_scroll(ws, area).min(max_scroll)
+            centered_tab_scroll(ws, tabs_and_controls_area).min(max_scroll)
         } else {
             current_scroll.min(max_scroll)
         };
         return TabBarView {
             scroll,
-            tab_hit_areas: layout_tab_hit_areas(ws, area, scroll),
+            tab_hit_areas: layout_tab_hit_areas(ws, tabs_and_controls_area, scroll),
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area: Rect::default(),
+            git_context_hit_area,
+            linear_context_hit_area,
         };
     }
 
+    let area = tabs_and_controls_area;
     let area_right = area.x + area.width;
     let all_tabs_area = Rect::new(
         area.x,
@@ -157,6 +263,8 @@ pub(crate) fn compute_tab_bar_view(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area,
+            git_context_hit_area,
+            linear_context_hit_area,
         };
     }
 
@@ -201,6 +309,8 @@ pub(crate) fn compute_tab_bar_view(
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
+        git_context_hit_area,
+        linear_context_hit_area,
     }
 }
 
@@ -367,6 +477,28 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         );
     }
 
+    if app.view.linear_context_hit_area.width > 0 {
+        if let Some(ticket) = ws.branch().as_deref().and_then(linear_ticket_from_branch) {
+            frame.render_widget(
+                Paragraph::new(format!("linear:{ticket}"))
+                    .style(Style::default().fg(p.mauve).add_modifier(Modifier::BOLD)),
+                app.view.linear_context_hit_area,
+            );
+        }
+    }
+    if app.view.git_context_hit_area.width > 0 {
+        if let Some(branch) = ws.branch() {
+            let label = truncate_end(
+                &format!("git:{branch}"),
+                app.view.git_context_hit_area.width as usize,
+            );
+            frame.render_widget(
+                Paragraph::new(label).style(Style::default().fg(p.blue)),
+                app.view.git_context_hit_area,
+            );
+        }
+    }
+
     if first_visible_idx.is_some_and(|idx| idx > 0) {
         let x = if app.mouse_capture && app.view.tab_scroll_left_hit_area.width > 0 {
             app.view.tab_scroll_left_hit_area.x + app.view.tab_scroll_left_hit_area.width
@@ -380,10 +512,19 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
     if last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len()) {
+        let tab_content_right = [
+            app.view.linear_context_hit_area,
+            app.view.git_context_hit_area,
+        ]
+        .into_iter()
+        .filter(|rect| rect.width > 0)
+        .map(|rect| rect.x)
+        .min()
+        .unwrap_or(area.x + area.width);
         let x = if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
             app.view.tab_scroll_right_hit_area.x.saturating_sub(1)
         } else {
-            area.x + area.width.saturating_sub(1)
+            tab_content_right.saturating_sub(1)
         };
         if x >= area.x && x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
@@ -412,6 +553,7 @@ mod tests {
     fn tab_bar_marks_zoomed_tabs_without_renaming_them() {
         let mut app = AppState::test_new();
         let mut ws = Workspace::test_new("test");
+        ws.cached_git_branch = None;
         ws.tabs[0].zoomed = true;
         let custom_tab = ws.test_add_tab(Some("test"));
         ws.tabs[custom_tab].zoomed = true;
@@ -435,6 +577,62 @@ mod tests {
         assert_eq!(
             app.workspaces[0].tab_display_name(custom_tab).as_deref(),
             Some("test")
+        );
+    }
+
+    #[test]
+    fn context_actions_render_and_degrade_without_overlapping_tabs() {
+        let mut ws = Workspace::test_new("test");
+        ws.cached_git_branch = Some("feat/SCA-2312-sidebar-界面".into());
+
+        let wide = compute_tab_bar_view(&ws, Rect::new(0, 0, 80, 1), 0, true, true);
+        assert!(wide.tab_hit_areas[0].width >= MIN_TAB_WIDTH);
+        assert!(wide.new_tab_hit_area.width > 0);
+        assert!(wide.git_context_hit_area.width > 0);
+        assert!(wide.linear_context_hit_area.width > 0);
+        assert!(
+            wide.tab_hit_areas[0].x + wide.tab_hit_areas[0].width <= wide.git_context_hit_area.x
+        );
+        assert!(
+            wide.git_context_hit_area.x + wide.git_context_hit_area.width
+                < wide.linear_context_hit_area.x
+        );
+
+        let mut overflow_ws = Workspace::test_new("overflow");
+        overflow_ws.cached_git_branch = Some("feat/SCA-2312-sidebar-界面".into());
+        for index in 0..4 {
+            overflow_ws.test_add_tab(Some(&format!("overflow-{index}")));
+        }
+        let overflow = compute_tab_bar_view(&overflow_ws, Rect::new(0, 0, 40, 1), 0, true, true);
+        assert_eq!(
+            overflow.tab_hit_areas[overflow_ws.active_tab].width,
+            MIN_TAB_WIDTH
+        );
+        assert_eq!(overflow.scroll_left_hit_area.width, TAB_SCROLL_BUTTON_WIDTH);
+        assert_eq!(
+            overflow.scroll_right_hit_area.width,
+            TAB_SCROLL_BUTTON_WIDTH
+        );
+
+        let narrow = compute_tab_bar_view(&ws, Rect::new(0, 0, 18, 1), 0, true, true);
+        assert_eq!(narrow.git_context_hit_area, Rect::default());
+        assert_eq!(narrow.linear_context_hit_area, Rect::default());
+        assert!(narrow.tab_hit_areas[0].width >= MIN_TAB_WIDTH);
+
+        let keyboard = compute_tab_bar_view(&ws, Rect::new(0, 0, 40, 1), 0, true, false);
+        assert_eq!(keyboard.new_tab_hit_area, Rect::default());
+        assert!(keyboard.git_context_hit_area.width > 0);
+
+        assert_eq!(
+            linear_ticket_from_branch("feat/SCA-2312-sidebar"),
+            Some("SCA-2312".into())
+        );
+        assert_eq!(linear_ticket_from_branch("feat/sca-2312-sidebar"), None);
+        assert_eq!(linear_ticket_from_branch("feat/SCA-0-sidebar"), None);
+        assert_eq!(linear_ticket_from_branch("xSCA-2312/sidebar"), None);
+        assert_eq!(
+            linear_ticket_from_branch("feat/ABC-12_then-SCA-99"),
+            Some("ABC-12".into())
         );
     }
 
@@ -487,6 +685,7 @@ mod tests {
     fn tab_bar_renders_trailing_cjk_character() {
         let mut app = AppState::test_new();
         let mut ws = Workspace::test_new("test");
+        ws.cached_git_branch = None;
         ws.tabs[0].set_custom_name("提交 herdr 的反馈".into());
 
         app.active = Some(0);

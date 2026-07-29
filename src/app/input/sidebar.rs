@@ -759,6 +759,8 @@ mod tests {
             ("logs", Agent::Claude),
             ("review", Agent::Codex),
             ("ops", Agent::Gemini),
+            ("qa", Agent::Claude),
+            ("deploy", Agent::Codex),
         ] {
             let tab_idx = ws.test_add_tab(Some(tab_name));
             let pane_id = ws.tabs[tab_idx].root_pane;

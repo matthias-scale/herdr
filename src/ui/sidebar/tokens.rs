@@ -164,6 +164,7 @@ mod tests {
             pane_id: crate::layout::PaneId::from_raw(1),
             primary_label: "repo".into(),
             primary_tab_label: None,
+            custom_tab_label: None,
             pane_label: None,
             terminal_title: None,
             terminal_title_stripped: None,

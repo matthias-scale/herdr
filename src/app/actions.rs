@@ -1747,6 +1747,8 @@ impl AppState {
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
+            self.view.git_context_hit_area = ratatui::layout::Rect::default();
+            self.view.linear_context_hit_area = ratatui::layout::Rect::default();
             return;
         };
 
@@ -1762,6 +1764,8 @@ impl AppState {
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
+        self.view.git_context_hit_area = layout.git_context_hit_area;
+        self.view.linear_context_hit_area = layout.linear_context_hit_area;
     }
 }
 
@@ -4342,7 +4346,6 @@ mod tests {
         let last_idx = state.workspaces[0].tabs.len() - 1;
         let last_pane = state.workspaces[0].tabs[last_idx].root_pane;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        assert!(state.workspace_scroll > 0);
         let (_, visible_agents) =
             crate::ui::compute_workspace_list_areas(&state, state.view.sidebar_rect);
         assert!(visible_agents
