@@ -62,7 +62,53 @@ pub(crate) fn sample_status_metrics(
 }
 
 fn status_battery() -> (Option<u8>, Option<bool>) {
-    (None, None)
+    // SAFETY: each IOKit `Copy` result is retained by `StatusCfOwned`; the
+    // description dictionaries and array entries remain borrowed from those
+    // snapshots until both guards are dropped.
+    unsafe {
+        let Some(blob) = StatusCfOwned::from_copy(iops_copy_power_sources_info()) else {
+            return (None, None);
+        };
+        let Some(list) = StatusCfOwned::from_copy(iops_copy_power_sources_list(blob.as_ptr()))
+        else {
+            return (None, None);
+        };
+        if cf_get_type_id(list.as_ptr()) != cf_array_get_type_id() {
+            return (None, None);
+        }
+
+        let mut best = None;
+        for index in 0..cf_array_get_count(list.as_ptr()) {
+            let power_source = cf_array_get_value_at_index(list.as_ptr(), index);
+            if power_source.is_null() {
+                continue;
+            }
+            let description = iops_get_power_source_description(blob.as_ptr(), power_source);
+            if description.is_null() || cf_get_type_id(description) != cf_dictionary_get_type_id() {
+                continue;
+            }
+            let capacity = status_cf_dictionary_i32(description, IOPS_CURRENT_CAPACITY_KEY)
+                .filter(|capacity| (0..=100).contains(capacity));
+            let Some(capacity) = capacity else {
+                continue;
+            };
+            let internal = status_cf_dictionary_string(description, IOPS_TYPE_KEY)
+                .is_some_and(|kind| kind == IOPS_INTERNAL_BATTERY_TYPE);
+            let state = status_cf_dictionary_string(description, IOPS_POWER_SOURCE_STATE_KEY);
+            let charging = state.as_deref() == Some(IOPS_AC_POWER_VALUE)
+                || status_cf_dictionary_bool(description, IOPS_IS_CHARGING_KEY).unwrap_or(false);
+            let candidate = (capacity as u8, charging);
+            if internal {
+                best = Some(candidate);
+                break;
+            }
+            best.get_or_insert(candidate);
+        }
+
+        best.map_or((None, None), |(percent, charging)| {
+            (Some(percent), Some(charging))
+        })
+    }
 }
 
 fn status_identity() -> (String, String) {
@@ -346,6 +392,28 @@ impl Drop for StatusIfAddrs {
     }
 }
 
+fn status_default_route_interface() -> Option<String> {
+    // SAFETY: every Create/Copy result is retained by a guard and all borrowed
+    // dictionary values are consumed before their owning snapshot is dropped.
+    unsafe {
+        let name = StatusCfOwned::string("Herdr status metrics")?;
+        let store = StatusCfOwned::from_copy(sc_dynamic_store_create(
+            std::ptr::null(),
+            name.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+        ))?;
+        let key = StatusCfOwned::string("State:/Network/Global/IPv4")?;
+        let snapshot =
+            StatusCfOwned::from_copy(sc_dynamic_store_copy_value(store.as_ptr(), key.as_ptr()))?;
+        if cf_get_type_id(snapshot.as_ptr()) != cf_dictionary_get_type_id() {
+            return None;
+        }
+        status_cf_dictionary_string(snapshot.as_ptr(), "PrimaryInterface")
+            .filter(|interface| !interface.is_empty() && interface.len() < libc::IFNAMSIZ)
+    }
+}
+
 fn status_interface_name(interface: &libc::ifaddrs) -> Option<String> {
     if interface.ifa_name.is_null() {
         return None;
@@ -416,7 +484,7 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
     }
     drop(interfaces);
 
-    select_status_network_interfaces(None, ipv4s, counters)
+    select_status_network_interfaces(status_default_route_interface().as_deref(), ipv4s, counters)
 }
 
 fn select_status_network_interfaces(
@@ -522,7 +590,7 @@ mod status_metric_tests {
 
     #[test]
     fn platform_metric_sampler_returns_local_macos_snapshot() {
-        // AC6: macOS collection stays in macos.rs and uses native libc/Mach APIs.
+        // AC6: macOS collection stays in macos.rs and uses native platform APIs.
         let metrics = super::sample_status_metrics(
             &mut crate::platform::status_metrics::StatusMetricSampler::new(),
         );
@@ -530,8 +598,18 @@ mod status_metric_tests {
         assert!(!metrics.username.is_empty());
         assert_eq!(metrics.date.len(), 10);
         assert_eq!(metrics.time.len(), 5);
-        assert_eq!(metrics.battery_percent, None);
-        assert_eq!(metrics.battery_charging, None);
+        if let Some(percent) = metrics.battery_percent {
+            assert!(percent <= 100);
+            assert!(metrics.battery_charging.is_some());
+        }
+    }
+
+    #[test]
+    fn native_default_route_interface_is_valid_when_available() {
+        if let Some(interface) = super::status_default_route_interface() {
+            assert!(!interface.is_empty());
+            assert!(interface.len() < libc::IFNAMSIZ);
+        }
     }
 
     #[test]
@@ -732,8 +810,19 @@ struct TisInputSource {
 type TisInputSourceRef = *const TisInputSource;
 type CfTypeRef = *const libc::c_void;
 type CfStringRef = *const libc::c_void;
+type CfIndex = isize;
+type CfTypeId = usize;
 type OsStatus = libc::c_int;
 type Boolean = libc::c_uchar;
+
+const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+const CF_NUMBER_INT_TYPE: CfIndex = 9;
+const IOPS_TYPE_KEY: &str = "Type";
+const IOPS_INTERNAL_BATTERY_TYPE: &str = "InternalBattery";
+const IOPS_CURRENT_CAPACITY_KEY: &str = "Current Capacity";
+const IOPS_POWER_SOURCE_STATE_KEY: &str = "Power Source State";
+const IOPS_AC_POWER_VALUE: &str = "AC Power";
+const IOPS_IS_CHARGING_KEY: &str = "Is Charging";
 
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
@@ -764,6 +853,58 @@ extern "C" {
     #[link_name = "CFEqual"]
     fn cf_equal(left: CfTypeRef, right: CfTypeRef) -> Boolean;
 
+    #[link_name = "CFGetTypeID"]
+    fn cf_get_type_id(value: CfTypeRef) -> CfTypeId;
+
+    #[link_name = "CFArrayGetTypeID"]
+    fn cf_array_get_type_id() -> CfTypeId;
+
+    #[link_name = "CFArrayGetCount"]
+    fn cf_array_get_count(array: CfTypeRef) -> CfIndex;
+
+    #[link_name = "CFArrayGetValueAtIndex"]
+    fn cf_array_get_value_at_index(array: CfTypeRef, index: CfIndex) -> CfTypeRef;
+
+    #[link_name = "CFDictionaryGetTypeID"]
+    fn cf_dictionary_get_type_id() -> CfTypeId;
+
+    #[link_name = "CFDictionaryGetValue"]
+    fn cf_dictionary_get_value(dictionary: CfTypeRef, key: CfTypeRef) -> CfTypeRef;
+
+    #[link_name = "CFStringCreateWithCString"]
+    fn cf_string_create_with_c_string(
+        allocator: CfTypeRef,
+        value: *const libc::c_char,
+        encoding: u32,
+    ) -> CfStringRef;
+
+    #[link_name = "CFStringGetTypeID"]
+    fn cf_string_get_type_id() -> CfTypeId;
+
+    #[link_name = "CFStringGetCString"]
+    fn cf_string_get_c_string(
+        string: CfStringRef,
+        buffer: *mut libc::c_char,
+        buffer_size: CfIndex,
+        encoding: u32,
+    ) -> Boolean;
+
+    #[link_name = "CFNumberGetTypeID"]
+    fn cf_number_get_type_id() -> CfTypeId;
+
+    #[link_name = "CFNumberGetValue"]
+    fn cf_number_get_value(
+        number: CfTypeRef,
+        number_type: CfIndex,
+        value: *mut libc::c_void,
+    ) -> Boolean;
+
+    #[link_name = "CFBooleanGetTypeID"]
+    fn cf_boolean_get_type_id() -> CfTypeId;
+
+    #[link_name = "CFBooleanGetValue"]
+    fn cf_boolean_get_value(boolean: CfTypeRef) -> Boolean;
+
     #[link_name = "kCFRunLoopDefaultMode"]
     static CF_RUN_LOOP_DEFAULT_MODE: CfStringRef;
 
@@ -773,6 +914,103 @@ extern "C" {
         seconds: f64,
         return_after_source_handled: Boolean,
     ) -> libc::c_int;
+}
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    #[link_name = "IOPSCopyPowerSourcesInfo"]
+    fn iops_copy_power_sources_info() -> CfTypeRef;
+
+    #[link_name = "IOPSCopyPowerSourcesList"]
+    fn iops_copy_power_sources_list(blob: CfTypeRef) -> CfTypeRef;
+
+    #[link_name = "IOPSGetPowerSourceDescription"]
+    fn iops_get_power_source_description(blob: CfTypeRef, power_source: CfTypeRef) -> CfTypeRef;
+}
+
+#[link(name = "SystemConfiguration", kind = "framework")]
+extern "C" {
+    #[link_name = "SCDynamicStoreCreate"]
+    fn sc_dynamic_store_create(
+        allocator: CfTypeRef,
+        name: CfStringRef,
+        callback: *const libc::c_void,
+        context: *const libc::c_void,
+    ) -> CfTypeRef;
+
+    #[link_name = "SCDynamicStoreCopyValue"]
+    fn sc_dynamic_store_copy_value(store: CfTypeRef, key: CfStringRef) -> CfTypeRef;
+}
+
+struct StatusCfOwned(NonNull<libc::c_void>);
+
+impl StatusCfOwned {
+    unsafe fn from_copy(raw: CfTypeRef) -> Option<Self> {
+        NonNull::new(raw.cast_mut()).map(Self)
+    }
+
+    unsafe fn string(value: &str) -> Option<Self> {
+        let value = std::ffi::CString::new(value).ok()?;
+        Self::from_copy(cf_string_create_with_c_string(
+            std::ptr::null(),
+            value.as_ptr(),
+            CF_STRING_ENCODING_UTF8,
+        ))
+    }
+
+    fn as_ptr(&self) -> CfTypeRef {
+        self.0.as_ptr()
+    }
+}
+
+impl Drop for StatusCfOwned {
+    fn drop(&mut self) {
+        // SAFETY: each instance owns one retain returned by a Create/Copy API.
+        unsafe { cf_release(self.as_ptr()) }
+    }
+}
+
+unsafe fn status_cf_dictionary_value(dictionary: CfTypeRef, key: &str) -> Option<CfTypeRef> {
+    let key = StatusCfOwned::string(key)?;
+    let value = cf_dictionary_get_value(dictionary, key.as_ptr());
+    (!value.is_null()).then_some(value)
+}
+
+unsafe fn status_cf_dictionary_i32(dictionary: CfTypeRef, key: &str) -> Option<i32> {
+    let value = status_cf_dictionary_value(dictionary, key)?;
+    if cf_get_type_id(value) != cf_number_get_type_id() {
+        return None;
+    }
+    let mut result = 0i32;
+    (cf_number_get_value(value, CF_NUMBER_INT_TYPE, (&raw mut result).cast()) != 0)
+        .then_some(result)
+}
+
+unsafe fn status_cf_dictionary_bool(dictionary: CfTypeRef, key: &str) -> Option<bool> {
+    let value = status_cf_dictionary_value(dictionary, key)?;
+    (cf_get_type_id(value) == cf_boolean_get_type_id()).then(|| cf_boolean_get_value(value) != 0)
+}
+
+unsafe fn status_cf_dictionary_string(dictionary: CfTypeRef, key: &str) -> Option<String> {
+    let value = status_cf_dictionary_value(dictionary, key)?;
+    if cf_get_type_id(value) != cf_string_get_type_id() {
+        return None;
+    }
+    let mut buffer = [0 as libc::c_char; 256];
+    if cf_string_get_c_string(
+        value,
+        buffer.as_mut_ptr(),
+        buffer.len() as CfIndex,
+        CF_STRING_ENCODING_UTF8,
+    ) == 0
+    {
+        return None;
+    }
+    Some(
+        std::ffi::CStr::from_ptr(buffer.as_ptr())
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Pump the main thread's run loop once (non-blocking) so the process receives the
