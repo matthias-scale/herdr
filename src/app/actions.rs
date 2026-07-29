@@ -1554,16 +1554,23 @@ impl AppState {
             return;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
-        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
+        let Some((ws_idx, pane_id)) = crate::ui::agent_panel_entries(self)
+            .get(idx)
+            .map(|entry| (entry.ws_idx, entry.pane_id))
+        else {
+            return;
+        };
+        if let Some(key) = crate::ui::space_agent_collapse_key(self, ws_idx) {
+            self.collapsed_space_keys.remove(&key);
+        }
+        self.workspace_scroll = crate::ui::workspace_list_scroll_for_agent(
             self,
-            detail_area,
-            self.agent_panel_scroll,
-            idx,
+            self.view.sidebar_rect,
+            self.workspace_scroll,
+            ws_idx,
+            pane_id,
         );
+        self.agent_panel_scroll = 0;
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -4309,7 +4316,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_agent_keeps_wrapped_target_visible_in_agent_panel() {
+    fn previous_agent_keeps_wrapped_target_visible_in_unified_sidebar() {
         let mut workspace = Workspace::test_new("one");
         let root = workspace.tabs[0].root_pane;
         for idx in 1..8 {
@@ -4332,8 +4339,14 @@ mod tests {
         state.previous_agent();
 
         let last_idx = state.workspaces[0].tabs.len() - 1;
+        let last_pane = state.workspaces[0].tabs[last_idx].root_pane;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        assert!(state.agent_panel_scroll > 0);
+        assert!(state.workspace_scroll > 0);
+        let (_, visible_agents) =
+            crate::ui::compute_workspace_list_areas(&state, state.view.sidebar_rect);
+        assert!(visible_agents
+            .iter()
+            .any(|agent| agent.pane_id == last_pane));
         state.assert_invariants_for_test();
     }
 

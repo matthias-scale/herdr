@@ -25,7 +25,7 @@ pub(super) enum ResolvedTokenKind {
 }
 
 impl ResolvedToken {
-    fn new(kind: ResolvedTokenKind, style: SidebarTokenStyle) -> Self {
+    pub(super) fn new(kind: ResolvedTokenKind, style: SidebarTokenStyle) -> Self {
         Self { kind, style }
     }
 

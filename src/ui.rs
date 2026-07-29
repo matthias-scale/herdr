@@ -76,13 +76,12 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
-        agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
+        agent_panel_entries, all_agent_panel_entries, collapsed_sidebar_sections,
+        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, compute_workspace_list_areas,
+        expanded_sidebar_toggle_rect, normalized_workspace_scroll, space_agent_chevron_rect,
+        space_agent_collapse_key, space_has_agent_rows, workspace_drop_slots,
+        workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect, workspace_list_scroll_for_agent, workspace_list_scroll_metrics,
         workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
         WorkspaceListEntry,
     },
@@ -236,9 +235,7 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        app.agent_panel_scroll = 0;
     } else {
         app.workspace_scroll = app
             .workspace_scroll
@@ -1018,7 +1015,9 @@ mod tests {
         let root_terminal_id = app.workspaces[0].tabs[0].panes[&root_pane]
             .attached_terminal_id
             .clone();
-        app.terminals.get_mut(&root_terminal_id).unwrap().cwd = repo.clone();
+        let root_terminal = app.terminals.get_mut(&root_terminal_id).unwrap();
+        root_terminal.cwd = repo.clone();
+        root_terminal.detected_agent = Some(crate::detect::Agent::Pi);
         app.selected = 0;
         app.mode = Mode::Navigate;
 
@@ -1033,9 +1032,12 @@ mod tests {
         let line1 = buffer_row_text(buffer, card, card.y);
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        assert!(line1.starts_with(" · one"));
+        assert!(
+            line1.starts_with("▾ · one"),
+            "expanded Space row should show agent chevron, state, then name: {line1:?}"
+        );
         assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        assert_eq!(line2, "  main");
 
         std::fs::remove_dir_all(repo).ok();
     }

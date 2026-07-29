@@ -1160,9 +1160,6 @@ pub(crate) enum DragTarget {
     WorkspaceListScrollbar {
         grab_row_offset: u16,
     },
-    AgentPanelScrollbar {
-        grab_row_offset: u16,
-    },
     PaneSplit {
         path: Vec<bool>,
         direction: Direction,
@@ -1183,7 +1180,6 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
-    SidebarSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.

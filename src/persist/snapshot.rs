@@ -880,6 +880,19 @@ mod tests {
     }
 
     #[test]
+    fn space_agent_collapse_keys_round_trip() {
+        let mut state = state_with_workspaces(&["one"]);
+        let key = crate::ui::space_agent_collapse_key(&state, 0).unwrap();
+        state.collapsed_space_keys.insert(key.clone());
+
+        let snapshot = capture_from_state(&state);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert!(restored.collapsed_space_keys.contains(&key));
+    }
+
+    #[test]
     fn capture_contract_tracks_worktree_space_membership() {
         let mut state = state_with_workspaces(&["main"]);
         state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
