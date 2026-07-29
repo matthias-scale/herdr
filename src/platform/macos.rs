@@ -97,15 +97,42 @@ fn status_battery() -> (Option<u8>, Option<bool>) {
         .unwrap_or((None, None))
 }
 
-fn wait_for_child_until(child: &mut std::process::Child, timeout: Duration) -> bool {
+trait BoundedChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus>;
+}
+
+impl BoundedChild for std::process::Child {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        std::process::Child::try_wait(self)
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        std::process::Child::kill(self)
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        std::process::Child::wait(self)
+    }
+}
+
+fn kill_and_reap_child(child: &mut impl BoundedChild) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn wait_for_child_until(child: &mut impl BoundedChild, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
-            Err(_) => return false,
+            Err(_) => {
+                kill_and_reap_child(child);
+                return false;
+            }
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap_child(child);
                 return false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
@@ -1360,6 +1387,37 @@ pub fn process_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct TryWaitErrorChild {
+        kill_calls: usize,
+        wait_calls: usize,
+    }
+
+    impl BoundedChild for TryWaitErrorChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            Err(std::io::Error::other("injected try_wait failure"))
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.kill_calls += 1;
+            Err(std::io::Error::other("injected kill failure"))
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            self.wait_calls += 1;
+            Err(std::io::Error::other("injected wait failure"))
+        }
+    }
+
+    #[test]
+    fn pmset_battery_wait_cleans_up_after_try_wait_error() {
+        let mut child = TryWaitErrorChild::default();
+
+        assert!(!wait_for_child_until(&mut child, Duration::from_secs(1)));
+        assert_eq!(child.kill_calls, 1);
+        assert_eq!(child.wait_calls, 1);
+    }
 
     #[test]
     fn pmset_battery_parser_handles_present_discharging_battery() {
