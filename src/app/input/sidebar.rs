@@ -1154,7 +1154,14 @@ mod tests {
         assert!(app.state.collapsed_space_keys.contains(&key));
         let (_, collapsed_agents) =
             crate::ui::compute_workspace_list_areas(&app.state, app.state.view.sidebar_rect);
-        assert!(collapsed_agents.iter().all(|agent| agent.ws_idx == 1));
+        assert_eq!(
+            collapsed_agents
+                .iter()
+                .map(|agent| agent.ws_idx)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "collapse retains Space one's selected child without affecting Space two"
+        );
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
