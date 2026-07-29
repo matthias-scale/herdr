@@ -5,20 +5,22 @@ on:
     types: [opened, edited, reopened, synchronize]
 
 jobs:
+  # The intake policy is canonical-repository only, and its maintainer token
+  # does not exist on forks, so skip the whole job there instead of failing.
   check-contributor:
+    if: github.repository == 'ogulcancelik/herdr'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
       pull-requests: write
     steps:
-      # The intake policy is canonical-repository only, and its maintainer token
-      # does not exist on forks, so skip the step there instead of failing.
       - name: Check pull request intake policy
-        if: github.repository == 'ogulcancelik/herdr'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
-          github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          # Fall back to the workflow token so a missing maintainer secret
+          # cannot fail the job on a missing required input.
+          github-token: ${{ secrets.KANGAL_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const CANONICAL_REPOSITORY = 'ogulcancelik/herdr';
             const KANGAL_USER_ID = 285672167;
