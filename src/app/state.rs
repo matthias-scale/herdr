@@ -1417,6 +1417,10 @@ pub(crate) struct PaneFocusTarget {
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
+    /// Server-owned native metric snapshot consumed by pure rendering.
+    pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
+    pub(crate) status_session_name: String,
+    pub(crate) status_home_dir: Option<std::path::PathBuf>,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -1794,6 +1798,12 @@ impl AppState {
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {
+            status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+                metrics: crate::platform::status_metrics::status_metrics_fixture(),
+                sampled_at: std::time::Instant::now(),
+            }),
+            status_session_name: "main".into(),
+            status_home_dir: Some(std::path::PathBuf::from("/home/test")),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 #[cfg(test)]
 use std::time::Duration;
@@ -226,6 +226,8 @@ impl App {
         let mut changed = false;
         let mut resized = false;
 
+        changed |= self.schedule_status_metrics(now);
+
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
             changed |= resized;
@@ -328,6 +330,44 @@ impl App {
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
         changed
+    }
+
+    pub(crate) fn schedule_status_metrics(&mut self, now: Instant) -> bool {
+        let stale = self
+            .state
+            .status_metrics
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.is_stale_at(now));
+        if stale {
+            self.state.status_metrics = None;
+        }
+        if !self.status_metric_refresh_enabled || !self.status_metric_refresh.begin(now) {
+            return stale;
+        }
+
+        let tx = self.event_tx.clone();
+        let sampler = Arc::clone(&self.status_metric_sampler);
+        let spawn_result = std::thread::Builder::new()
+            .name("herdr-status-metrics".into())
+            .spawn(move || {
+                let snapshot = std::panic::catch_unwind(|| {
+                    let mut sampler = sampler.lock().ok()?;
+                    Some(Box::new(
+                        crate::platform::status_metrics::StatusMetricsSnapshot {
+                            metrics: crate::platform::sample_status_metrics(&mut sampler),
+                            sampled_at: Instant::now(),
+                        },
+                    ))
+                })
+                .ok()
+                .flatten();
+                let _ =
+                    tx.blocking_send(crate::events::AppEvent::StatusMetricsRefreshed { snapshot });
+            });
+        if spawn_result.is_err() {
+            self.status_metric_refresh.finish();
+        }
+        stale
     }
 
     /// Clears temporary copied-token highlights, such as after double-click copy.
@@ -535,6 +575,12 @@ impl App {
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,
+            self.status_metric_refresh
+                .deadline()
+                .filter(|_| self.status_metric_refresh_enabled),
+            self.state.status_metrics.as_ref().map(|snapshot| {
+                snapshot.sampled_at + crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER
+            }),
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),

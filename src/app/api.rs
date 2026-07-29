@@ -60,6 +60,15 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::StatusMetricsRefreshed { snapshot } => {
+                let should_repaint = self
+                    .status_metric_refresh
+                    .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
+                if let Some(snapshot) = snapshot {
+                    self.state.status_metrics = Some(*snapshot);
+                }
+                should_repaint
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -97,6 +106,15 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::StatusMetricsRefreshed { snapshot } = ev {
+            self.status_metric_refresh
+                .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
+            if let Some(snapshot) = snapshot {
+                self.state.status_metrics = Some(*snapshot);
+            }
+            return;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);

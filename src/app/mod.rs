@@ -94,6 +94,10 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    pub(crate) status_metric_refresh: crate::platform::status_metrics::StatusMetricRefresh,
+    pub(crate) status_metric_sampler:
+        Arc<std::sync::Mutex<crate::platform::status_metrics::StatusMetricSampler>>,
+    pub(crate) status_metric_refresh_enabled: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
@@ -525,6 +529,11 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            status_metrics: None,
+            status_session_name: crate::session::active_name()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
+            status_home_dir: std::env::var_os("HOME").map(std::path::PathBuf::from),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -731,6 +740,13 @@ impl App {
             copy_feedback_deadline: None,
             last_api_notification_at: None,
             state,
+            status_metric_refresh: crate::platform::status_metrics::StatusMetricRefresh::immediate(
+                Instant::now(),
+            ),
+            status_metric_sampler: Arc::new(std::sync::Mutex::new(
+                crate::platform::status_metrics::StatusMetricSampler::new(),
+            )),
+            status_metric_refresh_enabled: !cfg!(test),
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,

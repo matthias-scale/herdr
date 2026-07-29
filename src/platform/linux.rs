@@ -19,6 +19,254 @@ struct ProcGroupMember {
     comm: String,
 }
 
+pub(crate) fn sample_status_metrics(
+    sampler: &mut super::status_metrics::StatusMetricSampler,
+) -> super::status_metrics::StatusMetrics {
+    let (hostname, username) = status_identity();
+    let (date, time) = status_local_date_time();
+    let (mem_used_gib, mem_total_gib) = status_memory().unwrap_or((0.0, 0.0));
+    let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
+    let (battery_percent, battery_charging) = status_battery();
+    let (local_ip, tailscale_ip) = status_interface_ipv4s();
+    let interface = status_default_interface();
+    let (net_down_kib, net_up_kib) = interface
+        .as_deref()
+        .and_then(status_interface_bytes)
+        .and_then(|(rx, tx)| sampler.bandwidth_kib(rx, tx, std::time::Instant::now()))
+        .map(|(down, up)| (Some(down), Some(up)))
+        .unwrap_or((None, None));
+
+    super::status_metrics::StatusMetrics {
+        cpu_percent,
+        mem_used_gib: (mem_total_gib > 0.0).then_some(mem_used_gib),
+        mem_total_gib: (mem_total_gib > 0.0).then_some(mem_total_gib),
+        battery_percent,
+        battery_charging,
+        local_ip,
+        tailscale_ip: tailscale_ip.clone(),
+        public_ip: super::status_metrics::compatible_public_ip(),
+        net_down_kib,
+        net_up_kib,
+        net_kind: status_net_kind(interface.as_deref()),
+        vpn_active: tailscale_ip.is_some() || status_vpn_active(),
+        remote_session: super::status_metrics::remote_session_from_env(),
+        hostname,
+        username,
+        date,
+        time,
+    }
+}
+
+fn status_identity() -> (String, String) {
+    let mut hostname = [0u8; 256];
+    // SAFETY: `hostname` is writable for the length passed to libc.
+    let host = if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
+        let end = hostname
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(hostname.len());
+        super::status_metrics::short_hostname(&String::from_utf8_lossy(&hostname[..end]))
+    } else {
+        "localhost".into()
+    };
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    (host, user)
+}
+
+fn status_local_date_time() -> (String, String) {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
+    // SAFETY: `local` is valid writable storage and `now` is a valid time value.
+    if unsafe { libc::localtime_r(&now, &mut local) }.is_null() {
+        return ("----/--/--".into(), "--:--".into());
+    }
+    (
+        format!(
+            "{:04}-{:02}-{:02}",
+            local.tm_year + 1900,
+            local.tm_mon + 1,
+            local.tm_mday
+        ),
+        format!("{:02}:{:02}", local.tm_hour, local.tm_min),
+    )
+}
+
+fn status_memory() -> Option<(f32, f32)> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total_kib = None;
+    let mut available_kib = None;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("MemTotal:") {
+            total_kib = value.split_whitespace().next()?.parse::<u64>().ok();
+        } else if let Some(value) = line.strip_prefix("MemAvailable:") {
+            available_kib = value.split_whitespace().next()?.parse::<u64>().ok();
+        }
+    }
+    let total = total_kib?;
+    let used = total.saturating_sub(available_kib.unwrap_or_default());
+    Some((used as f32 / 1_048_576.0, total as f32 / 1_048_576.0))
+}
+
+fn status_cpu_ticks() -> Option<(u64, u64)> {
+    let contents = std::fs::read_to_string("/proc/stat").ok()?;
+    let mut fields = contents.lines().next()?.split_whitespace();
+    (fields.next()? == "cpu").then_some(())?;
+    let values = fields
+        .take(8)
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (values.len() == 8).then_some(())?;
+    let idle = values[3].saturating_add(values[4]);
+    Some((idle, values.iter().sum()))
+}
+
+fn status_battery() -> (Option<u8>, Option<bool>) {
+    let battery = std::fs::read_dir("/sys/class/power_supply")
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("BAT"))
+                })
+        });
+    let Some(battery) = battery else {
+        return (None, None);
+    };
+    let percent = std::fs::read_to_string(battery.join("capacity"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u8>().ok());
+    let charging = std::fs::read_to_string(battery.join("status"))
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "charging" | "full"
+            )
+        });
+    (percent, charging)
+}
+
+fn status_default_interface() -> Option<String> {
+    let contents = std::fs::read_to_string("/proc/net/route").ok()?;
+    contents.lines().skip(1).find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let interface = fields.next()?;
+        (fields.next()? == "00000000").then(|| interface.to_string())
+    })
+}
+
+fn status_interface_bytes(interface: &str) -> Option<(u64, u64)> {
+    let root = std::path::Path::new("/sys/class/net")
+        .join(interface)
+        .join("statistics");
+    let rx = std::fs::read_to_string(root.join("rx_bytes"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let tx = std::fs::read_to_string(root.join("tx_bytes"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((rx, tx))
+}
+
+fn status_net_kind(interface: Option<&str>) -> super::status_metrics::NetKind {
+    let Some(interface) = interface else {
+        return super::status_metrics::NetKind::Unknown;
+    };
+    if std::path::Path::new("/sys/class/net")
+        .join(interface)
+        .join("wireless")
+        .exists()
+        || interface.starts_with("wl")
+    {
+        super::status_metrics::NetKind::Wifi
+    } else {
+        super::status_metrics::NetKind::Ethernet
+    }
+}
+
+fn status_vpn_active() -> bool {
+    std::fs::read_dir("/sys/class/net")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            ["tun", "wg", "tailscale", "ppp", "ipsec"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
+}
+
+fn status_interface_ipv4s() -> (Option<String>, Option<String>) {
+    let mut local = None;
+    let mut tailscale = None;
+    let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: libc owns the linked list until the paired `freeifaddrs`.
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 || interfaces.is_null() {
+        return (local, tailscale);
+    }
+    let mut current = interfaces;
+    while !current.is_null() {
+        // SAFETY: current belongs to the valid getifaddrs list.
+        let interface = unsafe { &*current };
+        if !interface.ifa_addr.is_null()
+            && unsafe { (*interface.ifa_addr).sa_family as i32 } == libc::AF_INET
+        {
+            let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+            let name = if interface.ifa_name.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(interface.ifa_name) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                let tunnel = ["tailscale", "tun", "wg", "ppp", "ipsec"]
+                    .iter()
+                    .any(|needle| name.contains(needle));
+                if tunnel && ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]) {
+                    tailscale.get_or_insert_with(|| ip.to_string());
+                } else if !tunnel {
+                    local.get_or_insert_with(|| ip.to_string());
+                }
+            }
+        }
+        current = interface.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(interfaces) };
+    (local, tailscale)
+}
+
+#[cfg(test)]
+mod status_metric_tests {
+    #[test]
+    fn platform_metric_sampler_returns_local_linux_snapshot() {
+        // AC6: Linux collection stays in linux.rs and uses /proc, /sys, libc.
+        let metrics = super::sample_status_metrics(
+            &mut crate::platform::status_metrics::StatusMetricSampler::new(),
+        );
+        assert!(!metrics.hostname.is_empty());
+        assert!(!metrics.username.is_empty());
+        assert_eq!(metrics.date.len(), 10);
+        assert_eq!(metrics.time.len(), 5);
+    }
+}
+
 pub fn raise_server_nofile_limit() {}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {

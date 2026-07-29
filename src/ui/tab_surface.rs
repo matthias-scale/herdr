@@ -291,6 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_full_app_semantic_frame_is_characterized() {
+        // AC2/AC8: deterministic frame covers geometry used by the integration gate.
         let uri = "https://example.com/full-app";
         let mut app = full_app_characterization_state(uri);
         let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
@@ -307,7 +308,7 @@ mod tests {
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         assert_eq!(
             frame_digest(&frame),
-            "34d7abe39cf002c13e1bab7b899e5ce9532804e45be693485704b374f74ecda8"
+            "4b119f91aa382094f1d5f8221a21fd76918383b1fec5ef2909b34168310a2ed0"
         );
     }
 
