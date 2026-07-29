@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
@@ -62,125 +61,7 @@ pub(crate) fn sample_status_metrics(
     }
 }
 
-/// `pmset` is the stable system battery surface available without adding an
-/// IOKit binding dependency. The metrics worker remains bounded by killing the
-/// local command after a short deadline and accepts only a small output.
 fn status_battery() -> (Option<u8>, Option<bool>) {
-    const PMSET_TIMEOUT: Duration = Duration::from_millis(250);
-    const PMSET_OUTPUT_MAX_BYTES: usize = 4096;
-
-    let mut command = crate::noninteractive_process::command("/usr/bin/pmset");
-    let mut child = match command
-        .args(["-g", "batt"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return (None, None),
-    };
-    if !wait_for_child_until(&mut child, PMSET_TIMEOUT) {
-        return (None, None);
-    }
-
-    let Some(stdout) = child.stdout.take() else {
-        return (None, None);
-    };
-    let bytes = match read_limited_reader(stdout, PMSET_OUTPUT_MAX_BYTES) {
-        Ok(LimitedRead::Complete(bytes)) => bytes,
-        Ok(LimitedRead::Empty | LimitedRead::Oversized) | Err(_) => return (None, None),
-    };
-    std::str::from_utf8(&bytes)
-        .ok()
-        .map(parse_pmset_battery)
-        .unwrap_or((None, None))
-}
-
-trait BoundedChild {
-    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
-    fn kill(&mut self) -> std::io::Result<()>;
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus>;
-}
-
-impl BoundedChild for std::process::Child {
-    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        std::process::Child::try_wait(self)
-    }
-
-    fn kill(&mut self) -> std::io::Result<()> {
-        std::process::Child::kill(self)
-    }
-
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        std::process::Child::wait(self)
-    }
-}
-
-fn kill_and_reap_child(child: &mut impl BoundedChild) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn wait_for_child_until(child: &mut impl BoundedChild, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Err(_) => {
-                kill_and_reap_child(child);
-                return false;
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                kill_and_reap_child(child);
-                return false;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
-}
-
-fn parse_pmset_battery(output: &str) -> (Option<u8>, Option<bool>) {
-    for line in output.lines() {
-        let Some((before_percent, after_percent)) = line.split_once("%;") else {
-            continue;
-        };
-        let percent_text = before_percent
-            .trim_end()
-            .chars()
-            .rev()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>();
-        if percent_text.is_empty() {
-            continue;
-        }
-        let Ok(percent) = percent_text.parse::<u8>() else {
-            continue;
-        };
-        if percent > 100 {
-            continue;
-        }
-        let state = after_percent
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        let charging = if state.contains("discharging") {
-            Some(false)
-        } else if state == "charged"
-            || state.contains("charging")
-            || state.contains("finishing charge")
-        {
-            Some(true)
-        } else {
-            None
-        };
-        return (Some(percent), charging);
-    }
     (None, None)
 }
 
@@ -465,42 +346,6 @@ impl Drop for StatusIfAddrs {
     }
 }
 
-fn status_default_route_interface() -> Option<String> {
-    const ROUTE_TIMEOUT: Duration = Duration::from_millis(250);
-    const ROUTE_OUTPUT_MAX_BYTES: usize = 4096;
-
-    // `route get` reads the kernel's local routing table; it performs no
-    // network I/O. Keep the helper bounded because this runs in the sampler.
-    let mut command = crate::noninteractive_process::command("/sbin/route");
-    let mut child = command
-        .args(["-n", "get", "default"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    if !wait_for_child_until(&mut child, ROUTE_TIMEOUT) {
-        return None;
-    }
-    let stdout = child.stdout.take()?;
-    let bytes = match read_limited_reader(stdout, ROUTE_OUTPUT_MAX_BYTES).ok()? {
-        LimitedRead::Complete(bytes) => bytes,
-        LimitedRead::Empty | LimitedRead::Oversized => return None,
-    };
-    parse_default_route_interface(std::str::from_utf8(&bytes).ok()?)
-}
-
-fn parse_default_route_interface(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let (label, value) = line.split_once(':')?;
-        if label.trim() != "interface" {
-            return None;
-        }
-        let interface = value.split_whitespace().next()?;
-        (!interface.is_empty() && interface.len() < libc::IFNAMSIZ).then(|| interface.to_string())
-    })
-}
-
 fn status_interface_name(interface: &libc::ifaddrs) -> Option<String> {
     if interface.ifa_name.is_null() {
         return None;
@@ -571,7 +416,7 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
     }
     drop(interfaces);
 
-    select_status_network_interfaces(status_default_route_interface().as_deref(), ipv4s, counters)
+    select_status_network_interfaces(None, ipv4s, counters)
 }
 
 fn select_status_network_interfaces(
@@ -685,6 +530,8 @@ mod status_metric_tests {
         assert!(!metrics.username.is_empty());
         assert_eq!(metrics.date.len(), 10);
         assert_eq!(metrics.time.len(), 5);
+        assert_eq!(metrics.battery_percent, None);
+        assert_eq!(metrics.battery_charging, None);
     }
 
     #[test]
@@ -700,16 +547,24 @@ mod status_metric_tests {
     }
 
     #[test]
-    fn route_parser_extracts_only_the_interface_field() {
-        let output = "   route to: default\n\
-                      destination: default\n\
-                      interface: en9\n\
-                      flags: <UP,GATEWAY,DONE>\n";
-        assert_eq!(
-            super::parse_default_route_interface(output).as_deref(),
-            Some("en9")
-        );
-        assert_eq!(super::parse_default_route_interface("gateway: en9\n"), None);
+    fn status_sampler_source_has_no_process_or_network_client_path() {
+        let source = include_str!("macos.rs");
+        let sampler = source
+            .split_once("pub(crate) fn sample_status_metrics")
+            .expect("sampler start")
+            .1
+            .split_once("#[cfg(test)]\nmod status_metric_tests")
+            .expect("sampler end")
+            .0;
+
+        for forbidden in [
+            "noninteractive_process::command",
+            "Command::new",
+            "http://",
+            "https://",
+        ] {
+            assert!(!sampler.contains(forbidden), "found {forbidden}");
+        }
     }
 
     #[test]
@@ -1791,87 +1646,6 @@ pub fn process_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[derive(Default)]
-    struct TryWaitErrorChild {
-        kill_calls: usize,
-        wait_calls: usize,
-    }
-
-    impl BoundedChild for TryWaitErrorChild {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            Err(std::io::Error::other("injected try_wait failure"))
-        }
-
-        fn kill(&mut self) -> std::io::Result<()> {
-            self.kill_calls += 1;
-            Err(std::io::Error::other("injected kill failure"))
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            self.wait_calls += 1;
-            Err(std::io::Error::other("injected wait failure"))
-        }
-    }
-
-    #[test]
-    fn pmset_battery_wait_cleans_up_after_try_wait_error() {
-        let mut child = TryWaitErrorChild::default();
-
-        assert!(!wait_for_child_until(&mut child, Duration::from_secs(1)));
-        assert_eq!(child.kill_calls, 1);
-        assert_eq!(child.wait_calls, 1);
-    }
-
-    #[test]
-    fn pmset_battery_parser_handles_present_discharging_battery() {
-        let output =
-            "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t73%; discharging; 4:12 remaining present: true\n";
-        assert_eq!(parse_pmset_battery(output), (Some(73), Some(false)));
-    }
-
-    #[test]
-    fn pmset_battery_parser_handles_charging_battery() {
-        let output =
-            "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t42%; charging; 1:11 remaining present: true\n";
-        assert_eq!(parse_pmset_battery(output), (Some(42), Some(true)));
-    }
-
-    #[test]
-    fn pmset_battery_parser_handles_unavailable_battery() {
-        assert_eq!(
-            parse_pmset_battery("Now drawing from 'AC Power'\n"),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn pmset_battery_parser_rejects_malformed_values() {
-        assert_eq!(
-            parse_pmset_battery("-InternalBattery-0\tunknown%; charging;\n"),
-            (None, None)
-        );
-        assert_eq!(
-            parse_pmset_battery("-InternalBattery-0\t101%; charging;\n"),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn pmset_battery_wait_kills_a_child_blocked_on_full_stdout_pipe() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "while :; do printf 'battery-output'; done"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn blocking fixture");
-        let started = Instant::now();
-
-        assert!(!wait_for_child_until(&mut child, Duration::from_millis(50)));
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(child.try_wait().expect("query child").is_some());
-    }
 
     #[test]
     fn nofile_target_raises_low_soft_limit_to_cap_when_hard_is_unlimited() {
