@@ -608,6 +608,48 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     start.min(entries.len().saturating_sub(1))
 }
 
+/// Position of `ws_idx` in the unified sidebar row list, which is the index
+/// space `AppState::workspace_scroll` lives in. Flat projections have no
+/// workspace rows, so the workspace's first agent row stands in for it.
+pub(crate) fn sidebar_row_index_for_workspace(app: &AppState, ws_idx: usize) -> Option<usize> {
+    sidebar_rows(app)
+        .iter()
+        .position(|row| sidebar_row_belongs_to_workspace(row, ws_idx))
+}
+
+pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) -> bool {
+    match row {
+        SidebarRow::Workspace { ws_idx: row_ws, .. } => *row_ws == ws_idx,
+        SidebarRow::Agent { entry, .. } => entry.ws_idx == ws_idx,
+    }
+}
+
+/// Smallest scroll offset that keeps sidebar row `target` inside the workspace
+/// list viewport, starting from `current_scroll`. `area` is the full sidebar
+/// rect, matching [`normalized_workspace_scroll`].
+pub(crate) fn sidebar_row_scroll_for_target(
+    app: &AppState,
+    area: Rect,
+    current_scroll: usize,
+    target: usize,
+) -> usize {
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let max_scroll = workspace_list_bottom_start(app, ws_area);
+    if target < current_scroll {
+        return target.min(max_scroll);
+    }
+
+    let mut scroll = current_scroll.min(max_scroll);
+    while scroll < target {
+        let visible = workspace_list_visible_count(app, ws_area, scroll);
+        if visible > 0 && target < scroll.saturating_add(visible) {
+            break;
+        }
+        scroll = scroll.saturating_add(1);
+    }
+    scroll.min(max_scroll)
+}
+
 pub(crate) fn workspace_list_scroll_metrics(
     app: &AppState,
     area: Rect,
@@ -842,13 +884,23 @@ pub(crate) fn compute_agent_card_areas(
     compute_sidebar_row_areas(app, area).1
 }
 
+pub(crate) fn agent_counts_by_workspace(
+    entries: &[AgentPanelEntry],
+) -> std::collections::HashMap<usize, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for entry in entries {
+        *counts.entry(entry.ws_idx).or_default() += 1;
+    }
+    counts
+}
+
+/// `has_agents` is supplied by the caller so a per-frame or per-hit-test agent
+/// scan is shared across every card instead of rebuilt for each row.
 pub(crate) fn workspace_agent_chevron_rect(
     app: &AppState,
     card: &crate::app::state::WorkspaceCardArea,
+    has_agents: bool,
 ) -> Rect {
-    let has_agents = all_agent_panel_entries(app)
-        .iter()
-        .any(|entry| entry.ws_idx == card.ws_idx);
     if !has_agents || card.rect.width < 2 || card.rect.height == 0 {
         return Rect::default();
     }
@@ -1382,10 +1434,7 @@ fn render_workspace_list(
     };
     let entries = workspace_list_entries(app);
     let all_agents = all_agent_panel_entries_from(app, terminal_runtimes);
-    let mut agent_counts = std::collections::HashMap::<usize, usize>::new();
-    for entry in &all_agents {
-        *agent_counts.entry(entry.ws_idx).or_default() += 1;
-    }
+    let agent_counts = agent_counts_by_workspace(&all_agents);
 
     for card in cards {
         let i = card.ws_idx;
@@ -1539,7 +1588,7 @@ fn render_workspace_list(
             );
         }
         if let Some(count) = agent_counts.get(&i) {
-            let chevron = workspace_agent_chevron_rect(app, card);
+            let chevron = workspace_agent_chevron_rect(app, card, *count > 0);
             if chevron != Rect::default() {
                 let count_label = count.to_string();
                 let count_width = display_width_u16(&count_label);
@@ -1984,7 +2033,7 @@ mod tests {
             .iter()
             .find(|card| card.ws_idx == 0)
             .unwrap();
-        let agent_chevron = workspace_agent_chevron_rect(&app, main);
+        let agent_chevron = workspace_agent_chevron_rect(&app, main, true);
         let group_chevron = workspace_group_chevron_rect(main);
 
         assert_ne!(agent_chevron, Rect::default());
@@ -2057,8 +2106,11 @@ mod tests {
             .into_iter()
             .find(|card| card.ws_idx == 0)
             .unwrap();
+        let empty_has_agents = agent_counts_by_workspace(&all_agent_panel_entries(&app))
+            .contains_key(&empty_card.ws_idx);
+        assert!(!empty_has_agents);
         assert_eq!(
-            workspace_agent_chevron_rect(&app, &empty_card),
+            workspace_agent_chevron_rect(&app, &empty_card, empty_has_agents),
             Rect::default()
         );
     }

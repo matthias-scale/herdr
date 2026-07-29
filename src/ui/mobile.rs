@@ -9,8 +9,8 @@ use ratatui::{
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
-    grouped_child_display_label, mobile_sidebar_rows, mobile_sidebar_rows_from, AgentPanelEntry,
-    SidebarRow,
+    grouped_child_display_label, mobile_sidebar_rows, mobile_sidebar_rows_from,
+    sidebar_row_belongs_to_workspace, AgentPanelEntry, SidebarRow,
 };
 use super::status::state_dot;
 use super::text::{display_width_u16, truncate_end};
@@ -95,29 +95,35 @@ pub(crate) fn mobile_switcher_max_scroll_for_height(app: &AppState, viewport_hei
     mobile_switcher_content_height(app).saturating_sub(viewport_height as usize)
 }
 
+/// Doc row the sidebar row list starts at: the section title, plus the
+/// "+ new workspace" affordance in the Spaces tree or the empty-state line in a
+/// flat projection with no rows.
+fn mobile_sidebar_rows_start(app: &AppState, rows: &[SidebarRow]) -> usize {
+    let mut start = 1;
+    if app.sidebar_shows_spaces_tree() || rows.is_empty() {
+        start += 1;
+    }
+    start
+}
+
 fn mobile_sidebar_block_height(app: &AppState) -> usize {
     let rows = mobile_sidebar_rows(app);
-    if app.sidebar_shows_spaces_tree() {
-        2 + rows.len() * 2
-    } else if rows.is_empty() {
-        2
-    } else {
-        1 + rows.len() * 2
-    }
+    mobile_sidebar_rows_start(app, &rows) + rows.len() * 2
 }
 
 pub(crate) fn mobile_switcher_workspace_doc_range(
     app: &AppState,
     idx: usize,
-) -> std::ops::Range<usize> {
+) -> Option<std::ops::Range<usize>> {
     // Spaces render in grouped order, so a workspace's row position is its index
-    // in the entry list, not its raw array index.
-    let pos = mobile_sidebar_rows(app)
+    // in the row list, not its raw array index. Flat projections have no
+    // workspace rows, so the workspace's first agent row stands in for it.
+    let rows = mobile_sidebar_rows(app);
+    let pos = rows
         .iter()
-        .position(|row| matches!(row, SidebarRow::Workspace { ws_idx, .. } if *ws_idx == idx))
-        .unwrap_or(idx);
-    let start = 2 + pos * 2;
-    start..start + 2
+        .position(|row| sidebar_row_belongs_to_workspace(row, idx))?;
+    let start = mobile_sidebar_rows_start(app, &rows) + pos * 2;
+    Some(start..start + 2)
 }
 
 pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
@@ -142,18 +148,12 @@ pub(crate) fn mobile_switcher_target_at(
             areas.viewport.height,
         ));
     let doc_row = scroll.saturating_add(row.saturating_sub(areas.viewport.y) as usize);
-    let mut cursor = 0usize;
 
     let rows = mobile_sidebar_rows(app);
-    cursor += 1; // spaces/agents title
-    if app.sidebar_shows_spaces_tree() {
-        if doc_row == cursor {
-            return Some(MobileSwitcherTarget::NewWorkspace);
-        }
-        cursor += 1;
-    } else if rows.is_empty() {
-        cursor += 1; // filtered empty state
+    if app.sidebar_shows_spaces_tree() && doc_row == 1 {
+        return Some(MobileSwitcherTarget::NewWorkspace);
     }
+    let mut cursor = mobile_sidebar_rows_start(app, &rows);
     let sidebar_end = cursor + rows.len() * 2;
     if doc_row >= cursor && doc_row < sidebar_end {
         let idx = (doc_row - cursor) / 2;
@@ -523,6 +523,9 @@ fn render_mobile_switcher_content(
         ws.focused_pane_id()
             .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
     });
+    let agent_counts = crate::ui::agent_counts_by_workspace(
+        &super::sidebar::all_agent_panel_entries_from(app, terminal_runtimes),
+    );
     for (entry_idx, row) in rows.iter().enumerate() {
         match row {
             SidebarRow::Workspace { ws_idx, indented } => {
@@ -535,9 +538,15 @@ fn render_mobile_switcher_content(
                 let (state, seen) = ws.aggregate_state(&app.terminals);
                 let (dot, dot_style) = state_dot(state, seen, p);
                 let mut title_spans = vec![Span::styled("  ", Style::default().bg(bg))];
-                let next_linked_child = rows.get(entry_idx + 1).is_some_and(|next| {
-                    matches!(next, SidebarRow::Workspace { indented: true, .. })
-                });
+                // Disclosed agent rows sit between a workspace and its next
+                // sibling, so the connector glyph looks past them.
+                let next_linked_child = rows
+                    .iter()
+                    .skip(entry_idx + 1)
+                    .find(|next| matches!(next, SidebarRow::Workspace { .. }))
+                    .is_some_and(|next| {
+                        matches!(next, SidebarRow::Workspace { indented: true, .. })
+                    });
                 let detail_prefix = if *indented {
                     title_spans.push(Span::styled(
                         if next_linked_child {
@@ -577,11 +586,7 @@ fn render_mobile_switcher_content(
                         .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 ));
-                let agent_count =
-                    super::sidebar::all_agent_panel_entries_from(app, terminal_runtimes)
-                        .iter()
-                        .filter(|agent| agent.ws_idx == *ws_idx)
-                        .count();
+                let agent_count = agent_counts.get(ws_idx).copied().unwrap_or(0);
                 if agent_count > 0 {
                     title_spans.push(Span::styled(
                         format!(
@@ -1298,7 +1303,7 @@ mod tests {
         assert_eq!(agent_panel_entries(&app).len(), 2);
         // Spaces title + new-workspace action precede the workspace, followed
         // immediately by its two disclosed agent children.
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 2);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).expect("workspace row").start, 2);
 
         let viewport = mobile_switcher_areas(&app).viewport;
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 2);
@@ -1338,8 +1343,8 @@ mod tests {
         // Grouped order pulls the worktree (idx 2) up under its parent (idx 0),
         // ahead of the unrelated "other" workspace (idx 1): rows are main,
         // feature, other.
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).start, 4);
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 1).start, 6);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).expect("workspace row").start, 4);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 1).expect("workspace row").start, 6);
 
         let viewport = mobile_switcher_areas(&app).viewport;
         // The second space row on screen is the worktree, not workspaces[1].
@@ -1349,7 +1354,7 @@ mod tests {
         // Mobile ignores collapse: even with the space folded on desktop, the
         // worktree child still renders in the same position.
         app.collapsed_space_keys.insert("repo-key".to_string());
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).start, 4);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).expect("workspace row").start, 4);
         let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
         assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
     }
@@ -1363,7 +1368,7 @@ mod tests {
 
         // No attached terminals -> no agents -> no agents header, spaces lead.
         assert_eq!(agent_panel_entries(&app).len(), 0);
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 2);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).expect("workspace row").start, 2);
     }
 
     #[test]

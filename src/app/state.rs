@@ -636,6 +636,11 @@ pub struct AgentCardArea {
 pub(crate) struct SidebarPresentationState {
     pub(crate) expanded_workspace_ids: std::collections::HashSet<String>,
     pub(crate) known_workspace_ids: std::collections::HashSet<String>,
+    /// Workspace this attach last scrolled into view. Focus changes routed
+    /// through the JSON API/CLI run outside the per-client presentation swap,
+    /// so each attach compares this against the active workspace when it
+    /// renders and scrolls itself instead of relying on the mutating path.
+    pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) force_spaces_tree: bool,
     pub(crate) workspace_scroll: usize,
     pub(crate) agent_panel_scroll: usize,
@@ -1634,6 +1639,10 @@ impl AppState {
             &mut other.known_workspace_ids,
         );
         std::mem::swap(
+            &mut self.sidebar_presentation.revealed_workspace_id,
+            &mut other.revealed_workspace_id,
+        );
+        std::mem::swap(
             &mut self.sidebar_presentation.force_spaces_tree,
             &mut other.force_spaces_tree,
         );
@@ -1660,6 +1669,11 @@ impl AppState {
         self.sidebar_presentation
             .expanded_workspace_ids
             .retain(|workspace_id| current_ids.contains(workspace_id));
+        self.sidebar_presentation.revealed_workspace_id = self
+            .sidebar_presentation
+            .revealed_workspace_id
+            .take()
+            .filter(|workspace_id| current_ids.contains(workspace_id));
         if let Some(active_id) = self
             .active
             .and_then(|ws_idx| self.workspaces.get(ws_idx))

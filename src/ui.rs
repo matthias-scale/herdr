@@ -78,11 +78,12 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_panel_entries, agent_panel_scroll_for_target, agent_panel_scroll_metrics,
-        agent_panel_scrollbar_rect, agent_panel_toggle_rect, all_agent_panel_entries,
-        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
-        normalized_workspace_scroll, relative_agent_navigation_entry, sidebar_rows,
+        agent_counts_by_workspace, agent_panel_entries, agent_panel_scroll_for_target,
+        agent_panel_scroll_metrics, agent_panel_scrollbar_rect, agent_panel_toggle_rect,
+        all_agent_panel_entries, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
+        compute_sidebar_row_areas, compute_workspace_card_areas, expanded_sidebar_sections,
+        expanded_sidebar_toggle_rect, normalized_workspace_scroll, relative_agent_navigation_entry,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
         sidebar_section_divider_rect, workspace_agent_chevron_rect, workspace_drop_slots,
         workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
@@ -239,11 +240,14 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            app.ensure_workspace_visible_in_sidebar(active, sidebar_area);
+        }
         app.agent_panel_scroll = 0;
     } else {
         app.workspace_scroll = app
             .workspace_scroll
-            .min(app.workspaces.len().saturating_sub(1));
+            .min(sidebar_rows(app).len().saturating_sub(1));
         app.agent_panel_scroll = 0;
     }
 
@@ -381,6 +385,11 @@ fn compute_mobile_view(
         pane_infos,
         split_borders,
     };
+    if app.mode == Mode::Navigate {
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            app.ensure_mobile_workspace_visible(active);
+        }
+    }
     app.sync_copy_mode_search_geometry();
 }
 
