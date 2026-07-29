@@ -421,15 +421,15 @@ fn server_ptmx_fd_count(pid: u32) -> usize {
 
 #[cfg(target_os = "macos")]
 fn server_ptmx_fd_count(pid: u32) -> usize {
-    let Ok(output) = std::process::Command::new("lsof")
-        .args(["-nP", "-p", &pid.to_string()])
+    let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-a", "-p", &pid.to_string(), "-d", "0-1024", "-Fn"])
         .output()
     else {
         return 0;
     };
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| line.contains("/dev/ptmx"))
+        .filter(|line| *line == "n/dev/ptmx")
         .count()
 }
 
@@ -1229,7 +1229,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\nexec /bin/sleep 30\n",
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n",
             started_marker.display()
         ),
     )
