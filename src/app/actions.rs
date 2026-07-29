@@ -2660,12 +2660,31 @@ fn is_trailing_token_wrapper(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Project the focused pane's runtime-resolved cwd into state.
+    ///
+    /// Rendering is pure and cannot reach `TerminalRuntimeRegistry`, so the
+    /// status row consumes this projection instead of the OSC 7-only
+    /// `TerminalState::cwd`, which is stale for panes without shell
+    /// integration. Returns whether the projection changed.
+    pub(crate) fn sync_status_focused_cwd(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> bool {
+        let focused_cwd = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(|ws| ws.focused_cwd_from(&self.terminals, terminal_runtimes));
+        let changed = self.status_focused_cwd != focused_cwd;
+        self.status_focused_cwd = focused_cwd;
+        changed
+    }
+
     pub fn apply_workspace_git_statuses(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = self.sync_status_focused_cwd(terminal_runtimes);
         for result in results {
             let Some(ws_idx) = self
                 .workspaces
@@ -2678,9 +2697,7 @@ impl AppState {
             let focused_cwd = self
                 .active
                 .filter(|active| *active == ws_idx)
-                .and_then(|_| {
-                    self.workspaces[ws_idx].focused_cwd_from(&self.terminals, terminal_runtimes)
-                });
+                .and_then(|_| self.status_focused_cwd.clone());
             if result.demand.branch && focused_cwd.as_ref() == Some(&result.resolved_identity_cwd) {
                 if self.status_git_cwd.as_ref() != Some(&result.resolved_identity_cwd) {
                     self.status_git_cwd = Some(result.resolved_identity_cwd.clone());
@@ -4048,6 +4065,17 @@ mod tests {
     }
 
     #[test]
+    fn sync_status_focused_cwd_projects_once_and_matches_git_target() {
+        let mut state = app_with_workspaces(&["one"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let expected = state.workspaces[0].focused_cwd_from(&state.terminals, &terminal_runtimes);
+
+        assert!(state.sync_status_focused_cwd(&terminal_runtimes));
+        assert_eq!(state.status_focused_cwd, expected);
+        assert!(!state.sync_status_focused_cwd(&terminal_runtimes));
+    }
+
+    #[test]
     fn apply_workspace_git_statuses_ignores_stale_cwd() {
         let mut state = app_with_workspaces(&["one"]);
         let workspace_id = state.workspaces[0].id.clone();
@@ -4055,6 +4083,7 @@ mod tests {
         state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.sync_status_focused_cwd(&terminal_runtimes);
         let changed = state.apply_workspace_git_statuses(
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
@@ -4083,6 +4112,7 @@ mod tests {
         state.workspaces[0].cached_git_branch = Some("old".into());
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.sync_status_focused_cwd(&terminal_runtimes);
         let changed = state.apply_workspace_git_statuses(
             &terminal_runtimes,
             vec![WorkspaceGitStatus {

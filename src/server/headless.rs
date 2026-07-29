@@ -721,7 +721,7 @@ impl HeadlessServer {
             // 8. Wait for next event.
             let next_deadline = self
                 .app
-                .next_headless_loop_deadline_with_git_refresh(
+                .next_headless_loop_deadline_with_client_refresh(
                     now,
                     needs_render,
                     self.has_app_client(),
@@ -4034,7 +4034,13 @@ impl HeadlessServer {
     /// Similar to `App::handle_scheduled_tasks` but without resize polling
     /// (the server doesn't have a terminal to resize).
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
-        let mut changed = self.app.schedule_status_metrics(now);
+        // Nothing renders the status row without an attached app client, so a
+        // detached server never samples native metrics.
+        let mut changed = if self.has_app_client() {
+            self.app.schedule_status_metrics(now)
+        } else {
+            self.app.discard_stale_status_metrics(now)
+        };
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -5742,7 +5748,7 @@ next_tab = ""
 
         assert!(!server.has_app_client());
         assert_eq!(
-            server.app.next_headless_loop_deadline_with_git_refresh(
+            server.app.next_headless_loop_deadline_with_client_refresh(
                 Instant::now(),
                 false,
                 server.has_app_client()
@@ -5778,7 +5784,7 @@ next_tab = ""
 
         assert!(!server.has_app_client());
         assert_eq!(
-            server.app.next_headless_loop_deadline_with_git_refresh(
+            server.app.next_headless_loop_deadline_with_client_refresh(
                 Instant::now(),
                 false,
                 server.has_app_client()

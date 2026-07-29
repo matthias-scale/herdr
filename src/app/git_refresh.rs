@@ -42,6 +42,11 @@ impl App {
             return;
         }
 
+        if self.state.sync_status_focused_cwd(&self.terminal_runtimes) {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+
         let refresh_repo_discovery = self.git_identity_refresh_requested
             || now.saturating_duration_since(self.last_git_repo_discovery_refresh)
                 >= GIT_REPO_DISCOVERY_REFRESH_INTERVAL;
@@ -100,10 +105,12 @@ impl App {
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
-        // The desktop status row always consumes branch identity, independent
-        // of whether the configurable sidebar also displays Git metadata.
+        // The desktop status row consumes branch identity when it is enabled,
+        // independent of whether the configurable sidebar also displays Git
+        // metadata. Disabling the row leaves the sidebar tokens as the only
+        // consumers, so opting out of both stops periodic Git polling.
         let mut demand = GitStatusRefreshDemand {
-            branch: true,
+            branch: self.state.status_bar_enabled,
             ahead_behind: false,
         };
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
@@ -427,6 +434,36 @@ mod tests {
     }
 
     #[test]
+    fn disabled_status_bar_without_sidebar_consumer_stops_git_refresh() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+
+        assert!(app.git_refresh_demand().is_empty());
+        assert!(app.git_refresh_deadline().is_none());
+    }
+
+    #[test]
+    fn disabled_status_bar_keeps_sidebar_git_refresh() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Branch]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+
+        assert_eq!(
+            app.git_refresh_demand(),
+            GitStatusRefreshDemand {
+                branch: true,
+                ahead_behind: false,
+            }
+        );
+        assert!(app.git_refresh_deadline().is_some());
+    }
+
+    #[test]
     fn git_refresh_demand_matches_sidebar_rows() {
         let cases = [
             (
@@ -508,11 +545,11 @@ mod tests {
         app.last_git_remote_status_refresh = now - GIT_REMOTE_STATUS_REFRESH_INTERVAL;
 
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, false),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, false),
             None
         );
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             Some(now)
         );
     }

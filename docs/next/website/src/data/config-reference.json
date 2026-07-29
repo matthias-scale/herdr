@@ -671,6 +671,12 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
+          "key": "ui.status_bar.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the full-width top status row on desktop layouts."
+        },
+        {
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
