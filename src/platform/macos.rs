@@ -53,7 +53,7 @@ pub(crate) fn sample_status_metrics(
             .as_deref()
             .map(status_net_kind)
             .unwrap_or_default(),
-        vpn_active: interfaces.tailscale_ip.is_some(),
+        vpn_active: interfaces.vpn_active,
         remote_session: super::status_metrics::remote_session_from_env(),
         hostname,
         username,
@@ -431,11 +431,13 @@ struct StatusNetworkInterfaces {
     tailscale_ip: Option<String>,
     primary: Option<String>,
     primary_bytes: Option<(u64, u64)>,
+    vpn_active: bool,
 }
 
 struct StatusInterfaceIpv4 {
     name: String,
     address: Ipv4Addr,
+    up: bool,
 }
 
 struct StatusIfAddrs(NonNull<libc::ifaddrs>);
@@ -531,6 +533,7 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
             tailscale_ip: None,
             primary: None,
             primary_bytes: None,
+            vpn_active: false,
         };
     };
     let mut ipv4s = Vec::new();
@@ -550,7 +553,11 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
             let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
             let address = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
             if let Some(name) = status_interface_name(interface) {
-                ipv4s.push(StatusInterfaceIpv4 { name, address });
+                ipv4s.push(StatusInterfaceIpv4 {
+                    name,
+                    address,
+                    up: interface.ifa_flags & (libc::IFF_UP as u32) != 0,
+                });
             }
         } else if family == Some(libc::AF_LINK) {
             if let (Some(name), Some(bytes)) = (
@@ -573,12 +580,14 @@ fn select_status_network_interfaces(
     mut counters: HashMap<String, (u64, u64)>,
 ) -> StatusNetworkInterfaces {
     let mut tailscale_ip = None;
+    let mut vpn_active = false;
     let mut candidates = Vec::new();
     for interface in ipv4s {
-        if interface.address.is_loopback() || interface.address.is_unspecified() {
+        if !interface.up || interface.address.is_loopback() || interface.address.is_unspecified() {
             continue;
         }
         let tunnel = status_tunnel_interface(&interface.name);
+        vpn_active |= tunnel;
         let octets = interface.address.octets();
         if tunnel && octets[0] == 100 && (64..=127).contains(&octets[1]) {
             tailscale_ip.get_or_insert_with(|| interface.address.to_string());
@@ -605,6 +614,7 @@ fn select_status_network_interfaces(
             tailscale_ip,
             primary: None,
             primary_bytes: None,
+            vpn_active,
         };
     };
     let primary = selected.name.clone();
@@ -615,6 +625,7 @@ fn select_status_network_interfaces(
         tailscale_ip,
         primary: Some(primary),
         primary_bytes,
+        vpn_active,
     }
 }
 
@@ -707,14 +718,17 @@ mod status_metric_tests {
             super::StatusInterfaceIpv4 {
                 name: "en0".into(),
                 address: Ipv4Addr::new(192, 168, 1, 5),
+                up: true,
             },
             super::StatusInterfaceIpv4 {
                 name: "en9".into(),
                 address: Ipv4Addr::new(10, 0, 0, 8),
+                up: true,
             },
             super::StatusInterfaceIpv4 {
                 name: "utun3".into(),
                 address: Ipv4Addr::new(100, 64, 1, 2),
+                up: true,
             },
         ];
         let counters = HashMap::from([
@@ -729,6 +743,7 @@ mod status_metric_tests {
         assert_eq!(selected.local_ip.as_deref(), Some("10.0.0.8"));
         assert_eq!(selected.primary_bytes, Some((30, 40)));
         assert_eq!(selected.tailscale_ip.as_deref(), Some("100.64.1.2"));
+        assert!(selected.vpn_active);
     }
 
     #[test]
@@ -748,10 +763,12 @@ mod status_metric_tests {
             super::StatusInterfaceIpv4 {
                 name: "utun3".into(),
                 address: Ipv4Addr::new(100, 100, 1, 2),
+                up: true,
             },
             super::StatusInterfaceIpv4 {
                 name: "en7".into(),
                 address: Ipv4Addr::new(172, 16, 0, 9),
+                up: true,
             },
         ];
         let counters = HashMap::from([("en7".into(), (70, 80))]);
@@ -762,6 +779,41 @@ mod status_metric_tests {
         assert_eq!(selected.local_ip.as_deref(), Some("172.16.0.9"));
         assert_eq!(selected.primary_bytes, Some((70, 80)));
         assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.1.2"));
+        assert!(selected.vpn_active);
+    }
+
+    #[test]
+    fn generic_vpn_requires_an_up_tunnel_with_a_usable_address() {
+        let ipv4s = vec![
+            super::StatusInterfaceIpv4 {
+                name: "utun7".into(),
+                address: Ipv4Addr::new(10, 50, 0, 1),
+                up: false,
+            },
+            super::StatusInterfaceIpv4 {
+                name: "en0".into(),
+                address: Ipv4Addr::new(192, 168, 1, 5),
+                up: true,
+            },
+        ];
+        let selected = super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new());
+        assert!(!selected.vpn_active);
+
+        let ipv4s = vec![
+            super::StatusInterfaceIpv4 {
+                name: "utun7".into(),
+                address: Ipv4Addr::new(10, 50, 0, 1),
+                up: true,
+            },
+            super::StatusInterfaceIpv4 {
+                name: "en0".into(),
+                address: Ipv4Addr::new(192, 168, 1, 5),
+                up: true,
+            },
+        ];
+        let selected = super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new());
+        assert!(selected.vpn_active);
+        assert_eq!(selected.tailscale_ip, None);
     }
 }
 

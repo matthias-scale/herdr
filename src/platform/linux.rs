@@ -50,7 +50,7 @@ pub(crate) fn sample_status_metrics(
         net_down_kib,
         net_up_kib,
         net_kind: status_net_kind(interface.as_deref()),
-        vpn_active: interfaces.tailscale_ip.is_some() || status_vpn_active(),
+        vpn_active: interfaces.vpn_active,
         remote_session: super::status_metrics::remote_session_from_env(),
         hostname,
         username,
@@ -212,31 +212,18 @@ fn status_net_kind(interface: Option<&str>) -> super::status_metrics::NetKind {
     }
 }
 
-fn status_vpn_active() -> bool {
-    std::fs::read_dir("/sys/class/net")
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .any(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            ["tun", "wg", "tailscale", "ppp", "ipsec"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-        })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StatusInterfaceIpv4 {
     name: String,
     address: std::net::Ipv4Addr,
+    up: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct StatusInterfaceSelection {
     local_ip: Option<String>,
     tailscale_ip: Option<String>,
+    vpn_active: bool,
 }
 
 fn status_tunnel_interface(name: &str) -> bool {
@@ -268,7 +255,11 @@ fn status_interface_ipv4s(default_interface: Option<&str>) -> StatusInterfaceSel
                     .to_string_lossy()
                     .into_owned()
             };
-            ipv4s.push(StatusInterfaceIpv4 { name, address: ip });
+            ipv4s.push(StatusInterfaceIpv4 {
+                name,
+                address: ip,
+                up: interface.ifa_flags & (libc::IFF_UP as u32) != 0,
+            });
         }
         current = interface.ifa_next;
     }
@@ -281,12 +272,14 @@ fn select_status_interface_ipv4s(
     ipv4s: Vec<StatusInterfaceIpv4>,
 ) -> StatusInterfaceSelection {
     let mut tailscale_ip = None;
+    let mut vpn_active = false;
     let mut local_candidates = Vec::new();
     for interface in ipv4s {
-        if interface.address.is_loopback() || interface.address.is_unspecified() {
+        if !interface.up || interface.address.is_loopback() || interface.address.is_unspecified() {
             continue;
         }
         if status_tunnel_interface(&interface.name) {
+            vpn_active = true;
             let octets = interface.address.octets();
             if octets[0] == 100 && (64..=127).contains(&octets[1]) {
                 tailscale_ip.get_or_insert_with(|| interface.address.to_string());
@@ -305,6 +298,7 @@ fn select_status_interface_ipv4s(
     StatusInterfaceSelection {
         local_ip,
         tailscale_ip,
+        vpn_active,
     }
 }
 
@@ -344,20 +338,24 @@ mod status_metric_tests {
             StatusInterfaceIpv4 {
                 name: "eth0".into(),
                 address: Ipv4Addr::new(192, 168, 1, 20),
+                up: true,
             },
             StatusInterfaceIpv4 {
                 name: "wlan0".into(),
                 address: Ipv4Addr::new(10, 0, 0, 9),
+                up: true,
             },
             StatusInterfaceIpv4 {
                 name: "tailscale0".into(),
                 address: Ipv4Addr::new(100, 100, 20, 30),
+                up: true,
             },
         ];
 
         let selected = super::select_status_interface_ipv4s(Some("wlan0"), interfaces);
         assert_eq!(selected.local_ip.as_deref(), Some("10.0.0.9"));
         assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.20.30"));
+        assert!(selected.vpn_active);
     }
 
     #[test]
@@ -365,10 +363,44 @@ mod status_metric_tests {
         let interfaces = vec![StatusInterfaceIpv4 {
             name: "eth0".into(),
             address: Ipv4Addr::new(192, 168, 1, 20),
+            up: true,
         }];
 
         let selected = super::select_status_interface_ipv4s(Some("wlan0"), interfaces);
         assert_eq!(selected.local_ip, None);
+    }
+
+    #[test]
+    fn vpn_selection_requires_an_up_tunnel_with_a_usable_address() {
+        let interfaces = vec![
+            StatusInterfaceIpv4 {
+                name: "wg0".into(),
+                address: Ipv4Addr::new(10, 10, 0, 1),
+                up: false,
+            },
+            StatusInterfaceIpv4 {
+                name: "eth0".into(),
+                address: Ipv4Addr::new(192, 168, 1, 20),
+                up: true,
+            },
+        ];
+        let selected = super::select_status_interface_ipv4s(Some("eth0"), interfaces);
+        assert!(!selected.vpn_active);
+
+        let interfaces = vec![
+            StatusInterfaceIpv4 {
+                name: "tun0".into(),
+                address: Ipv4Addr::new(10, 20, 0, 1),
+                up: true,
+            },
+            StatusInterfaceIpv4 {
+                name: "eth0".into(),
+                address: Ipv4Addr::new(192, 168, 1, 20),
+                up: true,
+            },
+        ];
+        let selected = super::select_status_interface_ipv4s(Some("eth0"), interfaces);
+        assert!(selected.vpn_active);
     }
 }
 
