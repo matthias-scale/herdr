@@ -6,9 +6,9 @@ on:
 
 jobs:
   # The intake policy is canonical-repository only, and its maintainer token
-  # does not exist on forks, so skip the whole job there instead of failing.
+   # does not exist on forks. The job still runs there so the check reports a
+   # result, but the script returns early instead of failing.
   check-contributor:
-    if: ${{ github.repository == 'ogulcancelik/herdr' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -41,7 +41,9 @@ jobs:
             const repositoryName = context.payload.repository.full_name.toLowerCase();
 
             if (repositoryName !== CANONICAL_REPOSITORY) {
-              core.setFailed(`PR Gate only runs for ${CANONICAL_REPOSITORY}`);
+              // Forks do not host the intake policy, its maintainer files, or
+              // its token, so this is a no-op there rather than a failure.
+              core.info(`Skipping PR Gate: it only runs for ${CANONICAL_REPOSITORY}`);
               return;
             }
 
