@@ -37,6 +37,7 @@ pub(crate) struct MobileSwitcherAreas {
 pub(crate) enum MobileSwitcherTarget {
     NewWorkspace,
     Workspace(usize),
+    WorkspaceDisclosure(usize),
     NewTab,
     Tab(usize),
     Agent {
@@ -45,6 +46,24 @@ pub(crate) enum MobileSwitcherTarget {
         pane_id: PaneId,
     },
     Menu(usize),
+}
+
+/// Columns of the agent disclosure control on a workspace title line. The
+/// control is right-aligned inside `content`, so render and hit-testing share
+/// this range without depending on the rendered workspace label width.
+fn mobile_workspace_disclosure_columns(
+    content: Rect,
+    agent_count: usize,
+) -> Option<std::ops::Range<u16>> {
+    if agent_count == 0 || content.width == 0 {
+        return None;
+    }
+    let width = 1u16.saturating_add(agent_count.to_string().len() as u16);
+    if content.width <= width {
+        return None;
+    }
+    let start = content.x + content.width - width;
+    Some(start..start + width)
 }
 
 pub(crate) fn is_mobile_width(area: Rect, threshold: u16) -> bool {
@@ -157,8 +176,24 @@ pub(crate) fn mobile_switcher_target_at(
     let sidebar_end = cursor + rows.len() * 2;
     if doc_row >= cursor && doc_row < sidebar_end {
         let idx = (doc_row - cursor) / 2;
+        let on_title_line = (doc_row - cursor) % 2 == 0;
         return rows.get(idx).map(|entry| match entry {
-            SidebarRow::Workspace { ws_idx, .. } => MobileSwitcherTarget::Workspace(*ws_idx),
+            SidebarRow::Workspace { ws_idx, .. } => {
+                let agent_count = crate::ui::agent_counts_by_workspace(
+                    &crate::ui::all_agent_panel_entries(app),
+                )
+                .get(ws_idx)
+                .copied()
+                .unwrap_or(0);
+                let on_disclosure = on_title_line
+                    && mobile_workspace_disclosure_columns(content, agent_count)
+                        .is_some_and(|columns| columns.contains(&col));
+                if on_disclosure {
+                    MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
+                } else {
+                    MobileSwitcherTarget::Workspace(*ws_idx)
+                }
+            }
             SidebarRow::Agent { entry, .. } => MobileSwitcherTarget::Agent {
                 ws_idx: entry.ws_idx,
                 tab_idx: entry.tab_idx,
@@ -587,10 +622,19 @@ fn render_mobile_switcher_content(
                         .add_modifier(Modifier::BOLD),
                 ));
                 let agent_count = agent_counts.get(ws_idx).copied().unwrap_or(0);
-                if agent_count > 0 {
+                if let Some(columns) = mobile_workspace_disclosure_columns(content, agent_count) {
+                    let used = title_spans
+                        .iter()
+                        .map(|span| display_width_u16(span.content.as_ref()))
+                        .sum::<u16>();
+                    let filler = columns.start.saturating_sub(content.x).saturating_sub(used);
+                    title_spans.push(Span::styled(
+                        " ".repeat(filler as usize),
+                        Style::default().bg(bg),
+                    ));
                     title_spans.push(Span::styled(
                         format!(
-                            " {}{}",
+                            "{}{}",
                             if app.workspace_agents_expanded(*ws_idx) {
                                 "▾"
                             } else {

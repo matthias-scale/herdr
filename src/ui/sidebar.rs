@@ -18,7 +18,6 @@ use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
-const AGENT_PANEL_HEADER_ROWS: u16 = 2;
 
 #[derive(Clone)]
 pub(crate) struct AgentPanelEntry {
@@ -50,9 +49,6 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, _split_ratio: f32) -> (Rect,
     (content, content)
 }
 
-pub(crate) fn sidebar_section_divider_rect(_area: Rect, _split_ratio: f32) -> Rect {
-    Rect::default()
-}
 
 fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
@@ -676,17 +672,6 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
     ))
 }
 
-pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
-    if area.width == 0 || area.height <= AGENT_PANEL_HEADER_ROWS {
-        return Rect::default();
-    }
-
-    let body_y = area.y.saturating_add(AGENT_PANEL_HEADER_ROWS);
-    let body_height = (area.y + area.height).saturating_sub(body_y);
-    let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
-    Rect::new(area.x, body_y, body_width, body_height)
-}
-
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
@@ -706,98 +691,6 @@ pub(crate) fn agent_entry_height_in_body(
         .max(1)
         .min(u16::MAX as usize) as u16)
         .min(body_height)
-}
-
-pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usize) -> u16 {
-    if entry_idx + 1 < entry_count {
-        app.sidebar_agents.row_gap
-    } else {
-        0
-    }
-}
-
-fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
-    let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height == 0 {
-        return 0;
-    }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
-        if used_rows.saturating_add(height) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(height);
-        visible += 1;
-        used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
-            .min(body.height);
-    }
-    visible
-}
-
-fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
-    let body = agent_panel_body_rect(area, false);
-    let entries = agent_panel_entries(app);
-    let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (index, entry) in entries.iter().enumerate().rev() {
-        let gap = agent_entry_gap(app, index, entries.len());
-        let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
-        if used_rows.saturating_add(needed) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(needed);
-        start = index;
-    }
-    start.min(entries.len().saturating_sub(1))
-}
-
-pub(crate) fn agent_panel_scroll_for_target(
-    app: &AppState,
-    area: Rect,
-    current_scroll: usize,
-    target: usize,
-) -> usize {
-    let max_scroll = agent_panel_bottom_start(app, area);
-    if target < current_scroll {
-        return target.min(max_scroll);
-    }
-    let mut scroll = current_scroll.min(max_scroll);
-    while scroll < target {
-        let visible = agent_panel_visible_count_from(app, area, scroll);
-        if visible > 0 && target < scroll.saturating_add(visible) {
-            break;
-        }
-        scroll += 1;
-    }
-    scroll.min(max_scroll)
-}
-
-pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
-    let max_scroll = agent_panel_bottom_start(app, area);
-    let scroll = app.agent_panel_scroll.min(max_scroll);
-    let viewport_rows = agent_panel_visible_count_from(app, area, scroll);
-
-    crate::pane::ScrollMetrics {
-        offset_from_bottom: max_scroll.saturating_sub(scroll),
-        max_offset_from_bottom: max_scroll,
-        viewport_rows,
-    }
-}
-
-pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
-    let metrics = agent_panel_scroll_metrics(app, area);
-    let body = agent_panel_body_rect(area, true);
-    (should_show_scrollbar(metrics) && body.width > 0 && body.height > 0).then_some(Rect::new(
-        area.x + area.width.saturating_sub(1),
-        body.y,
-        1,
-        body.height,
-    ))
 }
 
 pub(crate) fn compute_workspace_list_areas(
@@ -825,7 +718,7 @@ pub(crate) fn compute_sidebar_row_areas(
         return (Vec::new(), Vec::new());
     }
 
-    let scroll = app.workspace_scroll;
+    let scroll = app.workspace_scroll.min(metrics.max_offset_from_bottom);
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
@@ -936,6 +829,15 @@ pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect
 }
 
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
+/// Scroll offset of the collapsed rail, in the same unified row index space as
+/// [`normalized_workspace_scroll`].
+pub(crate) fn collapsed_sidebar_row_scroll(app: &AppState, ws_area: Rect) -> usize {
+    let max_scroll = sidebar_rows(app)
+        .len()
+        .saturating_sub(ws_area.height as usize);
+    app.workspace_scroll.min(max_scroll)
+}
+
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -962,8 +864,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         return;
     }
 
-    for (visible_idx, row) in sidebar_rows(app).iter().enumerate() {
-        let y = ws_area.y + visible_idx as u16;
+    let scroll = collapsed_sidebar_row_scroll(app, ws_area);
+    for (row_idx, row) in sidebar_rows(app).iter().enumerate().skip(scroll) {
+        let y = ws_area.y + (row_idx - scroll) as u16;
         if y >= ws_area.y + ws_area.height {
             break;
         }
@@ -1021,7 +924,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Paragraph::new(Line::from(vec![
                         Span::styled(
                             if *depth == 0 {
-                                format!("{}", visible_idx + 1)
+                                format!("{}", row_idx + 1)
                             } else if *depth > 1 {
                                 "  ".to_string()
                             } else {
@@ -1397,29 +1300,20 @@ fn render_workspace_list(
             )])),
             Rect::new(area.x, area.y, area.width, 1),
         );
-        if app.agent_view_override.is_some() || app.agent_panel_sort != AgentPanelSort::Spaces {
-            let control_label = active_agent_view_label(app)
-                .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    control_label,
-                    Style::default().fg(if app.agent_view_override.is_some() {
-                        p.accent
-                    } else {
-                        p.overlay0
-                    }),
-                ))
-                .alignment(Alignment::Right),
-                agent_panel_header_label_rect(area, control_label),
-            );
-        } else {
-            let control_label = agent_panel_sort_label(app.agent_panel_sort);
-            frame.render_widget(
-                Paragraph::new(Span::styled(control_label, Style::default().fg(p.overlay0)))
-                    .alignment(Alignment::Right),
-                agent_panel_header_label_rect(area, control_label),
-            );
-        }
+        let control_label = active_agent_view_label(app)
+            .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                control_label,
+                Style::default().fg(if app.agent_view_override.is_some() {
+                    p.accent
+                } else {
+                    p.overlay0
+                }),
+            ))
+            .alignment(Alignment::Right),
+            agent_panel_header_label_rect(area, control_label),
+        );
     }
 
     let metrics = workspace_list_scroll_metrics(app, area);
@@ -1622,6 +1516,16 @@ fn render_workspace_list(
     }
 
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
+    if row_entries.is_empty() && !app.sidebar_shows_spaces_tree() {
+        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        if body.width > 0 && body.height > 0 {
+            frame.render_widget(
+                Paragraph::new(" no matching agents")
+                    .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
+                Rect::new(body.x, body.y, body.width, 1),
+            );
+        }
+    }
     let agent_cards = if app.view.agent_card_areas.is_empty() {
         compute_agent_card_areas(app, sidebar_area)
     } else {
@@ -1737,126 +1641,6 @@ fn render_agent_card(
             Paragraph::new(Line::from(spans)).style(row_style),
             Rect::new(rect.x, rect.y + row_index as u16, rect.width, 1),
         );
-    }
-}
-
-#[cfg(test)]
-fn render_agent_detail(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let p = &app.palette;
-
-    if area.height < 3 {
-        return;
-    }
-
-    let sep_line = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Span::styled(&sep_line, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            " agents",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-        )])),
-        Rect::new(area.x, area.y + 1, area.width, 1),
-    );
-    let control_label = active_agent_view_label(app)
-        .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
-    let toggle_rect = agent_panel_header_label_rect(area, control_label);
-    if toggle_rect != Rect::default() {
-        let color = if app.agent_view_override.is_some() {
-            p.accent
-        } else {
-            p.overlay0
-        };
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                control_label,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Right),
-            toggle_rect,
-        );
-    }
-
-    let details = agent_panel_entries_from(app, terminal_runtimes);
-    let metrics = agent_panel_scroll_metrics(app, area);
-    let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
-    let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
-    if body == Rect::default() {
-        return;
-    }
-    if details.is_empty() && app.agent_view_override.is_some() {
-        frame.render_widget(
-            Paragraph::new(" no matching agents")
-                .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
-            Rect::new(body.x, body.y, body.width, 1),
-        );
-        return;
-    }
-
-    let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
-        let height = (rows.len().max(1) as u16).min(body.height);
-        if row_y.saturating_add(height) > body_bottom {
-            break;
-        }
-
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
-            Style::default().bg(p.surface_dim)
-        } else {
-            Style::default()
-        };
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_dot(detail.state, detail.seen, p);
-
-        for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
-        }
-        row_y = row_y
-            .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
-            .min(body_bottom);
-    }
-
-    if let Some(track) = scrollbar_rect {
-        render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
 }
 
@@ -1986,10 +1770,6 @@ mod tests {
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
         assert!(text.iter().any(|line| line.contains("pi")));
-        assert_eq!(
-            sidebar_section_divider_rect(area, app.sidebar_section_split),
-            Rect::default()
-        );
     }
 
     #[test]
@@ -2136,7 +1916,7 @@ mod tests {
         app.agent_view_override = Some(filtered_to_missing());
         app.sidebar_collapsed = true;
         app.sidebar_presentation.expanded_workspace_ids.clear();
-        app.agent_panel_scroll = 99;
+        app.workspace_scroll = 99;
 
         app.previous_agent();
         assert_eq!(app.active, Some(2));
@@ -2581,19 +2361,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         assert_eq!(app.sidebar_agents.row_gap, 0);
 
+        app.agent_panel_sort = AgentPanelSort::Priority;
+
         let area = Rect::new(0, 0, 20, 5);
-        let metrics = agent_panel_scroll_metrics(&app, area);
-        let body = agent_panel_body_rect(area, false);
+        let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+        let metrics = workspace_list_scroll_metrics(&app, ws_area);
+        let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
         let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
         terminal
-            .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
 
         assert_eq!(metrics.viewport_rows, 2);
         assert_eq!(metrics.max_offset_from_bottom, 0);
-        assert_eq!(row_text(buffer, body.y, body.width), " pi");
-        assert_eq!(row_text(buffer, body.y + 1, body.width), " claude");
+        assert_eq!(row_text(buffer, body.y, body.width), "pi");
+        assert_eq!(row_text(buffer, body.y + 1, body.width), "claude");
     }
 
     #[test]
@@ -2720,11 +2503,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![crate::config::AgentSidebarToken::Custom("a".into())],
             vec![crate::config::AgentSidebarToken::Custom("b".into())],
         ];
+        app.agent_panel_sort = AgentPanelSort::Priority;
         let area = Rect::new(0, 0, 20, 6);
+        let ws_area = workspace_list_rect(area, app.sidebar_section_split);
 
-        let metrics = agent_panel_scroll_metrics(&app, area);
+        let metrics = workspace_list_scroll_metrics(&app, ws_area);
         assert_eq!(metrics.max_offset_from_bottom, 1);
-        assert_eq!(agent_panel_scroll_for_target(&app, area, 0, 2), 1);
+        assert_eq!(sidebar_row_scroll_for_target(&app, area, 0, 2), 1);
     }
 
     #[test]
@@ -2760,16 +2545,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "claude".into(),
             vec![vec![crate::config::AgentSidebarToken::Agent]; 6],
         );
+        app.agent_panel_sort = AgentPanelSort::Priority;
         let panel = Rect::new(0, 0, 20, 5);
+        let ws_area = workspace_list_rect(panel, app.sidebar_section_split);
+        let body = workspace_list_body_rect(ws_area, false);
 
-        let metrics = agent_panel_scroll_metrics(&app, panel);
+        let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
         assert_eq!(metrics.viewport_rows, 1);
         assert_eq!(metrics.max_offset_from_bottom, 0);
         let entry = agent_panel_entries(&app).pop().unwrap();
         assert_eq!(
-            agent_entry_height_in_body(&app, &entry, agent_panel_body_rect(panel, false).height),
-            agent_panel_body_rect(panel, false).height
+            agent_entry_height_in_body(&app, &entry, body.height),
+            body.height
         );
     }
 
@@ -3100,13 +2888,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert_eq!(ws_area, Rect::new(0, 0, 19, 5));
         assert_eq!(detail_area, ws_area);
-    }
-
-    #[test]
-    fn sidebar_section_divider_is_hidden_for_tiny_heights() {
-        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
-
-        assert_eq!(divider, Rect::default());
     }
 
     #[test]
@@ -3444,7 +3225,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.mode = Mode::Terminal;
         app.workspace_scroll = 1;
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 12));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);
