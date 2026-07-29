@@ -487,10 +487,40 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
 
     use super::super::{app_for_mouse_test, mouse, state_with_workspaces};
     use super::*;
+
+    #[test]
+    fn desktop_clamped_settings_hit_geometry_includes_status_row() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.view.status_bar_rect = Rect::new(0, 0, 106, 1);
+        state.view.sidebar_rect = Rect::new(0, 1, 26, 19);
+        state.view.terminal_area = Rect::new(26, 2, 80, 18);
+        open_settings(&mut state);
+
+        assert_eq!(state.screen_rect(), Rect::new(0, 0, 106, 20));
+        assert_eq!(state.settings_popup_rect(), Rect::new(15, 1, 76, 18));
+        let inner = state.settings_inner_rect();
+        let (_, close) = crate::ui::settings_button_rects(
+            inner,
+            state.settings.section,
+            crate::ui::settings_show_primary_action(&state),
+        );
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: close.x,
+            row: close.y,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        assert_eq!(state.handle_settings_mouse(click), None);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
 
     #[test]
     fn settings_cancel_restores_previewed_theme_from_other_sections() {

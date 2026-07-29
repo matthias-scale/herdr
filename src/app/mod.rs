@@ -534,6 +534,8 @@ impl App {
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
             status_home_dir: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            status_git_cwd: None,
+            status_git_branch: None,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),

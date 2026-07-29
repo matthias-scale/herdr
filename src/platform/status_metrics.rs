@@ -4,6 +4,7 @@
 //! module deliberately contains no process spawning, network clients, or
 //! platform APIs so UI rendering can consume a plain `AppState` snapshot.
 
+use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,6 +12,7 @@ pub(crate) const STATUS_METRIC_REFRESH_INTERVAL: Duration = Duration::from_secs(
 pub(crate) const STATUS_METRIC_STALE_AFTER: Duration = Duration::from_secs(4);
 const STATUS_METRIC_REPAINT_INTERVAL: Duration = Duration::from_secs(4);
 const COMPATIBLE_WAN_CACHE_TTL: Duration = Duration::from_secs(300);
+const COMPATIBLE_WAN_CACHE_MAX_BYTES: u64 = 64;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct StatusMetrics {
@@ -187,11 +189,44 @@ pub(super) fn compatible_public_ip() -> Option<String> {
 }
 
 fn read_compatible_public_ip(path: &Path, now: SystemTime) -> Option<String> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let path_metadata = std::fs::symlink_metadata(path).ok()?;
+    if !path_metadata.file_type().is_file() || path_metadata.len() > COMPATIBLE_WAN_CACHE_MAX_BYTES
+    {
+        return None;
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > COMPATIBLE_WAN_CACHE_MAX_BYTES {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+            return None;
+        }
+    }
+
+    let modified = metadata.modified().ok()?;
     if now.duration_since(modified).ok()? > COMPATIBLE_WAN_CACHE_TTL {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let mut bytes = Vec::with_capacity(COMPATIBLE_WAN_CACHE_MAX_BYTES as usize + 1);
+    file.take(COMPATIBLE_WAN_CACHE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > COMPATIBLE_WAN_CACHE_MAX_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes).ok()?;
     let ip = text.trim();
     plausible_ipv4(ip).then(|| ip.to_string())
 }
@@ -227,6 +262,10 @@ pub(crate) fn status_metrics_fixture() -> StatusMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wan_fixture_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("herdr-status-wan-{}-{label}", std::process::id()))
+    }
 
     #[test]
     fn metric_refresh_cadence_is_immediate_bounded_and_retries() {
@@ -271,7 +310,7 @@ mod tests {
     #[test]
     fn metric_privacy_cache_accepts_only_fresh_local_values() {
         // AC5/AC6: the shared policy has no HTTP/process path; WAN is read-only cache data.
-        let path = std::env::temp_dir().join(format!("herdr-status-wan-{}", std::process::id()));
+        let path = wan_fixture_path("fresh");
         std::fs::write(&path, "203.0.113.9\n").expect("write fixture");
         let modified = std::fs::metadata(&path)
             .expect("fixture metadata")
@@ -289,6 +328,54 @@ mod tests {
             None
         );
         std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn metric_privacy_cache_rejects_oversized_values() {
+        let path = wan_fixture_path("oversized");
+        std::fs::write(
+            &path,
+            vec![b'1'; COMPATIBLE_WAN_CACHE_MAX_BYTES as usize + 1],
+        )
+        .expect("write oversized fixture");
+        let modified = std::fs::metadata(&path)
+            .expect("fixture metadata")
+            .modified()
+            .expect("fixture timestamp");
+
+        assert_eq!(read_compatible_public_ip(&path, modified), None);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metric_privacy_cache_rejects_symlinks() {
+        let target = wan_fixture_path("symlink-target");
+        let link = wan_fixture_path("symlink");
+        std::fs::write(&target, "203.0.113.9\n").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let modified = std::fs::metadata(&target)
+            .expect("target metadata")
+            .modified()
+            .expect("target timestamp");
+
+        assert_eq!(read_compatible_public_ip(&link, modified), None);
+        std::fs::remove_file(link).expect("remove symlink");
+        std::fs::remove_file(target).expect("remove target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metric_privacy_cache_rejects_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = wan_fixture_path("fifo");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("valid path");
+        // SAFETY: `c_path` is a valid NUL-terminated filesystem path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        assert_eq!(read_compatible_public_ip(&path, SystemTime::now()), None);
+        std::fs::remove_file(path).expect("remove fifo");
     }
 
     #[test]

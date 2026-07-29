@@ -1185,6 +1185,16 @@ impl Workspace {
         self.active_tab().map(|tab| tab.layout.focused())
     }
 
+    pub fn focused_cwd_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        self.active_tab()
+            .and_then(|tab| tab.cwd_for_pane(tab.layout.focused(), terminals, terminal_runtimes))
+            .or_else(|| Some(self.identity_cwd.clone()))
+    }
+
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
         let tab_idx = match self.find_tab_index_for_pane(pane_id) {
             Some(idx) => idx,
