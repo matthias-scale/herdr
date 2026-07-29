@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Write;
+use std::net::Ipv4Addr;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -231,6 +233,50 @@ fn status_sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
     (result == 0 && size == std::mem::size_of::<u64>()).then_some(value)
 }
 
+type StatusMachPortDeallocator =
+    unsafe fn(libc::mach_port_t, libc::mach_port_t) -> libc::kern_return_t;
+
+struct StatusMachHostPort {
+    port: libc::mach_port_t,
+    deallocate: StatusMachPortDeallocator,
+}
+
+impl StatusMachHostPort {
+    fn acquire() -> Option<Self> {
+        // SAFETY: `mach_host_self` returns a send right owned by the caller.
+        let port = unsafe { status_mach_host_self() };
+        (port != 0).then_some(Self {
+            port,
+            deallocate: deallocate_status_mach_port,
+        })
+    }
+
+    fn get(&self) -> libc::mach_port_t {
+        self.port
+    }
+}
+
+impl Drop for StatusMachHostPort {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns exactly one send right returned by
+        // `mach_host_self`; the task-self port is process-owned and borrowed.
+        let _ = unsafe { (self.deallocate)(status_mach_task_self(), self.port) };
+    }
+}
+
+unsafe fn deallocate_status_mach_port(
+    task: libc::mach_port_t,
+    name: libc::mach_port_t,
+) -> libc::kern_return_t {
+    // SAFETY: the caller guarantees that `name` is an owned send right in `task`.
+    unsafe { status_mach_port_deallocate(task, name) }
+}
+
+unsafe fn status_mach_task_self() -> libc::mach_port_t {
+    // SAFETY: the kernel owns this process-global task-self port name.
+    unsafe { STATUS_MACH_TASK_SELF }
+}
+
 fn status_used_memory_bytes(total: u64) -> Option<u64> {
     const HOST_VM_INFO64: libc::c_int = 4;
     #[repr(C)]
@@ -264,9 +310,10 @@ fn status_used_memory_bytes(total: u64) -> Option<u64> {
     let mut stats = VmStatistics64::default();
     let mut count = (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<libc::integer_t>())
         as libc::mach_msg_type_number_t;
+    let host = StatusMachHostPort::acquire()?;
     let result = unsafe {
         status_host_statistics64(
-            status_mach_host_self(),
+            host.get(),
             HOST_VM_INFO64,
             (&raw mut stats).cast(),
             &mut count,
@@ -290,9 +337,10 @@ fn status_cpu_ticks() -> Option<(u64, u64)> {
     }
     let mut load = CpuLoad { ticks: [0; 4] };
     let mut count = 4;
+    let host = StatusMachHostPort::acquire()?;
     let result = unsafe {
         status_host_statistics(
-            status_mach_host_self(),
+            host.get(),
             HOST_CPU_LOAD_INFO,
             (&raw mut load).cast(),
             &mut count,
@@ -381,68 +429,205 @@ struct StatusNetworkInterfaces {
     primary_bytes: Option<(u64, u64)>,
 }
 
-fn status_interface_ipv4s() -> StatusNetworkInterfaces {
-    let mut local = None;
-    let mut tailscale = None;
-    let mut primary = None;
-    let mut primary_bytes = None;
-    let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 || interfaces.is_null() {
-        return StatusNetworkInterfaces {
-            local_ip: local,
-            tailscale_ip: tailscale,
-            primary,
-            primary_bytes,
-        };
+struct StatusInterfaceIpv4 {
+    name: String,
+    address: Ipv4Addr,
+}
+
+struct StatusIfAddrs(NonNull<libc::ifaddrs>);
+
+impl StatusIfAddrs {
+    fn acquire() -> Option<Self> {
+        let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: libc initializes the list pointer on success and retains
+        // ownership until the paired `freeifaddrs` in this guard's Drop.
+        if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+            return None;
+        }
+        NonNull::new(interfaces).map(Self)
     }
-    let mut current = interfaces;
+
+    fn first(&self) -> *mut libc::ifaddrs {
+        self.0.as_ptr()
+    }
+}
+
+impl Drop for StatusIfAddrs {
+    fn drop(&mut self) {
+        // SAFETY: `acquire` gives this guard sole ownership of the list.
+        unsafe { libc::freeifaddrs(self.0.as_ptr()) };
+    }
+}
+
+fn status_default_route_interface() -> Option<String> {
+    const ROUTE_TIMEOUT: Duration = Duration::from_millis(250);
+    const ROUTE_OUTPUT_MAX_BYTES: usize = 4096;
+
+    // `route get` reads the kernel's local routing table; it performs no
+    // network I/O. Keep the helper bounded because this runs in the sampler.
+    let mut command = crate::noninteractive_process::command("/sbin/route");
+    let mut child = command
+        .args(["-n", "get", "default"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if !wait_for_child_until(&mut child, ROUTE_TIMEOUT) {
+        return None;
+    }
+    let stdout = child.stdout.take()?;
+    let bytes = match read_limited_reader(stdout, ROUTE_OUTPUT_MAX_BYTES).ok()? {
+        LimitedRead::Complete(bytes) => bytes,
+        LimitedRead::Empty | LimitedRead::Oversized => return None,
+    };
+    parse_default_route_interface(std::str::from_utf8(&bytes).ok()?)
+}
+
+fn parse_default_route_interface(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if label.trim() != "interface" {
+            return None;
+        }
+        let interface = value.split_whitespace().next()?;
+        (!interface.is_empty() && interface.len() < libc::IFNAMSIZ).then(|| interface.to_string())
+    })
+}
+
+fn status_interface_name(interface: &libc::ifaddrs) -> Option<String> {
+    if interface.ifa_name.is_null() {
+        return None;
+    }
+    // SAFETY: every node in a live getifaddrs list owns a NUL-terminated name.
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(interface.ifa_name) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn status_interface_bytes(interface: &libc::ifaddrs) -> Option<(u64, u64)> {
+    if interface.ifa_data.is_null() {
+        return None;
+    }
+    let data = interface.ifa_data.cast::<libc::if_data>();
+    // SAFETY: Darwin documents AF_LINK `ifa_data` as `struct if_data`.
+    // `if_data` is packed to four bytes, so copy both fields unaligned rather
+    // than creating references whose alignment Rust cannot guarantee.
+    let rx = unsafe { std::ptr::addr_of!((*data).ifi_ibytes).read_unaligned() };
+    let tx = unsafe { std::ptr::addr_of!((*data).ifi_obytes).read_unaligned() };
+    Some((u64::from(rx), u64::from(tx)))
+}
+
+fn status_interface_ipv4s() -> StatusNetworkInterfaces {
+    let Some(interfaces) = StatusIfAddrs::acquire() else {
+        return StatusNetworkInterfaces {
+            local_ip: None,
+            tailscale_ip: None,
+            primary: None,
+            primary_bytes: None,
+        };
+    };
+    let mut ipv4s = Vec::new();
+    let mut counters = HashMap::new();
+    let mut current = interfaces.first();
     while !current.is_null() {
+        // SAFETY: `current` belongs to the live list guarded by `interfaces`.
         let interface = unsafe { &*current };
-        if !interface.ifa_addr.is_null()
-            && unsafe { (*interface.ifa_addr).sa_family as i32 } == libc::AF_INET
-        {
+        let family = if interface.ifa_addr.is_null() {
+            None
+        } else {
+            // SAFETY: a non-null ifa_addr points to a sockaddr for this node.
+            Some(unsafe { (*interface.ifa_addr).sa_family as i32 })
+        };
+        if family == Some(libc::AF_INET) {
+            // SAFETY: the family check above establishes sockaddr_in layout.
             let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
-            let ip = std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
-            let name = if interface.ifa_name.is_null() {
-                String::new()
-            } else {
-                unsafe { std::ffi::CStr::from_ptr(interface.ifa_name) }
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            if !ip.is_loopback() && !ip.is_unspecified() {
-                let tunnel = name.starts_with("utun")
-                    || name.starts_with("tun")
-                    || name.contains("tailscale");
-                if tunnel && ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]) {
-                    tailscale.get_or_insert_with(|| ip.to_string());
-                } else if !tunnel {
-                    local.get_or_insert_with(|| ip.to_string());
-                    if primary.is_none() {
-                        if !interface.ifa_data.is_null() {
-                            let data = unsafe { &*(interface.ifa_data.cast::<libc::if_data>()) };
-                            primary_bytes =
-                                Some((u64::from(data.ifi_ibytes), u64::from(data.ifi_obytes)));
-                        }
-                        primary = Some(name);
-                    }
-                }
+            let address = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+            if let Some(name) = status_interface_name(interface) {
+                ipv4s.push(StatusInterfaceIpv4 { name, address });
+            }
+        } else if family == Some(libc::AF_LINK) {
+            if let (Some(name), Some(bytes)) = (
+                status_interface_name(interface),
+                status_interface_bytes(interface),
+            ) {
+                counters.insert(name, bytes);
             }
         }
         current = interface.ifa_next;
     }
-    unsafe { libc::freeifaddrs(interfaces) };
+    drop(interfaces);
+
+    select_status_network_interfaces(status_default_route_interface().as_deref(), ipv4s, counters)
+}
+
+fn select_status_network_interfaces(
+    default_interface: Option<&str>,
+    ipv4s: Vec<StatusInterfaceIpv4>,
+    mut counters: HashMap<String, (u64, u64)>,
+) -> StatusNetworkInterfaces {
+    let mut tailscale_ip = None;
+    let mut candidates = Vec::new();
+    for interface in ipv4s {
+        if interface.address.is_loopback() || interface.address.is_unspecified() {
+            continue;
+        }
+        let tunnel = status_tunnel_interface(&interface.name);
+        let octets = interface.address.octets();
+        if tunnel && octets[0] == 100 && (64..=127).contains(&octets[1]) {
+            tailscale_ip.get_or_insert_with(|| interface.address.to_string());
+        }
+        candidates.push(interface);
+    }
+
+    let selected = default_interface
+        .and_then(|name| {
+            candidates
+                .iter()
+                .position(|interface| interface.name == name)
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .position(|interface| !status_tunnel_interface(&interface.name))
+        })
+        .and_then(|index| candidates.get(index));
+
+    let Some(selected) = selected else {
+        return StatusNetworkInterfaces {
+            local_ip: None,
+            tailscale_ip,
+            primary: None,
+            primary_bytes: None,
+        };
+    };
+    let primary = selected.name.clone();
+    let local_ip = selected.address.to_string();
+    let primary_bytes = counters.remove(&primary);
     StatusNetworkInterfaces {
-        local_ip: local,
-        tailscale_ip: tailscale,
-        primary,
+        local_ip: Some(local_ip),
+        tailscale_ip,
+        primary: Some(primary),
         primary_bytes,
     }
 }
 
+fn status_tunnel_interface(name: &str) -> bool {
+    name.starts_with("utun") || name.starts_with("tun") || name.contains("tailscale")
+}
+
 unsafe extern "C" {
+    #[link_name = "mach_task_self_"]
+    static STATUS_MACH_TASK_SELF: libc::mach_port_t;
     #[link_name = "mach_host_self"]
     fn status_mach_host_self() -> libc::mach_port_t;
+    #[link_name = "mach_port_deallocate"]
+    fn status_mach_port_deallocate(
+        task: libc::mach_port_t,
+        name: libc::mach_port_t,
+    ) -> libc::kern_return_t;
     #[link_name = "host_statistics"]
     fn status_host_statistics(
         host: libc::mach_port_t,
@@ -461,6 +646,20 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod status_metric_tests {
+    use std::collections::HashMap;
+    use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn record_deallocation(
+        _task: libc::mach_port_t,
+        _name: libc::mach_port_t,
+    ) -> libc::kern_return_t {
+        DEALLOCATIONS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
     #[test]
     fn platform_metric_sampler_returns_local_macos_snapshot() {
         // AC6: macOS collection stays in macos.rs and uses native libc/Mach APIs.
@@ -471,6 +670,94 @@ mod status_metric_tests {
         assert!(!metrics.username.is_empty());
         assert_eq!(metrics.date.len(), 10);
         assert_eq!(metrics.time.len(), 5);
+    }
+
+    #[test]
+    fn mach_host_port_guard_deallocates_exactly_once() {
+        DEALLOCATIONS.store(0, Ordering::SeqCst);
+        {
+            let _host = super::StatusMachHostPort {
+                port: 42,
+                deallocate: record_deallocation,
+            };
+        }
+        assert_eq!(DEALLOCATIONS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn route_parser_extracts_only_the_interface_field() {
+        let output = "   route to: default\n\
+                      destination: default\n\
+                      interface: en9\n\
+                      flags: <UP,GATEWAY,DONE>\n";
+        assert_eq!(
+            super::parse_default_route_interface(output).as_deref(),
+            Some("en9")
+        );
+        assert_eq!(super::parse_default_route_interface("gateway: en9\n"), None);
+    }
+
+    #[test]
+    fn network_selection_joins_default_route_ipv4_and_link_counters_by_name() {
+        let ipv4s = vec![
+            super::StatusInterfaceIpv4 {
+                name: "en0".into(),
+                address: Ipv4Addr::new(192, 168, 1, 5),
+            },
+            super::StatusInterfaceIpv4 {
+                name: "en9".into(),
+                address: Ipv4Addr::new(10, 0, 0, 8),
+            },
+            super::StatusInterfaceIpv4 {
+                name: "utun3".into(),
+                address: Ipv4Addr::new(100, 64, 1, 2),
+            },
+        ];
+        let counters = HashMap::from([
+            ("en0".into(), (10, 20)),
+            ("en9".into(), (30, 40)),
+            ("utun3".into(), (50, 60)),
+        ]);
+
+        let selected = super::select_status_network_interfaces(Some("en9"), ipv4s, counters);
+
+        assert_eq!(selected.primary.as_deref(), Some("en9"));
+        assert_eq!(selected.local_ip.as_deref(), Some("10.0.0.8"));
+        assert_eq!(selected.primary_bytes, Some((30, 40)));
+        assert_eq!(selected.tailscale_ip.as_deref(), Some("100.64.1.2"));
+    }
+
+    #[test]
+    fn link_counter_reader_copies_darwin_if_data_fields() {
+        let mut data = unsafe { std::mem::zeroed::<libc::if_data>() };
+        data.ifi_ibytes = 123;
+        data.ifi_obytes = 456;
+        let mut interface = unsafe { std::mem::zeroed::<libc::ifaddrs>() };
+        interface.ifa_data = (&raw mut data).cast();
+
+        assert_eq!(super::status_interface_bytes(&interface), Some((123, 456)));
+    }
+
+    #[test]
+    fn network_selection_falls_back_coherently_when_default_route_is_unavailable() {
+        let ipv4s = vec![
+            super::StatusInterfaceIpv4 {
+                name: "utun3".into(),
+                address: Ipv4Addr::new(100, 100, 1, 2),
+            },
+            super::StatusInterfaceIpv4 {
+                name: "en7".into(),
+                address: Ipv4Addr::new(172, 16, 0, 9),
+            },
+        ];
+        let counters = HashMap::from([("en7".into(), (70, 80))]);
+
+        let selected = super::select_status_network_interfaces(Some("missing0"), ipv4s, counters);
+
+        assert_eq!(selected.primary.as_deref(), Some("en7"));
+        assert_eq!(selected.local_ip.as_deref(), Some("172.16.0.9"));
+        assert_eq!(selected.primary_bytes, Some((70, 80)));
+        assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.1.2"));
     }
 }
 
