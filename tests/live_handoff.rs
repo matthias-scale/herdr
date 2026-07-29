@@ -422,7 +422,7 @@ fn server_ptmx_fd_count(pid: u32) -> usize {
 #[cfg(target_os = "macos")]
 fn server_ptmx_fd_count(pid: u32) -> usize {
     let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-a", "-p", &pid.to_string(), "-d", "0-1024", "-Fn"])
+        .args(["-nP", "-a", "-p", &pid.to_string(), "-Fn"])
         .output()
     else {
         return 0;
