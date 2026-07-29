@@ -82,7 +82,7 @@ pub(crate) use self::{
     sidebar::{
         agent_panel_entries, agent_panel_scroll_for_target, agent_panel_scroll_metrics,
         agent_panel_scrollbar_rect, agent_panel_toggle_rect, all_agent_panel_entries,
-        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_agent_card_areas,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
         normalized_workspace_scroll, relative_agent_navigation_entry, sidebar_rows,
         sidebar_section_divider_rect, workspace_agent_chevron_rect, workspace_drop_slots,

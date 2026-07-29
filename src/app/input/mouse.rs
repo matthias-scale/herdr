@@ -558,11 +558,8 @@ impl AppState {
                         return None;
                     }
 
-                    let cards = if self.view.workspace_card_areas.is_empty() {
-                        crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
-                    } else {
-                        self.view.workspace_card_areas.clone()
-                    };
+                    let (cards, _) =
+                        crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
                     if let Some(card) = cards.iter().find(|card| {
                         let chevron = crate::ui::workspace_agent_chevron_rect(self, card);
                         mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0

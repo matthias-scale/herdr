@@ -287,11 +287,7 @@ impl AppState {
             return None;
         }
 
-        let cards = if self.view.workspace_card_areas.is_empty() {
-            crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
-        } else {
-            self.view.workspace_card_areas.clone()
-        };
+        let (cards, _) = crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
 
         cards.iter().find_map(|card| {
             (row >= card.rect.y && row < card.rect.y + card.rect.height).then_some(card.ws_idx)
@@ -350,11 +346,7 @@ impl AppState {
             return None;
         }
 
-        let cards = if self.view.workspace_card_areas.is_empty() {
-            crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
-        } else {
-            self.view.workspace_card_areas.clone()
-        };
+        let (cards, _) = crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
         crate::ui::workspace_drop_slots(self, &cards, area)
             .into_iter()
             .enumerate()
@@ -469,11 +461,7 @@ impl AppState {
             return None;
         }
 
-        let cards = if self.view.agent_card_areas.is_empty() {
-            crate::ui::compute_agent_card_areas(self, self.view.sidebar_rect)
-        } else {
-            self.view.agent_card_areas.clone()
-        };
+        let (_, cards) = crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
         cards.iter().find_map(|card| {
             (row >= card.rect.y && row < card.rect.y + card.rect.height).then_some((
                 card.ws_idx,
@@ -693,7 +681,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.reconcile_sidebar_presentation();
         app.state.view.agent_card_areas =
-            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect);
+            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
         let target = app
             .state
             .view
@@ -775,6 +763,74 @@ mod tests {
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 1),
             Some((1, 0, second_pane))
+        );
+    }
+
+    #[test]
+    fn sidebar_hit_testing_recomputes_client_local_scrolled_row_geometry() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.state.sidebar_spaces.rows = vec![
+            vec![crate::config::SpaceSidebarToken::Workspace],
+            vec![crate::config::SpaceSidebarToken::StateText],
+        ];
+        app.state.sidebar_spaces.row_gap = 1;
+        app.state.workspace_scroll = 1;
+
+        let (cards, _) =
+            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
+        assert_eq!(cards[0].ws_idx, 1);
+        let target_row = cards[0].rect.y;
+        app.state.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: cards[0].rect,
+            indented: false,
+        }];
+
+        assert_eq!(app.state.workspace_at_row(target_row), Some(1));
+        assert_eq!(
+            app.state.workspace_drop_target_at_row(target_row),
+            Some(crate::app::state::WorkspaceDropTarget::Before(1))
+        );
+    }
+
+    #[test]
+    fn agent_hit_testing_ignores_geometry_cached_for_another_client() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        for (ws_idx, pane_id) in [(0, first_pane), (1, second_pane)] {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
+        let (_, cards) =
+            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
+        let first_row = cards[0].rect;
+        app.state.view.agent_card_areas = vec![crate::app::state::AgentCardArea {
+            ws_idx: 1,
+            tab_idx: 0,
+            pane_id: second_pane,
+            rect: first_row,
+        }];
+
+        assert_eq!(
+            app.state.agent_detail_target_at(first_row.y),
+            Some((0, 0, first_pane))
         );
     }
 
@@ -879,7 +935,7 @@ mod tests {
         app.state.reconcile_sidebar_presentation();
         assert!(app.state.toggle_workspace_agent_disclosure(1));
         app.state.view.agent_card_areas =
-            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect);
+            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
         let target = app
             .state
             .view
@@ -1019,7 +1075,7 @@ mod tests {
         app.state.reconcile_sidebar_presentation();
         app.state.workspace_scroll = 1;
         app.state.view.agent_card_areas =
-            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect);
+            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
         let target = app
             .state
             .view
