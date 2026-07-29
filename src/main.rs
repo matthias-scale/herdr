@@ -344,6 +344,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Full-width top status row on desktop layouts.
+[ui.status_bar]
+# enabled = true
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
@@ -889,5 +893,10 @@ mod tests {
         assert!(NESTED_HERDR_MESSAGES
             .iter()
             .all(|message| !message.starts_with("herdr:")));
+    }
+
+    #[test]
+    fn default_config_exposes_status_bar_enabled_setting() {
+        assert!(DEFAULT_CONFIG.contains("[ui.status_bar]\n# enabled = true"));
     }
 }
