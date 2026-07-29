@@ -10153,13 +10153,6 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.mode = crate::app::Mode::Terminal;
-        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = server.app.state.workspaces[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.detected_agent = Some(crate::detect::Agent::Claude);
-        terminal.state = crate::detect::AgentState::Working;
         crate::ui::compute_view(&mut server.app.state, Rect::new(0, 0, 120, 40));
         let card = server.app.state.view.workspace_card_areas[0].rect;
         server.clients.insert(1, test_app_client(None, 1));

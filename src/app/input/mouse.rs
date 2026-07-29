@@ -203,7 +203,6 @@ impl AppState {
                         mouse.row == card.rect.y
                             && mouse.column >= card.rect.x
                             && mouse.column < card.rect.x + card.rect.width
-                            && crate::ui::space_has_agent_rows(self, card.ws_idx)
                             && !crate::ui::space_agents_collapsed(self, card.ws_idx)
                     })
                     .map(|card| card.ws_idx)

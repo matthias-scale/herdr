@@ -369,7 +369,7 @@ impl AppState {
 mod tests {
     use std::fs;
 
-    use crossterm::event::{MouseButton, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
@@ -1900,6 +1900,8 @@ mod tests {
     async fn space_compose_click_targets_hovered_space_for_prompt_and_direct_paths() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.workspaces[1].test_add_tab(None);
+        app.state.workspaces[1].test_add_tab(None);
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         for ws_idx in 0..2 {
@@ -1940,7 +1942,16 @@ mod tests {
             app.state.requested_new_tab_workspace_id.as_deref(),
             Some(target_id.as_str())
         );
+        assert_eq!(app.state.name_input, "4");
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[1].tabs.len(), 4);
+        assert!(
+            app.state.workspaces[1].tabs[3].custom_name.is_none(),
+            "the target Space default name must remain auto-generated"
+        );
 
+        app.state.active = Some(0);
         app.state.mode = Mode::Terminal;
         app.state.creating_new_tab = false;
         app.state.requested_new_tab_workspace_id = None;

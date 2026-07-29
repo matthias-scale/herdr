@@ -407,7 +407,10 @@ pub(crate) fn sidebar_tree_entries(app: &AppState) -> Vec<SidebarTreeEntry> {
         if space_agents_collapsed(app, ws_idx) {
             if let Some((detail_idx, detail)) = details.iter().enumerate().find(|(_, detail)| {
                 detail.ws_idx == ws_idx
-                    && app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id)
+                    && app.workspaces.get(ws_idx).is_some_and(|workspace| {
+                        detail.tab_idx == workspace.active_tab_index()
+                            && workspace.focused_pane_id() == Some(detail.pane_id)
+                    })
             }) {
                 entries.push(SidebarTreeEntry::Agent {
                     detail_idx,
@@ -869,9 +872,9 @@ pub(crate) fn space_compose_rect(card: &crate::app::state::WorkspaceCardArea) ->
         return Rect::default();
     }
     Rect::new(
-        card.rect.x + card.rect.width.saturating_sub(2),
+        card.rect.x + card.rect.width.saturating_sub(3),
         card.rect.y,
-        1,
+        2,
         1,
     )
 }
@@ -1565,7 +1568,7 @@ fn render_workspace_list(
             let compose_visible =
                 row_index == 0 && !agents_collapsed && app.hovered_space_compose_ws == Some(i);
             let trailing_width = u16::from(row_index == 0 && parent_group.is_some()) * 2
-                + u16::from(compose_visible);
+                + u16::from(compose_visible) * 2;
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
@@ -1595,7 +1598,7 @@ fn render_workspace_list(
         }
         if app.hovered_space_compose_ws == Some(i) && !agents_collapsed {
             frame.render_widget(
-                Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
+                Paragraph::new(Span::styled("□✎", Style::default().fg(p.accent))),
                 space_compose_rect(card),
             );
         }
@@ -3046,30 +3049,45 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap();
         let compose = space_compose_rect(&second);
         assert_eq!(
-            shown.backend().buffer()[(compose.x, compose.y)].symbol(),
-            "✎"
+            row_text(shown.backend().buffer(), compose.y, 25)
+                .chars()
+                .skip(compose.x as usize)
+                .take(compose.width as usize)
+                .collect::<String>(),
+            "□✎"
         );
 
         let collapse_key = space_agent_collapse_key(&app, 1).unwrap();
         app.collapsed_space_keys.insert(collapse_key);
         let collapsed = render(&app);
         assert!(!row_text(collapsed.backend().buffer(), second.rect.y, 25).contains('✎'));
+
+        app.collapsed_space_keys.clear();
+        for terminal in app.terminals.values_mut() {
+            terminal.detected_agent = None;
+        }
+        let empty = render(&app);
+        assert!(
+            row_text(empty.backend().buffer(), second.rect.y, 25).contains('✎'),
+            "an expanded empty Space must still expose compose on hover"
+        );
     }
 
     // AC4
     #[test]
     fn space_collapse_keeps_only_selected_child_and_expand_restores_focus() {
         let mut app = AppState::test_new();
+        let other_workspace = Workspace::test_new("other");
         let mut workspace = Workspace::test_new("one");
         let first_pane = workspace.tabs[0].root_pane;
         let second_tab = workspace.test_add_tab(Some("second"));
         let second_pane = workspace.tabs[second_tab].root_pane;
         workspace.switch_tab(second_tab);
-        app.workspaces = vec![workspace];
+        app.workspaces = vec![other_workspace, workspace];
         app.ensure_test_terminals();
         app.active = Some(0);
         for pane_id in [first_pane, second_pane] {
-            let terminal_id = app.workspaces[0]
+            let terminal_id = app.workspaces[1]
                 .pane_state(pane_id)
                 .unwrap()
                 .attached_terminal_id
@@ -3078,18 +3096,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal.detected_agent = Some(Agent::Claude);
             terminal.state = AgentState::Working;
         }
-        let key = space_agent_collapse_key(&app, 0).unwrap();
+        let key = space_agent_collapse_key(&app, 1).unwrap();
         app.collapsed_space_keys.insert(key.clone());
         let collapsed = sidebar_tree_entries(&app);
-        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed.len(), 3);
         assert!(matches!(
-            collapsed[1],
+            collapsed[2],
             SidebarTreeEntry::Agent { pane_id, .. } if pane_id == second_pane
         ));
         app.collapsed_space_keys.remove(&key);
         let expanded = sidebar_tree_entries(&app);
-        assert_eq!(expanded.len(), 3);
-        assert!(app.is_active_pane(0, second_tab, second_pane));
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(app.workspaces[1].active_tab_index(), second_tab);
+        assert_eq!(app.workspaces[1].focused_pane_id(), Some(second_pane));
     }
 
     // AC5

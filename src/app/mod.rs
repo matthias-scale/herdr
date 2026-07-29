@@ -5988,13 +5988,6 @@ last_pane = "prefix+tab"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.mode = Mode::Terminal;
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.detected_agent = Some(Agent::Claude);
-        terminal.state = AgentState::Working;
         app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 12);
         app.state.view.workspace_card_areas =
             crate::ui::compute_workspace_card_areas(&app.state, app.state.view.sidebar_rect);

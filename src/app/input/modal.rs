@@ -410,10 +410,15 @@ fn workspace_create_label(input: &str, suggested_name: &str) -> Option<String> {
     (!name.is_empty() && name != suggested_name).then(|| name.to_string())
 }
 
-fn next_new_tab_default_name(state: &AppState) -> String {
-    state
-        .active
-        .and_then(|i| state.workspaces.get(i))
+fn next_new_tab_default_name_for_workspace(state: &AppState, workspace_id: Option<&str>) -> String {
+    workspace_id
+        .and_then(|target| {
+            state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == target)
+        })
+        .or_else(|| state.active.and_then(|i| state.workspaces.get(i)))
         .map(|ws| (ws.tabs.len() + 1).to_string())
         .unwrap_or_else(|| "1".to_string())
 }
@@ -447,7 +452,7 @@ fn open_new_tab_dialog_with_target(state: &mut AppState, workspace_id: Option<St
                 .find(|workspace| &workspace.id == target)
         })
         .map(|workspace| (workspace.tabs.len() + 1).to_string())
-        .unwrap_or_else(|| next_new_tab_default_name(state));
+        .unwrap_or_else(|| next_new_tab_default_name_for_workspace(state, None));
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
 }
@@ -529,7 +534,10 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 }
                 Mode::RenameTab if state.creating_new_tab => {
                     state.request_new_tab = true;
-                    let default_name = next_new_tab_default_name(state);
+                    let default_name = next_new_tab_default_name_for_workspace(
+                        state,
+                        state.requested_new_tab_workspace_id.as_deref(),
+                    );
                     state.requested_new_tab_name =
                         if new_name.is_empty() || new_name == default_name {
                             None
@@ -1042,7 +1050,9 @@ impl App {
                 }
             }
             Mode::RenameTab if self.state.creating_new_tab => {
-                let default_name = next_new_tab_default_name(&self.state);
+                let workspace_id = self.state.requested_new_tab_workspace_id.take();
+                let default_name =
+                    next_new_tab_default_name_for_workspace(&self.state, workspace_id.as_deref());
                 let label = if new_name.is_empty() || new_name == default_name {
                     None
                 } else {
@@ -1051,7 +1061,7 @@ impl App {
                 self.runtime_tab_create(
                     "tui.tab.create_named",
                     crate::api::schema::TabCreateParams {
-                        workspace_id: None,
+                        workspace_id,
                         cwd: None,
                         focus: true,
                         label,
