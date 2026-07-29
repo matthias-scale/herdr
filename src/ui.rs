@@ -78,12 +78,13 @@ pub(crate) use self::{
     sidebar::{
         agent_panel_entries, all_agent_panel_entries, collapsed_sidebar_sections,
         collapsed_sidebar_toggle_rect, compute_workspace_card_areas, compute_workspace_list_areas,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, space_agent_chevron_rect,
-        space_agent_collapse_key, space_has_agent_rows, workspace_drop_slots,
-        workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
-        workspace_list_rect, workspace_list_scroll_for_agent, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
-        WorkspaceListEntry,
+        expanded_sidebar_toggle_rect, next_visible_agent_age_deadline, normalized_workspace_scroll,
+        sidebar_header_new_space_rect, sidebar_header_overflow_rect, space_agent_chevron_rect,
+        space_agent_collapse_key, space_agents_collapsed, space_compose_rect, space_has_agent_rows,
+        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_for_agent,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, WorkspaceListEntry,
     },
 };
 

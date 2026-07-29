@@ -1,6 +1,16 @@
 use super::App;
 
 impl App {
+    pub(crate) fn open_active_config(&mut self) {
+        let path = crate::config::config_path();
+        if let Err(err) = crate::platform::open_url(&path.to_string_lossy()) {
+            tracing::warn!(err = %err, path = %path.display(), "failed to open config");
+            self.state.config_diagnostic = Some(format!("failed to open config: {err}"));
+            self.config_diagnostic_deadline =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        }
+    }
+
     pub(super) fn update_config_file<F>(&mut self, error_context: &str, update: F) -> bool
     where
         F: FnOnce(&str) -> String,

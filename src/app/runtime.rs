@@ -169,15 +169,16 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                let changes_view = !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
-                    || self.state.mode.mouse_motion_changes_view();
+                let previous_hover = self.state.hovered_space_compose_ws;
                 if self.state.popup_pane.is_some() || self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
                     self.state
                         .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                 }
-                changes_view
+                !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
+                    || self.state.mode.mouse_motion_changes_view()
+                    || previous_hover != self.state.hovered_space_compose_ws
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
                 self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
@@ -225,6 +226,16 @@ impl App {
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = false;
         let mut resized = false;
+
+        if self
+            .last_render_at
+            .and_then(|rendered_at| {
+                crate::ui::next_visible_agent_age_deadline(&self.state, rendered_at)
+            })
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed = true;
+        }
 
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
@@ -527,6 +538,7 @@ impl App {
         } else {
             None
         };
+        let agent_age_deadline = crate::ui::next_visible_agent_age_deadline(&self.state, now);
 
         [
             include_resize_poll.then_some(self.next_resize_poll),
@@ -545,6 +557,7 @@ impl App {
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
+            agent_age_deadline,
             render_deadline,
         ]
         .into_iter()

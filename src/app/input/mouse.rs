@@ -18,7 +18,8 @@ use super::WheelRouting;
 use super::{
     modal::{
         apply_global_menu_action, confirm_close_cancel, global_menu_actions, leave_modal,
-        modal_action_from_buttons, open_global_menu, open_new_tab_dialog, ModalAction,
+        modal_action_from_buttons, open_global_menu, open_new_tab_dialog,
+        open_new_tab_dialog_for_workspace, ModalAction,
     },
     settings::SettingsAction,
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
@@ -188,6 +189,29 @@ impl AppState {
             && mouse.column < sidebar.x + sidebar.width
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
+
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            let hovered = if in_sidebar && !self.sidebar_collapsed {
+                let cards = if self.view.workspace_card_areas.is_empty() {
+                    crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
+                } else {
+                    self.view.workspace_card_areas.clone()
+                };
+                cards
+                    .iter()
+                    .find(|card| {
+                        mouse.row == card.rect.y
+                            && mouse.column >= card.rect.x
+                            && mouse.column < card.rect.x + card.rect.width
+                            && crate::ui::space_has_agent_rows(self, card.ws_idx)
+                            && !crate::ui::space_agents_collapsed(self, card.ws_idx)
+                    })
+                    .map(|card| card.ws_idx)
+            } else {
+                None
+            };
+            self.hovered_space_compose_ws = hovered;
+        }
 
         if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
             return None;
@@ -506,6 +530,7 @@ impl AppState {
                 if in_sidebar {
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
                         self.sidebar_collapsed = !self.sidebar_collapsed;
+                        self.hovered_space_compose_ws = None;
                         return None;
                     }
 
@@ -554,6 +579,24 @@ impl AppState {
                     } else {
                         self.view.workspace_card_areas.clone()
                     };
+                    if let Some(card) = cards.iter().find(|card| {
+                        self.hovered_space_compose_ws == Some(card.ws_idx)
+                            && !crate::ui::space_agents_collapsed(self, card.ws_idx)
+                            && crate::ui::space_compose_rect(card)
+                                .contains((mouse.column, mouse.row).into())
+                    }) {
+                        if self.prompt_new_tab_name {
+                            open_new_tab_dialog_for_workspace(self, card.ws_idx);
+                        } else {
+                            self.requested_new_tab_workspace_id = self
+                                .workspaces
+                                .get(card.ws_idx)
+                                .map(|workspace| workspace.id.clone());
+                            self.request_new_tab = true;
+                            self.mode = Mode::Terminal;
+                        }
+                        return None;
+                    }
                     if let Some(card) = cards.iter().find(|card| {
                         let chevron = crate::ui::workspace_group_chevron_rect(card);
                         mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0

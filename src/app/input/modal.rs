@@ -74,24 +74,19 @@ pub(super) fn modal_action_from_buttons<A: Copy>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlobalMenuAction {
-    Detach,
-    WhatsNew,
     Keybinds,
     ReloadConfig,
+    Config,
     Settings,
 }
 
-pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
-    let mut actions = vec![
+pub(super) fn global_menu_actions(_state: &AppState) -> Vec<GlobalMenuAction> {
+    vec![
         GlobalMenuAction::Settings,
         GlobalMenuAction::Keybinds,
         GlobalMenuAction::ReloadConfig,
-    ];
-    if state.update_available.is_some() || state.latest_release_notes_available {
-        actions.push(GlobalMenuAction::WhatsNew);
-    }
-    actions.push(GlobalMenuAction::Detach);
-    actions
+        GlobalMenuAction::Config,
+    ]
 }
 
 pub(super) fn open_global_menu(state: &mut AppState) {
@@ -106,20 +101,6 @@ pub(super) fn open_keybind_help(state: &mut AppState) {
     state.mode = Mode::KeybindHelp;
 }
 
-fn open_update_release_notes(state: &mut AppState) {
-    let Some(notes) = crate::release_notes::load_latest() else {
-        return;
-    };
-
-    state.release_notes = Some(crate::app::state::ReleaseNotesState {
-        version: notes.version,
-        body: notes.body,
-        scroll: 0,
-        preview: notes.preview,
-    });
-    state.mode = Mode::ReleaseNotes;
-}
-
 pub(super) fn request_detach(state: &mut AppState) {
     if state.detach_exits {
         state.should_quit = true;
@@ -130,14 +111,13 @@ pub(super) fn request_detach(state: &mut AppState) {
 
 pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
     match action {
-        GlobalMenuAction::Detach => {
-            leave_modal(state);
-            request_detach(state);
-        }
-        GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
         GlobalMenuAction::ReloadConfig => {
             state.request_reload_config = true;
+            leave_modal(state);
+        }
+        GlobalMenuAction::Config => {
+            state.request_open_config = true;
             leave_modal(state);
         }
         GlobalMenuAction::Settings => super::settings::open_settings(state),
@@ -439,11 +419,35 @@ fn next_new_tab_default_name(state: &AppState) -> String {
 }
 
 pub(super) fn open_new_tab_dialog(state: &mut AppState) {
+    state.requested_new_tab_workspace_id = None;
+    open_new_tab_dialog_with_target(state, None);
+}
+
+pub(super) fn open_new_tab_dialog_for_workspace(state: &mut AppState, ws_idx: usize) {
+    let workspace_id = state
+        .workspaces
+        .get(ws_idx)
+        .map(|workspace| workspace.id.clone());
+    open_new_tab_dialog_with_target(state, workspace_id);
+}
+
+fn open_new_tab_dialog_with_target(state: &mut AppState, workspace_id: Option<String>) {
     state.creating_new_tab = true;
+    state.requested_new_tab_workspace_id = workspace_id;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
-    state.name_input = next_new_tab_default_name(state);
+    state.name_input = state
+        .requested_new_tab_workspace_id
+        .as_ref()
+        .and_then(|target| {
+            state
+                .workspaces
+                .iter()
+                .find(|workspace| &workspace.id == target)
+        })
+        .map(|workspace| (workspace.tabs.len() + 1).to_string())
+        .unwrap_or_else(|| next_new_tab_default_name(state));
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
 }
@@ -593,6 +597,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
         }
         ModalAction::Cancel => {
             state.creating_new_tab = false;
+            state.requested_new_tab_workspace_id = None;
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
@@ -1365,6 +1370,7 @@ impl App {
 
 fn cancel_rename_modal(state: &mut AppState) {
     state.creating_new_tab = false;
+    state.requested_new_tab_workspace_id = None;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
@@ -1396,22 +1402,6 @@ mod tests {
     use super::super::{capture_snapshot, state_with_workspaces};
     use super::*;
     use crate::workspace::Workspace;
-
-    fn config_env_lock() -> &'static std::sync::Mutex<()> {
-        crate::config::test_config_env_lock()
-    }
-
-    fn temp_config_path(name: &str) -> std::path::PathBuf {
-        let unique = format!(
-            "herdr-modal-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        std::env::temp_dir().join(unique).join("config.toml")
-    }
 
     fn app_with_test_workspaces(names: &[&str]) -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1516,34 +1506,6 @@ mod tests {
 
         assert!(state.should_quit);
         assert!(!state.detach_requested);
-    }
-
-    #[test]
-    fn global_menu_whats_new_opens_saved_release_notes() {
-        let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("whats-new-saved-release-notes");
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
-        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- Menu")
-            .unwrap();
-
-        let mut state = state_with_workspaces(&["test"]);
-        state.latest_release_notes_available = true;
-
-        assert!(global_menu_actions(&state).contains(&GlobalMenuAction::WhatsNew));
-
-        apply_global_menu_action(&mut state, GlobalMenuAction::WhatsNew);
-
-        assert_eq!(state.mode, Mode::ReleaseNotes);
-        assert_eq!(
-            state
-                .release_notes
-                .as_ref()
-                .map(|notes| notes.body.as_str()),
-            Some("### Changed\n- Menu")
-        );
-
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

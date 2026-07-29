@@ -2980,6 +2980,7 @@ impl AppState {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
+                terminal.last_agent_state_change_at = Some(now);
             }
         }
         let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
@@ -6012,5 +6013,41 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
+    }
+
+    // AC7
+    #[test]
+    fn effective_agent_transition_and_selection_update_seen_sidebar_state() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        let pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[1].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        let observed_at = std::time::Instant::now();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at,
+        });
+
+        let recorded_transition = state.terminals[&terminal_id]
+            .last_agent_state_change_at
+            .expect("effective state transition records an age origin");
+        assert!(recorded_transition >= observed_at);
+        assert!(!state.workspaces[1].panes[&pane_id].seen);
+
+        state.switch_workspace(1);
+        assert!(state.workspaces[1].panes[&pane_id].seen);
+        assert_eq!(
+            state.terminals[&terminal_id].last_agent_state_change_at,
+            Some(recorded_transition),
+            "selection changes seen state without inventing an agent transition"
+        );
     }
 }

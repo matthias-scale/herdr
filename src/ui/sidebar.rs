@@ -17,7 +17,7 @@ use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
-const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
+const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
@@ -34,6 +34,7 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    pub last_agent_state_change_at: Option<std::time::Instant>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
 }
@@ -104,6 +105,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        last_agent_state_change_at: detail.last_agent_state_change_at,
                         state_labels: detail.state_labels,
                         tokens: detail.tokens,
                     }
@@ -403,6 +405,17 @@ pub(crate) fn sidebar_tree_entries(app: &AppState) -> Vec<SidebarTreeEntry> {
         let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace_entry;
         entries.push(SidebarTreeEntry::Workspace { ws_idx, indented });
         if space_agents_collapsed(app, ws_idx) {
+            if let Some((detail_idx, detail)) = details.iter().enumerate().find(|(_, detail)| {
+                detail.ws_idx == ws_idx
+                    && app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id)
+            }) {
+                entries.push(SidebarTreeEntry::Agent {
+                    detail_idx,
+                    ws_idx,
+                    tab_idx: detail.tab_idx,
+                    pane_id: detail.pane_id,
+                });
+            }
             continue;
         }
         entries.extend(
@@ -431,8 +444,7 @@ pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect 
     }
 
     let body_y = area.y.saturating_add(WORKSPACE_SECTION_HEADER_ROWS);
-    let footer_y = area.y + area.height.saturating_sub(1);
-    let body_height = footer_y.saturating_sub(body_y);
+    let body_height = area.y.saturating_add(area.height).saturating_sub(body_y);
     let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
     Rect::new(area.x, body_y, body_width, body_height)
 }
@@ -551,13 +563,43 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
 }
 
 fn resolved_tree_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
-    let rows = resolved_agent_rows(app, entry)
+    let status_label = tree_agent_status_label(entry.state, entry.seen);
+    let mut rows = resolved_agent_rows(app, entry)
         .into_iter()
         .filter_map(|row| {
-            let row = row
+            let mut row = row
                 .into_iter()
-                .filter(|token| !matches!(token.kind, ResolvedTokenKind::Workspace(_)))
+                .filter_map(|mut token| match &mut token.kind {
+                    ResolvedTokenKind::Workspace(_) => None,
+                    ResolvedTokenKind::StateText(_) if status_label.is_none() => None,
+                    ResolvedTokenKind::StateText(text) => {
+                        *text = status_label.unwrap_or_default().to_string();
+                        Some(token)
+                    }
+                    _ => Some(token),
+                })
                 .collect::<Vec<_>>();
+            if let Some(label) = status_label {
+                let has_icon = row
+                    .iter()
+                    .any(|token| matches!(token.kind, ResolvedTokenKind::StateIcon));
+                let has_text = row
+                    .iter()
+                    .any(|token| matches!(token.kind, ResolvedTokenKind::StateText(_)));
+                if has_icon && !has_text {
+                    let icon_idx = row
+                        .iter()
+                        .position(|token| matches!(token.kind, ResolvedTokenKind::StateIcon))
+                        .unwrap_or(0);
+                    row.insert(
+                        icon_idx + 1,
+                        ResolvedToken::new(
+                            ResolvedTokenKind::StateText(label.to_string()),
+                            crate::config::SidebarTokenStyle::default(),
+                        ),
+                    );
+                }
+            }
             (!row.is_empty()).then_some(row)
         })
         .collect::<Vec<_>>();
@@ -568,13 +610,89 @@ fn resolved_tree_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<
             .or(entry.agent_kind_label.as_ref())
             .cloned()
             .unwrap_or_else(|| "agent".to_string());
-        vec![vec![ResolvedToken::new(
+        rows.push(vec![ResolvedToken::new(
             ResolvedTokenKind::Agent(label),
             crate::config::SidebarTokenStyle::default(),
-        )]]
-    } else {
-        rows
+        )]);
     }
+    rows
+}
+
+fn tree_agent_status_label(state: AgentState, seen: bool) -> Option<&'static str> {
+    match (state, seen) {
+        (AgentState::Working, _) => Some("Working"),
+        (AgentState::Idle, false) => Some("Completed"),
+        (AgentState::Blocked, _) => Some("Blocked"),
+        (AgentState::Idle, true) | (AgentState::Unknown, _) => None,
+    }
+}
+
+fn tree_agent_state_icon(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
+    match (state, seen) {
+        (AgentState::Working, _) | (AgentState::Idle, false) => ("●", Style::default().fg(p.green)),
+        (AgentState::Blocked, _) => ("●", Style::default().fg(p.red)),
+        (AgentState::Idle, true) | (AgentState::Unknown, _) => ("", Style::default()),
+    }
+}
+
+fn tree_agent_status_color(state: AgentState, seen: bool, p: &Palette) -> ratatui::style::Color {
+    match (state, seen) {
+        (AgentState::Working, _) | (AgentState::Idle, false) => p.green,
+        (AgentState::Blocked, _) => p.red,
+        (AgentState::Idle, true) | (AgentState::Unknown, _) => p.overlay0,
+    }
+}
+
+pub(crate) fn relative_agent_age(
+    changed_at: std::time::Instant,
+    now: std::time::Instant,
+) -> (String, std::time::Instant) {
+    let elapsed = now.saturating_duration_since(changed_at).as_secs();
+    let (text, next_seconds) = if elapsed < 60 {
+        ("now".to_string(), 60)
+    } else if elapsed < 60 * 60 {
+        let minutes = elapsed / 60;
+        (format!("{minutes}m ago"), (minutes + 1) * 60)
+    } else if elapsed < 24 * 60 * 60 {
+        let hours = elapsed / (60 * 60);
+        (format!("{hours}h ago"), (hours + 1) * 60 * 60)
+    } else {
+        let days = elapsed / (24 * 60 * 60);
+        (format!("{days}d ago"), (days + 1) * 24 * 60 * 60)
+    };
+    (
+        text,
+        changed_at + std::time::Duration::from_secs(next_seconds),
+    )
+}
+
+pub(crate) fn next_visible_agent_age_deadline(
+    app: &AppState,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    if app.sidebar_collapsed
+        || app.view.layout == crate::app::state::ViewLayout::Mobile
+        || app.view.sidebar_rect.width == 0
+    {
+        return None;
+    }
+    let (_, visible_agent_areas) = compute_workspace_list_areas(app, app.view.sidebar_rect);
+    agent_panel_entries(app)
+        .into_iter()
+        .filter(|entry| entry.state != AgentState::Unknown)
+        .filter(|entry| {
+            visible_agent_areas.iter().any(|area| {
+                area.ws_idx == entry.ws_idx
+                    && area.tab_idx == entry.tab_idx
+                    && area.pane_id == entry.pane_id
+            })
+        })
+        .filter_map(|entry| {
+            entry
+                .last_agent_state_change_at
+                .map(|changed_at| relative_agent_age(changed_at, now).1)
+        })
+        .min()
 }
 
 fn sidebar_tree_entry_height(
@@ -744,6 +862,32 @@ pub(crate) fn space_agent_chevron_rect(card: &crate::app::state::WorkspaceCardAr
         1,
         1,
     )
+}
+
+pub(crate) fn space_compose_rect(card: &crate::app::state::WorkspaceCardArea) -> Rect {
+    if card.rect.width == 0 || card.rect.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        card.rect.x + card.rect.width.saturating_sub(2),
+        card.rect.y,
+        1,
+        1,
+    )
+}
+
+pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
+    if area.width < 6 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(area.x + area.width.saturating_sub(5), area.y, 2, 1)
+}
+
+pub(crate) fn sidebar_header_overflow_rect(area: Rect) -> Rect {
+    if area.width < 3 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(area.x + area.width.saturating_sub(2), area.y, 1, 1)
 }
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
@@ -1014,7 +1158,39 @@ pub(super) fn render_sidebar(
 
     let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_sidebar_toggle(app, frame, area, false, p);
+    render_sidebar_header(frame, area, p);
+}
+
+fn render_sidebar_header(frame: &mut Frame, area: Rect, p: &Palette) {
+    if area.width <= 1 || area.height == 0 {
+        return;
+    }
+    let toggle = expanded_sidebar_toggle_rect(area);
+    let new_space = sidebar_header_new_space_rect(area);
+    let overflow = sidebar_header_overflow_rect(area);
+    frame.render_widget(
+        Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
+        toggle,
+    );
+    let title_x = toggle.x.saturating_add(toggle.width).saturating_add(1);
+    let title_right = new_space.x.saturating_sub(1);
+    if title_right > title_x {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "Spaces",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(title_x, area.y, title_right - title_x, 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled("＋", Style::default().fg(p.accent))),
+        new_space,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("…", Style::default().fg(p.overlay0))),
+        overflow,
+    );
 }
 
 fn resolved_token_spans(
@@ -1236,16 +1412,7 @@ fn render_workspace_list(
         _ => None,
     };
 
-    let list_bottom = area.y + area.height.saturating_sub(1);
-    if area.height > 0 {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                " spaces",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            )])),
-            Rect::new(area.x, area.y, area.width, 1),
-        );
-    }
+    let list_bottom = area.y + area.height;
 
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
@@ -1395,11 +1562,10 @@ fn render_workspace_list(
                 spans.push(Span::raw("  "));
                 2
             };
-            let trailing_width = if row_index == 0 && parent_group.is_some() {
-                2
-            } else {
-                0
-            };
+            let compose_visible =
+                row_index == 0 && !agents_collapsed && app.hovered_space_compose_ws == Some(i);
+            let trailing_width = u16::from(row_index == 0 && parent_group.is_some()) * 2
+                + u16::from(compose_visible);
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
@@ -1427,6 +1593,12 @@ fn render_workspace_list(
                 workspace_group_chevron_rect(card),
             );
         }
+        if app.hovered_space_compose_ws == Some(i) && !agents_collapsed {
+            frame.render_widget(
+                Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
+                space_compose_rect(card),
+            );
+        }
     }
 
     for area in agent_areas {
@@ -1452,7 +1624,7 @@ fn render_workspace_list(
                 }
             }
         }
-        let label_color = state_label_color(detail.state, detail.seen, p);
+        let label_color = tree_agent_status_color(detail.state, detail.seen, p);
         let name_style = if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
@@ -1466,7 +1638,7 @@ fn render_workspace_list(
                 Modifier::default()
             });
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_dot(detail.state, detail.seen, p);
+        let state_icon = tree_agent_state_icon(detail.state, detail.seen, p);
         let parent_indented = cards
             .iter()
             .find(|card| card.ws_idx == detail.ws_idx)
@@ -1477,6 +1649,15 @@ fn render_workspace_list(
                 break;
             }
             let mut spans = vec![Span::raw(" ".repeat(prefix_width))];
+            let age = (detail.state != AgentState::Unknown)
+                .then_some(detail.last_agent_state_change_at)
+                .flatten()
+                .map(|changed_at| relative_agent_age(changed_at, std::time::Instant::now()).0);
+            let age_width = age
+                .as_deref()
+                .map(display_width)
+                .unwrap_or(0)
+                .saturating_add(usize::from(age.is_some()));
             spans.extend(resolved_token_spans(
                 resolved,
                 state_icon,
@@ -1485,7 +1666,11 @@ fn render_workspace_list(
                 agent_style,
                 agent_style,
                 p,
-                area.rect.width.saturating_sub(prefix_width as u16) as usize,
+                area.rect
+                    .width
+                    .saturating_sub(prefix_width as u16)
+                    .saturating_sub(age_width.min(u16::MAX as usize) as u16)
+                    as usize,
             ));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(row_style),
@@ -1496,6 +1681,22 @@ fn render_workspace_list(
                     1,
                 ),
             );
+            if let Some(age) = age {
+                let width = display_width(&age).min(area.rect.width as usize) as u16;
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        age,
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    ))
+                    .alignment(Alignment::Right),
+                    Rect::new(
+                        area.rect.x + area.rect.width.saturating_sub(width),
+                        area.rect.y + row_index as u16,
+                        width,
+                        1,
+                    ),
+                );
+            }
         }
     }
 
@@ -1513,31 +1714,6 @@ fn render_workspace_list(
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
-
-    if app.mouse_capture && list_bottom > area.y {
-        let new_rect = app.sidebar_new_button_rect();
-        frame.render_widget(
-            Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
-            new_rect,
-        );
-
-        let menu_rect = app.global_launcher_rect();
-        let menu_line = if app.global_menu_attention_badge_visible() {
-            Line::from(vec![
-                Span::styled(
-                    "● ",
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("menu", Style::default().fg(p.overlay0)),
-            ])
-        } else {
-            Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
-        };
-        frame.render_widget(
-            Paragraph::new(menu_line).alignment(Alignment::Right),
-            menu_rect,
-        );
-    }
 }
 
 pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -1554,12 +1730,7 @@ pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
     if area.width <= 1 || area.height == 0 {
         return Rect::default();
     }
-    Rect::new(
-        area.x + area.width.saturating_sub(2),
-        area.y + area.height.saturating_sub(1),
-        1,
-        1,
-    )
+    Rect::new(area.x, area.y, 1, 1)
 }
 
 fn render_sidebar_toggle(
@@ -1882,7 +2053,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let first = row_text(buffer, target.rect.y, 17);
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
-        assert!(first.contains('·'), "rendered row: {first:?}");
+        assert!(
+            !first.contains("very-long-workspace-name"),
+            "tree child rows must not repeat their Space label: {first:?}"
+        );
     }
 
     #[test]
@@ -1979,8 +2153,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 26, 20);
         let toggle = expanded_sidebar_toggle_rect(area);
 
-        assert_eq!(toggle.x, area.x + area.width - 2);
-        assert_eq!(toggle.y, area.y + area.height - 1);
+        assert_eq!(toggle.x, area.x);
+        assert_eq!(toggle.y, area.y);
     }
 
     #[test]
@@ -2401,7 +2575,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         collapse_all_space_agents(&mut app);
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         app.sidebar_spaces.row_gap = 0;
-        let area = Rect::new(0, 0, 30, 5);
+        let area = Rect::new(0, 0, 30, 3);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         assert_eq!(app.view.workspace_card_areas.len(), 2);
         let list_area = workspace_list_rect(area, app.sidebar_section_split);
@@ -2471,8 +2645,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spacious[3].rect.y,
             spacious[2].rect.y + spacious[2].rect.height + 2
         );
-        let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 7));
-        assert_eq!(spacious_metrics.viewport_rows, 2);
+        let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
+        assert_eq!(spacious_metrics.viewport_rows, 3);
         assert_eq!(spacious_metrics.max_offset_from_bottom, 3);
 
         app.sidebar_spaces.row_gap = 0;
@@ -2480,7 +2654,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(packed
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
-        let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 7));
+        let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
         assert_eq!(packed_metrics.viewport_rows, 4);
         assert_eq!(packed_metrics.max_offset_from_bottom, 0);
     }
@@ -2591,12 +2765,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.active = None;
         app.mode = Mode::Terminal;
 
-        let ws_area = Rect::new(0, 0, 30, 6);
+        let ws_area = Rect::new(0, 0, 30, 5);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
-        assert_eq!(metrics.viewport_rows, 1);
-        assert_eq!(metrics.max_offset_from_bottom, 1);
-        assert_eq!(metrics.offset_from_bottom, 1);
+        assert_eq!(metrics.viewport_rows, 2);
+        assert_eq!(metrics.max_offset_from_bottom, 0);
+        assert_eq!(metrics.offset_from_bottom, 0);
     }
 
     #[test]
@@ -2805,5 +2979,190 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
             ]
         );
+    }
+
+    // AC1
+    #[test]
+    fn expanded_sidebar_header_replaces_footer_and_preserves_theme_min_width() {
+        for width in [26, 18] {
+            let app = AppState::test_new();
+            let area = Rect::new(0, 0, width, 8);
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let header = row_text(terminal.backend().buffer(), 0, width - 1);
+            assert!(header.starts_with('«'));
+            assert!(header.contains("Spaces"));
+            assert!(header.contains('＋'));
+            assert!(header.contains('…'));
+            assert!(!row_text(terminal.backend().buffer(), 7, width - 1).contains("menu"));
+            let new_space = sidebar_header_new_space_rect(area);
+            assert_eq!(
+                terminal.backend().buffer()[(new_space.x, new_space.y)]
+                    .style()
+                    .fg,
+                Some(app.palette.accent)
+            );
+        }
+    }
+
+    // AC3
+    #[test]
+    fn expanded_space_compose_is_hover_only_and_targets_its_space() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        for ws_idx in 0..2 {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = AgentState::Working;
+        }
+        let area = Rect::new(0, 0, 26, 12);
+        app.view.sidebar_rect = area;
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let render = |app: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(26, 12)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            terminal
+        };
+        let hidden = render(&app);
+        assert!((0..12).all(|row| !row_text(hidden.backend().buffer(), row, 25).contains('✎')));
+
+        app.hovered_space_compose_ws = Some(1);
+        let shown = render(&app);
+        let second = app
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == 1)
+            .cloned()
+            .unwrap();
+        let compose = space_compose_rect(&second);
+        assert_eq!(
+            shown.backend().buffer()[(compose.x, compose.y)].symbol(),
+            "✎"
+        );
+
+        let collapse_key = space_agent_collapse_key(&app, 1).unwrap();
+        app.collapsed_space_keys.insert(collapse_key);
+        let collapsed = render(&app);
+        assert!(!row_text(collapsed.backend().buffer(), second.rect.y, 25).contains('✎'));
+    }
+
+    // AC4
+    #[test]
+    fn space_collapse_keeps_only_selected_child_and_expand_restores_focus() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_tab = workspace.test_add_tab(Some("second"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        workspace.switch_tab(second_tab);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        for pane_id in [first_pane, second_pane] {
+            let terminal_id = app.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = AgentState::Working;
+        }
+        let key = space_agent_collapse_key(&app, 0).unwrap();
+        app.collapsed_space_keys.insert(key.clone());
+        let collapsed = sidebar_tree_entries(&app);
+        assert_eq!(collapsed.len(), 2);
+        assert!(matches!(
+            collapsed[1],
+            SidebarTreeEntry::Agent { pane_id, .. } if pane_id == second_pane
+        ));
+        app.collapsed_space_keys.remove(&key);
+        let expanded = sidebar_tree_entries(&app);
+        assert_eq!(expanded.len(), 3);
+        assert!(app.is_active_pane(0, second_tab, second_pane));
+    }
+
+    // AC5
+    #[test]
+    fn tree_agent_rows_render_unseen_completion_and_clear_it_when_seen() {
+        let app = AppState::test_new();
+        let mut entry = AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(1),
+            primary_label: "space".into(),
+            primary_tab_label: None,
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_label: Some("claude".into()),
+            agent_kind_label: Some("claude".into()),
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            seen: false,
+            last_agent_state_change_seq: Some(1),
+            last_agent_state_change_at: Some(std::time::Instant::now()),
+            state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
+        };
+        let text = |entry: &AgentPanelEntry| {
+            resolved_tree_agent_rows(&app, entry)
+                .into_iter()
+                .flatten()
+                .map(|token| match token.kind {
+                    ResolvedTokenKind::StateIcon => {
+                        tree_agent_state_icon(entry.state, entry.seen, &app.palette)
+                            .0
+                            .to_string()
+                    }
+                    ResolvedTokenKind::StateText(text) | ResolvedTokenKind::Agent(text) => text,
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert!(text(&entry).contains("● Completed"));
+        entry.seen = true;
+        assert!(!text(&entry).contains("Completed"));
+        assert!(!text(&entry).contains('●'));
+        entry.state = AgentState::Working;
+        assert!(text(&entry).contains("● Working"));
+        entry.state = AgentState::Blocked;
+        assert!(text(&entry).contains("● Blocked"));
+        entry.state = AgentState::Unknown;
+        assert!(!text(&entry).contains('●'));
+    }
+
+    // AC6
+    #[test]
+    fn relative_agent_age_formats_and_schedules_exact_boundaries() {
+        let now = std::time::Instant::now();
+        for (elapsed, text, next) in [
+            (0, "now", 60),
+            (60, "1m ago", 120),
+            (60 * 60, "1h ago", 2 * 60 * 60),
+            (24 * 60 * 60, "1d ago", 2 * 24 * 60 * 60),
+        ] {
+            let changed_at = now - std::time::Duration::from_secs(elapsed);
+            assert_eq!(
+                relative_agent_age(changed_at, now),
+                (
+                    text.to_string(),
+                    changed_at + std::time::Duration::from_secs(next)
+                )
+            );
+        }
+        let app = AppState::test_new();
+        assert_eq!(next_visible_agent_age_deadline(&app, now), None);
     }
 }

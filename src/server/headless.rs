@@ -842,7 +842,8 @@ impl HeadlessServer {
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
-            let response = self.headless_tab_create("headless.tab.create", label);
+            let workspace_id = self.app.state.requested_new_tab_workspace_id.take();
+            let response = self.headless_tab_create("headless.tab.create", workspace_id, label);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -918,6 +919,13 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.config_reload");
         }
 
+        if self.app.state.request_open_config {
+            self.app.state.request_open_config = false;
+            self.app.open_active_config();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.config_open");
+        }
+
         needs_render
     }
 
@@ -941,12 +949,13 @@ impl HeadlessServer {
     fn headless_tab_create(
         &mut self,
         id: &'static str,
+        workspace_id: Option<String>,
         label: Option<String>,
     ) -> Result<(), api::schema::ErrorBody> {
         self.dispatch_headless_runtime_mutation(
             id,
             api::schema::Method::TabCreate(api::schema::TabCreateParams {
-                workspace_id: None,
+                workspace_id,
                 cwd: None,
                 focus: true,
                 label,
@@ -2642,6 +2651,7 @@ impl HeadlessServer {
         );
         let render_neutral_mouse_motion =
             events_are_render_neutral_mouse_motion(&events, self.app.state.mode);
+        let previous_space_compose_hover = self.app.state.hovered_space_compose_ws;
         if let Some(client) = self.clients.get_mut(&client_id) {
             if host_surface_redraw {
                 client.request_repaint();
@@ -2677,6 +2687,8 @@ impl HeadlessServer {
         // Client-local theme reports were applied above; routing them again would update every
         // pane once per palette entry instead of once per captured batch.
         self.app.route_client_events_from(client_id, events, false);
+        let space_compose_hover_changed =
+            self.app.state.hovered_space_compose_ws != previous_space_compose_hover;
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
         } else {
@@ -2701,7 +2713,10 @@ impl HeadlessServer {
 
             false
         } else {
-            foreground_changed || theme_changed || (interaction && !render_neutral_mouse_motion)
+            foreground_changed
+                || theme_changed
+                || space_compose_hover_changed
+                || (interaction && !render_neutral_mouse_motion)
         }
     }
 
@@ -4035,6 +4050,17 @@ impl HeadlessServer {
     /// (the server doesn't have a terminal to resize).
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = false;
+
+        if self
+            .app
+            .last_render_at
+            .and_then(|rendered_at| {
+                crate::ui::next_visible_agent_age_deadline(&self.app.state, rendered_at)
+            })
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed = true;
+        }
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -10117,6 +10143,125 @@ next_tab = ""
                 .is_err(),
             "stale idle report must not forward a done sound"
         );
+    }
+
+    // AC3
+    #[test]
+    fn space_compose_hover_repaints_only_on_target_change() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("space")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = server.app.state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = crate::detect::AgentState::Working;
+        crate::ui::compute_view(&mut server.app.state, Rect::new(0, 0, 120, 40));
+        let card = server.app.state.view.workspace_card_areas[0].rect;
+        server.clients.insert(1, test_app_client(None, 1));
+        server.foreground_client_id = Some(1);
+        let moved = |column, row| {
+            vec![crate::raw_input::RawInputEvent::Mouse(
+                crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+            )]
+        };
+
+        assert!(server.handle_client_input_events(1, moved(card.x + 1, card.y)));
+        assert_eq!(server.app.state.hovered_space_compose_ws, Some(0));
+        assert!(!server.handle_client_input_events(1, moved(card.x + 2, card.y)));
+        assert!(server.handle_client_input_events(1, moved(40, card.y)));
+        assert_eq!(server.app.state.hovered_space_compose_ws, None);
+    }
+
+    // AC6
+    #[test]
+    fn headless_loop_repaints_visible_agent_age_at_boundary() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("space")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = server.app.state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let rendered_at = Instant::now();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = crate::detect::AgentState::Working;
+        terminal.last_agent_state_change_at = Some(rendered_at);
+        server.app.last_render_at = Some(rendered_at);
+        let deadline = rendered_at + Duration::from_secs(60);
+
+        assert!(!server.handle_scheduled_tasks_headless(deadline - Duration::from_millis(1), false));
+        assert!(server.handle_scheduled_tasks_headless(deadline, false));
+    }
+
+    // AC7
+    #[test]
+    fn state_and_seen_changes_forward_changed_sidebar_frames() {
+        let mut server = test_headless_server();
+        let foreground = crate::workspace::Workspace::test_new("foreground");
+        let background = crate::workspace::Workspace::test_new("background");
+        let background_pane = background.tabs[0].root_pane;
+        server.app.state.workspaces = vec![foreground, background];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let terminal_id = server.app.state.workspaces[1].panes[&background_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = crate::detect::AgentState::Working;
+
+        let (writer, _control_rx, render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.render_and_stream();
+        let working = frame_text(&read_server_frame(render_rx.recv().unwrap()));
+        assert!(working.contains("Working"));
+
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+                pane_id: background_pane,
+                agent: Some(crate::detect::Agent::Claude),
+                state: crate::detect::AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: Instant::now(),
+            })
+        );
+        server.render_and_stream();
+        let completed = frame_text(&read_server_frame(render_rx.recv().unwrap()));
+        assert!(completed.contains("Completed"));
+
+        server.app.state.switch_workspace(1);
+        server.render_and_stream();
+        let seen = frame_text(&read_server_frame(render_rx.recv().unwrap()));
+        assert!(!seen.contains("Completed"));
     }
 
     /// Verify that no direct calls to `self.app.handle_internal_event`

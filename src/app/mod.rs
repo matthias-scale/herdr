@@ -539,6 +539,7 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            requested_new_tab_workspace_id: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -547,6 +548,7 @@ impl App {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_open_config: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -558,6 +560,7 @@ impl App {
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            hovered_space_compose_ws: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -969,10 +972,11 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
+                let workspace_id = self.state.requested_new_tab_workspace_id.take();
                 self.runtime_tab_create(
                     "tui.tab.create",
                     crate::api::schema::TabCreateParams {
-                        workspace_id: None,
+                        workspace_id,
                         cwd: None,
                         focus: true,
                         label,
@@ -1031,6 +1035,12 @@ impl App {
             if self.state.request_reload_config {
                 self.state.request_reload_config = false;
                 self.reload_config();
+                needs_render = true;
+            }
+
+            if self.state.request_open_config {
+                self.state.request_open_config = false;
+                self.open_active_config();
                 needs_render = true;
             }
 
@@ -1667,11 +1677,15 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
+                    let previous_hover = self.state.hovered_space_compose_ws;
                     if self.state.popup_pane.is_some() || self.state.mouse_capture {
                         self.handle_mouse_event_headless(source_id, mouse);
                     } else {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
+                    }
+                    if previous_hover != self.state.hovered_space_compose_ws {
+                        self.render_dirty.request_generic();
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
@@ -5964,5 +5978,66 @@ last_pane = "prefix+tab"
             &input[events[1].start..events[1].start + events[1].len],
             b"a"
         );
+    }
+
+    // AC3
+    #[tokio::test]
+    async fn space_compose_hover_repaints_only_on_target_change() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = AgentState::Working;
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 12);
+        app.state.view.workspace_card_areas =
+            crate::ui::compute_workspace_card_areas(&app.state, app.state.view.sidebar_rect);
+        let card = app.state.view.workspace_card_areas[0].rect;
+        let moved = |column, row| {
+            crate::raw_input::RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+
+        assert!(app.handle_raw_input_event(moved(card.x + 1, card.y)).await);
+        assert_eq!(app.state.hovered_space_compose_ws, Some(0));
+        assert!(!app.handle_raw_input_event(moved(card.x + 2, card.y)).await);
+        assert!(app.handle_raw_input_event(moved(30, card.y)).await);
+        assert_eq!(app.state.hovered_space_compose_ws, None);
+    }
+
+    // AC6
+    #[test]
+    fn monolithic_loop_repaints_visible_agent_age_at_boundary() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 12);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let now = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = AgentState::Working;
+        terminal.last_agent_state_change_at = Some(now);
+        app.last_render_at = Some(now);
+        app.next_resize_poll = now + Duration::from_secs(120);
+
+        let age_deadline = crate::ui::next_visible_agent_age_deadline(&app.state, now).unwrap();
+        assert_eq!(age_deadline, now + Duration::from_secs(60));
+        assert!(app.next_loop_deadline(now, false).unwrap() <= age_deadline);
+        assert!(app.handle_scheduled_tasks(age_deadline, false));
     }
 }

@@ -97,14 +97,12 @@ impl AppState {
         if ws_area == Rect::default() {
             return Rect::default();
         }
-        let y = ws_area.y + ws_area.height.saturating_sub(1);
-        Rect::new(ws_area.x, y, ws_area.width, 1)
+        let y = ws_area.y + ws_area.height;
+        Rect::new(ws_area.x, y, ws_area.width, 0)
     }
 
     pub(crate) fn sidebar_new_button_rect(&self) -> Rect {
-        let footer = self.sidebar_footer_rect();
-        let width = 5u16.min(footer.width.max(1));
-        Rect::new(footer.x, footer.y, width, footer.height)
+        crate::ui::sidebar_header_new_space_rect(self.view.sidebar_rect)
     }
 
     pub(crate) fn global_launcher_rect(&self) -> Rect {
@@ -112,26 +110,11 @@ impl AppState {
             return self.view.mobile_menu_hit_area;
         }
 
-        let footer = self.sidebar_footer_rect();
-        let width = if self.global_menu_attention_badge_visible() {
-            8
-        } else {
-            6
-        }
-        .min(footer.width.max(1));
-        let x = footer.x + footer.width.saturating_sub(width.saturating_add(1));
-        Rect::new(x, footer.y, width, footer.height)
+        crate::ui::sidebar_header_overflow_rect(self.view.sidebar_rect)
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["settings", "keybinds", "reload config"];
-        if self.update_available.is_some() {
-            labels.push("update ready");
-        } else if self.latest_release_notes_available {
-            labels.push("what's new");
-        }
-        labels.push("detach");
-        labels
+        vec!["settings", "keybinds", "reload config", "config"]
     }
 
     pub(crate) fn global_menu_rect(&self) -> Rect {
@@ -156,7 +139,10 @@ impl AppState {
         let max_x = screen.x + screen.width.saturating_sub(menu_w);
         let desired_x = launcher.x + launcher.width.saturating_sub(menu_w);
         let x = desired_x.min(max_x);
-        let y = launcher.y.saturating_sub(menu_h);
+        let y = launcher
+            .y
+            .saturating_add(1)
+            .min(screen.y + screen.height.saturating_sub(menu_h));
         Rect::new(x, y, menu_w, menu_h)
     }
 
@@ -200,11 +186,6 @@ impl AppState {
     }
 
     pub(super) fn workspace_at_row(&self, row: u16) -> Option<usize> {
-        let footer = self.sidebar_footer_rect();
-        if footer == Rect::default() {
-            return None;
-        }
-
         let cards = if self.view.workspace_card_areas.is_empty() {
             crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
         } else {
@@ -491,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn update_pending_menu_surfaces_update_ready_entry() {
+    fn update_pending_does_not_change_the_fixed_overflow_menu() {
         let mut app = app_for_mouse_test();
         app.state.update_available = Some("0.3.2".into());
         app.state.latest_release_notes_available = true;
@@ -505,19 +486,13 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec![
-                "settings",
-                "keybinds",
-                "reload config",
-                "update ready",
-                "detach"
-            ]
+            vec!["settings", "keybinds", "reload config", "config"]
         );
         assert!(!app.state.should_quit);
     }
 
     #[test]
-    fn persistence_mode_menu_surfaces_detach_action() {
+    fn persistence_mode_does_not_change_the_fixed_overflow_menu() {
         let mut app = app_for_mouse_test();
         app.state.detach_exits = false;
 
@@ -530,35 +505,20 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "reload config", "detach"]
+            vec!["settings", "keybinds", "reload config", "config"]
         );
-
-        let menu = app.state.global_menu_rect();
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            menu.x + 2,
-            menu.y + 4,
-        ));
-
-        assert!(app.state.detach_requested);
         assert!(!app.state.should_quit);
-        assert_ne!(app.state.mode, Mode::GlobalMenu);
+        assert_eq!(app.state.mode, Mode::GlobalMenu);
     }
 
     #[test]
-    fn whats_new_remains_in_menu_for_latest_installed_release_notes() {
+    fn release_notes_do_not_change_the_fixed_overflow_menu() {
         let mut app = app_for_mouse_test();
         app.state.latest_release_notes_available = true;
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec![
-                "settings",
-                "keybinds",
-                "reload config",
-                "what's new",
-                "detach"
-            ]
+            vec!["settings", "keybinds", "reload config", "config"]
         );
     }
 
@@ -1590,7 +1550,7 @@ mod tests {
         );
         assert_eq!(
             app.state.workspace_drop_target_at_row(2),
-            Some(crate::app::state::WorkspaceDropTarget::Before(0))
+            Some(crate::app::state::WorkspaceDropTarget::Before(1))
         );
         assert_eq!(
             app.state.workspace_drop_target_at_row(3),
@@ -1934,5 +1894,124 @@ mod tests {
         assert!(app.state.drag.is_none());
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(26));
+    }
+
+    #[tokio::test]
+    async fn space_compose_click_targets_hovered_space_for_prompt_and_direct_paths() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        for ws_idx in 0..2 {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = crate::detect::AgentState::Working;
+        }
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let target = app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == 1)
+            .cloned()
+            .unwrap();
+        let target_id = app.state.workspaces[1].id.clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Moved,
+            target.rect.x + 1,
+            target.rect.y,
+        ));
+        assert_eq!(app.state.hovered_space_compose_ws, Some(1));
+        let compose = crate::ui::space_compose_rect(&target);
+
+        app.state.prompt_new_tab_name = true;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            compose.x,
+            compose.y,
+        ));
+        assert_eq!(app.state.mode, Mode::RenameTab);
+        assert_eq!(
+            app.state.requested_new_tab_workspace_id.as_deref(),
+            Some(target_id.as_str())
+        );
+
+        app.state.mode = Mode::Terminal;
+        app.state.creating_new_tab = false;
+        app.state.requested_new_tab_workspace_id = None;
+        app.state.prompt_new_tab_name = false;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            compose.x,
+            compose.y,
+        ));
+        assert!(app.state.request_new_tab);
+        assert_eq!(
+            app.state.requested_new_tab_workspace_id.as_deref(),
+            Some(target_id.as_str())
+        );
+    }
+
+    // AC2
+    #[tokio::test]
+    async fn sidebar_header_actions_route_and_menu_has_exactly_four_entries() {
+        let mut app = app_for_mouse_test();
+        let area = app.state.view.sidebar_rect;
+
+        let toggle = crate::ui::expanded_sidebar_toggle_rect(area);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert!(app.state.sidebar_collapsed);
+        app.state.sidebar_collapsed = false;
+        app.state.prompt_new_workspace_name = true;
+
+        let new_space = crate::ui::sidebar_header_new_space_rect(area);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_space.x,
+            new_space.y,
+        ));
+        assert!(
+            app.state.request_new_workspace || app.state.mode == Mode::RenameWorkspace,
+            "new-Space header action must enter the existing creation path"
+        );
+
+        app.state.mode = Mode::Navigate;
+        let overflow = crate::ui::sidebar_header_overflow_rect(area);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            overflow.x,
+            overflow.y,
+        ));
+        assert_eq!(app.state.mode, Mode::GlobalMenu);
+        assert_eq!(
+            app.state.global_menu_labels(),
+            vec!["settings", "keybinds", "reload config", "config"]
+        );
+        assert_eq!(
+            crate::app::input::modal::global_menu_actions(&app.state),
+            vec![
+                crate::app::input::modal::GlobalMenuAction::Settings,
+                crate::app::input::modal::GlobalMenuAction::Keybinds,
+                crate::app::input::modal::GlobalMenuAction::ReloadConfig,
+                crate::app::input::modal::GlobalMenuAction::Config,
+            ]
+        );
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 4,
+        ));
+        assert!(app.state.request_open_config);
     }
 }

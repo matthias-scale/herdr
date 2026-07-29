@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         assert_eq!(
             frame_digest(&frame),
-            "f0570443c5db9d7e1adb545c585044e9ae576d3dc56884ecd305b10421397ce7"
+            "c215a1fb4e9d368dbc4c509e53e7a569d92f3d8e5cb3752f488ba4185944b509"
         );
     }
 
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            "295608a66067f1e1f066c0adb3cf427e8a2d68bba8f68949fb72d464dcd8baab"
+            "b6272e70389c23ab98d438bc8174bd9562c3f0c77a8c05a41b74f976cabbfa11"
         );
     }
 }
