@@ -1507,12 +1507,12 @@ impl AppState {
 
         if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
         {
-            self.ensure_agent_panel_entry_visible(idx);
+            self.ensure_agent_row_visible(ws_idx, pane_id);
             return true;
         }
 
         if self.focus_pane_in_workspace(ws_idx, pane_id) {
-            self.ensure_agent_panel_entry_visible(idx);
+            self.ensure_agent_row_visible(ws_idx, pane_id);
             return true;
         }
         false
@@ -1521,25 +1521,44 @@ impl AppState {
     #[cfg(test)]
     fn cycle_agent_entry(&mut self, forward: bool) {
         if let Some((_idx, target)) = crate::ui::relative_agent_navigation_entry(self, forward) {
-            self.focus_pane_in_workspace(target.ws_idx, target.pane_id);
+            let (ws_idx, pane_id) = (target.ws_idx, target.pane_id);
+            self.focus_pane_in_workspace(ws_idx, pane_id);
+            self.ensure_agent_row_visible(ws_idx, pane_id);
         }
     }
 
-    pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
+    /// Scroll the sidebar so the row representing `pane_id` is visible, falling
+    /// back to its workspace row when the projection renders no agent row.
+    pub(crate) fn ensure_agent_row_visible(&mut self, ws_idx: usize, pane_id: PaneId) {
+        if self.view.layout == ViewLayout::Mobile {
+            self.ensure_workspace_visible(ws_idx);
+            return;
+        }
         if self.sidebar_collapsed {
+            self.ensure_workspace_visible(ws_idx);
             return;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
-        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
-            self,
-            detail_area,
-            self.agent_panel_scroll,
-            idx,
-        );
+        let sidebar_area = self.view.sidebar_rect;
+        let target_row_idx = crate::ui::sidebar_rows(self)
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    crate::ui::SidebarRow::Agent { entry, .. }
+                        if entry.ws_idx == ws_idx && entry.pane_id == pane_id
+                )
+            })
+            .or_else(|| crate::ui::sidebar_row_index_for_workspace(self, ws_idx));
+        let Some(target_row_idx) = target_row_idx else {
+            return;
+        };
+
+        let scroll =
+            crate::ui::normalized_workspace_scroll(self, sidebar_area, self.workspace_scroll);
+        self.workspace_scroll =
+            crate::ui::sidebar_row_scroll_for_target(self, sidebar_area, scroll, target_row_idx);
+        let _ = self.take_pending_workspace_reveal();
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -4296,7 +4315,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_agent_wrap_does_not_mutate_agent_projection_scroll() {
+    fn previous_agent_wrap_reveals_target_agent_row() {
         let mut workspace = Workspace::test_new("one");
         let root = workspace.tabs[0].root_pane;
         for idx in 1..8 {
@@ -4320,7 +4339,10 @@ mod tests {
 
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        assert_eq!(state.agent_panel_scroll, 0);
+        let target = state.workspaces[0].tabs[last_idx].root_pane;
+        let (_, agent_cards) =
+            crate::ui::compute_sidebar_row_areas(&state, state.view.sidebar_rect);
+        assert!(agent_cards.iter().any(|card| card.pane_id == target));
         state.assert_invariants_for_test();
     }
 

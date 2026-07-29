@@ -430,14 +430,6 @@ impl AppState {
                     return None;
                 }
 
-                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
-                    self.drag = Some(DragState {
-                        target: DragTarget::SidebarSectionDivider,
-                    });
-                    self.set_sidebar_section_split(mouse.row);
-                    return None;
-                }
-
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         let grab_offset = match border.direction {
@@ -605,24 +597,8 @@ impl AppState {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,
                             AgentPanelSort::Priority => AgentPanelSort::Spaces,
                         };
-                        self.agent_panel_scroll = 0;
+                        self.workspace_scroll = 0;
                         self.mark_session_dirty();
-                        return None;
-                    }
-
-                    if let Some(target) =
-                        self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
-                    {
-                        match target {
-                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
-                                self.drag = Some(DragState {
-                                    target: DragTarget::AgentPanelScrollbar { grab_row_offset },
-                                });
-                            }
-                            ScrollbarClickTarget::Track { offset_from_bottom } => {
-                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
-                            }
-                        }
                         return None;
                     }
 
@@ -742,13 +718,6 @@ impl AppState {
                                 self.set_workspace_list_offset_from_bottom(offset_from_bottom);
                             }
                         }
-                        DragTarget::AgentPanelScrollbar { grab_row_offset } => {
-                            if let Some(offset_from_bottom) =
-                                self.agent_panel_offset_for_drag_row(mouse.row, *grab_row_offset)
-                            {
-                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
-                            }
-                        }
                         DragTarget::PaneSplit {
                             path,
                             direction,
@@ -796,9 +765,6 @@ impl AppState {
                         }
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
-                        }
-                        DragTarget::SidebarSectionDivider => {
-                            self.set_sidebar_section_split(mouse.row);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
@@ -969,23 +935,27 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
-                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
-                    self,
-                    self.workspace_list_rect(),
-                )) {
-                    self.scroll_workspace_list(-1);
-                } else if self.sidebar_shows_spaces_tree() {
-                    self.move_selected_workspace_by_visible_delta(-1);
+                if !self.scroll_collapsed_sidebar(-1) {
+                    if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
+                        self,
+                        self.workspace_list_rect(),
+                    )) {
+                        self.scroll_workspace_list(-1);
+                    } else if self.sidebar_shows_spaces_tree() {
+                        self.move_selected_workspace_by_visible_delta(-1);
+                    }
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
-                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
-                    self,
-                    self.workspace_list_rect(),
-                )) {
-                    self.scroll_workspace_list(1);
-                } else if self.sidebar_shows_spaces_tree() {
-                    self.move_selected_workspace_by_visible_delta(1);
+                if !self.scroll_collapsed_sidebar(1) {
+                    if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
+                        self,
+                        self.workspace_list_rect(),
+                    )) {
+                        self.scroll_workspace_list(1);
+                    } else if self.sidebar_shows_spaces_tree() {
+                        self.move_selected_workspace_by_visible_delta(1);
+                    }
                 }
             }
 
@@ -1136,7 +1106,7 @@ impl AppState {
                 return MobileMouseResult::Ignored;
             }
             if rect_contains(self.view.mobile_menu_hit_area, mouse.column, mouse.row) {
-                self.mobile_switcher_scroll = 0;
+                self.begin_workspace_picker_presentation();
                 self.mode = Mode::Navigate;
                 return MobileMouseResult::Consumed;
             }
@@ -1145,7 +1115,7 @@ impl AppState {
 
         let areas = crate::ui::mobile_switcher_areas(self);
         if rect_contains(areas.close, mouse.column, mouse.row) {
-            self.mode = Mode::Terminal;
+            self.close_workspace_picker();
             return MobileMouseResult::Consumed;
         }
 
@@ -1154,19 +1124,22 @@ impl AppState {
                 return MobileMouseResult::Action(MouseAction::NewWorkspace);
             }
             Some(crate::ui::MobileSwitcherTarget::Workspace(ws_idx)) => {
-                self.mode = Mode::Terminal;
+                self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusWorkspace { ws_idx });
+            }
+            Some(crate::ui::MobileSwitcherTarget::WorkspaceDisclosure(ws_idx)) => {
+                self.toggle_workspace_agent_disclosure(ws_idx);
             }
             Some(crate::ui::MobileSwitcherTarget::NewTab) => {
                 if self.prompt_new_tab_name {
                     open_new_tab_dialog(self);
                 } else {
                     self.request_new_tab = true;
-                    self.mode = Mode::Terminal;
+                    self.close_workspace_picker();
                 }
             }
             Some(crate::ui::MobileSwitcherTarget::Tab(tab_idx)) => {
-                self.mode = Mode::Terminal;
+                self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusTab { tab_idx });
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
@@ -1174,7 +1147,7 @@ impl AppState {
                 tab_idx: _,
                 pane_id,
             }) => {
-                self.mode = Mode::Terminal;
+                self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
@@ -1187,6 +1160,11 @@ impl AppState {
         }
 
         MobileMouseResult::Consumed
+    }
+
+    fn close_workspace_picker(&mut self) {
+        self.end_workspace_picker_presentation();
+        self.mode = Mode::Terminal;
     }
 
     fn scroll_mobile_switcher_at(&mut self, _col: u16, _row: u16, delta: i16) {

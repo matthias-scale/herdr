@@ -53,9 +53,9 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 #[cfg(test)]
-pub(crate) use self::sidebar::agent_panel_body_rect;
-#[cfg(test)]
-pub(crate) use self::sidebar::workspace_drop_indicator_row;
+pub(crate) use self::sidebar::{
+    expanded_sidebar_sections, workspace_drop_indicator_row, workspace_list_body_rect,
+};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
@@ -78,13 +78,13 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_counts_by_workspace, agent_panel_entries, agent_panel_scroll_for_target,
-        agent_panel_scroll_metrics, agent_panel_scrollbar_rect, agent_panel_toggle_rect,
-        all_agent_panel_entries, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
-        compute_sidebar_row_areas, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, relative_agent_navigation_entry,
-        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
-        sidebar_section_divider_rect, workspace_agent_chevron_rect, workspace_drop_slots,
+        agent_counts_by_workspace, agent_panel_entries, agent_panel_toggle_rect,
+        all_agent_panel_entries, collapsed_sidebar_row_scroll, collapsed_sidebar_sections,
+        collapsed_sidebar_toggle_rect, compute_sidebar_row_areas, compute_workspace_card_areas,
+        expanded_sidebar_toggle_rect, normalized_workspace_scroll,
+        relative_agent_navigation_entry, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, workspace_agent_chevron_rect,
+        workspace_drop_slots,
         workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
         workspace_parent_group_state, AgentPanelEntry, SidebarRow, WorkspaceListEntry,
@@ -243,12 +243,19 @@ fn compute_view_internal(
         if let Some(active) = app.take_pending_workspace_reveal() {
             app.ensure_workspace_visible_in_sidebar(active, sidebar_area);
         }
-        app.agent_panel_scroll = 0;
     } else {
-        app.workspace_scroll = app
-            .workspace_scroll
-            .min(sidebar_rows(app).len().saturating_sub(1));
-        app.agent_panel_scroll = 0;
+        let (ws_area, _, _) = collapsed_sidebar_sections(sidebar_area);
+        app.workspace_scroll = collapsed_sidebar_row_scroll(app, ws_area);
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            if let Some(target) = sidebar_row_index_for_workspace(app, active) {
+                let height = ws_area.height as usize;
+                if target < app.workspace_scroll {
+                    app.workspace_scroll = target;
+                } else if height > 0 && target >= app.workspace_scroll.saturating_add(height) {
+                    app.workspace_scroll = target.saturating_sub(height.saturating_sub(1));
+                }
+            }
+        }
     }
 
     let workspace_card_areas = if app.sidebar_collapsed {

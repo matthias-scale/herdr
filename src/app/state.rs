@@ -643,7 +643,6 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) force_spaces_tree: bool,
     pub(crate) workspace_scroll: usize,
-    pub(crate) agent_panel_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
 }
 
@@ -1187,9 +1186,6 @@ pub(crate) enum DragTarget {
     WorkspaceListScrollbar {
         grab_row_offset: u16,
     },
-    AgentPanelScrollbar {
-        grab_row_offset: u16,
-    },
     PaneSplit {
         path: Vec<bool>,
         direction: Direction,
@@ -1210,7 +1206,6 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
-    SidebarSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1494,7 +1489,6 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
     pub workspace_scroll: usize,
-    pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1647,7 +1641,6 @@ impl AppState {
             &mut other.force_spaces_tree,
         );
         std::mem::swap(&mut self.workspace_scroll, &mut other.workspace_scroll);
-        std::mem::swap(&mut self.agent_panel_scroll, &mut other.agent_panel_scroll);
         std::mem::swap(
             &mut self.mobile_switcher_scroll,
             &mut other.mobile_switcher_scroll,
@@ -1979,7 +1972,6 @@ impl AppState {
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
             workspace_scroll: 0,
-            agent_panel_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

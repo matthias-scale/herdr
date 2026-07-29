@@ -87,7 +87,7 @@ impl App {
 
     fn replace_agent_view_override(&mut self, view: Option<AgentViewSetParams>) {
         self.state.agent_view_override = view;
-        self.state.agent_panel_scroll = 0;
+        self.state.workspace_scroll = 0;
         self.state.mobile_switcher_scroll = 0;
     }
 }
