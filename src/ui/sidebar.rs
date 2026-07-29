@@ -765,7 +765,7 @@ pub(crate) fn compute_workspace_list_areas(
     (compute_sidebar_row_areas(app, area).0, Vec::new())
 }
 
-fn compute_sidebar_row_areas(
+pub(crate) fn compute_sidebar_row_areas(
     app: &AppState,
     area: Rect,
 ) -> (
