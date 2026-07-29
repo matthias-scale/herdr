@@ -388,6 +388,26 @@ fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
     );
 }
 
+/// A pane created through `workspace.create` only becomes a valid `agent.start`
+/// target once its freshly spawned shell shows up as the foreground process, so
+/// retry while the server still reports the pane as busy.
+fn start_agent_when_shell_is_ready(
+    socket_path: &Path,
+    request_body: serde_json::Value,
+    timeout: Duration,
+) -> serde_json::Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let response = request(socket_path, request_body.clone());
+        if response["error"]["code"].as_str() != Some("agent_pane_busy")
+            || Instant::now() >= deadline
+        {
+            return response;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut last_text = String::new();
@@ -1416,7 +1436,7 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
         .unwrap()
         .to_string();
 
-    let started = request(
+    let started = start_agent_when_shell_is_ready(
         &api_socket,
         serde_json::json!({
             "id": "test:agent-start",
@@ -1428,6 +1448,7 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
                 "timeout_ms": 5000
             }
         }),
+        Duration::from_secs(10),
     );
     assert_ok(started);
     support::wait_for_file(&started_marker, Duration::from_secs(5));
