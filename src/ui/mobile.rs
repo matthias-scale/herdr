@@ -176,15 +176,14 @@ pub(crate) fn mobile_switcher_target_at(
     let sidebar_end = cursor + rows.len() * 2;
     if doc_row >= cursor && doc_row < sidebar_end {
         let idx = (doc_row - cursor) / 2;
-        let on_title_line = (doc_row - cursor) % 2 == 0;
+        let on_title_line = (doc_row - cursor).is_multiple_of(2);
         return rows.get(idx).map(|entry| match entry {
             SidebarRow::Workspace { ws_idx, .. } => {
-                let agent_count = crate::ui::agent_counts_by_workspace(
-                    &crate::ui::all_agent_panel_entries(app),
-                )
-                .get(ws_idx)
-                .copied()
-                .unwrap_or(0);
+                let agent_count =
+                    crate::ui::agent_counts_by_workspace(&crate::ui::all_agent_panel_entries(app))
+                        .get(ws_idx)
+                        .copied()
+                        .unwrap_or(0);
                 let on_disclosure = on_title_line
                     && mobile_workspace_disclosure_columns(content, agent_count)
                         .is_some_and(|columns| columns.contains(&col));
@@ -1347,7 +1346,12 @@ mod tests {
         assert_eq!(agent_panel_entries(&app).len(), 2);
         // Spaces title + new-workspace action precede the workspace, followed
         // immediately by its two disclosed agent children.
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).expect("workspace row").start, 2);
+        assert_eq!(
+            mobile_switcher_workspace_doc_range(&app, 0)
+                .expect("workspace row")
+                .start,
+            2
+        );
 
         let viewport = mobile_switcher_areas(&app).viewport;
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 2);
@@ -1387,8 +1391,18 @@ mod tests {
         // Grouped order pulls the worktree (idx 2) up under its parent (idx 0),
         // ahead of the unrelated "other" workspace (idx 1): rows are main,
         // feature, other.
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).expect("workspace row").start, 4);
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 1).expect("workspace row").start, 6);
+        assert_eq!(
+            mobile_switcher_workspace_doc_range(&app, 2)
+                .expect("workspace row")
+                .start,
+            4
+        );
+        assert_eq!(
+            mobile_switcher_workspace_doc_range(&app, 1)
+                .expect("workspace row")
+                .start,
+            6
+        );
 
         let viewport = mobile_switcher_areas(&app).viewport;
         // The second space row on screen is the worktree, not workspaces[1].
@@ -1398,7 +1412,12 @@ mod tests {
         // Mobile ignores collapse: even with the space folded on desktop, the
         // worktree child still renders in the same position.
         app.collapsed_space_keys.insert("repo-key".to_string());
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).expect("workspace row").start, 4);
+        assert_eq!(
+            mobile_switcher_workspace_doc_range(&app, 2)
+                .expect("workspace row")
+                .start,
+            4
+        );
         let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
         assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
     }
@@ -1412,7 +1431,12 @@ mod tests {
 
         // No attached terminals -> no agents -> no agents header, spaces lead.
         assert_eq!(agent_panel_entries(&app).len(), 0);
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).expect("workspace row").start, 2);
+        assert_eq!(
+            mobile_switcher_workspace_doc_range(&app, 0)
+                .expect("workspace row")
+                .start,
+            2
+        );
     }
 
     #[test]

@@ -246,8 +246,8 @@ impl AppState {
             return None;
         }
 
-        let idx = (row - ws_area.y) as usize
-            + crate::ui::collapsed_sidebar_row_scroll(self, ws_area);
+        let idx =
+            (row - ws_area.y) as usize + crate::ui::collapsed_sidebar_row_scroll(self, ws_area);
         crate::ui::sidebar_rows(self)
             .get(idx)
             .and_then(|entry| match entry {
@@ -268,8 +268,8 @@ impl AppState {
         if content == Rect::default() || row < content.y || row >= content.y + content.height {
             return None;
         }
-        let row_idx = (row - content.y) as usize
-            + crate::ui::collapsed_sidebar_row_scroll(self, content);
+        let row_idx =
+            (row - content.y) as usize + crate::ui::collapsed_sidebar_row_scroll(self, content);
         crate::ui::sidebar_rows(self)
             .get(row_idx)
             .and_then(|entry| match entry {

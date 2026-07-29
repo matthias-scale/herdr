@@ -49,7 +49,6 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, _split_ratio: f32) -> (Rect,
     (content, content)
 }
 
-
 fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
         AgentPanelSort::Spaces => "grouped",
