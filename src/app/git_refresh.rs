@@ -11,12 +11,14 @@ struct WorkspaceGitRefreshItem {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
     cache_key_hint: Option<PathBuf>,
+    demand: GitStatusRefreshDemand,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshTarget {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
+    demand: GitStatusRefreshDemand,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +26,7 @@ struct WorkspaceGitRefreshJob {
     cache_key: PathBuf,
     cached: Option<GitStatusCacheEntry>,
     targets: Vec<WorkspaceGitRefreshTarget>,
+    demand: GitStatusRefreshDemand,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +45,9 @@ impl App {
             return;
         }
 
-        if self.state.sync_status_focused_cwd(&self.terminal_runtimes) {
+        if self.state.status_bar_enabled
+            && self.state.sync_status_focused_cwd(&self.terminal_runtimes)
+        {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -61,17 +66,12 @@ impl App {
         self.git_refresh_in_flight = true;
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
-        let mut demand = self.git_refresh_demand();
-        if self.git_identity_refresh_requested {
-            demand.branch = true;
-        }
         self.git_identity_refresh_requested = false;
         if refresh_repo_discovery {
             self.last_git_repo_discovery_refresh = now;
         }
         std::thread::spawn(move || {
-            let output =
-                refresh_workspace_git_statuses_with_cache_and_demand(workspaces, &cache, demand);
+            let output = refresh_workspace_git_statuses(workspaces, &cache);
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
                 results: output.results,
                 cache_updates: output.cache_updates,
@@ -105,14 +105,13 @@ impl App {
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
-        // The desktop status row consumes branch identity when it is enabled,
-        // independent of whether the configurable sidebar also displays Git
-        // metadata. Disabling the row leaves the sidebar tokens as the only
-        // consumers, so opting out of both stops periodic Git polling.
-        let mut demand = GitStatusRefreshDemand {
-            branch: self.state.status_bar_enabled,
-            ahead_behind: false,
-        };
+        let mut demand = self.sidebar_git_refresh_demand();
+        demand.branch |= self.state.status_bar_enabled;
+        demand
+    }
+
+    fn sidebar_git_refresh_demand(&self) -> GitStatusRefreshDemand {
+        let mut demand = GitStatusRefreshDemand::default();
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token.parts().0 {
                 crate::config::SpaceSidebarToken::Branch => demand.branch = true,
@@ -127,43 +126,55 @@ impl App {
         &self,
         refresh_repo_discovery: bool,
     ) -> Vec<WorkspaceGitRefreshItem> {
-        let mut items = self
-            .state
-            .workspaces
-            .iter()
-            .filter_map(|ws| {
-                let cwd =
-                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
-                let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
-                    .then(|| ws.cached_git_status_key.clone());
-                Some(WorkspaceGitRefreshItem {
-                    workspace_id: ws.id.clone(),
-                    resolved_identity_cwd: cwd,
-                    cache_key_hint,
+        let mut workspace_demand = self.sidebar_git_refresh_demand();
+        workspace_demand.branch |= self.git_identity_refresh_requested;
+        let mut items = if workspace_demand.is_empty() {
+            Vec::new()
+        } else {
+            self.state
+                .workspaces
+                .iter()
+                .filter_map(|ws| {
+                    let cwd = ws.resolved_identity_cwd_from(
+                        &self.state.terminals,
+                        &self.terminal_runtimes,
+                    )?;
+                    let cache_key_hint = (!refresh_repo_discovery
+                        && ws.cached_identity_cwd == cwd)
+                        .then(|| ws.cached_git_status_key.clone());
+                    Some(WorkspaceGitRefreshItem {
+                        workspace_id: ws.id.clone(),
+                        resolved_identity_cwd: cwd,
+                        cache_key_hint,
+                        demand: workspace_demand,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        };
 
-        // Only the status row consumes a branch for a focused cwd that differs
-        // from the workspace identity. Sidebar branch/status tokens consume
-        // the workspace item above and must not create hidden extra work.
-        if self.state.status_bar_enabled && self.git_refresh_demand().branch {
+        if self.state.status_bar_enabled {
             if let Some(ws) = self
                 .state
                 .active
                 .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
             {
-                if let Some(cwd) =
-                    ws.focused_cwd_from(&self.state.terminals, &self.terminal_runtimes)
-                {
-                    let duplicate = items.iter().any(|item| {
+                if let Some(cwd) = self.state.status_focused_cwd.clone() {
+                    if let Some(existing) = items.iter_mut().find(|item| {
                         item.workspace_id == ws.id && item.resolved_identity_cwd == cwd
-                    });
-                    if !duplicate {
+                    }) {
+                        existing.demand.branch = true;
+                    } else {
+                        let cache_key_hint = (!refresh_repo_discovery
+                            && ws.cached_identity_cwd == cwd)
+                            .then(|| ws.cached_git_status_key.clone());
                         items.push(WorkspaceGitRefreshItem {
                             workspace_id: ws.id.clone(),
                             resolved_identity_cwd: cwd,
-                            cache_key_hint: None,
+                            cache_key_hint,
+                            demand: GitStatusRefreshDemand {
+                                branch: true,
+                                ahead_behind: false,
+                            },
                         });
                     }
                 }
@@ -189,9 +200,12 @@ fn deduplicate_git_refresh_items(
         let target = WorkspaceGitRefreshTarget {
             workspace_id: item.workspace_id,
             resolved_identity_cwd: item.resolved_identity_cwd,
+            demand: item.demand,
         };
         if let Some(&index) = indexes.get(&cache_key) {
             jobs[index].targets.push(target);
+            jobs[index].demand.branch |= item.demand.branch;
+            jobs[index].demand.ahead_behind |= item.demand.ahead_behind;
             continue;
         }
 
@@ -201,16 +215,16 @@ fn deduplicate_git_refresh_items(
             cache_key,
             cached,
             targets: vec![target],
+            demand: item.demand,
         });
     }
 
     jobs
 }
 
-fn refresh_workspace_git_statuses_with_cache_and_demand(
+fn refresh_workspace_git_statuses(
     items: Vec<WorkspaceGitRefreshItem>,
     cache: &HashMap<PathBuf, GitStatusCacheEntry>,
-    demand: GitStatusRefreshDemand,
 ) -> WorkspaceGitRefreshOutput {
     let mut results = Vec::new();
     let mut cache_updates = Vec::new();
@@ -219,7 +233,7 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
         let (snapshot, cache_entry) = crate::workspace::git_status_snapshot_for_cwd_with_demand(
             &job.cache_key,
             job.cached.as_ref(),
-            demand,
+            job.demand,
         );
         if let Some(cache_entry) = cache_entry {
             cache_updates.push((job.cache_key.clone(), cache_entry));
@@ -229,7 +243,7 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
                 target.workspace_id,
                 target.resolved_identity_cwd,
                 job.cache_key.clone(),
-                demand,
+                target.demand,
             )
         }));
     }
@@ -260,21 +274,22 @@ mod tests {
             .output()
             .expect("run git init");
 
-        let output = refresh_workspace_git_statuses_with_cache_and_demand(
+        let output = refresh_workspace_git_statuses(
             vec![
                 WorkspaceGitRefreshItem {
                     workspace_id: "one".into(),
                     resolved_identity_cwd: nested.clone(),
                     cache_key_hint: None,
+                    demand: GitStatusRefreshDemand::ALL,
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
                     resolved_identity_cwd: other.clone(),
                     cache_key_hint: None,
+                    demand: GitStatusRefreshDemand::ALL,
                 },
             ],
             &HashMap::new(),
-            GitStatusRefreshDemand::ALL,
         );
 
         assert_eq!(output.cache_updates.len(), 1);
@@ -378,6 +393,8 @@ mod tests {
         );
         app.state.workspaces.push(ws);
         app.state.active = Some(0);
+        app.state
+            .sync_status_focused_cwd(&app.terminal_runtimes);
 
         let items = app.workspace_git_refresh_items(true);
         assert_eq!(items.len(), 2);
@@ -385,14 +402,7 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item.resolved_identity_cwd == nested));
-        let output = refresh_workspace_git_statuses_with_cache_and_demand(
-            items,
-            &HashMap::new(),
-            GitStatusRefreshDemand {
-                branch: true,
-                ahead_behind: false,
-            },
-        );
+        let output = refresh_workspace_git_statuses(items, &HashMap::new());
 
         assert!(app
             .state
@@ -416,6 +426,7 @@ mod tests {
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
         app.state.workspaces.push(Workspace::test_new("test"));
+        app.state.active = Some(0);
         let now = Instant::now();
 
         app.request_git_identity_refresh(now);
@@ -432,12 +443,40 @@ mod tests {
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
         app.state.workspaces.push(Workspace::test_new("test"));
+        app.state.active = Some(0);
         let now = Instant::now();
         app.last_git_remote_status_refresh = now - GIT_REMOTE_STATUS_REFRESH_INTERVAL;
 
         app.start_git_status_refresh_if_due(now);
 
         assert!(app.git_refresh_in_flight);
+    }
+
+    #[test]
+    fn status_branch_refresh_targets_only_the_active_focused_cwd() {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        let inactive = Workspace::test_new("inactive");
+        let active = Workspace::test_new("active");
+        let focused_cwd = active.identity_cwd.clone();
+        let active_id = active.id.clone();
+        app.state.workspaces = vec![inactive, active];
+        app.state.active = Some(1);
+        app.state.status_focused_cwd = Some(focused_cwd.clone());
+
+        let items = app.workspace_git_refresh_items(false);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].workspace_id, active_id);
+        assert_eq!(items[0].resolved_identity_cwd, focused_cwd);
+        assert_eq!(
+            items[0].demand,
+            GitStatusRefreshDemand {
+                branch: true,
+                ahead_behind: false,
+            }
+        );
     }
 
     #[test]

@@ -426,17 +426,79 @@ fn status_interface_name(interface: &libc::ifaddrs) -> Option<String> {
     )
 }
 
-fn status_interface_bytes(interface: &libc::ifaddrs) -> Option<(u64, u64)> {
-    if interface.ifa_data.is_null() {
+fn status_interface_byte_snapshots() -> Option<HashMap<String, (u64, u64)>> {
+    let mut mib = [
+        libc::CTL_NET,
+        libc::PF_ROUTE,
+        0,
+        0,
+        libc::NET_RT_IFLIST2,
+        0,
+    ];
+    let mut length = 0;
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || length == 0
+    {
         return None;
     }
-    let data = interface.ifa_data.cast::<libc::if_data>();
-    // SAFETY: Darwin documents AF_LINK `ifa_data` as `struct if_data`.
-    // `if_data` is packed to four bytes, so copy both fields unaligned rather
-    // than creating references whose alignment Rust cannot guarantee.
-    let rx = unsafe { std::ptr::addr_of!((*data).ifi_ibytes).read_unaligned() };
-    let tx = unsafe { std::ptr::addr_of!((*data).ifi_obytes).read_unaligned() };
-    Some((u64::from(rx), u64::from(tx)))
+
+    let mut buffer = vec![0u8; length];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    buffer.truncate(length);
+
+    let mut snapshots = HashMap::new();
+    let mut offset = 0;
+    while offset + 4 <= buffer.len() {
+        let message = unsafe { buffer.as_ptr().add(offset).cast::<libc::if_msghdr>() };
+        let message_length =
+            unsafe { std::ptr::addr_of!((*message).ifm_msglen).read_unaligned() } as usize;
+        if message_length == 0 || offset + message_length > buffer.len() {
+            return None;
+        }
+        let message_type = unsafe { std::ptr::addr_of!((*message).ifm_type).read_unaligned() };
+        if message_type == libc::RTM_IFINFO2 as u8
+            && message_length >= std::mem::size_of::<libc::if_msghdr2>()
+        {
+            let message = message.cast::<libc::if_msghdr2>();
+            let index = unsafe { std::ptr::addr_of!((*message).ifm_index).read_unaligned() };
+            let rx =
+                unsafe { std::ptr::addr_of!((*message).ifm_data.ifi_ibytes).read_unaligned() };
+            let tx =
+                unsafe { std::ptr::addr_of!((*message).ifm_data.ifi_obytes).read_unaligned() };
+            let mut name = [0 as libc::c_char; libc::IFNAMSIZ];
+            let name = unsafe { libc::if_indextoname(index as u32, name.as_mut_ptr()) };
+            if !name.is_null() {
+                let name = unsafe { std::ffi::CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned();
+                snapshots.insert(name, (rx, tx));
+            }
+        }
+        offset += message_length;
+    }
+
+    (!snapshots.is_empty()).then_some(snapshots)
 }
 
 fn status_interface_ipv4s() -> StatusNetworkInterfaces {
@@ -450,7 +512,7 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
         };
     };
     let mut ipv4s = Vec::new();
-    let mut counters = HashMap::new();
+    let counters = status_interface_byte_snapshots().unwrap_or_default();
     let mut current = interfaces.first();
     while !current.is_null() {
         // SAFETY: `current` belongs to the live list guarded by `interfaces`.
@@ -471,13 +533,6 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
                     address,
                     up: interface.ifa_flags & (libc::IFF_UP as u32) != 0,
                 });
-            }
-        } else if family == Some(libc::AF_LINK) {
-            if let (Some(name), Some(bytes)) = (
-                status_interface_name(interface),
-                status_interface_bytes(interface),
-            ) {
-                counters.insert(name, bytes);
             }
         }
         current = interface.ifa_next;
@@ -680,14 +735,10 @@ mod status_metric_tests {
     }
 
     #[test]
-    fn link_counter_reader_copies_darwin_if_data_fields() {
-        let mut data = unsafe { std::mem::zeroed::<libc::if_data>() };
-        data.ifi_ibytes = 123;
-        data.ifi_obytes = 456;
-        let mut interface = unsafe { std::mem::zeroed::<libc::ifaddrs>() };
-        interface.ifa_data = (&raw mut data).cast();
-
-        assert_eq!(super::status_interface_bytes(&interface), Some((123, 456)));
+    fn interface_byte_snapshots_use_darwin_64_bit_route_messages() {
+        let snapshots = super::status_interface_byte_snapshots()
+            .expect("NET_RT_IFLIST2 should return interface counters");
+        assert!(snapshots.keys().any(|name| !name.starts_with("lo")));
     }
 
     #[test]
