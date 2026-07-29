@@ -231,6 +231,20 @@ fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> boo
     auto_updates_enabled(no_session) && check_enabled
 }
 
+/// Home directory used to collapse the status-row path to `~`.
+/// Windows shells normally expose the profile as `USERPROFILE`, not `HOME`.
+fn status_home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    const KEYS: &[&str] = &["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    const KEYS: &[&str] = &["HOME"];
+
+    KEYS.iter()
+        .filter_map(|key| std::env::var_os(key))
+        .find(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
     if no_session {
         return std::collections::HashMap::new();
@@ -533,9 +547,11 @@ impl App {
             status_session_name: crate::session::active_name()
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
-            status_home_dir: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            status_home_dir: status_home_dir(),
             status_git_cwd: None,
             status_git_branch: None,
+            status_focused_cwd: None,
+            status_bar_enabled: config.ui.status_bar.enabled,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1468,6 +1484,7 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
+                self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
@@ -4671,7 +4688,7 @@ mod tests {
         app.next_auto_update_check = Some(now + Duration::from_secs(6));
 
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             app.session_save_deadline
         );
     }
@@ -4688,7 +4705,7 @@ mod tests {
         app.state.workspaces.clear();
 
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             None
         );
     }

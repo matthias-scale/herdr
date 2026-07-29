@@ -256,6 +256,17 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+### Status row
+
+Desktop layouts show a full-width status row above the tab bar with the focused session's directory and Git branch, network details, memory, CPU, battery, date, and time. Segments are elided from the least important side first when the terminal is too narrow.
+
+```toml
+[ui.status_bar]
+enabled = false
+```
+
+Disabling the row also stops the background metric sampler, so nothing is collected while it is hidden.
+
 ### Sidebar row layouts
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:

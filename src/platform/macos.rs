@@ -45,13 +45,7 @@ pub(crate) fn sample_status_metrics(
         net_kind: interfaces
             .primary
             .as_deref()
-            .map(|name| {
-                if name == "en0" {
-                    super::status_metrics::NetKind::Wifi
-                } else {
-                    super::status_metrics::NetKind::Ethernet
-                }
-            })
+            .map(status_net_kind)
             .unwrap_or_default(),
         vpn_active: interfaces.tailscale_ip.is_some(),
         remote_session: super::status_metrics::remote_session_from_env(),
@@ -311,6 +305,73 @@ fn status_cpu_ticks() -> Option<(u64, u64)> {
         u64::from(load.ticks[2]),
         load.ticks.iter().map(|tick| u64::from(*tick)).sum(),
     ))
+}
+
+/// `net/if_media.h` packs its request structure to 4 bytes, so the layout and
+/// the derived `SIOCGIFMEDIA` request code must both use that packing.
+#[repr(C, packed(4))]
+// The trailing fields exist to match the kernel layout; only `ifm_active` is read back.
+#[allow(dead_code)]
+struct StatusIfMediaRequest {
+    ifm_name: [libc::c_char; libc::IFNAMSIZ],
+    ifm_current: libc::c_int,
+    ifm_mask: libc::c_int,
+    ifm_status: libc::c_int,
+    ifm_active: libc::c_int,
+    ifm_count: libc::c_int,
+    ifm_ulist: *mut libc::c_int,
+}
+
+const IFM_NMASK: libc::c_int = 0x0000_00e0;
+const IFM_ETHER: libc::c_int = 0x0000_0020;
+const IFM_IEEE80211: libc::c_int = 0x0000_0080;
+const SIOCGIFMEDIA: libc::c_ulong =
+    status_iowr(b'i', 56, std::mem::size_of::<StatusIfMediaRequest>());
+
+const fn status_iowr(group: u8, number: u8, size: usize) -> libc::c_ulong {
+    const IOC_IN: libc::c_ulong = 0x8000_0000;
+    const IOC_OUT: libc::c_ulong = 0x4000_0000;
+    const IOCPARM_MASK: libc::c_ulong = 0x1fff;
+
+    IOC_IN
+        | IOC_OUT
+        | (((size as libc::c_ulong) & IOCPARM_MASK) << 16)
+        | ((group as libc::c_ulong) << 8)
+        | number as libc::c_ulong
+}
+
+/// Resolve the link media type instead of guessing from the interface name:
+/// `en0` is Wi-Fi on portables but built-in Ethernet on desktop Macs, and
+/// docked links land on arbitrary `enN` names. Anything the kernel does not
+/// report as Ethernet or 802.11 stays unknown rather than mislabelled.
+fn status_net_kind(interface: &str) -> super::status_metrics::NetKind {
+    let name = interface.as_bytes();
+    if name.is_empty() || name.len() >= libc::IFNAMSIZ {
+        return super::status_metrics::NetKind::Unknown;
+    }
+
+    let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if socket < 0 {
+        return super::status_metrics::NetKind::Unknown;
+    }
+    let mut ifm_name = [0 as libc::c_char; libc::IFNAMSIZ];
+    for (slot, byte) in ifm_name.iter_mut().zip(name) {
+        *slot = *byte as libc::c_char;
+    }
+    let mut request: StatusIfMediaRequest = unsafe { std::mem::zeroed() };
+    request.ifm_name = ifm_name;
+    let result = unsafe { libc::ioctl(socket, SIOCGIFMEDIA, &raw mut request) };
+    let active = request.ifm_active;
+    unsafe { libc::close(socket) };
+    if result != 0 {
+        return super::status_metrics::NetKind::Unknown;
+    }
+
+    match active & IFM_NMASK {
+        IFM_IEEE80211 => super::status_metrics::NetKind::Wifi,
+        IFM_ETHER => super::status_metrics::NetKind::Ethernet,
+        _ => super::status_metrics::NetKind::Unknown,
+    }
 }
 
 struct StatusNetworkInterfaces {

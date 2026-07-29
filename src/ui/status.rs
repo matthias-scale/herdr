@@ -367,15 +367,13 @@ fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>,
         .and_then(|id| ws.public_pane_number(id))
         .map(|n| n.to_string())
         .unwrap_or_else(|| "1".into());
-    // Prefer live focused-pane terminal cwd; fall back to workspace identity.
-    let cwd = pane_id
-        .and_then(|pane_id| {
-            ws.tabs
-                .get(tab_idx)
-                .and_then(|tab| tab.panes.get(&pane_id))
-                .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-                .map(|terminal| terminal.cwd.clone())
-        })
+    // Runtime-resolved focused cwd, projected by the same code path that
+    // resolves the Git refresh target, so the cwd and branch segments always
+    // describe the same directory. Falls back to workspace identity until the
+    // first projection lands.
+    let cwd = app
+        .status_focused_cwd
+        .clone()
         .or_else(|| Some(ws.identity_cwd.clone()));
     let branch = if app.status_git_cwd.as_ref() == cwd.as_ref() {
         app.status_git_branch.clone()
@@ -386,6 +384,10 @@ fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>,
     };
     (ws_label, tab_label, pane_label, cwd, branch)
 }
+
+/// Both separators are accepted everywhere: Windows paths use `\`, and a
+/// Windows session attached to a Unix server still renders `/` paths.
+const PATH_SEPARATORS: [char; 2] = ['/', '\\'];
 
 fn shorten_path(path: &Path, home: Option<&Path>, max_width: usize) -> String {
     let raw = path.to_string_lossy();
@@ -416,7 +418,7 @@ fn left_truncate_path(display: &str, max_width: usize) -> String {
         return String::new();
     }
     // Never shorter than the final path component if possible.
-    let file = display.rsplit('/').next().unwrap_or(display);
+    let file = display.rsplit(PATH_SEPARATORS).next().unwrap_or(display);
     let file_w = display_width(file);
     if file_w >= max_width {
         return truncate_end(file, max_width);
@@ -440,8 +442,8 @@ fn left_truncate_path(display: &str, max_width: usize) -> String {
     }
     let mut suffix = &display[start..];
     // Drop a partial leading component so we always start on a path boundary when possible.
-    if let Some(slash) = suffix.find('/') {
-        suffix = &suffix[slash + 1..];
+    if let Some(separator) = suffix.find(PATH_SEPARATORS) {
+        suffix = &suffix[separator + 1..];
     }
     if suffix.is_empty() {
         suffix = file;
@@ -886,6 +888,7 @@ mod tests {
         );
         app.workspaces = vec![workspace];
         app.active = Some(0);
+        app.sync_status_focused_cwd(&crate::terminal::TerminalRuntimeRegistry::default());
         app.status_git_cwd = Some(PathBuf::from("/repo/nested"));
         app.status_git_branch = Some("nested-branch".into());
 
@@ -893,6 +896,22 @@ mod tests {
 
         assert_eq!(cwd, Some(PathBuf::from("/repo/nested")));
         assert_eq!(branch.as_deref(), Some("nested-branch"));
+    }
+
+    #[test]
+    fn status_cwd_falls_back_to_workspace_identity_before_first_projection() {
+        let mut workspace = crate::workspace::Workspace::test_new("status");
+        workspace.identity_cwd = PathBuf::from("/repo");
+        workspace.cached_identity_cwd = PathBuf::from("/repo");
+        workspace.cached_git_branch = Some("workspace-root".into());
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let (_, _, _, cwd, branch) = focused_identity(&app);
+
+        assert_eq!(cwd, Some(PathBuf::from("/repo")));
+        assert_eq!(branch.as_deref(), Some("workspace-root"));
     }
 
     #[test]

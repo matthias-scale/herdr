@@ -218,7 +218,7 @@ fn compute_view_internal(
     // Full-width top status row (tmux-parity): spans the whole client, with
     // sidebar + tabs below. Reserve it before the horizontal split so the bar
     // is never squeezed into the main column only.
-    let (status_bar_rect, body_area) = if area.height > 1 {
+    let (status_bar_rect, body_area) = if app.status_bar_enabled && area.height > 1 {
         let [status_bar_rect, body_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         (status_bar_rect, body_area)
@@ -1024,6 +1024,23 @@ mod tests {
         // Terminal/tab chrome never occupy the status-bar row.
         assert!(app.view.terminal_area.y >= 1);
         assert!(app.view.tab_bar_rect.y >= 1 || app.view.tab_bar_rect == Rect::default());
+    }
+
+    #[test]
+    fn disabled_status_bar_returns_its_row_to_the_body() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+        app.status_bar_enabled = false;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.view.status_bar_rect, Rect::default());
+        assert_eq!(app.view.sidebar_rect.y, 0);
+        assert_eq!(app.view.sidebar_rect.height, 24);
     }
 
     #[test]
