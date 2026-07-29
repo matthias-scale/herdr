@@ -2675,6 +2675,23 @@ impl AppState {
                 continue;
             };
 
+            let focused_cwd = self
+                .active
+                .filter(|active| *active == ws_idx)
+                .and_then(|_| {
+                    self.workspaces[ws_idx].focused_cwd_from(&self.terminals, terminal_runtimes)
+                });
+            if result.demand.branch && focused_cwd.as_ref() == Some(&result.resolved_identity_cwd) {
+                if self.status_git_cwd.as_ref() != Some(&result.resolved_identity_cwd) {
+                    self.status_git_cwd = Some(result.resolved_identity_cwd.clone());
+                    changed = true;
+                }
+                if self.status_git_branch != result.branch {
+                    self.status_git_branch = result.branch.clone();
+                    changed = true;
+                }
+            }
+
             if self.workspaces[ws_idx]
                 .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()

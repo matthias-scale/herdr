@@ -121,7 +121,43 @@ fn fitted_segments(
             right.remove(index);
         }
     }
+
+    // Session identity and MEM/CPU are required, but a user-controlled session
+    // name must not crowd the metrics out of the row. Shrink required left
+    // identity segments first; only pathological widths below the desktop
+    // threshold can require truncating the metrics themselves.
+    let session_index = left
+        .iter()
+        .position(|segment| segment.elide_rank.is_none() && !segment.preserve_bg);
+    let mut shrink_order = session_index.into_iter().collect::<Vec<_>>();
+    shrink_order.extend(
+        left.iter()
+            .enumerate()
+            .filter(|(index, segment)| {
+                Some(*index) != session_index && segment.elide_rank.is_none()
+            })
+            .map(|(index, _)| index),
+    );
+    for index in shrink_order {
+        let total_width = segment_width(&left) + segment_width(&right);
+        shrink_segment_for_overflow(&mut left[index], total_width, width);
+    }
+    for index in 0..right.len() {
+        let total_width = segment_width(&left) + segment_width(&right);
+        shrink_segment_for_overflow(&mut right[index], total_width, width);
+    }
+
+    debug_assert!(segment_width(&left) + segment_width(&right) <= width);
     (left, right)
+}
+
+fn shrink_segment_for_overflow(segment: &mut Segment, total_width: usize, width: usize) {
+    let overflow = total_width.saturating_sub(width);
+    if overflow == 0 {
+        return;
+    }
+    let current_width = display_width(&segment.text);
+    segment.text = truncate_end(&segment.text, current_width.saturating_sub(overflow));
 }
 
 fn left_segments(
@@ -317,9 +353,14 @@ fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>,
     let Some(ws) = app.workspaces.get(ws_idx) else {
         return ("1".into(), "1".into(), "1".into(), None, None);
     };
-    let ws_label = (ws_idx + 1).to_string();
+    let ws_label = crate::workspace::public_workspace_number(&ws.id)
+        .unwrap_or(ws_idx + 1)
+        .to_string();
     let tab_idx = ws.active_tab_index();
-    let tab_label = (tab_idx + 1).to_string();
+    let tab_label = ws
+        .public_tab_number(tab_idx)
+        .unwrap_or(tab_idx + 1)
+        .to_string();
     let pane_id = ws.focused_pane_id();
     // Prefer stable public pane numbers (tmux #P parity), not internal PaneId.
     let pane_label = pane_id
@@ -336,7 +377,13 @@ fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>,
                 .map(|terminal| terminal.cwd.clone())
         })
         .or_else(|| Some(ws.identity_cwd.clone()));
-    let branch = ws.cached_git_branch.clone();
+    let branch = if app.status_git_cwd.as_ref() == cwd.as_ref() {
+        app.status_git_branch.clone()
+    } else if ws.cached_identity_cwd == cwd.clone().unwrap_or_default() {
+        ws.cached_git_branch.clone()
+    } else {
+        None
+    };
     (ws_label, tab_label, pane_label, cwd, branch)
 }
 
@@ -759,6 +806,95 @@ mod tests {
         assert!(!rendered.contains(&metrics.time));
     }
 
+    fn assert_long_session_fits_status_row(session_name: &str) {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        const WIDTH: usize = crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD as usize;
+        let mut app = AppState::test_new();
+        app.status_session_name = session_name.into();
+        let metrics = crate::platform::status_metrics::status_metrics_fixture();
+        let (left, right) = fitted_segments(
+            left_segments(&app, &metrics, false, &app.palette),
+            right_segments(&metrics, &app.palette),
+            WIDTH,
+        );
+        assert!(segment_width(&left) + segment_width(&right) <= WIDTH);
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(WIDTH as u16, 1)).expect("create status terminal");
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, WIDTH as u16, 1)))
+            .expect("render status");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
+        assert!(rendered.contains("CPU 12%"), "{rendered}");
+    }
+
+    #[test]
+    fn minimum_desktop_status_fits_long_ascii_session_and_required_metrics() {
+        assert_long_session_fits_status_row(
+            "a-very-long-session-name-that-must-not-displace-required-metrics",
+        );
+    }
+
+    #[test]
+    fn minimum_desktop_status_fits_wide_session_and_required_metrics() {
+        assert_long_session_fits_status_row("重要な長いセッション名が必須メトリクスを隠さない");
+    }
+
+    #[test]
+    fn status_identity_uses_stable_public_workspace_and_tab_numbers() {
+        let mut filler = crate::workspace::Workspace::test_new("filler");
+        filler.id = "w2".into();
+        let mut workspace = crate::workspace::Workspace::test_adversarial_identity_state();
+        workspace.id = "wA".into();
+        let expected_tab = workspace
+            .public_tab_number(workspace.active_tab_index())
+            .expect("public tab number");
+        assert_ne!(expected_tab, workspace.active_tab_index() + 1);
+        let mut app = AppState::test_new();
+        app.workspaces = vec![filler, workspace];
+        app.active = Some(1);
+
+        let (workspace_label, tab_label, _, _, _) = focused_identity(&app);
+
+        assert_eq!(workspace_label, "10");
+        assert_eq!(tab_label, expected_tab.to_string());
+    }
+
+    #[test]
+    fn status_branch_is_bound_to_focused_pane_cwd() {
+        let mut workspace = crate::workspace::Workspace::test_new("status");
+        workspace.identity_cwd = PathBuf::from("/repo");
+        workspace.cached_identity_cwd = PathBuf::from("/repo");
+        workspace.cached_git_branch = Some("workspace-root".into());
+        let focused = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let focused_terminal = workspace
+            .terminal_id(focused)
+            .expect("focused terminal")
+            .clone();
+        let mut app = AppState::test_new();
+        app.terminals.insert(
+            focused_terminal.clone(),
+            crate::terminal::TerminalState::new(focused_terminal, PathBuf::from("/repo/nested")),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.status_git_cwd = Some(PathBuf::from("/repo/nested"));
+        app.status_git_branch = Some("nested-branch".into());
+
+        let (_, _, _, cwd, branch) = focused_identity(&app);
+
+        assert_eq!(cwd, Some(PathBuf::from("/repo/nested")));
+        assert_eq!(branch.as_deref(), Some("nested-branch"));
+    }
+
     #[test]
     fn status_metrics_fallback_format_is_explicit() {
         // AC3/AC5: unavailable snapshots render stable units without sampling in render.
@@ -822,6 +958,8 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.status_session_name = "session".into();
+        app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
+        app.status_git_branch = Some("feature/native-status".into());
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let (workspace_label, tab_label, pane_label, _, _) = focused_identity(&app);

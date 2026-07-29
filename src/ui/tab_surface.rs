@@ -260,6 +260,7 @@ mod tests {
 
     fn full_app_characterization_state(uri: &str) -> AppState {
         let mut workspace = Workspace::test_new("characterization");
+        workspace.id = "w1".into();
         workspace.identity_cwd = std::path::PathBuf::from("characterization");
         workspace.cached_git_branch = None;
         workspace.cached_git_ahead_behind = None;

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
@@ -23,6 +24,7 @@ pub(crate) fn sample_status_metrics(
         .and_then(status_used_memory_bytes)
         .map(|value| value as f32 / 1_073_741_824.0);
     let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
+    let (battery_percent, battery_charging) = status_battery();
     let interfaces = status_interface_ipv4s();
     let (net_down_kib, net_up_kib) = interfaces
         .primary_bytes
@@ -33,6 +35,8 @@ pub(crate) fn sample_status_metrics(
         cpu_percent,
         mem_used_gib,
         mem_total_gib,
+        battery_percent,
+        battery_charging,
         local_ip: interfaces.local_ip,
         tailscale_ip: interfaces.tailscale_ip.clone(),
         public_ip: super::status_metrics::compatible_public_ip(),
@@ -55,8 +59,102 @@ pub(crate) fn sample_status_metrics(
         username,
         date,
         time,
-        ..super::status_metrics::StatusMetrics::default()
     }
+}
+
+/// `pmset` is the stable system battery surface available without adding an
+/// IOKit binding dependency. The metrics worker remains bounded by killing the
+/// local command after a short deadline and accepts only a small output.
+fn status_battery() -> (Option<u8>, Option<bool>) {
+    const PMSET_TIMEOUT: Duration = Duration::from_millis(250);
+    const PMSET_OUTPUT_MAX_BYTES: usize = 4096;
+
+    let mut command = crate::noninteractive_process::command("/usr/bin/pmset");
+    let mut child = match command
+        .args(["-g", "batt"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return (None, None),
+    };
+    if !wait_for_child_until(&mut child, PMSET_TIMEOUT) {
+        return (None, None);
+    }
+
+    let Some(stdout) = child.stdout.take() else {
+        return (None, None);
+    };
+    let bytes = match read_limited_reader(stdout, PMSET_OUTPUT_MAX_BYTES) {
+        Ok(LimitedRead::Complete(bytes)) => bytes,
+        Ok(LimitedRead::Empty | LimitedRead::Oversized) | Err(_) => return (None, None),
+    };
+    std::str::from_utf8(&bytes)
+        .ok()
+        .map(parse_pmset_battery)
+        .unwrap_or((None, None))
+}
+
+fn wait_for_child_until(child: &mut std::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Err(_) => return false,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn parse_pmset_battery(output: &str) -> (Option<u8>, Option<bool>) {
+    for line in output.lines() {
+        let Some((before_percent, after_percent)) = line.split_once("%;") else {
+            continue;
+        };
+        let percent_text = before_percent
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        if percent_text.is_empty() {
+            continue;
+        }
+        let Ok(percent) = percent_text.parse::<u8>() else {
+            continue;
+        };
+        if percent > 100 {
+            continue;
+        }
+        let state = after_percent
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let charging = if state.contains("discharging") {
+            Some(false)
+        } else if state == "charged"
+            || state.contains("charging")
+            || state.contains("finishing charge")
+        {
+            Some(true)
+        } else {
+            None
+        };
+        return (Some(percent), charging);
+    }
+    (None, None)
 }
 
 fn status_identity() -> (String, String) {
@@ -1262,6 +1360,56 @@ pub fn process_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pmset_battery_parser_handles_present_discharging_battery() {
+        let output =
+            "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t73%; discharging; 4:12 remaining present: true\n";
+        assert_eq!(parse_pmset_battery(output), (Some(73), Some(false)));
+    }
+
+    #[test]
+    fn pmset_battery_parser_handles_charging_battery() {
+        let output =
+            "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t42%; charging; 1:11 remaining present: true\n";
+        assert_eq!(parse_pmset_battery(output), (Some(42), Some(true)));
+    }
+
+    #[test]
+    fn pmset_battery_parser_handles_unavailable_battery() {
+        assert_eq!(
+            parse_pmset_battery("Now drawing from 'AC Power'\n"),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn pmset_battery_parser_rejects_malformed_values() {
+        assert_eq!(
+            parse_pmset_battery("-InternalBattery-0\tunknown%; charging;\n"),
+            (None, None)
+        );
+        assert_eq!(
+            parse_pmset_battery("-InternalBattery-0\t101%; charging;\n"),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn pmset_battery_wait_kills_a_child_blocked_on_full_stdout_pipe() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "while :; do printf 'battery-output'; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn blocking fixture");
+        let started = Instant::now();
+
+        assert!(!wait_for_child_until(&mut child, Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(child.try_wait().expect("query child").is_some());
+    }
 
     #[test]
     fn nofile_target_raises_low_soft_limit_to_cap_when_hard_is_unlimited() {

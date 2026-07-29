@@ -100,7 +100,12 @@ impl App {
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
-        let mut demand = GitStatusRefreshDemand::default();
+        // The desktop status row always consumes branch identity, independent
+        // of whether the configurable sidebar also displays Git metadata.
+        let mut demand = GitStatusRefreshDemand {
+            branch: true,
+            ahead_behind: false,
+        };
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token.parts().0 {
                 crate::config::SpaceSidebarToken::Branch => demand.branch = true,
@@ -115,7 +120,8 @@ impl App {
         &self,
         refresh_repo_discovery: bool,
     ) -> Vec<WorkspaceGitRefreshItem> {
-        self.state
+        let mut items = self
+            .state
             .workspaces
             .iter()
             .filter_map(|ws| {
@@ -129,7 +135,28 @@ impl App {
                     cache_key_hint,
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        if let Some(ws) = self
+            .state
+            .active
+            .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+        {
+            if let Some(cwd) = ws.focused_cwd_from(&self.state.terminals, &self.terminal_runtimes) {
+                let duplicate = items
+                    .iter()
+                    .any(|item| item.workspace_id == ws.id && item.resolved_identity_cwd == cwd);
+                if !duplicate {
+                    items.push(WorkspaceGitRefreshItem {
+                        workspace_id: ws.id.clone(),
+                        resolved_identity_cwd: cwd,
+                        cache_key_hint: None,
+                    });
+                }
+            }
+        }
+
+        items
     }
 }
 
@@ -302,6 +329,74 @@ mod tests {
     }
 
     #[test]
+    fn focused_nested_pane_refreshes_its_branch_without_rebinding_workspace_branch() {
+        let outer = std::env::temp_dir().join(format!(
+            "herdr-focused-status-branch-{}",
+            std::process::id()
+        ));
+        let nested = outer.join("nested");
+        let _ = std::fs::remove_dir_all(&outer);
+        std::fs::create_dir_all(&nested).expect("create nested fixture");
+        for (cwd, branch) in [(&outer, "outer-branch"), (&nested, "nested-branch")] {
+            let output = std::process::Command::new("git")
+                .args(["init", "-b", branch])
+                .arg(cwd)
+                .output()
+                .expect("initialize fixture repository");
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let mut app = test_app(&crate::config::Config::default());
+        let mut ws = Workspace::test_new("test");
+        ws.identity_cwd = outer.clone();
+        ws.cached_identity_cwd = outer.clone();
+        let root = ws.tabs[0].root_pane;
+        let root_terminal = ws.terminal_id(root).expect("root terminal").clone();
+        let focused = ws.test_split(ratatui::layout::Direction::Horizontal);
+        let focused_terminal = ws.terminal_id(focused).expect("focused terminal").clone();
+        app.state.terminals.insert(
+            root_terminal.clone(),
+            crate::terminal::TerminalState::new(root_terminal, outer.clone()),
+        );
+        app.state.terminals.insert(
+            focused_terminal.clone(),
+            crate::terminal::TerminalState::new(focused_terminal, nested.clone()),
+        );
+        app.state.workspaces.push(ws);
+        app.state.active = Some(0);
+
+        let items = app.workspace_git_refresh_items(true);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.resolved_identity_cwd == outer));
+        assert!(items
+            .iter()
+            .any(|item| item.resolved_identity_cwd == nested));
+        let output = refresh_workspace_git_statuses_with_cache_and_demand(
+            items,
+            &HashMap::new(),
+            GitStatusRefreshDemand {
+                branch: true,
+                ahead_behind: false,
+            },
+        );
+
+        assert!(app
+            .state
+            .apply_workspace_git_statuses(&app.terminal_runtimes, output.results));
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("outer-branch")
+        );
+        assert_eq!(app.state.status_git_cwd.as_ref(), Some(&nested));
+        assert_eq!(
+            app.state.status_git_branch.as_deref(),
+            Some("nested-branch")
+        );
+
+        std::fs::remove_dir_all(outer).expect("remove fixture");
+    }
+
+    #[test]
     fn cwd_identity_refresh_runs_once_without_sidebar_git_tokens() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
@@ -318,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn due_git_refresh_does_not_start_without_sidebar_consumer() {
+    fn due_git_refresh_starts_for_status_branch_without_sidebar_consumer() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -328,8 +423,7 @@ mod tests {
 
         app.start_git_status_refresh_if_due(now);
 
-        assert!(!app.git_refresh_in_flight);
-        assert!(app.event_rx.try_recv().is_err());
+        assert!(app.git_refresh_in_flight);
     }
 
     #[test]
@@ -337,7 +431,10 @@ mod tests {
         let cases = [
             (
                 crate::config::SpaceSidebarToken::Workspace,
-                GitStatusRefreshDemand::default(),
+                GitStatusRefreshDemand {
+                    branch: true,
+                    ahead_behind: false,
+                },
             ),
             (
                 crate::config::SpaceSidebarToken::Branch,
@@ -349,7 +446,7 @@ mod tests {
             (
                 crate::config::SpaceSidebarToken::GitStatus,
                 GitStatusRefreshDemand {
-                    branch: false,
+                    branch: true,
                     ahead_behind: true,
                 },
             ),
@@ -362,16 +459,12 @@ mod tests {
             app.state.workspaces.push(Workspace::test_new("test"));
 
             assert_eq!(app.git_refresh_demand(), expected, "token: {token:?}");
-            assert_eq!(
-                app.git_refresh_deadline().is_some(),
-                !expected.is_empty(),
-                "token: {token:?}"
-            );
+            assert!(app.git_refresh_deadline().is_some(), "token: {token:?}");
         }
     }
 
     #[test]
-    fn unnamed_linked_worktree_does_not_force_periodic_branch_refresh() {
+    fn unnamed_linked_worktree_keeps_status_branch_refresh() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -386,11 +479,11 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
     #[test]
-    fn custom_named_linked_worktree_does_not_require_branch_refresh() {
+    fn custom_named_linked_worktree_keeps_status_branch_refresh() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -404,7 +497,7 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
     #[test]
