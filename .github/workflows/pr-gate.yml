@@ -5,10 +5,11 @@ on:
     types: [opened, edited, reopened, synchronize]
 
 jobs:
-  # The intake policy is canonical-repository only, and its maintainer token
-   # does not exist on forks. The job still runs there so the check reports a
-   # result, but the script returns early instead of failing.
   check-contributor:
+    # pull_request_target loads this workflow from the PR base ref. Skip the
+    # entire job on forks before actions/github-script resolves the maintainer
+    # token, which intentionally exists only in the canonical repository.
+    if: ${{ github.repository == 'ogulcancelik/herdr' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -18,9 +19,7 @@ jobs:
       - name: Check pull request intake policy
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
-          # Fall back to the workflow token so a missing maintainer secret
-          # cannot fail the job on a missing required input.
-          github-token: ${{ secrets.KANGAL_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}
           script: |
             const CANONICAL_REPOSITORY = 'ogulcancelik/herdr';
             const KANGAL_USER_ID = 285672167;
@@ -41,9 +40,7 @@ jobs:
             const repositoryName = context.payload.repository.full_name.toLowerCase();
 
             if (repositoryName !== CANONICAL_REPOSITORY) {
-              // Forks do not host the intake policy, its maintainer files, or
-              // its token, so this is a no-op there rather than a failure.
-              core.info(`Skipping PR Gate: it only runs for ${CANONICAL_REPOSITORY}`);
+              core.setFailed(`PR Gate only runs for ${CANONICAL_REPOSITORY}`);
               return;
             }
 
