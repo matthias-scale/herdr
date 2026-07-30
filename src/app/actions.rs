@@ -5057,9 +5057,7 @@ mod tests {
             .get_mut(&hidden_pane_id)
             .unwrap()
             .seen = false;
-        state.workspaces[0].tabs[0]
-            .layout
-            .focus_pane(root_pane_id);
+        state.workspaces[0].tabs[0].layout.focus_pane(root_pane_id);
 
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: hidden_pane_id,
