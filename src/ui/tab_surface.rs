@@ -342,7 +342,10 @@ mod tests {
         assert!(status.starts_with(' '), "{status:?}");
         assert!(status.contains("CPU 12%"), "{status:?}");
         assert!(status.contains("MEM 8.0/16.0 GiB"), "{status:?}");
-        assert!(status.trim_end().ends_with("MEM 8.0/16.0 GiB"), "{status:?}");
+        assert!(
+            status.trim_end().ends_with("MEM 8.0/16.0 GiB"),
+            "{status:?}"
+        );
         let sidebar = frame_rect_text(&frame, app.view.sidebar_rect);
         assert!(sidebar.contains("characterization"), "{sidebar:?}");
         let terminal = frame_rect_text(&frame, app.view.terminal_area);

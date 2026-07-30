@@ -1145,6 +1145,10 @@ mod tests {
         app.selected = 0;
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
+        app.status_home_dir = Some(PathBuf::from("/home/test"));
+        app.status_focused_cwd = Some(PathBuf::from("/home/test/work/native-status"));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some("feat/native-status".into());
 
         let mut rendered = Vec::new();
         for (width, height) in [(220, 8), (120, 12)] {
