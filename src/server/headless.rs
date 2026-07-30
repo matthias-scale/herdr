@@ -1460,6 +1460,17 @@ impl HeadlessServer {
         self.app_client_count() > 0
     }
 
+    fn has_renderable_status_target(&self) -> bool {
+        self.clients.values().any(|client| {
+            client.writer.is_some()
+                && client.is_full_app_client()
+                && crate::ui::status_bar_is_renderable(
+                    &self.app.state,
+                    Rect::new(0, 0, client.terminal_size.0, client.terminal_size.1),
+                )
+        })
+    }
+
     fn remove_client(&mut self, client_id: u64) -> bool {
         let was_foreground = self.foreground_client_id == Some(client_id);
         self.app.clear_input_source(client_id);
@@ -4040,7 +4051,11 @@ impl HeadlessServer {
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
-        let mut changed = if self.has_app_client() {
+        // A client resize updates its announced geometry before that geometry
+        // has produced a frame. Wait for the pending render to finish so a
+        // narrow-to-wide resize cannot start collection for an unseen row.
+        self.app.status_metrics_visible = !geometry_dirty && self.has_renderable_status_target();
+        let mut changed = if self.app.status_metrics_visible {
             self.app.schedule_status_metrics(now)
         } else {
             self.app.discard_stale_status_metrics(now)
@@ -4776,15 +4791,15 @@ mod tests {
 
         server.app.route_client_input(vec![0x02, b'n']);
         assert_eq!(server.app.state.workspaces[0].active_tab, second_tab);
-        let (_, _, _, stale_cwd, stale_branch) =
-            crate::ui::focused_status_identity_for_test(&server.app.state);
+        let (stale_cwd, stale_branch) =
+            crate::ui::focused_status_context_for_test(&server.app.state);
         assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/first")));
         assert_eq!(stale_branch.as_deref(), Some("first-branch"));
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(server.app.sync_status_context_before_render());
         server.render_and_stream();
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&server.app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&server.app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5869,7 +5884,68 @@ next_tab = ""
     }
 
     #[test]
-    fn attached_app_client_starts_status_metric_sampling_immediately() {
+    fn attached_app_client_starts_status_metric_sampling_after_first_render() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        server.handle_scheduled_tasks_headless(Instant::now(), true);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn narrow_to_wide_resize_waits_for_new_geometry_frame_before_sampling() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 40,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+        }));
+        server.handle_scheduled_tasks_headless(Instant::now(), true);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn status_sampling_tracks_renderable_clients() {
         let mut server = test_headless_server();
         server.app.status_metric_refresh_enabled = true;
         let (writer, _control_rx, _render_rx) = test_client_writer();
@@ -5887,7 +5963,22 @@ next_tab = ""
 
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
+        assert!(server.app.status_metrics_visible);
         assert!(server.app.status_metric_refresh.in_flight());
+
+        server.app.status_metric_refresh.finish();
+        server
+            .clients
+            .get_mut(&7)
+            .expect("attached client")
+            .terminal_size = (40, 24);
+        server.handle_scheduled_tasks_headless(
+            Instant::now() + crate::platform::status_metrics::STATUS_METRIC_REFRESH_INTERVAL,
+            false,
+        );
+
+        assert!(!server.app.status_metrics_visible);
+        assert!(!server.app.status_metric_refresh.in_flight());
     }
 
     #[test]

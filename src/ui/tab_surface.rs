@@ -340,10 +340,10 @@ mod tests {
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         let status = frame_rect_text(&frame, app.view.status_bar_rect);
         assert!(status.starts_with(' '), "{status:?}");
-        assert!(status.contains("CPU 12%"), "{status:?}");
-        assert!(status.contains("MEM 8.0/16.0 GiB"), "{status:?}");
+        assert!(status.contains("CPU  12%"), "{status:?}");
+        assert!(status.contains("MEM    8.0/  16.0 GiB"), "{status:?}");
         assert!(
-            status.trim_end().ends_with("MEM 8.0/16.0 GiB"),
+            status.trim_end().ends_with("MEM    8.0/  16.0 GiB"),
             "{status:?}"
         );
         let sidebar = frame_rect_text(&frame, app.view.sidebar_rect);

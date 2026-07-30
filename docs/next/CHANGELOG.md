@@ -4,7 +4,7 @@
 
 ### Changed
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
-- Desktop sessions now show a theme-derived, right-aligned native status row containing the focused folder and Git branch, device name, CPU, and memory. The left side stays blank; the row does not collect or display network details or usernames, and it does not show the Herdr version, battery, date, or time. Set `ui.status_bar.enabled = false` to hide the row and stop its background sampling.
+- Desktop sessions now show a theme-derived, right-aligned native status row containing the focused folder and Git branch, device name, Herdr build version, CPU, and memory. The left side stays blank; the row does not collect or display session, workspace, tab, or pane identity, network details, usernames, battery, date, or time. Set `ui.status_bar.enabled = false` to hide the row and stop its background sampling.
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed

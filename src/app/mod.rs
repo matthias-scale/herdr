@@ -98,6 +98,7 @@ pub struct App {
     pub(crate) status_metric_sampler:
         Arc<std::sync::Mutex<crate::platform::status_metrics::StatusMetricSampler>>,
     pub(crate) status_metric_refresh_enabled: bool,
+    pub(crate) status_metrics_visible: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
@@ -764,6 +765,7 @@ impl App {
                 crate::platform::status_metrics::StatusMetricSampler::new(),
             )),
             status_metric_refresh_enabled: !cfg!(test),
+            status_metrics_visible: false,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,
@@ -1158,6 +1160,8 @@ impl App {
                         frame,
                     );
                 })?;
+                self.status_metrics_visible =
+                    self.state.view.status_bar_rect != ratatui::layout::Rect::default();
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
                         &self.state,
@@ -2941,7 +2945,7 @@ mod tests {
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert!(app.state.status_bar_enabled);
         assert!(app.state.status_focus_projection_initialized);
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -2990,7 +2994,7 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo")));
         assert_eq!(branch, None);
         assert_eq!(app.state.status_git_cwd, None);
@@ -5246,14 +5250,13 @@ last_pane = "prefix+tab"
             .terminal_id(active_pane)
             .expect("active terminal");
         let expected_cwd = app.state.terminals[active_terminal].cwd.clone();
-        let (_, _, _, stale_cwd, stale_branch) =
-            crate::ui::focused_status_identity_for_test(&app.state);
+        let (stale_cwd, stale_branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/old-focus")));
         assert_eq!(stale_branch.as_deref(), Some("old-branch"));
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(expected_cwd));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5283,7 +5286,7 @@ last_pane = "prefix+tab"
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(!app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
         assert_eq!(branch.as_deref(), Some("runtime-branch"));
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5329,7 +5332,7 @@ last_pane = "prefix+tab"
         assert_eq!(app.status_context_focus, first_focus);
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5370,7 +5373,7 @@ last_pane = "prefix+tab"
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(!app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
         assert_eq!(branch.as_deref(), Some("runtime-branch"));
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
