@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 // Effective state arbitration is intentionally centralized here. Full lifecycle
 // Herdr hook integrations are hook-authoritative while live; screen recovery
 // remains only for session-only/custom hook paths and fallback detection.
@@ -105,8 +107,8 @@ struct AgentNameOwner {
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AgentActivityOwner {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AgentActivityOwner {
     Session {
         source: String,
         agent_label: String,
@@ -119,11 +121,49 @@ enum AgentActivityOwner {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentActivitySession {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentActivitySession {
     source: String,
     kind: crate::agent_resume::AgentSessionRefKind,
     value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentActivityHandoffState {
+    state: AgentActivityHandoffStatus,
+    active_elapsed: Option<Duration>,
+    last_active_elapsed: Option<Duration>,
+    owner: Option<AgentActivityOwner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum AgentActivityHandoffStatus {
+    Idle,
+    Working,
+    Blocked,
+    Unknown,
+}
+
+impl From<AgentState> for AgentActivityHandoffStatus {
+    fn from(state: AgentState) -> Self {
+        match state {
+            AgentState::Idle => Self::Idle,
+            AgentState::Working => Self::Working,
+            AgentState::Blocked => Self::Blocked,
+            AgentState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<AgentActivityHandoffStatus> for AgentState {
+    fn from(state: AgentActivityHandoffStatus) -> Self {
+        match state {
+            AgentActivityHandoffStatus::Idle => Self::Idle,
+            AgentActivityHandoffStatus::Working => Self::Working,
+            AgentActivityHandoffStatus::Blocked => Self::Blocked,
+            AgentActivityHandoffStatus::Unknown => Self::Unknown,
+        }
+    }
 }
 
 impl AgentActivityOwner {
@@ -1834,6 +1874,44 @@ impl TerminalState {
         }
     }
 
+    pub(crate) fn agent_activity_handoff_state(
+        &self,
+        now: Instant,
+    ) -> Option<AgentActivityHandoffState> {
+        if self.agent_activity_owner.is_none()
+            && self.agent_active_since.is_none()
+            && self.agent_last_active_at.is_none()
+        {
+            return None;
+        }
+        Some(AgentActivityHandoffState {
+            state: self.state.into(),
+            active_elapsed: self
+                .agent_active_since
+                .map(|started| now.saturating_duration_since(started)),
+            last_active_elapsed: self
+                .agent_last_active_at
+                .map(|ended| now.saturating_duration_since(ended)),
+            owner: self.agent_activity_owner.clone(),
+        })
+    }
+
+    pub(crate) fn restore_agent_activity_handoff_state(
+        &mut self,
+        handoff: AgentActivityHandoffState,
+        now: Instant,
+    ) {
+        self.state = handoff.state.into();
+        self.fallback_state = self.state;
+        self.agent_active_since = handoff
+            .active_elapsed
+            .and_then(|elapsed| now.checked_sub(elapsed));
+        self.agent_last_active_at = handoff
+            .last_active_elapsed
+            .and_then(|elapsed| now.checked_sub(elapsed));
+        self.agent_activity_owner = handoff.owner;
+    }
+
     pub(crate) fn unchanged_effective_state_change_at(&self, now: Instant) -> EffectiveStateChange {
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
@@ -2298,6 +2376,44 @@ mod tests {
             )
             .is_some());
         assert_eq!(terminal.agent_activity_at(), Some(started));
+    }
+
+    #[test]
+    fn review_fix_handoff_preserves_working_activity_age_and_owner() {
+        let started = Instant::now().checked_sub(Duration::from_secs(45)).unwrap();
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        source.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            true,
+            false,
+            false,
+            started,
+        );
+        let handoff = source
+            .agent_activity_handoff_state(captured_at)
+            .expect("working activity should transfer");
+
+        let restored_at = captured_at + Duration::from_secs(2);
+        let mut restored = test_terminal();
+        restored.restore_agent_activity_handoff_state(handoff, restored_at);
+        restored.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            true,
+            false,
+            false,
+            restored_at + Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            restored.agent_activity_at(),
+            Some(started + Duration::from_secs(2))
+        );
+        assert_eq!(restored.agent_activity_owner, source.agent_activity_owner);
     }
 
     #[test]

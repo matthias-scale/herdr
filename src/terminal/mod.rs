@@ -11,4 +11,5 @@ pub use state::{
     AgentMetadataReport, EffectivePresentation, EffectiveStateChange, TerminalState,
     TerminalStateMutation,
 };
+pub(crate) use state::AgentActivityHandoffState;
 pub(crate) use title::stripped_terminal_title;

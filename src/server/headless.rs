@@ -1098,7 +1098,7 @@ impl HeadlessServer {
         apply_keybindings(&mut self.app, &keybindings);
         self.sync_visible_server_config_diagnostic(uses_local_keybindings);
         if outer_terminal_focus == Some(true) {
-            self.app.state.mark_active_tab_seen();
+            self.app.state.mark_active_pane_seen();
         }
         self.app.set_host_terminal_appearance_state(
             host_terminal_appearance,
@@ -1177,11 +1177,18 @@ impl HeadlessServer {
         );
 
         let mut handoff_entries = Vec::new();
+        let handoff_captured_at = Instant::now();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
             let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.agent_activity = self
+                .app
+                .state
+                .terminals
+                .get(terminal_id)
+                .and_then(|terminal| terminal.agent_activity_handoff_state(handoff_captured_at));
             let has_agent_session = self
                 .app
                 .state
