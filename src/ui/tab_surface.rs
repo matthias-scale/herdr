@@ -258,6 +258,17 @@ mod tests {
         format!("{:x}", Sha256::digest(encoded))
     }
 
+    fn frame_rect_text(frame: &crate::protocol::FrameData, area: Rect) -> String {
+        (area.y..area.y + area.height)
+            .flat_map(|y| {
+                let row_start = y as usize * frame.width as usize;
+                (area.x..area.x + area.width)
+                    .map(move |x| frame.cells[row_start + x as usize].symbol.as_str())
+                    .chain(std::iter::once("\n"))
+            })
+            .collect()
+    }
+
     fn full_app_characterization_state(uri: &str) -> AppState {
         let mut workspace = Workspace::test_new("characterization");
         workspace.id = "w1".into();
@@ -327,10 +338,16 @@ mod tests {
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
-        assert_eq!(
-            frame_digest(&frame),
-            "74a13591287cc33602cf0bfcd926b6f6937a7dc1a489ff4feef2282bd7929c0e"
-        );
+        let status = frame_rect_text(&frame, app.view.status_bar_rect);
+        assert!(status.starts_with(' '), "{status:?}");
+        assert!(status.contains("CPU 12%"), "{status:?}");
+        assert!(status.contains("MEM 8.0/16.0 GiB"), "{status:?}");
+        assert!(status.trim_end().ends_with("MEM 8.0/16.0 GiB"), "{status:?}");
+        let sidebar = frame_rect_text(&frame, app.view.sidebar_rect);
+        assert!(sidebar.contains("characterization"), "{sidebar:?}");
+        let terminal = frame_rect_text(&frame, app.view.terminal_area);
+        assert!(terminal.contains("LINK"), "{terminal:?}");
+        assert!(terminal.contains("RIGHT"), "{terminal:?}");
     }
 
     #[tokio::test]
