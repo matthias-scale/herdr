@@ -19,8 +19,7 @@ pub(super) fn read_branch_config_with_user_paths(
     branch: &str,
     user_config_paths: Vec<PathBuf>,
 ) -> Option<BranchConfig> {
-    let worktree_config_enabled =
-        worktree_config_enabled(&info.git_common_dir.join("config"), info);
+    let worktree_config_enabled = worktree_config_enabled(&info.git_common_dir.join("config"));
     let config_paths = user_config_paths
         .into_iter()
         .chain(std::iter::once(info.git_common_dir.join("config")))
@@ -67,7 +66,7 @@ fn git_user_config_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn worktree_config_enabled(path: &Path, info: &GitWorktreeInfo) -> bool {
+pub(super) fn worktree_config_enabled(path: &Path) -> bool {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -80,18 +79,7 @@ fn worktree_config_enabled(path: &Path, info: &GitWorktreeInfo) -> bool {
             section = if is_extensions {
                 ConfigSection::Extensions
             } else {
-                parse_config_section(
-                    section_name,
-                    "",
-                    info,
-                    path,
-                    &BranchConfig {
-                        remote: String::new(),
-                        merge_ref: String::new(),
-                        fetch_refspecs: Vec::new(),
-                        remote_urls: Vec::new(),
-                    },
-                )
+                ConfigSection::Other
             };
             continue;
         }
