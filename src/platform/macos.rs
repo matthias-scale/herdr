@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -44,7 +44,7 @@ pub(crate) fn sample_status_metrics(
         battery_charging,
         local_ip: interfaces.local_ip,
         tailscale_ip: interfaces.tailscale_ip.clone(),
-        public_ip: super::status_metrics::compatible_public_ip(),
+        public_ip: status_public_ip(),
         net_down_kib,
         net_up_kib,
         net_kind: interfaces
@@ -126,8 +126,88 @@ fn status_identity() -> (String, String) {
     let user = std::env::var("USER")
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(status_username_from_effective_uid);
     (host, user)
+}
+
+fn status_username_from_effective_uid() -> String {
+    let uid = unsafe { libc::geteuid() };
+    let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut size = if configured_size > 0 {
+        configured_size as usize
+    } else {
+        16 * 1024
+    };
+    size = size.clamp(1024, 1024 * 1024);
+
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0 as libc::c_char; size];
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == 0 && !result.is_null() {
+            let name = unsafe { std::ffi::CStr::from_ptr((*result).pw_name) }
+                .to_string_lossy()
+                .into_owned();
+            if !name.is_empty() {
+                return name;
+            }
+            break;
+        }
+        if status != libc::ERANGE || size >= 1024 * 1024 {
+            break;
+        }
+        size = (size * 2).min(1024 * 1024);
+    }
+
+    uid.to_string()
+}
+
+fn status_public_ip() -> Option<String> {
+    read_compatible_public_ip(
+        Path::new("/tmp/tmux-powerline-wan-ip"),
+        std::time::SystemTime::now(),
+    )
+}
+
+fn read_compatible_public_ip(path: &Path, now: std::time::SystemTime) -> Option<String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let path_metadata = std::fs::symlink_metadata(path).ok()?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
+    {
+        return None;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o022 != 0
+    {
+        return None;
+    }
+
+    let modified = metadata.modified().ok()?;
+    let mut bytes = Vec::with_capacity(super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1);
+    file.take((super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    super::status_metrics::compatible_public_ip_from_cache(&bytes, modified, now)
 }
 
 fn status_local_date_time() -> (String, String) {
@@ -554,18 +634,15 @@ fn select_status_network_interfaces(
         candidates.push(interface);
     }
 
-    let selected = default_interface
-        .and_then(|name| {
-            candidates
-                .iter()
-                .position(|interface| interface.name == name)
-        })
-        .or_else(|| {
-            candidates
-                .iter()
-                .position(|interface| !status_tunnel_interface(&interface.name))
-        })
-        .and_then(|index| candidates.get(index));
+    let selected = match default_interface {
+        Some(name) => candidates
+            .iter()
+            .position(|interface| interface.name == name),
+        None => candidates
+            .iter()
+            .position(|interface| !status_tunnel_interface(&interface.name)),
+    }
+    .and_then(|index| candidates.get(index));
 
     let Some(selected) = selected else {
         return StatusNetworkInterfaces {
@@ -623,6 +700,7 @@ mod status_metric_tests {
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
 
     static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -648,6 +726,28 @@ mod status_metric_tests {
             assert!(percent <= 100);
             assert!(metrics.battery_charging.is_some());
         }
+    }
+
+    #[test]
+    fn native_identity_lookup_returns_effective_user() {
+        assert!(!super::status_username_from_effective_uid().is_empty());
+    }
+
+    #[test]
+    fn wan_cache_reader_rejects_symlinks() {
+        let target =
+            std::env::temp_dir().join(format!("herdr-status-wan-{}-target", std::process::id()));
+        let link =
+            std::env::temp_dir().join(format!("herdr-status-wan-{}-link", std::process::id()));
+        std::fs::write(&target, "203.0.113.9\n").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        assert_eq!(
+            super::read_compatible_public_ip(&link, SystemTime::now()),
+            None
+        );
+        std::fs::remove_file(link).expect("remove symlink");
+        std::fs::remove_file(target).expect("remove target");
     }
 
     #[test]
@@ -733,7 +833,7 @@ mod status_metric_tests {
     }
 
     #[test]
-    fn network_selection_falls_back_coherently_when_default_route_is_unavailable() {
+    fn network_selection_hides_metrics_when_named_default_route_is_missing() {
         let ipv4s = vec![
             super::StatusInterfaceIpv4 {
                 name: "utun3".into(),
@@ -750,11 +850,27 @@ mod status_metric_tests {
 
         let selected = super::select_status_network_interfaces(Some("missing0"), ipv4s, counters);
 
+        assert_eq!(selected.primary, None);
+        assert_eq!(selected.local_ip, None);
+        assert_eq!(selected.primary_bytes, None);
+        assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.1.2"));
+        assert!(selected.vpn_active);
+    }
+
+    #[test]
+    fn network_selection_falls_back_when_default_route_is_unavailable() {
+        let ipv4s = vec![super::StatusInterfaceIpv4 {
+            name: "en7".into(),
+            address: Ipv4Addr::new(172, 16, 0, 9),
+            up: true,
+        }];
+        let counters = HashMap::from([("en7".into(), (70, 80))]);
+
+        let selected = super::select_status_network_interfaces(None, ipv4s, counters);
+
         assert_eq!(selected.primary.as_deref(), Some("en7"));
         assert_eq!(selected.local_ip.as_deref(), Some("172.16.0.9"));
         assert_eq!(selected.primary_bytes, Some((70, 80)));
-        assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.1.2"));
-        assert!(selected.vpn_active);
     }
 
     #[test]

@@ -2674,8 +2674,12 @@ impl AppState {
             .active
             .and_then(|ws_idx| self.workspaces.get(ws_idx))
             .and_then(|ws| ws.focused_cwd_from(&self.terminals, terminal_runtimes));
-        let changed = self.status_focused_cwd != focused_cwd;
+        let mut changed = self.status_focused_cwd != focused_cwd;
         self.status_focused_cwd = focused_cwd;
+        if self.status_git_cwd.as_ref() != self.status_focused_cwd.as_ref() {
+            changed |= self.status_git_cwd.take().is_some();
+            changed |= self.status_git_branch.take().is_some();
+        }
         changed
     }
 

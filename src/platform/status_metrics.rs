@@ -4,15 +4,13 @@
 //! module deliberately contains no process spawning, network clients, or
 //! platform APIs so UI rendering can consume a plain `AppState` snapshot.
 
-use std::io::Read;
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 pub(crate) const STATUS_METRIC_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const STATUS_METRIC_STALE_AFTER: Duration = Duration::from_secs(4);
 const STATUS_METRIC_REPAINT_INTERVAL: Duration = Duration::from_secs(4);
-const COMPATIBLE_WAN_CACHE_TTL: Duration = Duration::from_secs(300);
-const COMPATIBLE_WAN_CACHE_MAX_BYTES: u64 = 64;
+pub(super) const COMPATIBLE_WAN_CACHE_TTL: Duration = Duration::from_secs(300);
+pub(super) const COMPATIBLE_WAN_CACHE_MAX_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct StatusMetrics {
@@ -77,19 +75,23 @@ impl StatusMetricSampler {
     }
 
     pub(super) fn cpu_percent(&mut self, idle: u64, total: u64) -> Option<u8> {
-        let result = self.previous_cpu.map(|(previous_idle, previous_total)| {
-            let idle_delta = idle.saturating_sub(previous_idle);
-            let total_delta = total.saturating_sub(previous_total);
-            if total_delta == 0 {
-                return 0;
-            }
-            let busy = total_delta.saturating_sub(idle_delta) as f64;
-            ((busy / total_delta as f64) * 100.0)
-                .round()
-                .clamp(0.0, 100.0) as u8
-        });
+        let result = self
+            .previous_cpu
+            .and_then(|(previous_idle, previous_total)| {
+                let idle_delta = idle.saturating_sub(previous_idle);
+                let total_delta = total.saturating_sub(previous_total);
+                if total_delta == 0 {
+                    return None;
+                }
+                let busy = total_delta.saturating_sub(idle_delta) as f64;
+                Some(
+                    ((busy / total_delta as f64) * 100.0)
+                        .round()
+                        .clamp(0.0, 100.0) as u8,
+                )
+            });
         self.previous_cpu = Some((idle, total));
-        result.or(Some(0))
+        result
     }
 
     #[cfg(any(unix, test))]
@@ -189,51 +191,18 @@ pub(super) fn remote_session_from_env() -> bool {
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
 }
 
-/// Read only the existing tmux-powerline WAN cache. Collection never starts a
-/// public-IP request and never writes or refreshes this file.
-pub(super) fn compatible_public_ip() -> Option<String> {
-    read_compatible_public_ip(Path::new("/tmp/tmux-powerline-wan-ip"), SystemTime::now())
-}
-
-fn read_compatible_public_ip(path: &Path, now: SystemTime) -> Option<String> {
-    let path_metadata = std::fs::symlink_metadata(path).ok()?;
-    if !path_metadata.file_type().is_file() || path_metadata.len() > COMPATIBLE_WAN_CACHE_MAX_BYTES
-    {
+pub(super) fn compatible_public_ip_from_cache(
+    bytes: &[u8],
+    modified: SystemTime,
+    now: SystemTime,
+) -> Option<String> {
+    if bytes.len() > COMPATIBLE_WAN_CACHE_MAX_BYTES {
         return None;
     }
-
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > COMPATIBLE_WAN_CACHE_MAX_BYTES {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
-            return None;
-        }
-    }
-
-    let modified = metadata.modified().ok()?;
     if now.duration_since(modified).ok()? > COMPATIBLE_WAN_CACHE_TTL {
         return None;
     }
-    let mut bytes = Vec::with_capacity(COMPATIBLE_WAN_CACHE_MAX_BYTES as usize + 1);
-    file.take(COMPATIBLE_WAN_CACHE_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > COMPATIBLE_WAN_CACHE_MAX_BYTES {
-        return None;
-    }
-    let text = std::str::from_utf8(&bytes).ok()?;
+    let text = std::str::from_utf8(bytes).ok()?;
     let ip = text.trim();
     plausible_ipv4(ip).then(|| ip.to_string())
 }
@@ -269,10 +238,6 @@ pub(crate) fn status_metrics_fixture() -> StatusMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn wan_fixture_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("herdr-status-wan-{}-{label}", std::process::id()))
-    }
 
     #[test]
     fn metric_refresh_cadence_is_immediate_bounded_and_retries() {
@@ -379,80 +344,35 @@ mod tests {
     #[test]
     fn metric_privacy_cache_accepts_only_fresh_local_values() {
         // AC5/AC6: the shared policy has no HTTP/process path; WAN is read-only cache data.
-        let path = wan_fixture_path("fresh");
-        std::fs::write(&path, "203.0.113.9\n").expect("write fixture");
-        let modified = std::fs::metadata(&path)
-            .expect("fixture metadata")
-            .modified()
-            .expect("fixture timestamp");
+        let modified = SystemTime::now();
         assert_eq!(
-            read_compatible_public_ip(&path, modified).as_deref(),
+            compatible_public_ip_from_cache(b"203.0.113.9\n", modified, modified).as_deref(),
             Some("203.0.113.9")
         );
         assert_eq!(
-            read_compatible_public_ip(
-                &path,
+            compatible_public_ip_from_cache(
+                b"203.0.113.9\n",
+                modified,
                 modified + COMPATIBLE_WAN_CACHE_TTL + Duration::from_secs(1)
             ),
             None
         );
-        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]
     fn metric_privacy_cache_rejects_oversized_values() {
-        let path = wan_fixture_path("oversized");
-        std::fs::write(
-            &path,
-            vec![b'1'; COMPATIBLE_WAN_CACHE_MAX_BYTES as usize + 1],
-        )
-        .expect("write oversized fixture");
-        let modified = std::fs::metadata(&path)
-            .expect("fixture metadata")
-            .modified()
-            .expect("fixture timestamp");
-
-        assert_eq!(read_compatible_public_ip(&path, modified), None);
-        std::fs::remove_file(path).expect("remove fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn metric_privacy_cache_rejects_symlinks() {
-        let target = wan_fixture_path("symlink-target");
-        let link = wan_fixture_path("symlink");
-        std::fs::write(&target, "203.0.113.9\n").expect("write target");
-        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
-        let modified = std::fs::metadata(&target)
-            .expect("target metadata")
-            .modified()
-            .expect("target timestamp");
-
-        assert_eq!(read_compatible_public_ip(&link, modified), None);
-        std::fs::remove_file(link).expect("remove symlink");
-        std::fs::remove_file(target).expect("remove target");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn metric_privacy_cache_rejects_fifo_without_blocking() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let path = wan_fixture_path("fifo");
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("valid path");
-        // SAFETY: `c_path` is a valid NUL-terminated filesystem path.
-        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
-
-        assert_eq!(read_compatible_public_ip(&path, SystemTime::now()), None);
-        std::fs::remove_file(path).expect("remove fifo");
+        let oversized = vec![b'1'; COMPATIBLE_WAN_CACHE_MAX_BYTES + 1];
+        let now = SystemTime::now();
+        assert_eq!(compatible_public_ip_from_cache(&oversized, now, now), None);
     }
 
     #[test]
     fn metric_unavailable_and_rate_fallbacks_are_deterministic() {
-        // AC3/AC5: first CPU/network samples establish a stable visible baseline.
+        // AC3/AC5: CPU stays unavailable until a positive interval exists.
         let mut sampler = StatusMetricSampler::new();
         let now = Instant::now();
-        assert_eq!(sampler.cpu_percent(20, 100), Some(0));
+        assert_eq!(sampler.cpu_percent(20, 100), None);
+        assert_eq!(sampler.cpu_percent(20, 100), None);
         assert_eq!(sampler.cpu_percent(30, 140), Some(75));
         assert_eq!(sampler.bandwidth_kib("eth0", 1000, 2000, now), Some((0, 0)));
         assert_eq!(

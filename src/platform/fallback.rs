@@ -130,7 +130,7 @@ pub(crate) fn sample_status_metrics(
         hostname,
         username,
         remote_session: super::status_metrics::remote_session_from_env(),
-        public_ip: super::status_metrics::compatible_public_ip(),
+        public_ip: None,
         date: "----/--/--".into(),
         time: "--:--".into(),
         ..super::status_metrics::StatusMetrics::default()

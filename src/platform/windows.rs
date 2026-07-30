@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
+    io::Read,
     mem::{size_of, MaybeUninit},
     path::PathBuf,
     ptr::{copy_nonoverlapping, null_mut},
@@ -111,7 +112,7 @@ pub(crate) fn sample_status_metrics(
         cpu_percent,
         mem_used_gib,
         mem_total_gib,
-        public_ip: super::status_metrics::compatible_public_ip(),
+        public_ip: status_public_ip(),
         remote_session: super::status_metrics::remote_session_from_env(),
         hostname,
         username,
@@ -119,6 +120,35 @@ pub(crate) fn sample_status_metrics(
         time,
         ..super::status_metrics::StatusMetrics::default()
     }
+}
+
+fn status_public_ip() -> Option<String> {
+    let path = std::env::temp_dir().join("tmux-powerline-wan-ip");
+    let path_metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
+    {
+        return None;
+    }
+
+    let file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
+    {
+        return None;
+    }
+
+    let modified = metadata.modified().ok()?;
+    let mut bytes = Vec::with_capacity(super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1);
+    file.take((super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    super::status_metrics::compatible_public_ip_from_cache(
+        &bytes,
+        modified,
+        std::time::SystemTime::now(),
+    )
 }
 
 #[cfg(test)]
