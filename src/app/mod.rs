@@ -104,7 +104,7 @@ pub struct App {
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
-    pub(crate) status_context_focus: Option<(usize, usize, crate::layout::PaneId)>,
+    pub(crate) status_context_focus: Option<(String, usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
@@ -905,27 +905,32 @@ impl App {
         self.full_redraw_pending = true;
     }
 
-    fn focused_status_context_key(&self) -> Option<(usize, usize, crate::layout::PaneId)> {
+    fn focused_status_context_key(&self) -> Option<(String, usize, crate::layout::PaneId)> {
         self.state.active.and_then(|workspace_idx| {
             self.state
                 .workspaces
                 .get(workspace_idx)
                 .and_then(|workspace| {
-                    let tab_idx = workspace.active_tab;
+                    let tab_number = workspace.public_tab_number(workspace.active_tab)?;
                     workspace
                         .focused_pane_id()
-                        .map(|pane_id| (workspace_idx, tab_idx, pane_id))
+                        .map(|pane_id| (workspace.id.clone(), tab_number, pane_id))
                 })
         })
     }
 
-    fn record_status_context_focus(&mut self) {
-        self.status_context_focus = self.focused_status_context_key();
+    fn project_status_context_from_cached(&mut self) -> bool {
+        let current_focus = self.focused_status_context_key();
+        let changed = self.state.sync_status_focused_cached_cwd();
+        self.status_context_focus = current_focus;
+        changed
     }
 
     pub(crate) fn sync_status_focused_runtime_cwd(&mut self) -> bool {
-        self.record_status_context_focus();
-        self.state.sync_status_focused_cwd(&self.terminal_runtimes)
+        let current_focus = self.focused_status_context_key();
+        let changed = self.state.sync_status_focused_cwd(&self.terminal_runtimes);
+        self.status_context_focus = current_focus;
+        changed
     }
 
     pub(crate) fn sync_status_context_before_render(&mut self) -> bool {
@@ -935,8 +940,7 @@ impl App {
         {
             return false;
         }
-        self.status_context_focus = current_focus;
-        self.state.sync_status_focused_cached_cwd()
+        self.project_status_context_from_cached()
     }
 
     pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
@@ -1525,7 +1529,7 @@ impl App {
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 if self.state.status_bar_enabled && !status_bar_was_enabled {
-                    self.sync_status_context_before_render();
+                    self.project_status_context_from_cached();
                     self.request_git_identity_refresh(Instant::now());
                 }
                 self.state.agent_panel_sort =
@@ -2895,7 +2899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_config_enabling_status_projects_cached_focus_without_io() {
+    async fn status_context_reenable_projects_mutated_cached_focus_without_io() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-enable-status-focus");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2922,15 +2926,15 @@ mod tests {
             .terminal_id(nested)
             .expect("nested terminal")
             .clone();
-        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/old".into();
         let (runtime, _input_rx) = TerminalRuntime::test_with_channel(80, 24);
         app.terminal_runtimes
             .insert(nested_terminal.clone(), runtime);
         app.last_focus = Some((0, nested));
-        app.state.status_focused_cwd = Some("/old-focus".into());
-        app.state.status_git_cwd = Some("/old-focus".into());
+        assert!(app.sync_status_context_before_render());
+        app.state.status_git_cwd = Some("/repo/old".into());
         app.state.status_git_branch = Some("old-branch".into());
-        app.state.status_focus_projection_initialized = false;
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
 
         let report = app.reload_config();
@@ -5226,6 +5230,93 @@ last_pane = "prefix+tab"
         app.state.status_focused_cwd = Some("/runtime".into());
         app.state.status_git_cwd = Some("/runtime".into());
         app.state.status_git_branch = Some("runtime-branch".into());
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(!app.sync_status_context_before_render());
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
+        assert_eq!(branch.as_deref(), Some("runtime-branch"));
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+    }
+
+    #[test]
+    fn status_context_disabled_git_result_does_not_claim_new_focus() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("disabled-git-status");
+        let first_tab = workspace.active_tab;
+        let first_pane = workspace.tabs[first_tab].root_pane;
+        let second_tab = workspace.test_add_tab(Some("second"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        workspace.switch_tab(first_tab);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let first_terminal = app.state.workspaces[0]
+            .terminal_id(first_pane)
+            .expect("first terminal")
+            .clone();
+        let second_terminal = app.state.workspaces[0]
+            .terminal_id(second_pane)
+            .expect("second terminal")
+            .clone();
+        app.state.terminals.get_mut(&first_terminal).unwrap().cwd = "/first".into();
+        app.state.terminals.get_mut(&second_terminal).unwrap().cwd = "/second".into();
+        assert!(app.sync_status_context_before_render());
+        app.state.status_git_cwd = Some("/first".into());
+        app.state.status_git_branch = Some("first-branch".into());
+        let first_focus = app.status_context_focus.clone();
+
+        app.state.status_bar_enabled = false;
+        app.state.workspaces[0].switch_tab(second_tab);
+        app.git_refresh_in_flight = true;
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            results: Vec::new(),
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(app.status_context_focus, first_focus);
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(app.sync_status_context_before_render());
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+    }
+
+    #[test]
+    fn status_context_inactive_tab_reorder_preserves_runtime_projection() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("tab-reorder-status");
+        workspace.test_add_tab(Some("middle"));
+        let active_tab = workspace.test_add_tab(Some("active"));
+        workspace.switch_tab(active_tab);
+        let focused_pane = workspace.tabs[active_tab].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let terminal = app.state.workspaces[0]
+            .terminal_id(focused_pane)
+            .expect("focused terminal")
+            .clone();
+        app.state.terminals.get_mut(&terminal).unwrap().cwd = "/cached".into();
+        assert!(app.sync_status_context_before_render());
+        app.state.status_focused_cwd = Some("/runtime".into());
+        app.state.status_git_cwd = Some("/runtime".into());
+        app.state.status_git_branch = Some("runtime-branch".into());
+        let projected_focus = app.status_context_focus.clone();
+        let previous_active_tab = app.state.workspaces[0].active_tab;
+
+        assert!(app.state.workspaces[0].move_tab(0, 3));
+        assert_ne!(app.state.workspaces[0].active_tab, previous_active_tab);
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(focused_pane)
+        );
+        assert_eq!(app.focused_status_context_key(), projected_focus);
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(!app.sync_status_context_before_render());
