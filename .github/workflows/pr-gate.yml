@@ -13,9 +13,10 @@ jobs:
       pull-requests: write
     steps:
       # pull_request_target resolves this workflow from the repository's
-      # default branch. Forks do not have the canonical maintainer token, so
-      # complete their check without resolving the token-bearing action.
-      - name: Confirm canonical intake policy is not applicable
+      # default branch. Non-canonical repository copies do not have the
+      # canonical maintainer token, so complete their local check without
+      # resolving the token-bearing action.
+      - name: Confirm canonical intake policy is not applicable to this repository
         if: ${{ github.repository != 'ogulcancelik/herdr' }}
         run: echo "PR Gate is canonical-repository-only; fork check passed."
 
