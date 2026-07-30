@@ -113,23 +113,77 @@ enum AgentActivityOwner {
         kind: crate::agent_resume::AgentSessionRefKind,
         value: String,
     },
-    Agent(String),
+    Agent {
+        agent_label: String,
+        previous_session: Option<AgentActivitySession>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentActivitySession {
+    source: String,
+    kind: crate::agent_resume::AgentSessionRefKind,
+    value: String,
 }
 
 impl AgentActivityOwner {
     fn agent_label(&self) -> &str {
         match self {
-            Self::Session { agent_label, .. } | Self::Agent(agent_label) => agent_label,
+            Self::Session { agent_label, .. } | Self::Agent { agent_label, .. } => agent_label,
         }
+    }
+
+    fn session(&self) -> Option<AgentActivitySession> {
+        match self {
+            Self::Session {
+                source,
+                kind,
+                value,
+                ..
+            } => Some(AgentActivitySession {
+                source: source.clone(),
+                kind: *kind,
+                value: value.clone(),
+            }),
+            Self::Agent {
+                previous_session, ..
+            } => previous_session.clone(),
+        }
+    }
+
+    fn inherit_detection_lineage(&mut self, previous: Option<&Self>) {
+        let Self::Agent {
+            agent_label,
+            previous_session,
+        } = self
+        else {
+            return;
+        };
+        let Some(previous) = previous.filter(|owner| owner.agent_label() == agent_label) else {
+            return;
+        };
+        *previous_session = previous.session();
     }
 
     /// Detection can identify an agent before a session hook supplies its
     /// stronger identity, and can remain after that hook clears. Those
-    /// refinement transitions belong to one live activity interval. Two
-    /// distinct session identities still represent replacement agents.
+    /// refinement transitions belong to one live activity interval. A
+    /// detection fallback remembers its last authoritative session so a later
+    /// different session cannot inherit that interval.
     fn continues_activity_from(&self, previous: &Self) -> bool {
         match (previous, self) {
             (Self::Session { .. }, Self::Session { .. }) => previous == self,
+            (
+                Self::Agent {
+                    previous_session, ..
+                },
+                Self::Session { .. },
+            ) => {
+                previous.agent_label() == self.agent_label()
+                    && previous_session
+                        .as_ref()
+                        .is_none_or(|session| Some(session.clone()) == self.session())
+            }
             _ => previous.agent_label() == self.agent_label(),
         }
     }
@@ -1260,7 +1314,10 @@ impl TerminalState {
             )
             .or_else(|| {
                 self.effective_agent_label()
-                    .map(|label| AgentActivityOwner::Agent(label.to_string()))
+                    .map(|label| AgentActivityOwner::Agent {
+                        agent_label: label.to_string(),
+                        previous_session: None,
+                    })
             })
     }
 
@@ -2088,7 +2145,10 @@ impl TerminalState {
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
-        let activity_owner = self.current_agent_activity_owner();
+        let mut activity_owner = self.current_agent_activity_owner();
+        if let Some(owner) = activity_owner.as_mut() {
+            owner.inherit_detection_lineage(self.agent_activity_owner.as_ref());
+        }
         let activity_owner_changed =
             match (self.agent_activity_owner.as_ref(), activity_owner.as_ref()) {
                 (Some(previous), Some(current)) => !current.continues_activity_from(previous),
@@ -2274,6 +2334,59 @@ mod tests {
         assert!(terminal
             .agent_activity_at()
             .is_some_and(|at| at >= working_started));
+    }
+
+    #[test]
+    fn review_findings_same_label_replacement_after_fallback_resets_activity() {
+        let mut terminal = test_terminal();
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        let first_session =
+            crate::agent_resume::AgentSessionRef::path(test_session_path("first.jsonl")).unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            first_session.clone(),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(first_session),
+            Some(20),
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        terminal
+            .clear_hook_authority_with_mutation(Some("herdr:pi"), Some(21))
+            .expect("hook clear should be accepted");
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        let replacement_observed = Instant::now();
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                crate::agent_resume::AgentSessionRef::path(test_session_path("second.jsonl")),
+                Some(22),
+                replacement_observed,
+            )
+            .expect("replacement hook should be accepted");
+
+        assert_eq!(terminal.agent_activity_at(), Some(replacement_observed));
     }
 
     #[test]
