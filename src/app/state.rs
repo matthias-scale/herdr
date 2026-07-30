@@ -1426,6 +1426,7 @@ pub struct AppState {
     /// Runtime-resolved cwd of the focused pane, projected from the same
     /// source the Git refresh uses so rendering never re-derives a weaker one.
     pub(crate) status_focused_cwd: Option<std::path::PathBuf>,
+    pub(crate) status_focus_projection_initialized: bool,
     /// Whether the full-width top status row is enabled by configuration.
     pub(crate) status_bar_enabled: bool,
     pub terminals:
@@ -1814,6 +1815,7 @@ impl AppState {
             status_git_cwd: None,
             status_git_branch: None,
             status_focused_cwd: None,
+            status_focus_projection_initialized: false,
             status_bar_enabled: true,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),

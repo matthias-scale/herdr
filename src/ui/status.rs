@@ -347,7 +347,9 @@ fn battery_icon(pct: u8) -> &'static str {
     }
 }
 
-fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>, Option<String>) {
+pub(crate) fn focused_identity(
+    app: &AppState,
+) -> (String, String, String, Option<PathBuf>, Option<String>) {
     let Some(ws_idx) = app.active else {
         return ("1".into(), "1".into(), "1".into(), None, None);
     };
@@ -375,10 +377,12 @@ fn focused_identity(app: &AppState) -> (String, String, String, Option<PathBuf>,
     let cwd = app
         .status_focused_cwd
         .clone()
-        .or_else(|| Some(ws.identity_cwd.clone()));
+        .or_else(|| (!app.status_focus_projection_initialized).then(|| ws.identity_cwd.clone()));
     let branch = if app.status_git_cwd.as_ref() == cwd.as_ref() {
         app.status_git_branch.clone()
-    } else if ws.cached_identity_cwd == cwd.clone().unwrap_or_default() {
+    } else if !app.status_focus_projection_initialized
+        && ws.cached_identity_cwd == cwd.clone().unwrap_or_default()
+    {
         ws.cached_git_branch.clone()
     } else {
         None

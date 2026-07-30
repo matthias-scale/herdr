@@ -1195,6 +1195,14 @@ impl Workspace {
             .or_else(|| Some(self.identity_cwd.clone()))
     }
 
+    pub fn focused_cached_cwd(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<PathBuf> {
+        self.active_tab()
+            .and_then(|tab| tab.cached_cwd_for_pane(tab.layout.focused(), terminals))
+    }
+
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
         let tab_idx = match self.find_tab_index_for_pane(pane_id) {
             Some(idx) => idx,

@@ -55,6 +55,8 @@ use self::settings::render_settings_overlay;
 #[cfg(test)]
 pub(crate) use self::sidebar::workspace_drop_indicator_row;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+#[cfg(test)]
+pub(crate) use self::status::focused_identity as focused_status_identity_for_test;
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
     render_toast_notification, toast_notification_rect,
