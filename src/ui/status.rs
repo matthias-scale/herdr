@@ -20,12 +20,12 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: folder · branch · device · CPU · memory. The row
-/// before the first surviving segment is intentionally blank.
+/// Contents, left to right: folder · branch · device · Herdr build version ·
+/// CPU · memory. The row before the first surviving segment is intentionally blank.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
 /// first surviving segment. On narrow widths, folder, branch, then device elide
-/// in that order; CPU and memory remain required.
+/// in that order; build version, CPU, and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -92,8 +92,8 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
         segments.remove(index);
     }
 
-    // Only pathological widths narrower than the required CPU/MEM pair need
-    // truncation after all optional context has been removed.
+    // Only pathological widths narrower than the required build/CPU/MEM fields
+    // need truncation after all optional context has been removed.
     for index in 0..segments.len() {
         let total_width = segment_width(&segments);
         shrink_segment_for_overflow(&mut segments[index], total_width, width);
@@ -119,7 +119,7 @@ fn status_segments(
 ) -> Vec<Segment> {
     let mut out = Vec::new();
 
-    let (_, _, _, cwd, branch) = focused_identity(app);
+    let (cwd, branch) = focused_status_context(app);
 
     if let Some(cwd) = cwd {
         let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 32);
@@ -149,6 +149,13 @@ fn status_segments(
     });
 
     out.push(Segment {
+        text: format!(" Herdr {} ", crate::build_info::version()),
+        style: Style::default().fg(p.blue),
+        preserve_bg: false,
+        elide_rank: None,
+    });
+
+    out.push(Segment {
         text: metrics
             .cpu_percent
             .map(|cpu| format!(" CPU {cpu}% "))
@@ -171,28 +178,13 @@ fn status_segments(
     out
 }
 
-pub(crate) fn focused_identity(
-    app: &AppState,
-) -> (String, String, String, Option<PathBuf>, Option<String>) {
+pub(crate) fn focused_status_context(app: &AppState) -> (Option<PathBuf>, Option<String>) {
     let Some(ws_idx) = app.active else {
-        return ("1".into(), "1".into(), "1".into(), None, None);
+        return (None, None);
     };
     let Some(ws) = app.workspaces.get(ws_idx) else {
-        return ("1".into(), "1".into(), "1".into(), None, None);
+        return (None, None);
     };
-    let ws_label = crate::workspace::public_workspace_number(&ws.id)
-        .unwrap_or(ws_idx + 1)
-        .to_string();
-    let tab_idx = ws.active_tab_index();
-    let tab_label = ws
-        .public_tab_number(tab_idx)
-        .unwrap_or(tab_idx + 1)
-        .to_string();
-    let pane_label = ws
-        .focused_pane_id()
-        .and_then(|id| ws.public_pane_number(id))
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "1".into());
     // Runtime-resolved focused cwd, projected by the same code path that
     // resolves the Git refresh target, so the cwd and branch segments always
     // describe the same directory. Falls back to workspace identity until the
@@ -210,7 +202,7 @@ pub(crate) fn focused_identity(
     } else {
         None
     };
-    (ws_label, tab_label, pane_label, cwd, branch)
+    (cwd, branch)
 }
 
 /// Both separators are accepted everywhere: Windows paths use `\`, and a
@@ -612,7 +604,7 @@ mod tests {
 
     #[test]
     fn required_metrics_survive_optional_segment_elision() {
-        // CPU/MEM are required while optional right-side context elides by rank.
+        // Build version and CPU/MEM are required while other context elides by rank.
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
@@ -627,6 +619,7 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("MEM 8.0/16.0 GiB"));
         assert!(rendered.contains("CPU 12%"));
+        assert!(rendered.contains(&crate::build_info::version()));
         assert!(!rendered.contains("feature/very-long"));
     }
 
@@ -698,7 +691,7 @@ mod tests {
         app.status_git_cwd = Some(PathBuf::from("/repo/nested"));
         app.status_git_branch = Some("nested-branch".into());
 
-        let (_, _, _, cwd, branch) = focused_identity(&app);
+        let (cwd, branch) = focused_status_context(&app);
 
         assert_eq!(cwd, Some(PathBuf::from("/repo/nested")));
         assert_eq!(branch.as_deref(), Some("nested-branch"));
@@ -741,7 +734,7 @@ mod tests {
 
         assert!(app.focus_pane_in_workspace(0, nested));
         assert!(app.sync_status_focused_cwd(&runtimes));
-        let (_, _, _, cwd, branch) = focused_identity(&app);
+        let (cwd, branch) = focused_status_context(&app);
 
         assert_eq!(app.status_focused_cwd, Some(nested_cwd.clone()));
         assert_eq!(cwd, Some(nested_cwd));
@@ -758,7 +751,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
 
-        let (_, _, _, cwd, branch) = focused_identity(&app);
+        let (cwd, branch) = focused_status_context(&app);
 
         assert_eq!(cwd, Some(PathBuf::from("/repo")));
         assert_eq!(branch.as_deref(), Some("workspace-root"));
@@ -814,8 +807,9 @@ mod tests {
             vec![1, 2, 3]
         );
 
-        let optional_width = full[..3]
+        let optional_width = full
             .iter()
+            .filter(|segment| segment.elide_rank.is_some())
             .map(|segment| display_width(&segment.text))
             .sum::<usize>();
         let required = fitted_segments(
@@ -829,12 +823,16 @@ mod tests {
         assert!(!rendered.contains("~/work/status"), "{rendered}");
         assert!(!rendered.contains("feature/native-status"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
+        assert!(
+            rendered.contains(&crate::build_info::version()),
+            "{rendered}"
+        );
         assert!(rendered.contains("CPU 12%"), "{rendered}");
         assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
     }
 
     #[test]
-    fn status_content_order_theme_and_removed_segments_match_contract() {
+    fn status_content_order_theme_and_omitted_segments_match_contract() {
         let mut app = AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("status");
         workspace.identity_cwd = PathBuf::from("/home/test/work/status");
@@ -854,11 +852,13 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
+        let build_version = crate::build_info::version();
 
         let ordered = [
             "~/work/status",
             "feature/native-stat",
             "testhost",
+            build_version.as_str(),
             "CPU 12%",
             "MEM 8.0/16.0 GiB",
         ];
@@ -877,14 +877,22 @@ mod tests {
             "203.0.113.10",
             "↓",
             "↑",
-            "session:",
             "88%",
             "2026-01-02",
             "03:04",
-            env!("CARGO_PKG_VERSION"),
+            "session:",
         ] {
             assert!(!rendered.contains(removed), "{removed}: {rendered}");
         }
+        assert_eq!(
+            segments
+                .iter()
+                .find(|segment| segment.text.contains(&build_version))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.blue)
+        );
         assert_eq!(
             segments
                 .iter()

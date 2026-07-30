@@ -18,6 +18,8 @@ use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
+const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
+const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 
 #[derive(Clone)]
 pub(crate) struct AgentPanelEntry {
@@ -35,6 +37,7 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    pub activity_at: Option<std::time::Instant>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
 }
@@ -178,6 +181,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        activity_at: detail.activity_at,
                         state_labels: detail.state_labels,
                         tokens: detail.tokens,
                     }
@@ -1626,16 +1630,67 @@ fn render_agent_card(
         };
         let prefix_width = display_width_u16(&prefix);
         let mut spans = vec![Span::raw(prefix)];
-        spans.extend(resolved_token_spans(
-            resolved,
-            state_icon,
-            status_style,
-            name_style,
-            agent_style,
-            agent_style,
-            p,
-            rect.width.saturating_sub(prefix_width) as usize,
-        ));
+        let content_width = rect.width.saturating_sub(prefix_width) as usize;
+        let resolve_tokens = |max_width| {
+            resolved_token_spans(
+                resolved,
+                state_icon,
+                status_style,
+                name_style,
+                agent_style,
+                agent_style,
+                p,
+                max_width,
+            )
+        };
+        let baseline_token_spans = resolve_tokens(content_width);
+        let mut activity_field = None;
+        let token_spans = if row_index == 0
+            && content_width
+                >= AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH
+        {
+            let candidate =
+                resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH));
+            let preserves_context = candidate.len() == baseline_token_spans.len()
+                && candidate
+                    .iter()
+                    .zip(&baseline_token_spans)
+                    .all(|(candidate, baseline)| candidate.content == baseline.content);
+            if preserves_context {
+                let label =
+                    crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);
+                activity_field = Some(format!(" {label:>4}"));
+                candidate
+            } else {
+                baseline_token_spans
+            }
+        } else {
+            baseline_token_spans
+        };
+        let activity_width = activity_field
+            .as_deref()
+            .map(display_width)
+            .unwrap_or_default();
+        spans.extend(token_spans);
+        if let Some(activity_field) = activity_field {
+            let used_width = spans
+                .iter()
+                .map(|span| display_width(span.content.as_ref()))
+                .sum::<usize>();
+            let padding = rect
+                .width
+                .saturating_sub(used_width.min(usize::from(u16::MAX)) as u16)
+                .saturating_sub(activity_width.min(usize::from(u16::MAX)) as u16);
+            if padding > 0 {
+                spans.push(Span::raw(" ".repeat(usize::from(padding))));
+            }
+            let activity_style = if detail.state == AgentState::Working {
+                Style::default().fg(p.yellow)
+            } else {
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(activity_field, activity_style));
+        }
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(row_style),
             Rect::new(rect.x, rect.y + row_index as u16, rect.width, 1),
@@ -2172,12 +2227,15 @@ row_gap = 1
         let agent_row = agent_cards[0].rect.y;
 
         let first = row_text(buffer, workspace_row, 25);
+        let agent_window = row_text(buffer, agent_row, 25);
         let agent_label_row = (agent_row..agent_row + agent_cards[0].rect.height)
             .find(|row| row_text(buffer, *row, 25).contains("pi"))
             .unwrap();
         let second = row_text(buffer, agent_label_row, 25);
         assert!(first.contains("one"));
-        assert_eq!(second.trim_start(), "pi");
+        assert!(agent_window.ends_with("--"), "{agent_window:?}");
+        assert!(second.trim_start().starts_with("pi"), "{second:?}");
+        assert!(!second.ends_with("--"), "{second:?}");
         assert!(second.len() > second.trim_start().len());
         assert!(!first.contains("working"));
         assert!(!second.contains("working"));
@@ -2195,6 +2253,80 @@ row_gap = 1
         assert!(agent_style.add_modifier.contains(Modifier::DIM));
         assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(agent_style.bg, Some(app.palette.surface_dim));
+    }
+
+    #[test]
+    fn agent_rows_show_busy_duration_and_idle_last_active_age_in_fixed_column() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.reconcile_sidebar_presentation();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+
+        let area = Rect::new(0, 0, 26, 12);
+        app.view_observed_at = started + std::time::Duration::from_secs(42);
+        let mut busy = Terminal::new(TestBackend::new(26, 12)).unwrap();
+        busy.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let agent_row = compute_agent_card_areas(&app, area)[0].rect.y;
+        let busy_text = row_text(busy.backend().buffer(), agent_row, 25);
+        assert!(busy_text.ends_with("42s"), "{busy_text:?}");
+
+        let finished = started + std::time::Duration::from_secs(50);
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Idle,
+                false,
+                true,
+                false,
+                false,
+                finished,
+            );
+        app.view_observed_at = finished + std::time::Duration::from_secs(5 * 60);
+        let mut idle = Terminal::new(TestBackend::new(26, 12)).unwrap();
+        idle.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let idle_text = row_text(idle.backend().buffer(), agent_row, 25);
+        assert!(idle_text.ends_with("5m"), "{idle_text:?}");
+        assert_eq!(
+            busy_text.find("one"),
+            idle_text.find("one"),
+            "activity refresh moved the window label"
+        );
+    }
+
+    #[test]
+    fn narrow_agent_rows_elide_activity_age_before_window_context() {
+        let app = app_with_agents(&["one"]);
+        let area = Rect::new(0, 0, 12, 12);
+        let mut terminal = Terminal::new(TestBackend::new(12, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = &compute_agent_card_areas(&app, area)[0];
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 11);
+
+        assert!(rendered.contains("one"), "{rendered:?}");
+        assert!(!rendered.contains("--"), "{rendered:?}");
     }
 
     #[test]
@@ -2374,8 +2506,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert_eq!(metrics.viewport_rows, 2);
         assert_eq!(metrics.max_offset_from_bottom, 0);
-        assert_eq!(row_text(buffer, body.y, body.width), "pi");
-        assert_eq!(row_text(buffer, body.y + 1, body.width), "claude");
+        let first = row_text(buffer, body.y, body.width);
+        let second = row_text(buffer, body.y + 1, body.width);
+        assert!(first.starts_with("pi"), "{first:?}");
+        assert!(first.ends_with("--"), "{first:?}");
+        assert!(second.starts_with("claude"), "{second:?}");
+        assert!(second.ends_with("--"), "{second:?}");
     }
 
     #[test]

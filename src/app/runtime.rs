@@ -223,7 +223,7 @@ impl App {
     }
 
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
-        let mut changed = false;
+        let mut changed = self.take_due_agent_activity_refresh(now);
         let mut resized = false;
 
         changed |= self.schedule_status_metrics(now);
@@ -330,6 +330,21 @@ impl App {
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
         changed
+    }
+
+    pub(crate) fn sync_agent_activity_refresh_deadline(&mut self, now: Instant) {
+        self.agent_activity_refresh_deadline = self.state.next_agent_activity_age_change(now);
+    }
+
+    pub(crate) fn take_due_agent_activity_refresh(&mut self, now: Instant) -> bool {
+        if self
+            .agent_activity_refresh_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.agent_activity_refresh_deadline = None;
+        true
     }
 
     /// Drop a snapshot that outlived its staleness window so the status row
@@ -604,6 +619,9 @@ impl App {
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
+            include_client_refresh
+                .then_some(self.agent_activity_refresh_deadline)
+                .flatten(),
             self.pending_agent_resume_deadline,
             self.session_save_deadline,
             self.selection_autoscroll_deadline,

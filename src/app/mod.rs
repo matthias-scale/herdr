@@ -132,6 +132,7 @@ pub struct App {
     pub(crate) update_manifest_check_enabled: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
+    pub(crate) agent_activity_refresh_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
@@ -544,6 +545,7 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            view_observed_at: Instant::now(),
             status_metrics: None,
             status_home_dir: status_home_dir(),
             status_git_cwd: None,
@@ -790,6 +792,7 @@ impl App {
             update_manifest_check_enabled: config.update.manifest_check,
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
+            agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
@@ -1172,6 +1175,7 @@ impl App {
                     self.render_notify.notify_one();
                 }
                 self.last_render_at = Some(now);
+                self.sync_agent_activity_refresh_deadline(now);
                 needs_render = false;
                 continue;
             }
@@ -2944,7 +2948,7 @@ mod tests {
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert!(app.state.status_bar_enabled);
         assert!(app.state.status_focus_projection_initialized);
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -2993,7 +2997,7 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo")));
         assert_eq!(branch, None);
         assert_eq!(app.state.status_git_cwd, None);
@@ -4834,6 +4838,73 @@ mod tests {
     }
 
     #[test]
+    fn activity_age_refresh_uses_authoritative_transition_boundary() {
+        let mut app = test_app();
+        let started = Instant::now();
+        let workspace = Workspace::test_new("activity");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+
+        let observed = started + Duration::from_secs(7);
+        app.sync_agent_activity_refresh_deadline(observed);
+
+        assert_eq!(
+            app.agent_activity_refresh_deadline,
+            Some(started + Duration::from_secs(8))
+        );
+        assert!(!app.take_due_agent_activity_refresh(observed));
+        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
+        assert!(app.agent_activity_refresh_deadline.is_none());
+    }
+
+    #[test]
+    fn headless_activity_refresh_deadline_requires_an_attached_client() {
+        let mut app = test_app();
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(2);
+        app.next_resize_poll = now + Duration::from_secs(1);
+        app.config_diagnostic_deadline = None;
+        app.toast_deadline = None;
+        app.next_auto_update_check = None;
+        app.next_agent_manifest_update_check = None;
+        app.agent_metadata_deadline = None;
+        app.pending_agent_resume_deadline = None;
+        app.session_save_deadline = None;
+        app.selection_autoscroll_deadline = None;
+        app.selection_highlight_clear_deadline = None;
+        app.state.status_bar_enabled = false;
+        app.state.status_metrics = None;
+        app.state.workspaces.clear();
+        app.agent_activity_refresh_deadline = Some(deadline);
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
+            Some(deadline)
+        );
+        assert_eq!(
+            app.next_headless_loop_deadline_with_client_refresh(now, false, false),
+            None
+        );
+    }
+
+    #[test]
     fn headless_next_loop_deadline_ignores_resize_poll() {
         let mut app = test_app();
         let now = Instant::now();
@@ -5249,14 +5320,13 @@ last_pane = "prefix+tab"
             .terminal_id(active_pane)
             .expect("active terminal");
         let expected_cwd = app.state.terminals[active_terminal].cwd.clone();
-        let (_, _, _, stale_cwd, stale_branch) =
-            crate::ui::focused_status_identity_for_test(&app.state);
+        let (stale_cwd, stale_branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/old-focus")));
         assert_eq!(stale_branch.as_deref(), Some("old-branch"));
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(expected_cwd));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5286,7 +5356,7 @@ last_pane = "prefix+tab"
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(!app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
         assert_eq!(branch.as_deref(), Some("runtime-branch"));
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5332,7 +5402,7 @@ last_pane = "prefix+tab"
         assert_eq!(app.status_context_focus, first_focus);
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5373,7 +5443,7 @@ last_pane = "prefix+tab"
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(!app.sync_status_context_before_render());
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
         assert_eq!(branch.as_deref(), Some("runtime-branch"));
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);

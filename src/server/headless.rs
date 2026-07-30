@@ -716,6 +716,7 @@ impl HeadlessServer {
                     self.render_and_stream();
                 }
                 self.app.last_render_at = Some(now);
+                self.app.sync_agent_activity_refresh_deadline(now);
                 needs_render = false;
                 needs_full_render = false;
                 needs_graphics_render = false;
@@ -4071,7 +4072,8 @@ impl HeadlessServer {
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
-        let mut changed = if self.has_app_client() {
+        let mut changed = self.app.take_due_agent_activity_refresh(now);
+        changed |= if self.has_app_client() {
             self.app.schedule_status_metrics(now)
         } else {
             self.app.discard_stale_status_metrics(now)
@@ -4807,15 +4809,15 @@ mod tests {
 
         server.app.route_client_input(vec![0x02, b'n']);
         assert_eq!(server.app.state.workspaces[0].active_tab, second_tab);
-        let (_, _, _, stale_cwd, stale_branch) =
-            crate::ui::focused_status_identity_for_test(&server.app.state);
+        let (stale_cwd, stale_branch) =
+            crate::ui::focused_status_context_for_test(&server.app.state);
         assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/first")));
         assert_eq!(stale_branch.as_deref(), Some("first-branch"));
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(server.app.sync_status_context_before_render());
         server.render_and_stream();
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&server.app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&server.app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);

@@ -1459,7 +1459,7 @@ mod tests {
         assert_eq!(app.state.status_git_branch, None);
         assert!(app.git_identity_refresh_requested);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
         assert_eq!(branch, None);
 
@@ -1474,7 +1474,7 @@ mod tests {
         assert_eq!(app.state.status_git_cwd, None);
         assert_eq!(app.state.status_git_branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, None);
         assert_eq!(branch, None);
     }
@@ -1523,7 +1523,7 @@ mod tests {
         assert!(!app.git_identity_refresh_requested);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
         app.state.status_bar_enabled = true;
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
         assert_eq!(branch, None);
     }

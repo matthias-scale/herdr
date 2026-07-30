@@ -58,7 +58,7 @@ pub(crate) use self::sidebar::{
 };
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 #[cfg(test)]
-pub(crate) use self::status::focused_identity as focused_status_identity_for_test;
+pub(crate) use self::status::focused_status_context as focused_status_context_for_test;
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
     render_toast_notification, toast_notification_rect,
@@ -214,6 +214,7 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    app.view_observed_at = std::time::Instant::now();
     app.reconcile_sidebar_presentation();
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
@@ -1082,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_status_bar_renders_identity_and_metrics_segments() {
+    fn desktop_status_bar_renders_build_and_metrics_segments() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
@@ -1103,7 +1104,7 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        // AC4: fixture metrics provide deterministic identity and segment-parity evidence.
+        // AC4: fixture metrics provide deterministic segment-parity evidence.
         assert!(
             row0.contains("testhost"),
             "status bar missing hostname: {row0:?}"
@@ -1113,7 +1114,10 @@ mod tests {
             "status bar missing resource metrics: {row0:?}"
         );
         assert!(!row0.contains("testuser"), "{row0:?}");
-        assert!(!row0.contains(env!("CARGO_PKG_VERSION")), "{row0:?}");
+        assert!(
+            row0.contains(&crate::build_info::version()),
+            "status bar missing Herdr build version: {row0:?}"
+        );
         let first_content = row0
             .char_indices()
             .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))

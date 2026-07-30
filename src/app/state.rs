@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
@@ -1439,6 +1440,9 @@ pub(crate) struct PaneFocusTarget {
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
+    /// Clock snapshot captured during `compute_view`; renderers consume it
+    /// without reading the clock or mutating shared runtime state.
+    pub(crate) view_observed_at: Instant,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_home_dir: Option<std::path::PathBuf>,
@@ -1720,6 +1724,16 @@ impl AppState {
         })
     }
 
+    pub(crate) fn next_agent_activity_age_change(&self, now: Instant) -> Option<Instant> {
+        self.terminals
+            .values()
+            .filter(|terminal| terminal.is_agent_terminal())
+            .filter_map(|terminal| {
+                crate::activity_age::next_change_at(terminal.agent_activity_at(), now)
+            })
+            .min()
+    }
+
     pub(crate) fn toggle_workspace_agent_disclosure(&mut self, ws_idx: usize) -> bool {
         let Some(workspace_id) = self
             .workspaces
@@ -1942,6 +1956,7 @@ impl AppState {
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {
+            view_observed_at: std::time::Instant::now(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),

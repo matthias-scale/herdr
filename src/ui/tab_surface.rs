@@ -329,7 +329,7 @@ mod tests {
             .any(|line| line.trim_start().starts_with("agents")));
         assert_eq!(
             frame_digest(&frame),
-            "9e38aeb1766c885882326c783f93118afa45a58a26a15c53b2803d140a2b71fc"
+            "0b38ae503f29887a9068704b6f7c5fcbf503138bfdf7ee3fe65fbcb7cb947882"
         );
     }
 

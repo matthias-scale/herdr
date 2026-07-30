@@ -140,6 +140,8 @@ pub struct TerminalState {
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
+    agent_active_since: Option<Instant>,
+    agent_last_active_at: Option<Instant>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -173,6 +175,8 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
+            agent_active_since: None,
+            agent_last_active_at: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -1713,6 +1717,18 @@ impl TerminalState {
             .and_then(crate::detect::parse_agent_label)
     }
 
+    /// Authoritative runtime timestamp behind the sidebar activity-age field.
+    ///
+    /// Working agents expose the start of their current active interval.
+    /// Non-working agents expose when their most recent active interval ended.
+    pub(crate) fn agent_activity_at(&self) -> Option<Instant> {
+        if self.state == AgentState::Working {
+            self.agent_active_since
+        } else {
+            self.agent_last_active_at
+        }
+    }
+
     pub(crate) fn unchanged_effective_state_change_at(&self, now: Instant) -> EffectiveStateChange {
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
@@ -1940,6 +1956,8 @@ impl TerminalState {
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
+        self.agent_active_since = None;
+        self.agent_last_active_at = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2032,6 +2050,14 @@ impl TerminalState {
             return None;
         }
 
+        if previous_state != state {
+            if state == AgentState::Working {
+                self.agent_active_since = Some(now);
+            } else if previous_state == AgentState::Working {
+                self.agent_active_since = None;
+                self.agent_last_active_at = Some(now);
+            }
+        }
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,
@@ -2057,6 +2083,56 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn activity_timestamp_tracks_working_interval_without_observation_jitter() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started + Duration::from_secs(12),
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        let finished = started + Duration::from_secs(20);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            finished,
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(finished));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            finished + Duration::from_secs(30),
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(finished));
     }
 
     fn test_session_path(name: &str) -> String {
