@@ -903,6 +903,10 @@ impl App {
         self.full_redraw_pending = true;
     }
 
+    pub(crate) fn sync_status_context_before_render(&mut self) -> bool {
+        self.state.sync_status_focused_cached_cwd()
+    }
+
     pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
         // Emit the input-source intent on entering/leaving the ASCII realm, like `ClipboardWrite`;
         // the foreground (client, or this app in monolithic mode) applies the switch. Keyed on the
@@ -1079,6 +1083,7 @@ impl App {
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
 
             if needs_render && self.can_render_now(now) {
+                self.sync_status_context_before_render();
                 let _ = self.render_dirty.take();
                 let _sync_output = SyncOutputGuard::begin()?;
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
@@ -5097,6 +5102,77 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(second_root));
+    }
+
+    #[tokio::test]
+    async fn pre_render_status_context_matches_deferred_new_tab_click() {
+        let mut app = test_app();
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app.state.new_terminal_cwd = crate::config::NewTerminalCwdConfig::Path(
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("new-tab-status")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prompt_new_tab_name = false;
+        app.state.ensure_test_terminals();
+        let previous_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let previous_terminal = app.state.workspaces[0]
+            .terminal_id(previous_pane)
+            .expect("previous terminal")
+            .clone();
+        app.state.terminals.get_mut(&previous_terminal).unwrap().cwd = "/old-focus".into();
+        app.state.sync_status_focused_cached_cwd();
+        app.state.status_git_cwd = Some("/old-focus".into());
+        app.state.status_git_branch = Some("old-branch".into());
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let new_tab_area = app.state.view.new_tab_hit_area;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: new_tab_area.x + 1,
+                row: new_tab_area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+        assert!(app.state.request_new_tab);
+        app.state.request_new_tab = false;
+        let label = app.state.requested_new_tab_name.take();
+        app.runtime_tab_create(
+            "test.tab.create",
+            crate::api::schema::TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: true,
+                label,
+                env: Default::default(),
+            },
+        );
+
+        let active_tab = app.state.workspaces[0].active_tab;
+        assert_eq!(active_tab, 1);
+        let active_pane = app.state.workspaces[0].tabs[active_tab].root_pane;
+        let active_terminal = app.state.workspaces[0]
+            .terminal_id(active_pane)
+            .expect("active terminal");
+        let expected_cwd = app.state.terminals[active_terminal].cwd.clone();
+        let (_, _, _, stale_cwd, stale_branch) =
+            crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/old-focus")));
+        assert_eq!(stale_branch.as_deref(), Some("old-branch"));
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(app.sync_status_context_before_render());
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(cwd, Some(expected_cwd));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+
+        api::test_support::shutdown_test_runtimes(&mut app);
     }
 
     #[tokio::test]
