@@ -551,6 +551,7 @@ impl App {
             status_git_cwd: None,
             status_git_branch: None,
             status_focused_cwd: None,
+            status_focus_projection_initialized: false,
             status_bar_enabled: config.ui.status_bar.enabled,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),

@@ -2674,8 +2674,22 @@ impl AppState {
             .active
             .and_then(|ws_idx| self.workspaces.get(ws_idx))
             .and_then(|ws| ws.focused_cwd_from(&self.terminals, terminal_runtimes));
+        self.set_status_focused_cwd(focused_cwd)
+    }
+
+    pub(crate) fn sync_status_focused_cached_cwd(&mut self) -> bool {
+        let focused_cwd = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(|ws| ws.focused_cached_cwd(&self.terminals));
+        self.set_status_focused_cwd(focused_cwd)
+    }
+
+    fn set_status_focused_cwd(&mut self, focused_cwd: Option<std::path::PathBuf>) -> bool {
         let mut changed = self.status_focused_cwd != focused_cwd;
         self.status_focused_cwd = focused_cwd;
+        changed |= !self.status_focus_projection_initialized;
+        self.status_focus_projection_initialized = true;
         if self.status_git_cwd.as_ref() != self.status_focused_cwd.as_ref() {
             changed |= self.status_git_cwd.take().is_some();
             changed |= self.status_git_branch.take().is_some();
