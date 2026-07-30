@@ -101,25 +101,14 @@ fn resolve_main_worktree_root(
     is_linked_worktree: bool,
 ) -> PathBuf {
     if !is_bare && !is_linked_worktree {
-        if git_common_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some(".git")
-        {
+        if git_common_dir.file_name().and_then(|name| name.to_str()) != Some(".git") {
             return canonicalize_best_effort_path(repo_root);
         }
         return repo_root.to_path_buf();
     }
 
-    if git_common_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        == Some(".git")
-    {
-        return git_common_dir
-            .parent()
-            .unwrap_or(repo_root)
-            .to_path_buf();
+    if git_common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        return git_common_dir.parent().unwrap_or(repo_root).to_path_buf();
     }
 
     if is_linked_worktree {
@@ -157,7 +146,13 @@ fn configured_main_worktree_root(git_common_dir: &Path) -> Option<PathBuf> {
 
 fn gitdir_main_worktree_root(git_common_dir: &Path) -> Option<PathBuf> {
     let value = std::fs::read_to_string(git_common_dir.join("gitdir")).ok()?;
-    let path = Path::new(value.trim().strip_prefix("gitdir:").unwrap_or(value.trim()).trim());
+    let path = Path::new(
+        value
+            .trim()
+            .strip_prefix("gitdir:")
+            .unwrap_or(value.trim())
+            .trim(),
+    );
     let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -236,12 +231,8 @@ pub(super) fn git_rev_parse_verify(repo_root: &Path, revision: &str) -> Option<S
 }
 
 pub(super) fn git_ref_storage_is_reftable(git_common_dir: &Path) -> bool {
-    super::config::read_config_value(
-        &git_common_dir.join("config"),
-        "extensions",
-        "refstorage",
-    )
-    .is_some_and(|value| value.eq_ignore_ascii_case("reftable"))
+    super::config::read_config_value(&git_common_dir.join("config"), "extensions", "refstorage")
+        .is_some_and(|value| value.eq_ignore_ascii_case("reftable"))
 }
 
 fn git_dir_is_bare(git_dir: &Path) -> bool {
