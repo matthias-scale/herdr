@@ -67,43 +67,40 @@ fn git_user_config_paths() -> Vec<PathBuf> {
 }
 
 pub(super) fn worktree_config_enabled(path: &Path) -> bool {
+    read_config_value(path, "extensions", "worktreeConfig").is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    })
+}
+
+pub(super) fn read_config_value(path: &Path, section: &str, key: &str) -> Option<String> {
     let Ok(contents) = std::fs::read_to_string(path) else {
-        return false;
+        return None;
     };
-    let mut section = ConfigSection::Other;
-    let mut enabled = false;
+    let mut in_section = false;
+    let mut value = None;
     for raw_line in contents.lines() {
         let line = raw_line.trim();
         if let Some(section_name) = extract_config_section(line) {
-            let is_extensions = section_name.eq_ignore_ascii_case("extensions");
-            section = if is_extensions {
-                ConfigSection::Extensions
-            } else {
-                ConfigSection::Other
-            };
+            in_section = section_name.eq_ignore_ascii_case(section);
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = normalize_config_value(value);
-            match &section {
-                ConfigSection::Extensions if key.eq_ignore_ascii_case("worktreeConfig") => {
-                    enabled = matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "true" | "1" | "yes" | "on"
-                    );
-                }
-                _ => {}
+        if !in_section || line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some((name, raw_value)) = line.split_once('=') {
+            if name.trim().eq_ignore_ascii_case(key) {
+                value = Some(normalize_config_value(raw_value));
             }
             continue;
         }
-        if matches!(section, ConfigSection::Extensions)
-            && line.eq_ignore_ascii_case("worktreeConfig")
-        {
-            enabled = true;
+        if line.eq_ignore_ascii_case(key) {
+            value = Some("true".to_string());
         }
     }
-    enabled
+    value
 }
 
 fn collect_remote_urls(
@@ -264,7 +261,6 @@ fn merge_git_config(
 
 enum ConfigSection {
     Branch,
-    Extensions,
     Include,
     IncludeIf(IncludeIfMode),
     Remote(String),

@@ -138,14 +138,14 @@ fn configured_main_worktree_root(git_common_dir: &Path) -> Option<PathBuf> {
     let config = git_common_dir.join("config");
     let value = super::config::worktree_config_enabled(&config)
         .then(|| {
-            read_git_config_value(
+            super::config::read_config_value(
                 &git_common_dir.join("config.worktree"),
                 "core",
                 "worktree",
             )
         })
         .flatten()
-        .or_else(|| read_git_config_value(&config, "core", "worktree"))?;
+        .or_else(|| super::config::read_config_value(&config, "core", "worktree"))?;
     let path = Path::new(&value);
     let resolved = if path.is_absolute() {
         path.to_path_buf()
@@ -236,60 +236,22 @@ pub(super) fn git_rev_parse_verify(repo_root: &Path, revision: &str) -> Option<S
 }
 
 pub(super) fn git_ref_storage_is_reftable(git_common_dir: &Path) -> bool {
-    read_git_config_value(&git_common_dir.join("config"), "extensions", "refstorage")
-        .is_some_and(|value| value.eq_ignore_ascii_case("reftable"))
+    super::config::read_config_value(
+        &git_common_dir.join("config"),
+        "extensions",
+        "refstorage",
+    )
+    .is_some_and(|value| value.eq_ignore_ascii_case("reftable"))
 }
 
 fn git_dir_is_bare(git_dir: &Path) -> bool {
-    read_git_config_value(&git_dir.join("config"), "core", "bare")
+    super::config::read_config_value(&git_dir.join("config"), "core", "bare")
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 fn parse_git_head_branch(head: &str) -> Option<String> {
     let branch = head.trim().strip_prefix("ref: refs/heads/")?;
     (!branch.is_empty()).then(|| branch.to_string())
-}
-
-fn read_git_config_value(path: &Path, section: &str, key: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let mut in_section = false;
-    for raw_line in contents.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if let Some(section_name) = simple_git_config_section(line) {
-            in_section = section_name.eq_ignore_ascii_case(section);
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        if name.trim().eq_ignore_ascii_case(key) {
-            return Some(strip_git_config_comment(value).trim().to_string());
-        }
-    }
-    None
-}
-
-fn simple_git_config_section(line: &str) -> Option<&str> {
-    let section = line.strip_prefix('[')?.split_once(']')?.0.trim();
-    (!section.contains('"')).then_some(section)
-}
-
-fn strip_git_config_comment(value: &str) -> &str {
-    let value = value.trim();
-    for marker in ['#', ';'] {
-        if let Some((prefix, _)) = value.split_once(marker) {
-            if prefix.chars().next_back().is_some_and(char::is_whitespace) {
-                return prefix;
-            }
-        }
-    }
-    value
 }
 
 fn git_trimmed_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
@@ -501,7 +463,7 @@ mod tests {
     #[test]
     fn separate_git_dir_checkouts_share_main_checkout_repo_name() {
         let base = temp_test_dir("separate-git-dir");
-        let checkout = base.join("project");
+        let checkout = base.join("My #repo");
         let linked_checkout = base.join("feature");
         let metadata = base.join("meta");
         let separate_git_dir = format!("--separate-git-dir={}", metadata.display());
@@ -552,6 +514,14 @@ mod tests {
                 "HEAD",
             ],
         );
+        std::fs::write(
+            metadata.join("config.worktree"),
+            format!(
+                "[core]\n\tworktree = \"../wrong\"\n\tworktree = \"../{}\"\n",
+                checkout.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
 
         let linked_info = git_worktree_info(&linked_checkout).unwrap();
         let linked_space = git_space_metadata_from_info(&linked_info);
@@ -574,7 +544,7 @@ mod tests {
             primary_info.main_worktree_root
         );
         assert_eq!(primary_space.key, linked_space.key);
-        assert_eq!(primary_space.repo_name, "project");
+        assert_eq!(primary_space.repo_name, "My #repo");
         assert_eq!(linked_space.repo_name, primary_space.repo_name);
 
         std::fs::remove_dir_all(base).unwrap();
