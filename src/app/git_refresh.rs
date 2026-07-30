@@ -139,8 +139,7 @@ impl App {
                         &self.state.terminals,
                         &self.terminal_runtimes,
                     )?;
-                    let cache_key_hint = (!refresh_repo_discovery
-                        && ws.cached_identity_cwd == cwd)
+                    let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
                         .then(|| ws.cached_git_status_key.clone());
                     Some(WorkspaceGitRefreshItem {
                         workspace_id: ws.id.clone(),
@@ -393,8 +392,7 @@ mod tests {
         );
         app.state.workspaces.push(ws);
         app.state.active = Some(0);
-        app.state
-            .sync_status_focused_cwd(&app.terminal_runtimes);
+        app.state.sync_status_focused_cwd(&app.terminal_runtimes);
 
         let items = app.workspace_git_refresh_items(true);
         assert_eq!(items.len(), 2);

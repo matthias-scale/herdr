@@ -973,6 +973,25 @@ mod tests {
     }
 
     #[test]
+    fn status_renderer_source_contract_excludes_io_and_sampling() {
+        let source = include_str!("status.rs")
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("status renderer source")
+            .0;
+        for forbidden in [
+            "std::fs",
+            "std::net",
+            "std::process",
+            "Command::new",
+            "sample_status_metrics",
+            "http://",
+            "https://",
+        ] {
+            assert!(!source.contains(forbidden), "found {forbidden}");
+        }
+    }
+
+    #[test]
     fn unknown_network_kind_uses_neutral_label() {
         let metrics = StatusMetrics {
             net_down_kib: Some(12),

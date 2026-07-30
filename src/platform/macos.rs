@@ -427,14 +427,7 @@ fn status_interface_name(interface: &libc::ifaddrs) -> Option<String> {
 }
 
 fn status_interface_byte_snapshots() -> Option<HashMap<String, (u64, u64)>> {
-    let mut mib = [
-        libc::CTL_NET,
-        libc::PF_ROUTE,
-        0,
-        0,
-        libc::NET_RT_IFLIST2,
-        0,
-    ];
+    let mut mib = [libc::CTL_NET, libc::PF_ROUTE, 0, 0, libc::NET_RT_IFLIST2, 0];
     let mut length = 0;
     if unsafe {
         libc::sysctl(
@@ -482,10 +475,8 @@ fn status_interface_byte_snapshots() -> Option<HashMap<String, (u64, u64)>> {
         {
             let message = message.cast::<libc::if_msghdr2>();
             let index = unsafe { std::ptr::addr_of!((*message).ifm_index).read_unaligned() };
-            let rx =
-                unsafe { std::ptr::addr_of!((*message).ifm_data.ifi_ibytes).read_unaligned() };
-            let tx =
-                unsafe { std::ptr::addr_of!((*message).ifm_data.ifi_obytes).read_unaligned() };
+            let rx = unsafe { std::ptr::addr_of!((*message).ifm_data.ifi_ibytes).read_unaligned() };
+            let tx = unsafe { std::ptr::addr_of!((*message).ifm_data.ifi_obytes).read_unaligned() };
             let mut name = [0 as libc::c_char; libc::IFNAMSIZ];
             let name = unsafe { libc::if_indextoname(index as u32, name.as_mut_ptr()) };
             if !name.is_null() {
