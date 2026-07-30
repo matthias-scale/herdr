@@ -198,7 +198,7 @@ mod fallback;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
 
-/// Cached native metrics for the full-width top status bar (tmux-parity).
+/// Cached native metrics for the compact top status row.
 pub(crate) mod status_metrics;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

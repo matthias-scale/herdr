@@ -774,7 +774,7 @@ pub enum ViewLayout {
 
 pub struct ViewState {
     pub layout: ViewLayout,
-    /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
+    /// Full-width top status row. Empty on mobile or at tiny heights.
     pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,

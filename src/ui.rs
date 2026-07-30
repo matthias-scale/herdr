@@ -217,9 +217,9 @@ fn compute_view_internal(
         return;
     }
 
-    // Full-width top status row (tmux-parity): spans the whole client, with
-    // sidebar + tabs below. Reserve it before the horizontal split so the bar
-    // is never squeezed into the main column only.
+    // The top status row spans the whole client, with sidebar + tabs below.
+    // Reserve it before the horizontal split so the row is never squeezed
+    // into the main column only.
     let (status_bar_rect, body_area) = if app.status_bar_enabled && area.height > 1 {
         let [status_bar_rect, body_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
