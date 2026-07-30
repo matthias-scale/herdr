@@ -1175,7 +1175,7 @@ impl App {
                     self.render_notify.notify_one();
                 }
                 self.last_render_at = Some(now);
-                self.sync_agent_activity_refresh_deadline(now);
+                self.sync_agent_activity_refresh_deadline(self.state.view_observed_at);
                 needs_render = false;
                 continue;
             }

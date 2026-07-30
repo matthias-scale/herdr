@@ -1651,11 +1651,16 @@ fn render_agent_card(
         {
             let candidate =
                 resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH));
+            let candidate_width = candidate
+                .iter()
+                .map(|span| display_width(span.content.as_ref()))
+                .sum::<usize>();
             let preserves_context = candidate.len() == baseline_token_spans.len()
                 && candidate
                     .iter()
                     .zip(&baseline_token_spans)
-                    .all(|(candidate, baseline)| candidate.content == baseline.content);
+                    .all(|(candidate, baseline)| candidate.content == baseline.content)
+                && candidate_width <= content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH);
             if preserves_context {
                 let label =
                     crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);

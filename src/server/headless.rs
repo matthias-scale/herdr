@@ -716,7 +716,8 @@ impl HeadlessServer {
                     self.render_and_stream();
                 }
                 self.app.last_render_at = Some(now);
-                self.app.sync_agent_activity_refresh_deadline(now);
+                self.app
+                    .sync_agent_activity_refresh_deadline(self.app.state.view_observed_at);
                 needs_render = false;
                 needs_full_render = false;
                 needs_graphics_render = false;
@@ -4072,8 +4073,18 @@ impl HeadlessServer {
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
-        let mut changed = self.app.take_due_agent_activity_refresh(now);
-        changed |= if self.has_app_client() {
+        let has_app_client = self.has_app_client();
+        let mut changed = if has_app_client {
+            self.app.take_due_agent_activity_refresh(now)
+        } else {
+            // Activity age is client-only presentation state. Drop a deadline
+            // left by the final rendered frame when the last app client
+            // detaches instead of turning an unrelated server wake into a
+            // render request.
+            self.app.agent_activity_refresh_deadline = None;
+            false
+        };
+        changed |= if has_app_client {
             self.app.schedule_status_metrics(now)
         } else {
             self.app.discard_stale_status_metrics(now)
@@ -5899,6 +5910,17 @@ next_tab = ""
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
         assert!(!server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn detached_headless_server_discards_client_activity_refresh_deadline() {
+        let mut server = test_headless_server();
+        let now = Instant::now();
+        server.app.agent_activity_refresh_deadline =
+            Some(now.checked_sub(Duration::from_secs(1)).expect("deadline"));
+
+        assert!(!server.handle_scheduled_tasks_headless(now, false));
+        assert!(server.app.agent_activity_refresh_deadline.is_none());
     }
 
     #[test]
