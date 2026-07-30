@@ -1125,6 +1125,94 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_visual_evidence_covers_wide_and_120_column_layouts() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("focused"),
+            Workspace::test_new("queued"),
+        ];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+
+        let mut rendered = Vec::new();
+        for (width, height) in [(220, 8), (120, 12)] {
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let row0 = buffer_row_text(
+                terminal.backend().buffer(),
+                app.view.status_bar_rect,
+                app.view.status_bar_rect.y,
+            );
+            assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
+            assert!(row0.contains("CPU 12%"), "{row0:?}");
+            rendered.push((
+                "sampled metrics",
+                width,
+                height,
+                terminal.backend().buffer().clone(),
+            ));
+        }
+
+        app.status_metrics = None;
+        let width = 120;
+        let height = 4;
+        compute_view(&mut app, Rect::new(0, 0, width, height));
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        assert!(row0.contains("MEM --/-- GiB"), "{row0:?}");
+        assert!(row0.contains("CPU --%"), "{row0:?}");
+        rendered.push((
+            "unavailable fallback",
+            width,
+            height,
+            terminal.backend().buffer().clone(),
+        ));
+
+        let Ok(path) = std::env::var("HERDR_STATUS_EVIDENCE_HTML") else {
+            return;
+        };
+        let mut html = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>Herdr native status row</title>\
+             <style>body{margin:0;padding:24px;background:#11111b;color:#cdd6f4;\
+             font-family:\"JetBrainsMono Nerd Font Mono\",monospace}h1{font-size:20px}\
+             h2{font-size:14px;color:#a6adc8;margin:24px 0 8px}.terminal{display:grid;\
+             width:max-content;font-size:12px;line-height:16px;box-shadow:0 0 0 1px #45475a}\
+             .cell{width:1ch;height:16px;white-space:pre;overflow:visible}</style>\
+             <h1>Native full-width desktop status row</h1>",
+        );
+        for (label, width, height, buffer) in rendered {
+            html.push_str(&format!(
+                "<h2>{width} columns × {height} rows — {label}</h2>\
+                 <div class=\"terminal\" style=\"grid-template-columns:repeat({width},1ch)\">"
+            ));
+            for cell in buffer.content() {
+                let symbol = cell
+                    .symbol()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                html.push_str(&format!(
+                    "<span class=\"cell\" style=\"color:{};background:{}\">{symbol}</span>",
+                    color_css(cell.fg, "#cdd6f4"),
+                    color_css(cell.bg, "#11111b"),
+                ));
+            }
+            html.push_str("</div>");
+        }
+        std::fs::write(path, html).expect("write status-row visual evidence");
+    }
+
+    #[test]
     fn collapsed_sidebar_status_geometry_keeps_active_workspace_highlight() {
         // AC2/AC7: collapsed desktop content remains aligned below status row 0.
         let mut app = crate::app::state::AppState::test_new();
@@ -1460,6 +1548,30 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn color_css(color: Color, reset: &'static str) -> String {
+        match color {
+            Color::Reset => reset.into(),
+            Color::Black => "#45475a".into(),
+            Color::Red => "#f38ba8".into(),
+            Color::Green => "#a6e3a1".into(),
+            Color::Yellow => "#f9e2af".into(),
+            Color::Blue => "#89b4fa".into(),
+            Color::Magenta => "#cba6f7".into(),
+            Color::Cyan => "#94e2d5".into(),
+            Color::Gray => "#bac2de".into(),
+            Color::DarkGray => "#585b70".into(),
+            Color::LightRed => "#eba0ac".into(),
+            Color::LightGreen => "#a6e3a1".into(),
+            Color::LightYellow => "#f9e2af".into(),
+            Color::LightBlue => "#89dceb".into(),
+            Color::LightMagenta => "#f5c2e7".into(),
+            Color::LightCyan => "#89dceb".into(),
+            Color::White => "#cdd6f4".into(),
+            Color::Rgb(red, green, blue) => format!("#{red:02x}{green:02x}{blue:02x}"),
+            Color::Indexed(index) => format!("color-mix(in srgb, #cdd6f4 {}%, #11111b)", index),
+        }
     }
 
     fn temp_git_repo(branch: &str) -> std::path::PathBuf {
