@@ -1,4 +1,9 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+const MAX_REMEMBERED_MAIN_WORKTREES: usize = 256;
+static REMEMBERED_MAIN_WORKTREES: OnceLock<Mutex<VecDeque<(PathBuf, PathBuf)>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSpaceMetadata {
@@ -14,6 +19,7 @@ pub struct GitWorktreeInfo {
     pub repo_root: PathBuf,
     pub git_dir: PathBuf,
     pub git_common_dir: PathBuf,
+    pub main_worktree_root: PathBuf,
     pub is_bare: bool,
     pub is_linked_worktree: bool,
 }
@@ -45,11 +51,14 @@ pub fn git_worktree_info(cwd: &Path) -> Option<GitWorktreeInfo> {
     let git_common_dir = canonicalize_best_effort_path(&git_common_dir_for_git_dir(&git_dir));
     let is_linked_worktree = git_dir != git_common_dir;
     let is_bare = git_dir_is_bare(&git_dir);
+    let main_worktree_root =
+        resolve_main_worktree_root(&repo_root, &git_common_dir, is_bare, is_linked_worktree);
 
     Some(GitWorktreeInfo {
         repo_root,
         git_dir,
         git_common_dir,
+        main_worktree_root,
         is_bare,
         is_linked_worktree,
     })
@@ -75,19 +84,8 @@ pub(super) fn git_space_metadata_from_info(info: &GitWorktreeInfo) -> GitSpaceMe
     let checkout_key = canonicalize_best_effort_path(&info.repo_root)
         .display()
         .to_string();
-    let label_path = if !info.is_bare && !info.is_linked_worktree {
-        &info.repo_root
-    } else if info
-        .git_common_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        == Some(".git")
-    {
-        info.git_common_dir.parent().unwrap_or(&info.repo_root)
-    } else {
-        &info.git_common_dir
-    };
-    let repo_name = label_path
+    let repo_name = info
+        .main_worktree_root
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("repo")
@@ -99,6 +97,73 @@ pub(super) fn git_space_metadata_from_info(info: &GitWorktreeInfo) -> GitSpaceMe
         repo_root: info.repo_root.clone(),
         is_linked_worktree: info.is_linked_worktree,
     }
+}
+
+fn resolve_main_worktree_root(
+    repo_root: &Path,
+    git_common_dir: &Path,
+    is_bare: bool,
+    is_linked_worktree: bool,
+) -> PathBuf {
+    if !is_bare && !is_linked_worktree {
+        if git_common_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(".git")
+        {
+            let main_worktree_root = canonicalize_best_effort_path(repo_root);
+            remember_main_worktree(git_common_dir, &main_worktree_root);
+            return main_worktree_root;
+        }
+        return repo_root.to_path_buf();
+    }
+
+    if git_common_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(".git")
+    {
+        return git_common_dir
+            .parent()
+            .unwrap_or(repo_root)
+            .to_path_buf();
+    }
+
+    if is_linked_worktree {
+        let mut remembered = remembered_main_worktrees()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(position) = remembered
+            .iter()
+            .position(|(common_dir, _)| common_dir == git_common_dir)
+        {
+            if let Some((common_dir, main_worktree_root)) = remembered.remove(position) {
+                remembered.push_back((common_dir, main_worktree_root.clone()));
+                return main_worktree_root;
+            }
+        }
+    }
+
+    git_common_dir.to_path_buf()
+}
+
+fn remember_main_worktree(git_common_dir: &Path, repo_root: &Path) {
+    let mut remembered = remembered_main_worktrees()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(position) = remembered
+        .iter()
+        .position(|(common_dir, _)| common_dir == git_common_dir)
+    {
+        remembered.remove(position);
+    } else if remembered.len() >= MAX_REMEMBERED_MAIN_WORKTREES {
+        remembered.pop_front();
+    }
+    remembered.push_back((git_common_dir.to_path_buf(), repo_root.to_path_buf()));
+}
+
+fn remembered_main_worktrees() -> &'static Mutex<VecDeque<(PathBuf, PathBuf)>> {
+    REMEMBERED_MAIN_WORKTREES.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 pub(super) fn canonicalize_best_effort_path(path: &Path) -> PathBuf {
@@ -434,9 +499,10 @@ mod tests {
     }
 
     #[test]
-    fn separate_git_dir_keeps_checkout_name_as_repo_name() {
+    fn separate_git_dir_checkouts_share_main_checkout_repo_name() {
         let base = temp_test_dir("separate-git-dir");
         let checkout = base.join("project");
+        let linked_checkout = base.join("feature");
         let metadata = base.join("meta");
         let separate_git_dir = format!("--separate-git-dir={}", metadata.display());
         run_git(
@@ -448,17 +514,51 @@ mod tests {
                 checkout.to_str().unwrap(),
             ],
         );
+        run_git(
+            &checkout,
+            &["config", "user.email", "herdr@example.invalid"],
+        );
+        run_git(&checkout, &["config", "user.name", "Herdr Test"]);
+        run_git(
+            &checkout,
+            &["commit", "--quiet", "--allow-empty", "-m", "initial"],
+        );
+        run_git(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature",
+                linked_checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
 
-        let info = git_worktree_info(&checkout).unwrap();
-        let space = git_space_metadata_from_info(&info);
+        let primary_info = git_worktree_info(&checkout).unwrap();
+        let linked_info = git_worktree_info(&linked_checkout).unwrap();
+        let primary_space = git_space_metadata_from_info(&primary_info);
+        let linked_space = git_space_metadata_from_info(&linked_info);
 
-        assert!(!info.is_bare);
-        assert!(!info.is_linked_worktree);
+        assert!(!primary_info.is_bare);
+        assert!(!primary_info.is_linked_worktree);
+        assert!(linked_info.is_linked_worktree);
         assert_eq!(
-            info.git_common_dir,
+            primary_info.git_common_dir,
             canonicalize_best_effort_path(&metadata)
         );
-        assert_eq!(space.repo_name, "project");
+        assert_eq!(
+            primary_info.main_worktree_root,
+            canonicalize_best_effort_path(&checkout)
+        );
+        assert_eq!(
+            linked_info.main_worktree_root,
+            primary_info.main_worktree_root
+        );
+        assert_eq!(primary_space.key, linked_space.key);
+        assert_eq!(primary_space.repo_name, "project");
+        assert_eq!(linked_space.repo_name, primary_space.repo_name);
 
         std::fs::remove_dir_all(base).unwrap();
     }
