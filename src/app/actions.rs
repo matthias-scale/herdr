@@ -2688,7 +2688,10 @@ impl AppState {
     fn set_status_focused_cwd(&mut self, focused_cwd: Option<std::path::PathBuf>) -> bool {
         let mut changed = self.status_focused_cwd != focused_cwd;
         self.status_focused_cwd = focused_cwd;
-        changed |= !self.status_focus_projection_initialized;
+        changed |= !self.status_focus_projection_initialized
+            && self
+                .active
+                .is_some_and(|workspace_idx| self.workspaces.get(workspace_idx).is_some());
         self.status_focus_projection_initialized = true;
         if self.status_git_cwd.as_ref() != self.status_focused_cwd.as_ref() {
             changed |= self.status_git_cwd.take().is_some();
