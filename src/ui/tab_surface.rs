@@ -314,6 +314,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_full_app_status_and_sidebar_geometry_is_characterized() {
+        let uri = "https://example.com/full-app-status";
+        let mut app = full_app_characterization_state(uri);
+        let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
+
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 106, 1));
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 26, 19));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 80, 18));
+        assert_eq!(app.view.pane_infos.len(), 2);
+        assert!(!app.view.split_borders.is_empty());
+        assert!(frame.cursor.is_some());
+        assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        assert_eq!(
+            frame_digest(&frame),
+            "74a13591287cc33602cf0bfcd926b6f6937a7dc1a489ff4feef2282bd7929c0e"
+        );
+    }
+
+    #[tokio::test]
     async fn mobile_full_app_semantic_frame_is_characterized() {
         let mut app = full_app_characterization_state("https://example.com/mobile");
         app.mode = Mode::Navigate;
