@@ -7,23 +7,44 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr-gate.yml"
 
 
 class PullRequestGateWorkflowTests(unittest.TestCase):
-    def test_forks_skip_job_before_maintainer_token_resolution(self) -> None:
+    def test_forks_pass_job_without_maintainer_token_resolution(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
         job_start = workflow.index("  check-contributor:\n")
-        guard = workflow.index(
-            "    if: ${{ github.repository == 'ogulcancelik/herdr' }}\n",
-            job_start,
-        )
         runs_on = workflow.index("    runs-on:", job_start)
-        steps = workflow.index("    steps:", job_start)
+        self.assertNotIn(
+            "    if: ${{ github.repository == 'ogulcancelik/herdr' }}\n",
+            workflow[job_start:runs_on],
+        )
 
-        self.assertLess(job_start, guard)
-        self.assertLess(guard, runs_on)
-        self.assertLess(runs_on, steps)
-        self.assertIn(
+        no_op_step = workflow.index(
+            "      - name: Confirm canonical intake policy is not applicable",
+            runs_on,
+        )
+        no_op_condition = workflow.index(
+            "        if: ${{ github.repository != 'ogulcancelik/herdr' }}\n",
+            no_op_step,
+        )
+        policy_step = workflow.index(
+            "      - name: Check pull request intake policy",
+            no_op_condition,
+        )
+        policy_condition = workflow.index(
+            "        if: ${{ github.repository == 'ogulcancelik/herdr' }}\n",
+            policy_step,
+        )
+        token = workflow.index(
             "github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}",
-            workflow,
+            policy_condition,
+        )
+
+        self.assertLess(no_op_step, no_op_condition)
+        self.assertLess(no_op_condition, policy_step)
+        self.assertLess(policy_step, policy_condition)
+        self.assertLess(policy_condition, token)
+        self.assertIn(
+            'run: echo "PR Gate is canonical-repository-only; fork check passed."',
+            workflow[no_op_condition:policy_step],
         )
 
 

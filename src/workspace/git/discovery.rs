@@ -75,7 +75,9 @@ pub(super) fn git_space_metadata_from_info(info: &GitWorktreeInfo) -> GitSpaceMe
     let checkout_key = canonicalize_best_effort_path(&info.repo_root)
         .display()
         .to_string();
-    let label_path = if info
+    let label_path = if !info.is_bare && !info.is_linked_worktree {
+        &info.repo_root
+    } else if info
         .git_common_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -427,6 +429,36 @@ mod tests {
             checkout_auto_label,
             checkout.file_name().unwrap().to_str().unwrap()
         );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn separate_git_dir_keeps_checkout_name_as_repo_name() {
+        let base = temp_test_dir("separate-git-dir");
+        let checkout = base.join("project");
+        let metadata = base.join("meta");
+        let separate_git_dir = format!("--separate-git-dir={}", metadata.display());
+        run_git(
+            &base,
+            &[
+                "init",
+                "--quiet",
+                separate_git_dir.as_str(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        let info = git_worktree_info(&checkout).unwrap();
+        let space = git_space_metadata_from_info(&info);
+
+        assert!(!info.is_bare);
+        assert!(!info.is_linked_worktree);
+        assert_eq!(
+            info.git_common_dir,
+            canonicalize_best_effort_path(&metadata)
+        );
+        assert_eq!(space.repo_name, "project");
 
         std::fs::remove_dir_all(base).unwrap();
     }
