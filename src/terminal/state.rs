@@ -105,6 +105,17 @@ struct AgentNameOwner {
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentActivityOwner {
+    Session {
+        source: String,
+        agent_label: String,
+        kind: crate::agent_resume::AgentSessionRefKind,
+        value: String,
+    },
+    Agent(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecentAgentProcessExit {
     agent: Agent,
@@ -142,6 +153,7 @@ pub struct TerminalState {
     pub last_agent_state_change_seq: Option<u64>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
+    agent_activity_owner: Option<AgentActivityOwner>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -177,6 +189,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             agent_active_since: None,
             agent_last_active_at: None,
+            agent_activity_owner: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -1216,6 +1229,22 @@ impl TerminalState {
         })
     }
 
+    fn current_agent_activity_owner(&self) -> Option<AgentActivityOwner> {
+        self.current_session_identity_for_persistence()
+            .map(
+                |(source, agent_label, kind, value)| AgentActivityOwner::Session {
+                    source,
+                    agent_label,
+                    kind,
+                    value,
+                },
+            )
+            .or_else(|| {
+                self.effective_agent_label()
+                    .map(|label| AgentActivityOwner::Agent(label.to_string()))
+            })
+    }
+
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
         self.current_session_identity_for_persistence().is_some_and(
             |(current_source, current_agent, _, _)| {
@@ -1958,6 +1987,7 @@ impl TerminalState {
         self.last_agent_state_change_seq = None;
         self.agent_active_since = None;
         self.agent_last_active_at = None;
+        self.agent_activity_owner = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2039,9 +2069,29 @@ impl TerminalState {
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
+        let activity_owner = self.current_agent_activity_owner();
+        let activity_owner_changed = self.agent_activity_owner != activity_owner;
 
         let presentation = self.effective_presentation_for_state_at(state, now);
         self.clear_expiry_pending_for_hidden_metadata();
+
+        if activity_owner_changed {
+            if state == AgentState::Working && activity_owner.is_some() {
+                self.agent_active_since = Some(now);
+                self.agent_last_active_at = None;
+            } else {
+                self.agent_active_since = None;
+                self.agent_last_active_at = None;
+            }
+        } else if previous_state != state {
+            if state == AgentState::Working {
+                self.agent_active_since = Some(now);
+            } else if previous_state == AgentState::Working {
+                self.agent_active_since = None;
+                self.agent_last_active_at = Some(now);
+            }
+        }
+        self.agent_activity_owner = activity_owner;
 
         if previous_agent_label == agent_label
             && previous_state == state
@@ -2050,14 +2100,6 @@ impl TerminalState {
             return None;
         }
 
-        if previous_state != state {
-            if state == AgentState::Working {
-                self.agent_active_since = Some(now);
-            } else if previous_state == AgentState::Working {
-                self.agent_active_since = None;
-                self.agent_last_active_at = Some(now);
-            }
-        }
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,
@@ -2133,6 +2175,110 @@ mod tests {
             finished + Duration::from_secs(30),
         );
         assert_eq!(terminal.agent_activity_at(), Some(finished));
+    }
+
+    #[test]
+    fn review_findings_activity_timestamp_resets_for_replacement_session() {
+        let mut terminal = test_terminal();
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("first"),
+            Some(1),
+            Some("startup".into()),
+        );
+        terminal.agent_active_since = Some(started);
+
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("second"),
+            Some(2),
+            Some("resume".into()),
+        );
+
+        assert!(terminal.agent_activity_at().is_some_and(|at| at > started));
+    }
+
+    #[test]
+    fn review_findings_activity_timestamp_resets_for_detected_agent_owner() {
+        let mut terminal = test_terminal();
+        let started = Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        let replaced = started + Duration::from_secs(10);
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            replaced,
+        );
+
+        assert_eq!(terminal.agent_activity_at(), Some(replaced));
+    }
+
+    #[test]
+    fn review_findings_idle_activity_does_not_cross_session_owner() {
+        let mut terminal = test_terminal();
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("first"),
+            Some(1),
+            Some("startup".into()),
+        );
+        let finished = Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            finished,
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(finished));
+
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("second"),
+            Some(2),
+            Some("resume".into()),
+        );
+
+        assert_eq!(terminal.agent_activity_at(), None);
     }
 
     fn test_session_path(name: &str) -> String {

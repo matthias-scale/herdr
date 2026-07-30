@@ -81,14 +81,15 @@ pub(crate) use self::{
     },
     sidebar::{
         agent_counts_by_workspace, agent_panel_entries, agent_panel_toggle_rect,
-        all_agent_panel_entries, collapsed_sidebar_row_scroll, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_sidebar_row_areas, compute_workspace_card_areas,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, relative_agent_navigation_entry,
-        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_group_chevron_rect,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
+        all_agent_panel_entries, collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
+        relative_agent_navigation_entry, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, workspace_agent_chevron_rect,
+        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
+        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry, SidebarRow,
+        WorkspaceListEntry,
     },
 };
 
@@ -216,7 +217,7 @@ fn compute_view_internal(
 ) {
     app.view_observed_at = std::time::Instant::now();
     app.reconcile_sidebar_presentation();
-    if is_mobile_width(area, app.mobile_width_threshold) {
+    if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
     }
@@ -261,12 +262,8 @@ fn compute_view_internal(
         app.workspace_scroll = collapsed_sidebar_row_scroll(app, ws_area);
         if let Some(active) = app.take_pending_workspace_reveal() {
             if let Some(target) = sidebar_row_index_for_workspace(app, active) {
-                let height = ws_area.height as usize;
-                if target < app.workspace_scroll {
-                    app.workspace_scroll = target;
-                } else if height > 0 && target >= app.workspace_scroll.saturating_add(height) {
-                    app.workspace_scroll = target.saturating_sub(height.saturating_sub(1));
-                }
+                app.workspace_scroll =
+                    collapsed_sidebar_scroll_for_target(app, ws_area, app.workspace_scroll, target);
             }
         }
     }
@@ -320,16 +317,21 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
 
+    let agent_card_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_agent_card_areas(app, sidebar_area)
+    };
+    let visible_agent_activity_instants =
+        sidebar::visible_agent_activity_instants_from(app, terminal_runtimes, &agent_card_areas);
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
-        agent_card_areas: if app.sidebar_collapsed {
-            Vec::new()
-        } else {
-            sidebar::compute_agent_card_areas(app, sidebar_area)
-        },
+        agent_card_areas,
+        visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -343,6 +345,16 @@ fn compute_view_internal(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+}
+
+fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
+    is_mobile_width(area, app.mobile_width_threshold)
+        || (app.status_bar_enabled
+            && usize::from(area.width) < status::minimum_required_status_width(app))
+}
+
+pub(crate) fn status_bar_is_renderable(app: &AppState, area: Rect) -> bool {
+    app.status_bar_enabled && area.height > 1 && !uses_mobile_layout(app, area)
 }
 
 fn compute_mobile_view(
@@ -395,6 +407,7 @@ fn compute_mobile_view(
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
+        visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),

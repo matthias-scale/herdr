@@ -44,6 +44,9 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         .as_ref()
         .map(|snapshot| &snapshot.metrics)
         .unwrap_or(&unavailable);
+    if usize::from(area.width) < minimum_required_status_width(app) {
+        return;
+    }
     let segments = fitted_segments(status_segments(app, metrics, p), area.width as usize);
 
     let used = segment_width(&segments);
@@ -92,24 +95,25 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
         segments.remove(index);
     }
 
-    // Only pathological widths narrower than the required build/CPU/MEM fields
-    // need truncation after all optional context has been removed.
-    for index in 0..segments.len() {
-        let total_width = segment_width(&segments);
-        shrink_segment_for_overflow(&mut segments[index], total_width, width);
-    }
-
     debug_assert!(segment_width(&segments) <= width);
     segments
 }
 
-fn shrink_segment_for_overflow(segment: &mut Segment, total_width: usize, width: usize) {
-    let overflow = total_width.saturating_sub(width);
-    if overflow == 0 {
-        return;
-    }
-    let current_width = display_width(&segment.text);
-    segment.text = truncate_end(&segment.text, current_width.saturating_sub(overflow));
+pub(crate) fn minimum_required_status_width(app: &AppState) -> usize {
+    let unavailable = StatusMetrics {
+        hostname: "--".into(),
+        ..StatusMetrics::default()
+    };
+    let metrics = app
+        .status_metrics
+        .as_ref()
+        .map(|snapshot| &snapshot.metrics)
+        .unwrap_or(&unavailable);
+    status_segments(app, metrics, &app.palette)
+        .iter()
+        .filter(|segment| segment.elide_rank.is_none())
+        .map(|segment| display_width(&segment.text))
+        .sum()
 }
 
 fn status_segments(
@@ -612,7 +616,8 @@ mod tests {
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some("feature/very-long-branch".into());
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let segments = fitted_segments(status_segments(&app, &metrics, &app.palette), 40);
+        let width = minimum_required_status_width(&app);
+        let segments = fitted_segments(status_segments(&app, &metrics, &app.palette), width);
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
@@ -621,6 +626,43 @@ mod tests {
         assert!(rendered.contains("CPU 12%"));
         assert!(rendered.contains(&crate::build_info::version()));
         assert!(!rendered.contains("feature/very-long"));
+    }
+
+    #[test]
+    fn review_findings_narrow_desktop_never_truncates_build_version() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 0;
+        let required = minimum_required_status_width(&app) as u16;
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required - 1, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Mobile);
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Desktop);
+        let mut terminal = Terminal::new(TestBackend::new(required, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, required, 1)))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains(&format!("Herdr {}", crate::build_info::version())),
+            "{rendered}"
+        );
     }
 
     fn assert_long_context_fits_status_row(cwd: &str, branch: &str) {

@@ -716,8 +716,6 @@ impl HeadlessServer {
                     self.render_and_stream();
                 }
                 self.app.last_render_at = Some(now);
-                self.app
-                    .sync_agent_activity_refresh_deadline(self.app.state.view_observed_at);
                 needs_render = false;
                 needs_full_render = false;
                 needs_graphics_render = false;
@@ -1460,6 +1458,17 @@ impl HeadlessServer {
 
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
+    }
+
+    fn has_renderable_status_target(&self) -> bool {
+        self.clients.values().any(|client| {
+            client.writer.is_some()
+                && client.is_full_app_client()
+                && crate::ui::status_bar_is_renderable(
+                    &self.app.state,
+                    Rect::new(0, 0, client.terminal_size.0, client.terminal_size.1),
+                )
+        })
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
@@ -3790,6 +3799,7 @@ impl HeadlessServer {
             );
             crate::render_prof::duration_since("full_render.render_virtual", render_started);
             self.app.full_redraw_pending = false;
+            self.app.agent_activity_refresh_deadline = None;
             crate::render_prof::duration_since("full_render.total", full_started);
             debug!(
                 cols,
@@ -3800,6 +3810,7 @@ impl HeadlessServer {
 
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
+        let mut agent_activity_refresh_deadline = None;
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
@@ -3829,6 +3840,16 @@ impl HeadlessServer {
                             is_foreground,
                             render_cell_size,
                         );
+                    if let Some(deadline) = self
+                        .app
+                        .state
+                        .next_agent_activity_age_change(self.app.state.view_observed_at)
+                    {
+                        agent_activity_refresh_deadline = Some(
+                            agent_activity_refresh_deadline
+                                .map_or(deadline, |current: Instant| current.min(deadline)),
+                        );
+                    }
                     crate::render_prof::duration_since(
                         "full_render.render_virtual",
                         render_started,
@@ -4058,6 +4079,7 @@ impl HeadlessServer {
             }
         }
 
+        self.app.agent_activity_refresh_deadline = agent_activity_refresh_deadline;
         let (cols, rows) = self.effective_size;
         if !deferred_frame {
             self.app.full_redraw_pending = false;
@@ -4074,6 +4096,7 @@ impl HeadlessServer {
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
         let has_app_client = self.has_app_client();
+        self.app.status_metrics_visible = self.has_renderable_status_target();
         let mut changed = if has_app_client {
             self.app.take_due_agent_activity_refresh(now)
         } else {
@@ -4084,7 +4107,7 @@ impl HeadlessServer {
             self.app.agent_activity_refresh_deadline = None;
             false
         };
-        changed |= if has_app_client {
+        changed |= if self.app.status_metrics_visible {
             self.app.schedule_status_metrics(now)
         } else {
             self.app.discard_stale_status_metrics(now)
@@ -5943,6 +5966,43 @@ next_tab = ""
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
         assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn review_findings_status_sampling_tracks_renderable_clients() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(server.app.status_metrics_visible);
+        assert!(server.app.status_metric_refresh.in_flight());
+
+        server.app.status_metric_refresh.finish();
+        server
+            .clients
+            .get_mut(&7)
+            .expect("attached client")
+            .terminal_size = (40, 24);
+        server.handle_scheduled_tasks_headless(
+            Instant::now() + crate::platform::status_metrics::STATUS_METRIC_REFRESH_INTERVAL,
+            false,
+        );
+
+        assert!(!server.app.status_metrics_visible);
+        assert!(!server.app.status_metric_refresh.in_flight());
     }
 
     #[test]

@@ -841,6 +841,28 @@ pub(crate) fn collapsed_sidebar_row_scroll(app: &AppState, ws_area: Rect) -> usi
     app.workspace_scroll.min(max_scroll)
 }
 
+pub(crate) fn collapsed_sidebar_scroll_for_target(
+    app: &AppState,
+    ws_area: Rect,
+    current_scroll: usize,
+    target: usize,
+) -> usize {
+    let max_scroll = sidebar_rows(app)
+        .len()
+        .saturating_sub(ws_area.height as usize);
+    let current_scroll = current_scroll.min(max_scroll);
+    if target < current_scroll {
+        return target;
+    }
+    let height = ws_area.height as usize;
+    if height > 0 && target >= current_scroll.saturating_add(height) {
+        return target
+            .saturating_sub(height.saturating_sub(1))
+            .min(max_scroll);
+    }
+    current_scroll
+}
+
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1645,30 +1667,11 @@ fn render_agent_card(
         };
         let baseline_token_spans = resolve_tokens(content_width);
         let mut activity_field = None;
-        let token_spans = if row_index == 0
-            && content_width
-                >= AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH
-        {
-            let candidate =
-                resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH));
-            let candidate_width = candidate
-                .iter()
-                .map(|span| display_width(span.content.as_ref()))
-                .sum::<usize>();
-            let preserves_context = candidate.len() == baseline_token_spans.len()
-                && candidate
-                    .iter()
-                    .zip(&baseline_token_spans)
-                    .all(|(candidate, baseline)| candidate.content == baseline.content)
-                && candidate_width <= content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH);
-            if preserves_context {
-                let label =
-                    crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);
-                activity_field = Some(format!(" {label:>4}"));
-                candidate
-            } else {
-                baseline_token_spans
-            }
+        let token_spans = if row_index == 0 && agent_activity_age_fits(app, detail, rect, depth) {
+            let label =
+                crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);
+            activity_field = Some(format!(" {label:>4}"));
+            resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH))
         } else {
             baseline_token_spans
         };
@@ -1701,6 +1704,87 @@ fn render_agent_card(
             Rect::new(rect.x, rect.y + row_index as u16, rect.width, 1),
         );
     }
+}
+
+fn agent_activity_age_fits(
+    app: &AppState,
+    detail: &AgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+) -> bool {
+    let Some(resolved) = resolved_agent_rows(app, detail).into_iter().next() else {
+        return false;
+    };
+    let prefix_width = usize::from(depth) * 3 + usize::from(depth > 0);
+    let content_width = usize::from(rect.width).saturating_sub(prefix_width);
+    if content_width < AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH {
+        return false;
+    }
+    let p = &app.palette;
+    let label_color = state_label_color(detail.state, detail.seen, p);
+    let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+    let name_style = if is_active {
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+    };
+    let status_style = Style::default().fg(label_color).add_modifier(if is_active {
+        Modifier::empty()
+    } else {
+        Modifier::DIM
+    });
+    let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+    let state_icon = state_dot(detail.state, detail.seen, p);
+    let resolve_tokens = |max_width| {
+        resolved_token_spans(
+            &resolved,
+            state_icon,
+            status_style,
+            name_style,
+            agent_style,
+            agent_style,
+            p,
+            max_width,
+        )
+    };
+    let baseline = resolve_tokens(content_width);
+    let candidate = resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH));
+    let candidate_width = candidate
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum::<usize>();
+    candidate.len() == baseline.len()
+        && candidate
+            .iter()
+            .zip(&baseline)
+            .all(|(candidate, baseline)| candidate.content == baseline.content)
+        && candidate_width <= content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH)
+}
+
+pub(crate) fn visible_agent_activity_instants_from(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    cards: &[crate::app::state::AgentCardArea],
+) -> Vec<std::time::Instant> {
+    let rows = sidebar_rows_from(app, terminal_runtimes);
+    cards
+        .iter()
+        .filter_map(|card| {
+            let (entry, depth) = rows.iter().find_map(|row| match row {
+                SidebarRow::Agent { entry, depth }
+                    if entry.ws_idx == card.ws_idx
+                        && entry.tab_idx == card.tab_idx
+                        && entry.pane_id == card.pane_id =>
+                {
+                    Some((entry.as_ref(), *depth))
+                }
+                _ => None,
+            })?;
+            agent_activity_age_fits(app, entry, card.rect, depth)
+                .then_some(entry.activity_at)
+                .flatten()
+        })
+        .collect()
 }
 
 pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -2018,6 +2102,27 @@ mod tests {
     }
 
     #[test]
+    fn review_findings_workspace_picker_override_is_shared_across_clients() {
+        let mut app = app_with_agents(&["one", "two"]);
+        app.agent_panel_sort = AgentPanelSort::Priority;
+        let mut client_a = SidebarPresentationState::default();
+        let mut client_b = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut client_a);
+        app.begin_workspace_picker_presentation();
+        app.swap_sidebar_presentation(&mut client_a);
+        assert!(app.sidebar_shows_spaces_tree());
+
+        app.swap_sidebar_presentation(&mut client_b);
+        app.end_workspace_picker_presentation();
+        app.swap_sidebar_presentation(&mut client_b);
+
+        app.swap_sidebar_presentation(&mut client_a);
+        assert!(!app.sidebar_shows_spaces_tree());
+        app.swap_sidebar_presentation(&mut client_a);
+    }
+
+    #[test]
     fn workspace_picker_temporarily_shows_tree_from_agent_view_override() {
         let mut app = app_with_agents(&["one", "two"]);
         app.agent_view_override = Some(filtered_to_missing());
@@ -2067,6 +2172,36 @@ mod tests {
         assert_eq!(rows.len(), workspace_cards.len() + agent_cards.len());
         assert_eq!(workspace_cards, geometry_order.0);
         assert_eq!(agent_cards, geometry_order.1);
+    }
+
+    #[test]
+    fn review_findings_compact_agent_navigation_reveals_exact_row() {
+        let mut app = app_with_agents(&["one", "two", "three"]);
+        app.sidebar_presentation.expanded_workspace_ids = app
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect();
+        app.sidebar_collapsed = true;
+        app.view.sidebar_rect = Rect::new(0, 0, 4, 2);
+        app.workspace_scroll = 0;
+
+        app.next_agent();
+
+        let focused = app.active.unwrap();
+        let pane_id = app.workspaces[focused].focused_pane_id().unwrap();
+        let target = sidebar_rows(&app)
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::Agent { entry, .. }
+                        if entry.ws_idx == focused && entry.pane_id == pane_id
+                )
+            })
+            .unwrap();
+        assert!(target >= app.workspace_scroll);
+        assert!(target < app.workspace_scroll + 2);
     }
 
     #[test]
@@ -2332,6 +2467,57 @@ row_gap = 1
 
         assert!(rendered.contains("one"), "{rendered:?}");
         assert!(!rendered.contains("--"), "{rendered:?}");
+    }
+
+    #[test]
+    fn review_findings_activity_deadlines_follow_visible_age_fields() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let started = std::time::Instant::now();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        app.status_bar_enabled = false;
+        app.mobile_width_threshold = 0;
+        let runtimes = TerminalRuntimeRegistry::new();
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
+
+        app.sidebar_collapsed = true;
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        app.sidebar_collapsed = false;
+        app.mobile_width_threshold = 80;
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        app.mobile_width_threshold = 0;
+        app.sidebar_width = 12;
+        app.sidebar_min_width = 12;
+        app.sidebar_max_width = 12;
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        app.sidebar_width = 30;
+        app.sidebar_min_width = 18;
+        app.sidebar_max_width = 36;
+        app.toggle_workspace_agent_disclosure(0);
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
     }
 
     #[test]

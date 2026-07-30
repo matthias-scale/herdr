@@ -1535,7 +1535,26 @@ impl AppState {
             return;
         }
         if self.sidebar_collapsed {
-            self.ensure_workspace_visible(ws_idx);
+            let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+            let target_row_idx = crate::ui::sidebar_rows(self)
+                .iter()
+                .position(|row| {
+                    matches!(
+                        row,
+                        crate::ui::SidebarRow::Agent { entry, .. }
+                            if entry.ws_idx == ws_idx && entry.pane_id == pane_id
+                    )
+                })
+                .or_else(|| crate::ui::sidebar_row_index_for_workspace(self, ws_idx));
+            if let Some(target_row_idx) = target_row_idx {
+                self.workspace_scroll = crate::ui::collapsed_sidebar_scroll_for_target(
+                    self,
+                    ws_area,
+                    self.workspace_scroll,
+                    target_row_idx,
+                );
+                let _ = self.take_pending_workspace_reveal();
+            }
             return;
         }
 

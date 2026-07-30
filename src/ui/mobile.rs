@@ -610,18 +610,24 @@ fn render_mobile_switcher_content(
                 } else {
                     raw_label
                 };
+                let agent_count = agent_counts.get(ws_idx).copied().unwrap_or(0);
+                let disclosure_columns = mobile_workspace_disclosure_columns(content, agent_count);
+                let used = title_spans
+                    .iter()
+                    .map(|span| display_width_u16(span.content.as_ref()))
+                    .sum::<u16>();
+                let name_width = disclosure_columns
+                    .as_ref()
+                    .map(|columns| columns.start.saturating_sub(content.x).saturating_sub(used))
+                    .unwrap_or_else(|| content.width.saturating_sub(used).saturating_sub(1));
                 title_spans.push(Span::styled(
-                    truncate_end(
-                        &name,
-                        content.width.saturating_sub(if *indented { 8 } else { 5 }) as usize,
-                    ),
+                    truncate_end(&name, name_width as usize),
                     Style::default()
                         .fg(p.text)
                         .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 ));
-                let agent_count = agent_counts.get(ws_idx).copied().unwrap_or(0);
-                if let Some(columns) = mobile_workspace_disclosure_columns(content, agent_count) {
+                if let Some(columns) = disclosure_columns {
                     let used = title_spans
                         .iter()
                         .map(|span| display_width_u16(span.content.as_ref()))
@@ -1362,6 +1368,52 @@ mod tests {
             agent_hit,
             Some(MobileSwitcherTarget::Agent { .. })
         ));
+    }
+
+    #[test]
+    fn review_findings_mobile_workspace_name_reserves_disclosure_columns() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new(
+            "workspace-name-that-is-much-too-long",
+        )];
+        app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.agent_name = Some("pi".to_string());
+            terminal.state = AgentState::Working;
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Navigate;
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        app.view.mobile_header_rect = Rect::new(0, 0, 24, 2);
+        app.view.terminal_area = Rect::new(0, 2, 24, 16);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 24, 18),
+                )
+            })
+            .unwrap();
+
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let content = inset_for_left_scrollbar(viewport);
+        let columns = mobile_workspace_disclosure_columns(content, 1).unwrap();
+        let disclosure_start = columns.start;
+        let row = viewport.y + mobile_switcher_workspace_doc_range(&app, 0).unwrap().start as u16;
+        let disclosure = columns
+            .map(|x| terminal.backend().buffer()[(x, row)].symbol())
+            .collect::<String>();
+        assert_eq!(disclosure, "▾1");
+        assert_eq!(
+            mobile_switcher_target_at(&app, disclosure_start, row),
+            Some(MobileSwitcherTarget::WorkspaceDisclosure(0))
+        );
     }
 
     fn worktree_workspace(name: &str, key: &str, linked: bool) -> crate::workspace::Workspace {

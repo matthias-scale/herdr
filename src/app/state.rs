@@ -642,7 +642,6 @@ pub(crate) struct SidebarPresentationState {
     /// so each attach compares this against the active workspace when it
     /// renders and scrolls itself instead of relying on the mutating path.
     pub(crate) revealed_workspace_id: Option<String>,
-    pub(crate) force_spaces_tree: bool,
     pub(crate) workspace_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
 }
@@ -805,6 +804,7 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
+    pub(crate) visible_agent_activity_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -1505,6 +1505,7 @@ pub struct AppState {
     pub navigator: NavigatorState,
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
+    pub(crate) workspace_picker_forces_spaces_tree: bool,
     pub workspace_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
@@ -1653,10 +1654,6 @@ impl AppState {
             &mut self.sidebar_presentation.revealed_workspace_id,
             &mut other.revealed_workspace_id,
         );
-        std::mem::swap(
-            &mut self.sidebar_presentation.force_spaces_tree,
-            &mut other.force_spaces_tree,
-        );
         std::mem::swap(&mut self.workspace_scroll, &mut other.workspace_scroll);
         std::mem::swap(
             &mut self.mobile_switcher_scroll,
@@ -1699,18 +1696,18 @@ impl AppState {
     }
 
     pub(crate) fn sidebar_shows_spaces_tree(&self) -> bool {
-        self.sidebar_presentation.force_spaces_tree
+        self.workspace_picker_forces_spaces_tree
             || (self.agent_view_override.is_none()
                 && self.agent_panel_sort == AgentPanelSort::Spaces)
     }
 
     pub(crate) fn begin_workspace_picker_presentation(&mut self) {
         self.mobile_switcher_scroll = 0;
-        self.sidebar_presentation.force_spaces_tree = true;
+        self.workspace_picker_forces_spaces_tree = true;
     }
 
     pub(crate) fn end_workspace_picker_presentation(&mut self) {
-        self.sidebar_presentation.force_spaces_tree = false;
+        self.workspace_picker_forces_spaces_tree = false;
     }
 
     pub(crate) fn workspace_agents_expanded(&self, ws_idx: usize) -> bool {
@@ -1725,12 +1722,10 @@ impl AppState {
     }
 
     pub(crate) fn next_agent_activity_age_change(&self, now: Instant) -> Option<Instant> {
-        self.terminals
-            .values()
-            .filter(|terminal| terminal.is_agent_terminal())
-            .filter_map(|terminal| {
-                crate::activity_age::next_change_at(terminal.agent_activity_at(), now)
-            })
+        self.view
+            .visible_agent_activity_instants
+            .iter()
+            .filter_map(|observed_at| crate::activity_age::next_change_at(Some(*observed_at), now))
             .min()
     }
 
@@ -2009,6 +2004,7 @@ impl AppState {
             navigator: NavigatorState::default(),
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
+            workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
@@ -2019,6 +2015,7 @@ impl AppState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),

@@ -98,6 +98,7 @@ pub struct App {
     pub(crate) status_metric_sampler:
         Arc<std::sync::Mutex<crate::platform::status_metrics::StatusMetricSampler>>,
     pub(crate) status_metric_refresh_enabled: bool,
+    pub(crate) status_metrics_visible: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
@@ -604,6 +605,7 @@ impl App {
             navigator: state::NavigatorState::default(),
             copy_mode: None,
             sidebar_presentation: state::SidebarPresentationState::default(),
+            workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
@@ -614,6 +616,7 @@ impl App {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -767,6 +770,7 @@ impl App {
                 crate::platform::status_metrics::StatusMetricSampler::new(),
             )),
             status_metric_refresh_enabled: !cfg!(test),
+            status_metrics_visible: false,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,
@@ -1169,6 +1173,8 @@ impl App {
                         cell_size,
                     )?;
                 }
+                self.status_metrics_visible =
+                    self.state.view.status_bar_rect != ratatui::layout::Rect::default();
                 self.sync_pending_agent_resume_deadline(now);
                 if self.start_pending_agent_resumes(self.pending_agent_resume_due(now)) {
                     self.render_dirty.request_generic();
@@ -4224,6 +4230,10 @@ mod tests {
         let terminal_id = workspace.terminal_id(pane).unwrap().clone();
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.status_bar_enabled = false;
+        app.state.reconcile_sidebar_presentation();
         app.state
             .terminals
             .get_mut(&terminal_id)
@@ -4863,6 +4873,11 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            ratatui::layout::Rect::new(0, 0, 80, 20),
+        );
         app.sync_agent_activity_refresh_deadline(observed);
 
         assert_eq!(

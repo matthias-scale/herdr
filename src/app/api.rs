@@ -67,7 +67,7 @@ impl App {
                 if let Some(snapshot) = snapshot {
                     self.state.status_metrics = Some(*snapshot);
                 }
-                should_repaint
+                should_repaint && self.status_metrics_visible
             }
             AppEvent::GitStatusRefreshed {
                 results,

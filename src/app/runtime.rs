@@ -364,6 +364,7 @@ impl App {
     pub(crate) fn schedule_status_metrics(&mut self, now: Instant) -> bool {
         let stale = self.discard_stale_status_metrics(now);
         if !self.status_metric_refresh_enabled
+            || !self.status_metrics_visible
             || !self.state.status_bar_enabled
             || !self.status_metric_refresh.begin(now)
         {
@@ -608,11 +609,17 @@ impl App {
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh
                     && self.status_metric_refresh_enabled
+                    && self.status_metrics_visible
                     && self.state.status_bar_enabled
             }),
-            self.state.status_metrics.as_ref().map(|snapshot| {
-                snapshot.sampled_at + crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER
-            }),
+            self.status_metrics_visible
+                .then(|| {
+                    self.state.status_metrics.as_ref().map(|snapshot| {
+                        snapshot.sampled_at
+                            + crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER
+                    })
+                })
+                .flatten(),
             include_client_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
