@@ -128,6 +128,7 @@ pub(crate) struct AgentActivitySession {
     value: String,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentActivityHandoffState {
     state: AgentActivityHandoffStatus,
@@ -136,6 +137,7 @@ pub(crate) struct AgentActivityHandoffState {
     owner: Option<AgentActivityOwner>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum AgentActivityHandoffStatus {
     Idle,
@@ -144,6 +146,7 @@ enum AgentActivityHandoffStatus {
     Unknown,
 }
 
+#[cfg(unix)]
 impl From<AgentState> for AgentActivityHandoffStatus {
     fn from(state: AgentState) -> Self {
         match state {
@@ -155,6 +158,7 @@ impl From<AgentState> for AgentActivityHandoffStatus {
     }
 }
 
+#[cfg(unix)]
 impl From<AgentActivityHandoffStatus> for AgentState {
     fn from(state: AgentActivityHandoffStatus) -> Self {
         match state {
@@ -1874,6 +1878,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn agent_activity_handoff_state(
         &self,
         now: Instant,
@@ -1896,6 +1901,7 @@ impl TerminalState {
         })
     }
 
+    #[cfg(unix)]
     pub(crate) fn restore_agent_activity_handoff_state(
         &mut self,
         handoff: AgentActivityHandoffState,
@@ -2379,6 +2385,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn review_fix_handoff_preserves_working_activity_age_and_owner() {
         let started = Instant::now().checked_sub(Duration::from_secs(45)).unwrap();
         let captured_at = Instant::now();

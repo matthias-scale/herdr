@@ -528,6 +528,7 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        #[cfg(unix)]
         let imported_agent_activity = imported_runtime
             .as_ref()
             .and_then(|imported| imported.state.agent_activity.clone());
@@ -660,9 +661,14 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                if let Some(activity) = imported_agent_activity {
-                    terminal
-                        .restore_agent_activity_handoff_state(activity, std::time::Instant::now());
+                #[cfg(unix)]
+                {
+                    if let Some(activity) = imported_agent_activity {
+                        terminal.restore_agent_activity_handoff_state(
+                            activity,
+                            std::time::Instant::now(),
+                        );
+                    }
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);
