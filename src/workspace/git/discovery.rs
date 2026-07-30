@@ -135,7 +135,20 @@ fn resolve_main_worktree_root(
 }
 
 fn configured_main_worktree_root(git_common_dir: &Path) -> Option<PathBuf> {
-    let value = read_git_config_value(&git_common_dir.join("config"), "core", "worktree")?;
+    let config = git_common_dir.join("config");
+    let worktree_config_enabled =
+        read_git_config_value(&config, "extensions", "worktreeConfig")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let value = worktree_config_enabled
+        .then(|| {
+            read_git_config_value(
+                &git_common_dir.join("config.worktree"),
+                "core",
+                "worktree",
+            )
+        })
+        .flatten()
+        .or_else(|| read_git_config_value(&config, "core", "worktree"))?;
     let path = Path::new(&value);
     let resolved = if path.is_absolute() {
         path.to_path_buf()
@@ -511,7 +524,16 @@ mod tests {
         run_git(&checkout, &["config", "user.name", "Herdr Test"]);
         run_git(
             &checkout,
-            &["config", "core.worktree", checkout.to_str().unwrap()],
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        run_git(
+            &checkout,
+            &[
+                "config",
+                "--worktree",
+                "core.worktree",
+                checkout.to_str().unwrap(),
+            ],
         );
         run_git(
             &checkout,
