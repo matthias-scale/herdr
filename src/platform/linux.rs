@@ -1,8 +1,8 @@
 use std::{
     collections::{HashSet, VecDeque},
-    io::{Read, Write},
+    io::Write,
     os::fd::RawFd,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
@@ -22,47 +22,22 @@ struct ProcGroupMember {
 pub(crate) fn sample_status_metrics(
     sampler: &mut super::status_metrics::StatusMetricSampler,
 ) -> super::status_metrics::StatusMetrics {
-    let (hostname, username) = status_identity();
-    let (date, time) = status_local_date_time();
+    let hostname = status_hostname();
     let (mem_used_gib, mem_total_gib) = status_memory().unwrap_or((0.0, 0.0));
     let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
-    let (battery_percent, battery_charging) = status_battery();
-    let interface = status_default_interface();
-    let interfaces = status_interface_ipv4s(interface.as_deref());
-    let (net_down_kib, net_up_kib) = interface
-        .as_deref()
-        .and_then(status_interface_bytes)
-        .and_then(|(rx, tx)| {
-            sampler.bandwidth_kib(interface.as_deref()?, rx, tx, std::time::Instant::now())
-        })
-        .map(|(down, up)| (Some(down), Some(up)))
-        .unwrap_or((None, None));
 
     super::status_metrics::StatusMetrics {
         cpu_percent,
         mem_used_gib: (mem_total_gib > 0.0).then_some(mem_used_gib),
         mem_total_gib: (mem_total_gib > 0.0).then_some(mem_total_gib),
-        battery_percent,
-        battery_charging,
-        local_ip: interfaces.local_ip,
-        tailscale_ip: interfaces.tailscale_ip.clone(),
-        public_ip: status_public_ip(),
-        net_down_kib,
-        net_up_kib,
-        net_kind: status_net_kind(interface.as_deref()),
-        vpn_active: interfaces.vpn_active,
-        remote_session: super::status_metrics::remote_session_from_env(),
         hostname,
-        username,
-        date,
-        time,
     }
 }
 
-fn status_identity() -> (String, String) {
+fn status_hostname() -> String {
     let mut hostname = [0u8; 256];
     // SAFETY: `hostname` is writable for the length passed to libc.
-    let host = if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
+    if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
         let end = hostname
             .iter()
             .position(|byte| *byte == 0)
@@ -70,110 +45,7 @@ fn status_identity() -> (String, String) {
         super::status_metrics::short_hostname(&String::from_utf8_lossy(&hostname[..end]))
     } else {
         "localhost".into()
-    };
-    let user = std::env::var("USER")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(status_username_from_effective_uid);
-    (host, user)
-}
-
-fn status_username_from_effective_uid() -> String {
-    let uid = unsafe { libc::geteuid() };
-    let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
-    let mut size = if configured_size > 0 {
-        configured_size as usize
-    } else {
-        16 * 1024
-    };
-    size = size.clamp(1024, 1024 * 1024);
-
-    loop {
-        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
-        let mut result = std::ptr::null_mut();
-        let mut buffer = vec![0 as libc::c_char; size];
-        let status = unsafe {
-            libc::getpwuid_r(
-                uid,
-                entry.as_mut_ptr(),
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &mut result,
-            )
-        };
-        if status == 0 && !result.is_null() {
-            let name = unsafe { std::ffi::CStr::from_ptr((*result).pw_name) }
-                .to_string_lossy()
-                .into_owned();
-            if !name.is_empty() {
-                return name;
-            }
-            break;
-        }
-        if status != libc::ERANGE || size >= 1024 * 1024 {
-            break;
-        }
-        size = (size * 2).min(1024 * 1024);
     }
-
-    uid.to_string()
-}
-
-fn status_public_ip() -> Option<String> {
-    read_compatible_public_ip(
-        Path::new("/tmp/tmux-powerline-wan-ip"),
-        std::time::SystemTime::now(),
-    )
-}
-
-fn read_compatible_public_ip(path: &Path, now: std::time::SystemTime) -> Option<String> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-
-    let path_metadata = std::fs::symlink_metadata(path).ok()?;
-    if !path_metadata.file_type().is_file()
-        || path_metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
-    {
-        return None;
-    }
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.file_type().is_file()
-        || metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o022 != 0
-    {
-        return None;
-    }
-
-    let modified = metadata.modified().ok()?;
-    let mut bytes = Vec::with_capacity(super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1);
-    file.take((super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    super::status_metrics::compatible_public_ip_from_cache(&bytes, modified, now)
-}
-
-fn status_local_date_time() -> (String, String) {
-    let now = unsafe { libc::time(std::ptr::null_mut()) };
-    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
-    // SAFETY: `local` is valid writable storage and `now` is a valid time value.
-    if unsafe { libc::localtime_r(&now, &mut local) }.is_null() {
-        return ("----/--/--".into(), "--:--".into());
-    }
-    (
-        format!(
-            "{:04}-{:02}-{:02}",
-            local.tm_year + 1900,
-            local.tm_mon + 1,
-            local.tm_mday
-        ),
-        format!("{:02}:{:02}", local.tm_hour, local.tm_min),
-    )
 }
 
 fn status_memory() -> Option<(f32, f32)> {
@@ -211,226 +83,8 @@ fn status_cpu_ticks() -> Option<(u64, u64)> {
     Some((idle, values.iter().sum()))
 }
 
-fn status_battery() -> (Option<u8>, Option<bool>) {
-    let battery = std::fs::read_dir("/sys/class/power_supply")
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .find(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("BAT"))
-                })
-        });
-    let Some(battery) = battery else {
-        return (None, None);
-    };
-    let percent = std::fs::read_to_string(battery.join("capacity"))
-        .ok()
-        .and_then(|value| value.trim().parse::<u8>().ok());
-    let charging = std::fs::read_to_string(battery.join("status"))
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "charging" | "full"
-            )
-        });
-    (percent, charging)
-}
-
-fn status_default_interface() -> Option<String> {
-    let contents = std::fs::read_to_string("/proc/net/route").ok()?;
-    parse_default_interface(&contents)
-}
-
-fn parse_default_interface(contents: &str) -> Option<String> {
-    contents
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            let interface = *fields.first()?;
-            let destination = *fields.get(1)?;
-            let flags = u32::from_str_radix(fields.get(3)?, 16).ok()?;
-            let metric = fields.get(6)?.parse::<u64>().ok()?;
-            let mask = *fields.get(7)?;
-            (destination == "00000000" && mask == "00000000" && flags & 0x1 != 0)
-                .then_some((interface, metric))
-        })
-        .min_by_key(|(_, metric)| *metric)
-        .map(|(interface, _)| interface.to_owned())
-}
-
-fn status_interface_bytes(interface: &str) -> Option<(u64, u64)> {
-    let root = std::path::Path::new("/sys/class/net")
-        .join(interface)
-        .join("statistics");
-    let rx = std::fs::read_to_string(root.join("rx_bytes"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    let tx = std::fs::read_to_string(root.join("tx_bytes"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some((rx, tx))
-}
-
-fn status_net_kind(interface: Option<&str>) -> super::status_metrics::NetKind {
-    let Some(interface) = interface else {
-        return super::status_metrics::NetKind::Unknown;
-    };
-    if std::path::Path::new("/sys/class/net")
-        .join(interface)
-        .join("wireless")
-        .exists()
-        || interface.starts_with("wl")
-    {
-        super::status_metrics::NetKind::Wifi
-    } else {
-        super::status_metrics::NetKind::Ethernet
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StatusInterfaceIpv4 {
-    name: String,
-    address: std::net::Ipv4Addr,
-    up: bool,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct StatusInterfaceSelection {
-    local_ip: Option<String>,
-    tailscale_ip: Option<String>,
-    vpn_active: bool,
-}
-
-fn status_tunnel_interface(name: &str) -> bool {
-    ["tailscale", "tun", "wg", "ppp", "ipsec"]
-        .iter()
-        .any(|needle| name.contains(needle))
-}
-
-fn status_active_tunnel(name: &str, up: bool) -> bool {
-    up && status_tunnel_interface(name)
-}
-
-fn observe_status_interface(
-    family: Option<i32>,
-    name: Option<String>,
-    flags: u32,
-    address: Option<std::net::Ipv4Addr>,
-    ipv4s: &mut Vec<StatusInterfaceIpv4>,
-    vpn_active: &mut bool,
-) {
-    let Some(name) = name else {
-        return;
-    };
-    let up = flags & (libc::IFF_UP as u32) != 0;
-    *vpn_active |= status_active_tunnel(&name, up);
-    if family == Some(libc::AF_INET) {
-        if let Some(address) = address {
-            ipv4s.push(StatusInterfaceIpv4 { name, address, up });
-        }
-    }
-}
-
-fn status_interface_ipv4s(default_interface: Option<&str>) -> StatusInterfaceSelection {
-    let mut ipv4s = Vec::new();
-    let mut vpn_active = false;
-    let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: libc owns the linked list until the paired `freeifaddrs`.
-    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 || interfaces.is_null() {
-        return StatusInterfaceSelection::default();
-    }
-    let mut current = interfaces;
-    while !current.is_null() {
-        // SAFETY: current belongs to the valid getifaddrs list.
-        let interface = unsafe { &*current };
-        let name = if interface.ifa_name.is_null() {
-            None
-        } else {
-            Some(
-                unsafe { std::ffi::CStr::from_ptr(interface.ifa_name) }
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        };
-        let family = (!interface.ifa_addr.is_null())
-            .then(|| unsafe { (*interface.ifa_addr).sa_family as i32 });
-        let address = if family == Some(libc::AF_INET) {
-            let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
-            Some(std::net::Ipv4Addr::from(u32::from_be(
-                address.sin_addr.s_addr,
-            )))
-        } else {
-            None
-        };
-        observe_status_interface(
-            family,
-            name,
-            interface.ifa_flags,
-            address,
-            &mut ipv4s,
-            &mut vpn_active,
-        );
-        current = interface.ifa_next;
-    }
-    unsafe { libc::freeifaddrs(interfaces) };
-    select_status_interface_ipv4s(default_interface, ipv4s, vpn_active)
-}
-
-fn select_status_interface_ipv4s(
-    default_interface: Option<&str>,
-    ipv4s: Vec<StatusInterfaceIpv4>,
-    vpn_active: bool,
-) -> StatusInterfaceSelection {
-    let mut tailscale_ip = None;
-    let mut local_candidates = Vec::new();
-    for interface in ipv4s {
-        if !interface.up || interface.address.is_loopback() || interface.address.is_unspecified() {
-            continue;
-        }
-        if status_tunnel_interface(&interface.name) {
-            let octets = interface.address.octets();
-            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-                tailscale_ip.get_or_insert_with(|| interface.address.to_string());
-            }
-        } else {
-            local_candidates.push(interface);
-        }
-    }
-    let selected = match default_interface {
-        Some(name) => local_candidates
-            .iter()
-            .find(|interface| interface.name == name),
-        None => local_candidates.first(),
-    };
-    let local_ip = selected.map(|interface| interface.address.to_string());
-    StatusInterfaceSelection {
-        local_ip,
-        tailscale_ip,
-        vpn_active,
-    }
-}
-
 #[cfg(test)]
 mod status_metric_tests {
-    use std::net::Ipv4Addr;
-    use std::time::SystemTime;
-
-    use super::StatusInterfaceIpv4;
-
-    fn wan_fixture_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("herdr-status-wan-{}-{label}", std::process::id()))
-    }
-
     #[test]
     fn platform_metric_sampler_returns_local_linux_snapshot() {
         // AC6: Linux collection stays in linux.rs and uses /proc, /sys, libc.
@@ -438,41 +92,6 @@ mod status_metric_tests {
             &mut crate::platform::status_metrics::StatusMetricSampler::new(),
         );
         assert!(!metrics.hostname.is_empty());
-        assert!(!metrics.username.is_empty());
-        assert_eq!(metrics.date.len(), 10);
-        assert_eq!(metrics.time.len(), 5);
-    }
-
-    #[test]
-    fn native_identity_lookup_returns_effective_user() {
-        assert!(!super::status_username_from_effective_uid().is_empty());
-    }
-
-    #[test]
-    fn wan_cache_reader_rejects_symlinks() {
-        let target = wan_fixture_path("linux-symlink-target");
-        let link = wan_fixture_path("linux-symlink");
-        std::fs::write(&target, "203.0.113.9\n").expect("write target");
-        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
-
-        assert_eq!(
-            super::read_compatible_public_ip(&link, SystemTime::now()),
-            None
-        );
-        std::fs::remove_file(link).expect("remove symlink");
-        std::fs::remove_file(target).expect("remove target");
-    }
-
-    #[test]
-    fn default_route_prefers_lowest_metric_up_route() {
-        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
-                      eth0 00000000 0100000A 0003 0 0 200 00000000 0 0 0\n\
-                      wlan0 00000000 0100000A 0003 0 0 50 00000000 0 0 0\n\
-                      down0 00000000 0100000A 0002 0 0 1 00000000 0 0 0\n";
-        assert_eq!(
-            super::parse_default_interface(routes).as_deref(),
-            Some("wlan0")
-        );
     }
 
     #[test]
@@ -493,82 +112,6 @@ mod status_metric_tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn network_selection_keeps_local_ip_on_default_route_interface() {
-        let interfaces = vec![
-            StatusInterfaceIpv4 {
-                name: "eth0".into(),
-                address: Ipv4Addr::new(192, 168, 1, 20),
-                up: true,
-            },
-            StatusInterfaceIpv4 {
-                name: "wlan0".into(),
-                address: Ipv4Addr::new(10, 0, 0, 9),
-                up: true,
-            },
-            StatusInterfaceIpv4 {
-                name: "tailscale0".into(),
-                address: Ipv4Addr::new(100, 100, 20, 30),
-                up: true,
-            },
-        ];
-
-        let selected = super::select_status_interface_ipv4s(Some("wlan0"), interfaces, true);
-        assert_eq!(selected.local_ip.as_deref(), Some("10.0.0.9"));
-        assert_eq!(selected.tailscale_ip.as_deref(), Some("100.100.20.30"));
-        assert!(selected.vpn_active);
-    }
-
-    #[test]
-    fn network_selection_does_not_mix_missing_default_route_with_another_ip() {
-        let interfaces = vec![StatusInterfaceIpv4 {
-            name: "eth0".into(),
-            address: Ipv4Addr::new(192, 168, 1, 20),
-            up: true,
-        }];
-
-        let selected = super::select_status_interface_ipv4s(Some("wlan0"), interfaces, false);
-        assert_eq!(selected.local_ip, None);
-    }
-
-    #[test]
-    fn vpn_activity_tracks_ipv6_only_up_and_down_tunnels() {
-        let mut interfaces = vec![StatusInterfaceIpv4 {
-            name: "eth0".into(),
-            address: Ipv4Addr::new(192, 168, 1, 20),
-            up: true,
-        }];
-        let mut vpn_active = false;
-        super::observe_status_interface(
-            Some(libc::AF_INET6),
-            Some("wg0".into()),
-            libc::IFF_UP as u32,
-            None,
-            &mut interfaces,
-            &mut vpn_active,
-        );
-        assert!(vpn_active);
-        assert_eq!(interfaces.len(), 1);
-        let selected =
-            super::select_status_interface_ipv4s(Some("eth0"), interfaces.clone(), vpn_active);
-        assert!(selected.vpn_active);
-        assert_eq!(selected.tailscale_ip, None);
-
-        let mut vpn_active = false;
-        super::observe_status_interface(
-            Some(libc::AF_INET6),
-            Some("wg0".into()),
-            0,
-            None,
-            &mut interfaces,
-            &mut vpn_active,
-        );
-        assert!(!vpn_active);
-        assert_eq!(interfaces.len(), 1);
-        let selected = super::select_status_interface_ipv4s(Some("eth0"), interfaces, vpn_active);
-        assert!(!selected.vpn_active);
     }
 }
 

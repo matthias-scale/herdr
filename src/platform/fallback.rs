@@ -122,17 +122,8 @@ pub(crate) fn sample_status_metrics(
         .filter(|value| !value.is_empty())
         .map(|value| super::status_metrics::short_hostname(&value))
         .unwrap_or_else(|| "localhost".into());
-    let username = std::env::var("USER")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".into());
     super::status_metrics::StatusMetrics {
         hostname,
-        username,
-        remote_session: super::status_metrics::remote_session_from_env(),
-        public_ip: None,
-        date: "----/--/--".into(),
-        time: "--:--".into(),
         ..super::status_metrics::StatusMetrics::default()
     }
 }

@@ -361,7 +361,7 @@ impl App {
             .name("herdr-status-metrics".into())
             .spawn(move || {
                 let snapshot = std::panic::catch_unwind(|| {
-                    // The sampler only carries the previous CPU/network deltas,
+                    // The sampler only carries the previous CPU delta,
                     // so a poisoned lock stays usable; recovering keeps a single
                     // collector panic from disabling metrics for the session.
                     let mut sampler = sampler
