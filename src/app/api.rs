@@ -95,10 +95,16 @@ impl App {
         } else {
             self.last_git_remote_status_refresh = Instant::now();
         }
-        self.record_status_context_focus();
+        let projected_focus = self
+            .state
+            .status_bar_enabled
+            .then(|| self.focused_status_context_key());
         let changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+        if let Some(projected_focus) = projected_focus {
+            self.status_context_focus = projected_focus;
+        }
         if changed {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
