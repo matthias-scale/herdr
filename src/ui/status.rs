@@ -20,12 +20,12 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: folder · branch · device · Herdr version · CPU ·
-/// memory. The row before the first surviving segment is intentionally blank.
+/// Contents, left to right: folder · branch · device · CPU · memory. The row
+/// before the first surviving segment is intentionally blank.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
-/// first surviving segment. On narrow widths, folder, branch, device, then
-/// version elide in that order; CPU and memory remain required.
+/// first surviving segment. On narrow widths, folder, branch, then device elide
+/// in that order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -146,13 +146,6 @@ fn status_segments(
         style: Style::default().fg(p.green),
         preserve_bg: false,
         elide_rank: Some(3),
-    });
-
-    out.push(Segment {
-        text: format!(" Herdr v{} ", crate::build_info::version()),
-        style: Style::default().fg(p.blue),
-        preserve_bg: false,
-        elide_rank: Some(4),
     });
 
     out.push(Segment {
@@ -625,7 +618,13 @@ mod tests {
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some("feature/very-long-branch".into());
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let segments = fitted_segments(status_segments(&app, &metrics, &app.palette), 40);
+        let segments = status_segments(&app, &metrics, &app.palette);
+        let required_width = segments
+            .iter()
+            .filter(|segment| segment.elide_rank.is_none())
+            .map(|segment| display_width(&segment.text))
+            .sum();
+        let segments = fitted_segments(segments, required_width);
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
@@ -801,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn status_elision_drops_folder_branch_device_then_version() {
+    fn status_elision_drops_folder_branch_then_device() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
@@ -825,7 +824,7 @@ mod tests {
         assert!(rendered.contains("feat/status"), "{rendered}");
         assert!(rendered.contains("testhost"), "{rendered}");
 
-        let optional_width = full[..4]
+        let optional_width = full[..3]
             .iter()
             .map(|segment| display_width(&segment.text))
             .sum::<usize>();
@@ -840,7 +839,6 @@ mod tests {
         assert!(!rendered.contains("~/work/status"), "{rendered}");
         assert!(!rendered.contains("feat/status"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
-        assert!(!rendered.contains("Herdr v"), "{rendered}");
         assert!(rendered.contains("CPU 12%"), "{rendered}");
         assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
     }
@@ -866,13 +864,10 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        let version = format!("Herdr v{}", crate::build_info::version());
-
         let ordered = [
             "~/work/status",
             "feat/status",
             "testhost",
-            version.as_str(),
             "CPU 12%",
             "MEM 8.0/16.0 GiB",
         ];
@@ -892,6 +887,7 @@ mod tests {
             "↓",
             "↑",
             "session:",
+            "Herdr v",
             "88%",
             "2026-01-02",
             "03:04",
@@ -924,15 +920,6 @@ mod tests {
                 .style
                 .fg,
             Some(app.palette.green)
-        );
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains("Herdr v"))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.blue)
         );
         assert_eq!(
             segments

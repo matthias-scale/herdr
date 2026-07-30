@@ -1067,7 +1067,7 @@ mod tests {
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
 
-        // Wide enough that context, identity, build, and metrics all fit.
+        // Wide enough that context, identity, and metrics all fit.
         let width = 220u16;
         compute_view(&mut app, Rect::new(0, 0, width, 24));
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
@@ -1089,10 +1089,7 @@ mod tests {
             row0.contains("8.0") && row0.contains("12"),
             "status bar missing resource metrics: {row0:?}"
         );
-        assert!(
-            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
-            "status bar missing build identity: {row0:?}"
-        );
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
         assert!(!row0.contains("testuser"), "{row0:?}");
         assert!(!row0.contains("session:"), "{row0:?}");
         assert!(!row0.contains("↓"), "{row0:?}");
@@ -1128,10 +1125,7 @@ mod tests {
         );
         assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
         assert!(row0.contains("CPU 12%"), "{row0:?}");
-        assert!(
-            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
-            "{row0:?}"
-        );
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
     }
 
     #[test]
@@ -1163,10 +1157,7 @@ mod tests {
             );
             assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
             assert!(row0.contains("CPU 12%"), "{row0:?}");
-            assert!(
-                row0.contains(&format!("Herdr v{}", crate::build_info::version())),
-                "{row0:?}"
-            );
+            assert!(!row0.contains("Herdr v"), "{row0:?}");
             rendered.push((
                 "sampled metrics",
                 width,
