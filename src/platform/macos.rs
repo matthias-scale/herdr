@@ -441,6 +441,7 @@ struct StatusNetworkInterfaces {
     vpn_active: bool,
 }
 
+#[derive(Clone)]
 struct StatusInterfaceIpv4 {
     name: String,
     address: Ipv4Addr,
@@ -583,6 +584,7 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
         };
     };
     let mut ipv4s = Vec::new();
+    let mut vpn_active = false;
     let counters = status_interface_byte_snapshots().unwrap_or_default();
     let mut current = interfaces.first();
     while !current.is_null() {
@@ -594,39 +596,44 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
             // SAFETY: a non-null ifa_addr points to a sockaddr for this node.
             Some(unsafe { (*interface.ifa_addr).sa_family as i32 })
         };
+        let up = interface.ifa_flags & (libc::IFF_UP as u32) != 0;
+        let name = status_interface_name(interface);
+        vpn_active |= name
+            .as_deref()
+            .is_some_and(|name| status_active_tunnel(name, up));
         if family == Some(libc::AF_INET) {
             // SAFETY: the family check above establishes sockaddr_in layout.
             let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
             let address = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
-            if let Some(name) = status_interface_name(interface) {
-                ipv4s.push(StatusInterfaceIpv4 {
-                    name,
-                    address,
-                    up: interface.ifa_flags & (libc::IFF_UP as u32) != 0,
-                });
+            if let Some(name) = name {
+                ipv4s.push(StatusInterfaceIpv4 { name, address, up });
             }
         }
         current = interface.ifa_next;
     }
     drop(interfaces);
 
-    select_status_network_interfaces(status_default_route_interface().as_deref(), ipv4s, counters)
+    select_status_network_interfaces(
+        status_default_route_interface().as_deref(),
+        ipv4s,
+        counters,
+        vpn_active,
+    )
 }
 
 fn select_status_network_interfaces(
     default_interface: Option<&str>,
     ipv4s: Vec<StatusInterfaceIpv4>,
     mut counters: HashMap<String, (u64, u64)>,
+    vpn_active: bool,
 ) -> StatusNetworkInterfaces {
     let mut tailscale_ip = None;
-    let mut vpn_active = false;
     let mut candidates = Vec::new();
     for interface in ipv4s {
         if !interface.up || interface.address.is_loopback() || interface.address.is_unspecified() {
             continue;
         }
         let tunnel = status_tunnel_interface(&interface.name);
-        vpn_active |= tunnel;
         let octets = interface.address.octets();
         if tunnel && octets[0] == 100 && (64..=127).contains(&octets[1]) {
             tailscale_ip.get_or_insert_with(|| interface.address.to_string());
@@ -667,6 +674,10 @@ fn select_status_network_interfaces(
 
 fn status_tunnel_interface(name: &str) -> bool {
     name.starts_with("utun") || name.starts_with("tun") || name.contains("tailscale")
+}
+
+fn status_active_tunnel(name: &str, up: bool) -> bool {
+    up && status_tunnel_interface(name)
 }
 
 unsafe extern "C" {
@@ -816,7 +827,7 @@ mod status_metric_tests {
             ("utun3".into(), (50, 60)),
         ]);
 
-        let selected = super::select_status_network_interfaces(Some("en9"), ipv4s, counters);
+        let selected = super::select_status_network_interfaces(Some("en9"), ipv4s, counters, true);
 
         assert_eq!(selected.primary.as_deref(), Some("en9"));
         assert_eq!(selected.local_ip.as_deref(), Some("10.0.0.8"));
@@ -848,7 +859,8 @@ mod status_metric_tests {
         ];
         let counters = HashMap::from([("en7".into(), (70, 80))]);
 
-        let selected = super::select_status_network_interfaces(Some("missing0"), ipv4s, counters);
+        let selected =
+            super::select_status_network_interfaces(Some("missing0"), ipv4s, counters, true);
 
         assert_eq!(selected.primary, None);
         assert_eq!(selected.local_ip, None);
@@ -866,7 +878,7 @@ mod status_metric_tests {
         }];
         let counters = HashMap::from([("en7".into(), (70, 80))]);
 
-        let selected = super::select_status_network_interfaces(None, ipv4s, counters);
+        let selected = super::select_status_network_interfaces(None, ipv4s, counters, false);
 
         assert_eq!(selected.primary.as_deref(), Some("en7"));
         assert_eq!(selected.local_ip.as_deref(), Some("172.16.0.9"));
@@ -874,35 +886,25 @@ mod status_metric_tests {
     }
 
     #[test]
-    fn generic_vpn_requires_an_up_tunnel_with_a_usable_address() {
-        let ipv4s = vec![
-            super::StatusInterfaceIpv4 {
-                name: "utun7".into(),
-                address: Ipv4Addr::new(10, 50, 0, 1),
-                up: false,
-            },
-            super::StatusInterfaceIpv4 {
-                name: "en0".into(),
-                address: Ipv4Addr::new(192, 168, 1, 5),
-                up: true,
-            },
-        ];
-        let selected = super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new());
+    fn vpn_activity_tracks_ipv6_only_up_and_down_tunnels() {
+        assert!(super::status_active_tunnel("utun7", true));
+        assert!(!super::status_active_tunnel("utun7", false));
+
+        let ipv4s = vec![super::StatusInterfaceIpv4 {
+            name: "en0".into(),
+            address: Ipv4Addr::new(192, 168, 1, 5),
+            up: true,
+        }];
+        let selected = super::select_status_network_interfaces(
+            Some("en0"),
+            ipv4s.clone(),
+            HashMap::new(),
+            false,
+        );
         assert!(!selected.vpn_active);
 
-        let ipv4s = vec![
-            super::StatusInterfaceIpv4 {
-                name: "utun7".into(),
-                address: Ipv4Addr::new(10, 50, 0, 1),
-                up: true,
-            },
-            super::StatusInterfaceIpv4 {
-                name: "en0".into(),
-                address: Ipv4Addr::new(192, 168, 1, 5),
-                up: true,
-            },
-        ];
-        let selected = super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new());
+        let selected =
+            super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new(), true);
         assert!(selected.vpn_active);
         assert_eq!(selected.tailscale_ip, None);
     }
