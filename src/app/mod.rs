@@ -1485,7 +1485,12 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
+                let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
+                if self.state.status_bar_enabled && !status_bar_was_enabled {
+                    self.state.sync_status_focused_cached_cwd();
+                    self.request_git_identity_refresh(Instant::now());
+                }
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
@@ -2847,6 +2852,60 @@ mod tests {
         assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "reloaded config");
         assert_eq!(toast.context, "using config.toml");
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn reload_config_enabling_status_projects_cached_focus_without_io() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-enable-status-focus");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[ui.status_bar]\nenabled = true\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut startup_config = Config::default();
+        startup_config.ui.status_bar.enabled = false;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &startup_config,
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("reload-status-focus");
+        let nested = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(nested);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let nested_terminal = app.state.workspaces[0]
+            .terminal_id(nested)
+            .expect("nested terminal")
+            .clone();
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
+        let (runtime, _input_rx) = TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes
+            .insert(nested_terminal.clone(), runtime);
+        app.last_focus = Some((0, nested));
+        app.state.status_focused_cwd = Some("/old-focus".into());
+        app.state.status_git_cwd = Some("/old-focus".into());
+        app.state.status_git_branch = Some("old-branch".into());
+        app.state.status_focus_projection_initialized = false;
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.status_bar_enabled);
+        assert!(app.state.status_focus_projection_initialized);
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        assert!(app.git_identity_refresh_requested);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
