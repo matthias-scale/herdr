@@ -104,6 +104,7 @@ pub struct App {
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
+    pub(crate) status_context_focus: Option<(usize, usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
@@ -804,6 +805,7 @@ impl App {
             api_rx,
             event_hub,
             last_focus,
+            status_context_focus: None,
             no_session,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
@@ -903,7 +905,37 @@ impl App {
         self.full_redraw_pending = true;
     }
 
+    fn focused_status_context_key(&self) -> Option<(usize, usize, crate::layout::PaneId)> {
+        self.state.active.and_then(|workspace_idx| {
+            self.state
+                .workspaces
+                .get(workspace_idx)
+                .and_then(|workspace| {
+                    let tab_idx = workspace.active_tab;
+                    workspace
+                        .focused_pane_id()
+                        .map(|pane_id| (workspace_idx, tab_idx, pane_id))
+                })
+        })
+    }
+
+    fn record_status_context_focus(&mut self) {
+        self.status_context_focus = self.focused_status_context_key();
+    }
+
+    pub(crate) fn sync_status_focused_runtime_cwd(&mut self) -> bool {
+        self.record_status_context_focus();
+        self.state.sync_status_focused_cwd(&self.terminal_runtimes)
+    }
+
     pub(crate) fn sync_status_context_before_render(&mut self) -> bool {
+        let current_focus = self.focused_status_context_key();
+        if self.state.status_focus_projection_initialized
+            && current_focus == self.status_context_focus
+        {
+            return false;
+        }
+        self.status_context_focus = current_focus;
         self.state.sync_status_focused_cached_cwd()
     }
 
@@ -1493,7 +1525,7 @@ impl App {
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 if self.state.status_bar_enabled && !status_bar_was_enabled {
-                    self.state.sync_status_focused_cached_cwd();
+                    self.sync_status_context_before_render();
                     self.request_git_identity_refresh(Instant::now());
                 }
                 self.state.agent_panel_sort =
@@ -5173,6 +5205,34 @@ last_pane = "prefix+tab"
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
 
         api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn pre_render_status_context_preserves_bounded_refresh_projection() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("runtime-status")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .terminal_id(pane)
+            .expect("focused terminal")
+            .clone();
+        app.state.terminals.get_mut(&terminal).unwrap().cwd = "/cached".into();
+        assert!(app.sync_status_context_before_render());
+
+        app.state.status_focused_cwd = Some("/runtime".into());
+        app.state.status_git_cwd = Some("/runtime".into());
+        app.state.status_git_branch = Some("runtime-branch".into());
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(!app.sync_status_context_before_render());
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
+        assert_eq!(branch.as_deref(), Some("runtime-branch"));
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
     }
 
     #[tokio::test]
