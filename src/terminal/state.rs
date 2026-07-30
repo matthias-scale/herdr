@@ -116,6 +116,25 @@ enum AgentActivityOwner {
     Agent(String),
 }
 
+impl AgentActivityOwner {
+    fn agent_label(&self) -> &str {
+        match self {
+            Self::Session { agent_label, .. } | Self::Agent(agent_label) => agent_label,
+        }
+    }
+
+    /// Detection can identify an agent before a session hook supplies its
+    /// stronger identity, and can remain after that hook clears. Those
+    /// refinement transitions belong to one live activity interval. Two
+    /// distinct session identities still represent replacement agents.
+    fn continues_activity_from(&self, previous: &Self) -> bool {
+        match (previous, self) {
+            (Self::Session { .. }, Self::Session { .. }) => previous == self,
+            _ => previous.agent_label() == self.agent_label(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecentAgentProcessExit {
     agent: Agent,
@@ -2070,7 +2089,12 @@ impl TerminalState {
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
         let activity_owner = self.current_agent_activity_owner();
-        let activity_owner_changed = self.agent_activity_owner != activity_owner;
+        let activity_owner_changed =
+            match (self.agent_activity_owner.as_ref(), activity_owner.as_ref()) {
+                (Some(previous), Some(current)) => !current.continues_activity_from(previous),
+                (None, None) => false,
+                _ => true,
+            };
 
         let presentation = self.effective_presentation_for_state_at(state, now);
         self.clear_expiry_pending_for_hidden_metadata();
@@ -2175,6 +2199,81 @@ mod tests {
             finished + Duration::from_secs(30),
         );
         assert_eq!(terminal.agent_activity_at(), Some(finished));
+    }
+
+    #[test]
+    fn review_findings_activity_owner_refinement_preserves_working_interval() {
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Kimi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-root").unwrap();
+        assert!(terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                Some(session_ref.clone()),
+                Some(10),
+                Some("startup".into()),
+            )
+            .is_some());
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        assert!(terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                AgentState::Working,
+                None,
+                Some(session_ref),
+                Some(11),
+            )
+            .is_some());
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+    }
+
+    #[test]
+    fn review_findings_activity_owner_demotion_records_idle_transition() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-root").unwrap();
+        assert!(terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                Some(session_ref.clone()),
+                Some(10),
+                Some("startup".into()),
+            )
+            .is_some());
+        assert!(terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                AgentState::Working,
+                None,
+                Some(session_ref),
+                Some(11),
+            )
+            .is_some());
+        let working_started = terminal.agent_activity_at().unwrap();
+
+        assert!(terminal
+            .clear_hook_authority_with_mutation(Some("herdr:kimi"), Some(12))
+            .is_some());
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal
+            .agent_activity_at()
+            .is_some_and(|at| at >= working_started));
     }
 
     #[test]

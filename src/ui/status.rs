@@ -100,16 +100,17 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
 }
 
 pub(crate) fn minimum_required_status_width(app: &AppState) -> usize {
-    let unavailable = StatusMetrics {
-        hostname: "--".into(),
-        ..StatusMetrics::default()
+    // Native collectors derive memory from u64 byte counters, so this is the
+    // longest authoritative GiB value they can produce. Using fixed maxima
+    // keeps the desktop/mobile cutoff independent of each sampled snapshot.
+    const MAX_NATIVE_MEMORY_GIB: f32 = u64::MAX as f32 / 1_073_741_824.0;
+    let maximum = StatusMetrics {
+        cpu_percent: Some(100),
+        mem_used_gib: Some(MAX_NATIVE_MEMORY_GIB),
+        mem_total_gib: Some(MAX_NATIVE_MEMORY_GIB),
+        hostname: String::new(),
     };
-    let metrics = app
-        .status_metrics
-        .as_ref()
-        .map(|snapshot| &snapshot.metrics)
-        .unwrap_or(&unavailable);
-    status_segments(app, metrics, &app.palette)
+    status_segments(app, &maximum, &app.palette)
         .iter()
         .filter(|segment| segment.elide_rank.is_none())
         .map(|segment| display_width(&segment.text))
@@ -663,6 +664,32 @@ mod tests {
             rendered.contains(&format!("Herdr {}", crate::build_info::version())),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn review_findings_status_width_is_independent_of_metric_snapshot() {
+        let mut app = AppState::test_new();
+        let unavailable_width = minimum_required_status_width(&app);
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: StatusMetrics {
+                cpu_percent: Some(100),
+                mem_used_gib: Some(17_179_869_184.0),
+                mem_total_gib: Some(17_179_869_184.0),
+                hostname: "host-with-a-long-device-name".into(),
+            },
+            sampled_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(minimum_required_status_width(&app), unavailable_width);
+        let required = fitted_segments(
+            status_segments(
+                &app,
+                &app.status_metrics.as_ref().unwrap().metrics,
+                &app.palette,
+            ),
+            unavailable_width,
+        );
+        assert!(segment_width(&required) <= unavailable_width);
     }
 
     fn assert_long_context_fits_status_row(cwd: &str, branch: &str) {

@@ -54,12 +54,17 @@ pub(crate) enum MobileSwitcherTarget {
 fn mobile_workspace_disclosure_columns(
     content: Rect,
     agent_count: usize,
+    indented: bool,
 ) -> Option<std::ops::Range<u16>> {
     if agent_count == 0 || content.width == 0 {
         return None;
     }
     let width = 1u16.saturating_add(agent_count.to_string().len() as u16);
-    if content.width <= width {
+    // Two-cell inset + optional linked-worktree connector + status dot/space.
+    // Keep this in the shared geometry helper so render and hit-testing elide
+    // the disclosure together on ultra-narrow clients.
+    let prefix_width = 4u16.saturating_add(if indented { 3 } else { 0 });
+    if content.width < prefix_width.saturating_add(width) {
         return None;
     }
     let start = content.x + content.width - width;
@@ -178,14 +183,14 @@ pub(crate) fn mobile_switcher_target_at(
         let idx = (doc_row - cursor) / 2;
         let on_title_line = (doc_row - cursor).is_multiple_of(2);
         return rows.get(idx).map(|entry| match entry {
-            SidebarRow::Workspace { ws_idx, .. } => {
+            SidebarRow::Workspace { ws_idx, indented } => {
                 let agent_count =
                     crate::ui::agent_counts_by_workspace(&crate::ui::all_agent_panel_entries(app))
                         .get(ws_idx)
                         .copied()
                         .unwrap_or(0);
                 let on_disclosure = on_title_line
-                    && mobile_workspace_disclosure_columns(content, agent_count)
+                    && mobile_workspace_disclosure_columns(content, agent_count, *indented)
                         .is_some_and(|columns| columns.contains(&col));
                 if on_disclosure {
                     MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
@@ -611,7 +616,8 @@ fn render_mobile_switcher_content(
                     raw_label
                 };
                 let agent_count = agent_counts.get(ws_idx).copied().unwrap_or(0);
-                let disclosure_columns = mobile_workspace_disclosure_columns(content, agent_count);
+                let disclosure_columns =
+                    mobile_workspace_disclosure_columns(content, agent_count, *indented);
                 let used = title_spans
                     .iter()
                     .map(|span| display_width_u16(span.content.as_ref()))
@@ -1403,7 +1409,7 @@ mod tests {
 
         let viewport = mobile_switcher_areas(&app).viewport;
         let content = inset_for_left_scrollbar(viewport);
-        let columns = mobile_workspace_disclosure_columns(content, 1).unwrap();
+        let columns = mobile_workspace_disclosure_columns(content, 1, false).unwrap();
         let disclosure_start = columns.start;
         let row = viewport.y + mobile_switcher_workspace_doc_range(&app, 0).unwrap().start as u16;
         let disclosure = columns
@@ -1413,6 +1419,34 @@ mod tests {
         assert_eq!(
             mobile_switcher_target_at(&app, disclosure_start, row),
             Some(MobileSwitcherTarget::WorkspaceDisclosure(0))
+        );
+    }
+
+    #[test]
+    fn review_findings_mobile_disclosure_elides_before_prefix_overflow() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("narrow")];
+        app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.agent_name = Some("pi".to_string());
+            terminal.state = AgentState::Working;
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Navigate;
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        app.view.mobile_header_rect = Rect::new(0, 0, 6, 2);
+        app.view.terminal_area = Rect::new(0, 2, 6, 8);
+
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let content = inset_for_left_scrollbar(viewport);
+        assert_eq!(content.width, 5);
+        assert!(mobile_workspace_disclosure_columns(content, 1, false).is_none());
+
+        let row = viewport.y + mobile_switcher_workspace_doc_range(&app, 0).unwrap().start as u16;
+        assert_eq!(
+            mobile_switcher_target_at(&app, content.x + content.width - 1, row),
+            Some(MobileSwitcherTarget::Workspace(0))
         );
     }
 

@@ -252,8 +252,8 @@ impl App {
             NavigateAction::FocusAgent(idx) => {
                 if let Some((ws_idx, pane_id)) = self.agent_entry_target(idx) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                     leave_navigate_mode(&mut self.state);
+                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                 }
             }
             NavigateAction::WorkspacePicker => {
@@ -275,15 +275,15 @@ impl App {
             NavigateAction::PreviousAgent => {
                 if let Some((_idx, ws_idx, pane_id)) = self.relative_agent_entry(false) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                     leave_navigate_mode(&mut self.state);
+                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                 }
             }
             NavigateAction::NextAgent => {
                 if let Some((_idx, ws_idx, pane_id)) = self.relative_agent_entry(true) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                     leave_navigate_mode(&mut self.state);
+                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                 }
             }
             NavigateAction::NewTab => {
@@ -1936,6 +1936,56 @@ mod tests {
         app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
 
         assert_eq!(app.state.active, Some(1));
+    }
+
+    #[test]
+    fn review_findings_agent_navigation_reveals_against_final_picker_projection() {
+        let mut app = app_with_test_workspaces(&["one", "two", "three", "four", "five"]);
+        for ws_idx in 0..app.state.workspaces.len() {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = if ws_idx == 1 {
+                crate::detect::AgentState::Idle
+            } else {
+                crate::detect::AgentState::Blocked
+            };
+        }
+        app.state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 30, 6);
+        app.state.begin_workspace_picker_presentation();
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
+
+        assert!(!app.state.sidebar_shows_spaces_tree());
+        let target_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let target_row = crate::ui::sidebar_rows(&app.state)
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    crate::ui::SidebarRow::Agent { entry, .. }
+                        if entry.ws_idx == 1 && entry.pane_id == target_pane
+                )
+            })
+            .unwrap();
+        let normalized = crate::ui::normalized_workspace_scroll(
+            &app.state,
+            app.state.view.sidebar_rect,
+            app.state.workspace_scroll,
+        );
+        assert_eq!(
+            app.state.workspace_scroll,
+            crate::ui::sidebar_row_scroll_for_target(
+                &app.state,
+                app.state.view.sidebar_rect,
+                normalized,
+                target_row,
+            )
+        );
     }
 
     #[test]
