@@ -4,46 +4,18 @@
 //! module deliberately contains no process spawning, network clients, or
 //! platform APIs so UI rendering can consume a plain `AppState` snapshot.
 
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 pub(crate) const STATUS_METRIC_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const STATUS_METRIC_STALE_AFTER: Duration = Duration::from_secs(4);
 const STATUS_METRIC_REPAINT_INTERVAL: Duration = Duration::from_secs(4);
-pub(super) const COMPATIBLE_WAN_CACHE_TTL: Duration = Duration::from_secs(300);
-pub(super) const COMPATIBLE_WAN_CACHE_MAX_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct StatusMetrics {
     pub cpu_percent: Option<u8>,
     pub mem_used_gib: Option<f32>,
     pub mem_total_gib: Option<f32>,
-    pub battery_percent: Option<u8>,
-    pub battery_charging: Option<bool>,
-    pub local_ip: Option<String>,
-    pub tailscale_ip: Option<String>,
-    pub public_ip: Option<String>,
-    pub net_down_kib: Option<u64>,
-    pub net_up_kib: Option<u64>,
-    pub net_kind: NetKind,
-    pub vpn_active: bool,
-    pub remote_session: bool,
     pub hostname: String,
-    pub username: String,
-    pub date: String,
-    pub time: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-// Windows and fallback collectors currently expose network kind as unavailable.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "macos", test)),
-    allow(dead_code)
-)]
-pub(crate) enum NetKind {
-    #[default]
-    Unknown,
-    Wifi,
-    Ethernet,
 }
 
 #[derive(Debug, Clone)]
@@ -61,17 +33,11 @@ impl StatusMetricsSnapshot {
 #[derive(Debug)]
 pub(crate) struct StatusMetricSampler {
     previous_cpu: Option<(u64, u64)>,
-    #[cfg(any(unix, test))]
-    previous_network: Option<(String, u64, u64, Instant)>,
 }
 
 impl StatusMetricSampler {
     pub(crate) fn new() -> Self {
-        Self {
-            previous_cpu: None,
-            #[cfg(any(unix, test))]
-            previous_network: None,
-        }
+        Self { previous_cpu: None }
     }
 
     pub(super) fn cpu_percent(&mut self, idle: u64, total: u64) -> Option<u8> {
@@ -91,39 +57,6 @@ impl StatusMetricSampler {
                 )
             });
         self.previous_cpu = Some((idle, total));
-        result
-    }
-
-    #[cfg(any(unix, test))]
-    pub(super) fn bandwidth_kib(
-        &mut self,
-        interface: &str,
-        rx_bytes: u64,
-        tx_bytes: u64,
-        now: Instant,
-    ) -> Option<(u64, u64)> {
-        let result = self
-            .previous_network
-            .as_ref()
-            .and_then(
-                |(previous_interface, previous_rx, previous_tx, previous_at)| {
-                    if previous_interface != interface
-                        || rx_bytes < *previous_rx
-                        || tx_bytes < *previous_tx
-                    {
-                        return Some((0, 0));
-                    }
-                    let seconds = now.duration_since(*previous_at).as_secs_f64();
-                    (seconds > 0.0).then(|| {
-                        (
-                            ((rx_bytes - previous_rx) as f64 / seconds / 1024.0).round() as u64,
-                            ((tx_bytes - previous_tx) as f64 / seconds / 1024.0).round() as u64,
-                        )
-                    })
-                },
-            )
-            .or(Some((0, 0)));
-        self.previous_network = Some((interface.to_owned(), rx_bytes, tx_bytes, now));
         result
     }
 }
@@ -185,53 +118,13 @@ pub(super) fn short_hostname(hostname: &str) -> String {
     hostname.split('.').next().unwrap_or(hostname).to_string()
 }
 
-pub(super) fn remote_session_from_env() -> bool {
-    ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH"]
-        .iter()
-        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
-}
-
-pub(super) fn compatible_public_ip_from_cache(
-    bytes: &[u8],
-    modified: SystemTime,
-    now: SystemTime,
-) -> Option<String> {
-    if bytes.len() > COMPATIBLE_WAN_CACHE_MAX_BYTES {
-        return None;
-    }
-    if now.duration_since(modified).ok()? > COMPATIBLE_WAN_CACHE_TTL {
-        return None;
-    }
-    let text = std::str::from_utf8(bytes).ok()?;
-    let ip = text.trim();
-    plausible_ipv4(ip).then(|| ip.to_string())
-}
-
-fn plausible_ipv4(value: &str) -> bool {
-    let parts: Vec<_> = value.split('.').collect();
-    parts.len() == 4 && parts.iter().all(|part| part.parse::<u8>().is_ok())
-}
-
 #[cfg(test)]
 pub(crate) fn status_metrics_fixture() -> StatusMetrics {
     StatusMetrics {
         cpu_percent: Some(12),
         mem_used_gib: Some(8.0),
         mem_total_gib: Some(16.0),
-        battery_percent: Some(88),
-        battery_charging: Some(false),
-        local_ip: Some("10.0.0.2".into()),
-        tailscale_ip: Some("100.64.0.1".into()),
-        public_ip: Some("203.0.113.10".into()),
-        net_down_kib: Some(120),
-        net_up_kib: Some(34),
-        net_kind: NetKind::Wifi,
-        vpn_active: true,
-        remote_session: false,
         hostname: "testhost".into(),
-        username: "testuser".into(),
-        date: "2026-01-02".into(),
-        time: "03:04".into(),
     }
 }
 
@@ -342,60 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn metric_privacy_cache_accepts_only_fresh_local_values() {
-        // AC5/AC6: the shared policy has no HTTP/process path; WAN is read-only cache data.
-        let modified = SystemTime::now();
-        assert_eq!(
-            compatible_public_ip_from_cache(b"203.0.113.9\n", modified, modified).as_deref(),
-            Some("203.0.113.9")
-        );
-        assert_eq!(
-            compatible_public_ip_from_cache(
-                b"203.0.113.9\n",
-                modified,
-                modified + COMPATIBLE_WAN_CACHE_TTL + Duration::from_secs(1)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn metric_privacy_cache_rejects_oversized_values() {
-        let oversized = vec![b'1'; COMPATIBLE_WAN_CACHE_MAX_BYTES + 1];
-        let now = SystemTime::now();
-        assert_eq!(compatible_public_ip_from_cache(&oversized, now, now), None);
-    }
-
-    #[test]
-    fn metric_unavailable_and_rate_fallbacks_are_deterministic() {
+    fn metric_unavailable_cpu_fallback_is_deterministic() {
         // AC3/AC5: CPU stays unavailable until a positive interval exists.
         let mut sampler = StatusMetricSampler::new();
-        let now = Instant::now();
         assert_eq!(sampler.cpu_percent(20, 100), None);
         assert_eq!(sampler.cpu_percent(20, 100), None);
         assert_eq!(sampler.cpu_percent(30, 140), Some(75));
-        assert_eq!(sampler.bandwidth_kib("eth0", 1000, 2000, now), Some((0, 0)));
-        assert_eq!(
-            sampler.bandwidth_kib("eth0", 2024, 3024, now + Duration::from_secs(1)),
-            Some((1, 1))
-        );
-    }
-
-    #[test]
-    fn network_interface_change_resets_rate_baseline() {
-        let mut sampler = StatusMetricSampler::new();
-        let now = Instant::now();
-        assert_eq!(
-            sampler.bandwidth_kib("eth0", 1_000, 2_000, now),
-            Some((0, 0))
-        );
-        assert_eq!(
-            sampler.bandwidth_kib("wlan0", 9_000_000, 8_000_000, now + Duration::from_secs(1)),
-            Some((0, 0))
-        );
-        assert_eq!(
-            sampler.bandwidth_kib("wlan0", 9_001_024, 8_002_048, now + Duration::from_secs(2)),
-            Some((1, 2))
-        );
     }
 }

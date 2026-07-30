@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
-    io::Read,
     mem::{size_of, MaybeUninit},
     path::PathBuf,
     ptr::{copy_nonoverlapping, null_mut},
@@ -58,9 +57,9 @@ pub(crate) fn sample_status_metrics(
     sampler: &mut super::status_metrics::StatusMetricSampler,
 ) -> super::status_metrics::StatusMetrics {
     use windows_sys::Win32::{
-        Foundation::{FILETIME, SYSTEMTIME},
+        Foundation::FILETIME,
         System::{
-            SystemInformation::{GetLocalTime, GlobalMemoryStatusEx, MEMORYSTATUSEX},
+            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
             Threading::GetSystemTimes,
         },
     };
@@ -70,10 +69,6 @@ pub(crate) fn sample_status_metrics(
         .filter(|value| !value.is_empty())
         .map(|value| super::status_metrics::short_hostname(&value))
         .unwrap_or_else(|| "localhost".into());
-    let username = std::env::var("USERNAME")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".into());
     let mut memory = MEMORYSTATUSEX {
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..MEMORYSTATUSEX::default()
@@ -100,55 +95,12 @@ pub(crate) fn sample_status_metrics(
         None
     };
 
-    let mut local_time = SYSTEMTIME::default();
-    unsafe { GetLocalTime(&mut local_time) };
-    let date = format!(
-        "{:04}-{:02}-{:02}",
-        local_time.wYear, local_time.wMonth, local_time.wDay
-    );
-    let time = format!("{:02}:{:02}", local_time.wHour, local_time.wMinute);
-
     super::status_metrics::StatusMetrics {
         cpu_percent,
         mem_used_gib,
         mem_total_gib,
-        public_ip: status_public_ip(),
-        remote_session: super::status_metrics::remote_session_from_env(),
         hostname,
-        username,
-        date,
-        time,
-        ..super::status_metrics::StatusMetrics::default()
     }
-}
-
-fn status_public_ip() -> Option<String> {
-    let path = std::env::temp_dir().join("tmux-powerline-wan-ip");
-    let path_metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !path_metadata.file_type().is_file()
-        || path_metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
-    {
-        return None;
-    }
-
-    let file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.file_type().is_file()
-        || metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
-    {
-        return None;
-    }
-
-    let modified = metadata.modified().ok()?;
-    let mut bytes = Vec::with_capacity(super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1);
-    file.take((super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    super::status_metrics::compatible_public_ip_from_cache(
-        &bytes,
-        modified,
-        std::time::SystemTime::now(),
-    )
 }
 
 #[cfg(test)]
@@ -160,9 +112,6 @@ mod status_metric_tests {
             &mut crate::platform::status_metrics::StatusMetricSampler::new(),
         );
         assert!(!metrics.hostname.is_empty());
-        assert!(!metrics.username.is_empty());
-        assert_eq!(metrics.date.len(), 10);
-        assert_eq!(metrics.time.len(), 5);
     }
 }
 

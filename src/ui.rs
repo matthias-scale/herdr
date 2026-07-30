@@ -1067,8 +1067,7 @@ mod tests {
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
 
-        // Wide enough that left identity + right metrics both fit (long
-        // real cwd/branch must not push fixture IPs/CPU off the row).
+        // Wide enough that identity + metrics fit despite a long real cwd/branch.
         let width = 220u16;
         compute_view(&mut app, Rect::new(0, 0, width, 24));
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
@@ -1087,18 +1086,18 @@ mod tests {
             "status bar missing hostname: {row0:?}"
         );
         assert!(
-            row0.contains("testuser"),
-            "status bar missing username: {row0:?}"
-        );
-        assert!(
-            row0.contains("10.0.0.2")
-                || row0.contains("100.64.0.1")
-                || row0.contains("203.0.113.10"),
-            "status bar missing network ips: {row0:?}"
-        );
-        assert!(
             row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
             "status bar missing resource metrics: {row0:?}"
+        );
+        assert!(!row0.contains("testuser"), "{row0:?}");
+        assert!(!row0.contains(env!("CARGO_PKG_VERSION")), "{row0:?}");
+        let first_content = row0
+            .char_indices()
+            .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+            .expect("status row content");
+        assert!(
+            first_content > 0,
+            "status row is not right-aligned: {row0:?}"
         );
     }
 

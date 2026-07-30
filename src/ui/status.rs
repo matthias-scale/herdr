@@ -11,20 +11,21 @@ use ratatui::{
 use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
-    app::state::{CopyFeedback, Mode, Palette, ToastKind, ToastNotification},
+    app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
     app::AppState,
     config::{ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
-    platform::status_metrics::{NetKind, StatusMetrics},
+    platform::status_metrics::StatusMetrics,
 };
 
-/// Full-width top status row — native parity with the user's tmux powerline.
+/// Full-width, right-aligned top status row.
 ///
-/// Left:  [prefix]  session:workspace.tab.pane · host ·  user · cwd ·  branch
-/// Right: 󰛳 LAN 󰌘 Tailscale  WAN · transport [] ↓/↑ · MEM · CPU · battery · date · time
+/// Contents, left to right: folder · branch · device · CPU · memory. The row
+/// before the first surviving segment is intentionally blank.
 ///
-/// Layout: spans the full client width above the sidebar. On narrow widths,
-/// right-side tail segments drop first, then non-essential left segments.
+/// Layout: spans the full client width above the sidebar and pads before the
+/// first surviving segment. On narrow widths, folder, branch, then device elide
+/// in that order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -36,9 +37,6 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let unavailable = StatusMetrics {
         hostname: "--".into(),
-        username: "--".into(),
-        date: "----/--/--".into(),
-        time: "--:--".into(),
         ..StatusMetrics::default()
     };
     let metrics = app
@@ -46,32 +44,15 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         .as_ref()
         .map(|snapshot| &snapshot.metrics)
         .unwrap_or(&unavailable);
-    let prefix_active = app.mode == Mode::Prefix;
+    let segments = fitted_segments(status_segments(app, metrics, p), area.width as usize);
 
-    let (left, right) = fitted_segments(
-        left_segments(app, metrics, prefix_active, p),
-        right_segments(metrics, p),
-        area.width as usize,
-    );
-
+    let used = segment_width(&segments);
+    let pad = (area.width as usize).saturating_sub(used);
     let mut spans: Vec<Span> = Vec::new();
-    for seg in &left {
-        let style = if seg.preserve_bg {
-            seg.style
-        } else {
-            seg.style.bg(p.panel_bg)
-        };
-        spans.push(Span::styled(seg.text.clone(), style));
-    }
-    let used_left = segment_width(&left);
-    let used_right = segment_width(&right);
-    let pad = (area.width as usize)
-        .saturating_sub(used_left)
-        .saturating_sub(used_right);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
     }
-    for seg in &right {
+    for seg in &segments {
         let style = if seg.preserve_bg {
             seg.style
         } else {
@@ -98,57 +79,28 @@ fn segment_width(segments: &[Segment]) -> usize {
         .sum()
 }
 
-fn fitted_segments(
-    mut left: Vec<Segment>,
-    mut right: Vec<Segment>,
-    width: usize,
-) -> (Vec<Segment>, Vec<Segment>) {
-    while segment_width(&left) + segment_width(&right) > width {
-        let candidate =
-            left.iter()
-                .enumerate()
-                .filter_map(|(index, segment)| segment.elide_rank.map(|rank| (rank, true, index)))
-                .chain(right.iter().enumerate().filter_map(|(index, segment)| {
-                    segment.elide_rank.map(|rank| (rank, false, index))
-                }))
-                .min_by_key(|(rank, _, _)| *rank);
-        let Some((_, is_left, index)) = candidate else {
+fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
+    while segment_width(&segments) > width {
+        let candidate = segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| segment.elide_rank.map(|rank| (rank, index)))
+            .min_by_key(|(rank, _)| *rank);
+        let Some((_, index)) = candidate else {
             break;
         };
-        if is_left {
-            left.remove(index);
-        } else {
-            right.remove(index);
-        }
+        segments.remove(index);
     }
 
-    // Session identity and MEM/CPU are required, but a user-controlled session
-    // name must not crowd the metrics out of the row. Shrink required left
-    // identity segments first; only pathological widths below the desktop
-    // threshold can require truncating the metrics themselves.
-    let session_index = left
-        .iter()
-        .position(|segment| segment.elide_rank.is_none() && !segment.preserve_bg);
-    let mut shrink_order = session_index.into_iter().collect::<Vec<_>>();
-    shrink_order.extend(
-        left.iter()
-            .enumerate()
-            .filter(|(index, segment)| {
-                Some(*index) != session_index && segment.elide_rank.is_none()
-            })
-            .map(|(index, _)| index),
-    );
-    for index in shrink_order {
-        let total_width = segment_width(&left) + segment_width(&right);
-        shrink_segment_for_overflow(&mut left[index], total_width, width);
-    }
-    for index in 0..right.len() {
-        let total_width = segment_width(&left) + segment_width(&right);
-        shrink_segment_for_overflow(&mut right[index], total_width, width);
+    // Only pathological widths narrower than the required CPU/MEM pair need
+    // truncation after all optional context has been removed.
+    for index in 0..segments.len() {
+        let total_width = segment_width(&segments);
+        shrink_segment_for_overflow(&mut segments[index], total_width, width);
     }
 
-    debug_assert!(segment_width(&left) + segment_width(&right) <= width);
-    (left, right)
+    debug_assert!(segment_width(&segments) <= width);
+    segments
 }
 
 fn shrink_segment_for_overflow(segment: &mut Segment, total_width: usize, width: usize) {
@@ -160,137 +112,40 @@ fn shrink_segment_for_overflow(segment: &mut Segment, total_width: usize, width:
     segment.text = truncate_end(&segment.text, current_width.saturating_sub(overflow));
 }
 
-fn left_segments(
+fn status_segments(
     app: &AppState,
     metrics: &crate::platform::status_metrics::StatusMetrics,
-    prefix_active: bool,
     p: &Palette,
 ) -> Vec<Segment> {
     let mut out = Vec::new();
 
-    if prefix_active {
-        // Match tmux `#{?client_prefix,... § ...}`.
-        out.push(Segment {
-            text: " § ".into(),
-            style: Style::default()
-                .fg(p.panel_bg)
-                .bg(p.yellow)
-                .add_modifier(Modifier::BOLD),
-            preserve_bg: true,
-            elide_rank: None,
-        });
-    }
-
-    let (ws_label, tab_label, pane_label, cwd, branch) = focused_identity(app);
-
-    // Powerline session_icon: " #S" + dimmed ":#I.#P".
-    out.push(Segment {
-        text: format!("  {}", app.status_session_name),
-        style: Style::default().fg(p.blue),
-        preserve_bg: false,
-        elide_rank: None,
-    });
-    out.push(Segment {
-        text: format!(":{ws_label}.{tab_label}.{pane_label} "),
-        style: Style::default().fg(p.overlay0),
-        preserve_bg: false,
-        elide_rank: None,
-    });
-
-    // hostname_ssh: icon only when remote (SSH/mosh).
-    let host_text = if metrics.remote_session {
-        format!(" 󰣀 {} ", metrics.hostname)
-    } else {
-        format!(" {} ", metrics.hostname)
-    };
-    out.push(Segment {
-        text: host_text,
-        style: Style::default().fg(p.green),
-        preserve_bg: false,
-        elide_rank: Some(9),
-    });
-
-    out.push(Segment {
-        text: format!("  {} ", metrics.username),
-        style: Style::default().fg(p.teal),
-        preserve_bg: false,
-        elide_rank: Some(8),
-    });
+    let (_, _, _, cwd, branch) = focused_identity(app);
 
     if let Some(cwd) = cwd {
-        let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 40);
+        let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 32);
         out.push(Segment {
-            text: format!(" {display} "),
+            text: format!("  {display} "),
             style: Style::default().fg(p.mauve),
             preserve_bg: false,
-            elide_rank: Some(7),
+            elide_rank: Some(1),
         });
     }
 
     if let Some(branch) = branch {
-        let branch = shorten_branch(&branch, 24);
+        let branch = shorten_branch(&branch, 20);
         out.push(Segment {
             text: format!("  {branch} "),
             style: Style::default().fg(p.yellow),
             preserve_bg: false,
-            elide_rank: Some(6),
+            elide_rank: Some(2),
         });
     }
 
-    out
-}
-
-fn right_segments(
-    metrics: &crate::platform::status_metrics::StatusMetrics,
-    p: &Palette,
-) -> Vec<Segment> {
-    let mut out = Vec::new();
-
-    // network_ips: "󰛳 LAN 󰌘 TS  WAN"
-    let mut ip_parts: Vec<String> = Vec::new();
-    if let Some(ip) = &metrics.local_ip {
-        ip_parts.push(format!("󰛳 {ip}"));
-    }
-    if let Some(ip) = &metrics.tailscale_ip {
-        ip_parts.push(format!("󰌘 {ip}"));
-    }
-    if let Some(ip) = &metrics.public_ip {
-        ip_parts.push(format!(" {ip}"));
-    }
-    if !ip_parts.is_empty() {
-        out.push(Segment {
-            text: format!(" {} ", ip_parts.join(" ")),
-            style: Style::default().fg(p.teal),
-            preserve_bg: false,
-            elide_rank: Some(4),
-        });
-    }
-
-    // bandwidth: transport glyph/label + optional VPN lock + ↓/↑ KiB/s
-    if let (Some(down), Some(up)) = (metrics.net_down_kib, metrics.net_up_kib) {
-        let kind_label = match metrics.net_kind {
-            NetKind::Ethernet => "󰈀",
-            NetKind::Wifi => "",
-            NetKind::Unknown => "NET",
-        };
-        let vpn = if metrics.vpn_active { " " } else { "" };
-        out.push(Segment {
-            text: format!(" {kind_label}{vpn} ↓{down}K/s ↑{up}K/s "),
-            style: Style::default().fg(p.green),
-            preserve_bg: false,
-            elide_rank: Some(5),
-        });
-    }
-
-    let memory = match (metrics.mem_used_gib, metrics.mem_total_gib) {
-        (Some(used), Some(total)) => format!(" MEM {used:.1}/{total:.1} GiB "),
-        _ => " MEM --/-- GiB ".into(),
-    };
     out.push(Segment {
-        text: memory,
-        style: Style::default().fg(p.yellow),
+        text: format!(" {} ", metrics.hostname),
+        style: Style::default().fg(p.green),
         preserve_bg: false,
-        elide_rank: None,
+        elide_rank: Some(3),
     });
 
     out.push(Segment {
@@ -303,48 +158,17 @@ fn right_segments(
         elide_rank: None,
     });
 
-    if let Some(pct) = metrics.battery_percent {
-        let icon = match metrics.battery_charging {
-            Some(true) => "󰂄",
-            _ => battery_icon(pct),
-        };
-        out.push(Segment {
-            text: format!(" {icon} {pct}% "),
-            style: Style::default().fg(p.blue),
-            preserve_bg: false,
-            elide_rank: Some(3),
-        });
-    }
-
+    let memory = match (metrics.mem_used_gib, metrics.mem_total_gib) {
+        (Some(used), Some(total)) => format!(" MEM {used:.1}/{total:.1} GiB "),
+        _ => " MEM --/-- GiB ".into(),
+    };
     out.push(Segment {
-        text: format!("  {} ", metrics.date),
-        style: Style::default().fg(p.overlay0),
+        text: memory,
+        style: Style::default().fg(p.yellow),
         preserve_bg: false,
-        elide_rank: Some(2),
-    });
-    out.push(Segment {
-        text: format!(" {} ", metrics.time),
-        style: Style::default().fg(p.subtext0),
-        preserve_bg: false,
-        elide_rank: Some(1),
+        elide_rank: None,
     });
     out
-}
-
-/// Nerd Font battery glyph by charge bucket.
-fn battery_icon(pct: u8) -> &'static str {
-    match pct {
-        0..=10 => "󰁺",
-        11..=20 => "󰁻",
-        21..=30 => "󰁼",
-        31..=40 => "󰁽",
-        41..=50 => "󰁾",
-        51..=60 => "󰁿",
-        61..=70 => "󰂀",
-        71..=80 => "󰂁",
-        81..=90 => "󰂂",
-        _ => "󰁹",
-    }
 }
 
 pub(crate) fn focused_identity(
@@ -364,11 +188,10 @@ pub(crate) fn focused_identity(
         .public_tab_number(tab_idx)
         .unwrap_or(tab_idx + 1)
         .to_string();
-    let pane_id = ws.focused_pane_id();
-    // Prefer stable public pane numbers (tmux #P parity), not internal PaneId.
-    let pane_label = pane_id
+    let pane_label = ws
+        .focused_pane_id()
         .and_then(|id| ws.public_pane_number(id))
-        .map(|n| n.to_string())
+        .map(|number| number.to_string())
         .unwrap_or_else(|| "1".into());
     // Runtime-resolved focused cwd, projected by the same code path that
     // resolves the Git refresh target, so the cwd and branch segments always
@@ -789,43 +612,37 @@ mod tests {
 
     #[test]
     fn required_metrics_survive_optional_segment_elision() {
-        // AC3: MEM/CPU are required while optional right-tail segments elide by rank.
-        let palette = Palette::catppuccin();
+        // CPU/MEM are required while optional right-side context elides by rank.
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.status_focused_cwd = Some(PathBuf::from("/very/long/focused/folder"));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some("feature/very-long-branch".into());
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let (left, right) = fitted_segments(
-            vec![Segment {
-                text: " session ".into(),
-                style: Style::default(),
-                preserve_bg: false,
-                elide_rank: None,
-            }],
-            right_segments(&metrics, &palette),
-            40,
-        );
-        let rendered = left
+        let segments = fitted_segments(status_segments(&app, &metrics, &app.palette), 40);
+        let rendered = segments
             .iter()
-            .chain(&right)
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         assert!(rendered.contains("MEM 8.0/16.0 GiB"));
         assert!(rendered.contains("CPU 12%"));
-        assert!(!rendered.contains(&metrics.date));
-        assert!(!rendered.contains(&metrics.time));
+        assert!(!rendered.contains("feature/very-long"));
     }
 
-    fn assert_long_session_fits_status_row(session_name: &str) {
+    fn assert_long_context_fits_status_row(cwd: &str, branch: &str) {
         use ratatui::{backend::TestBackend, Terminal};
 
         const WIDTH: usize = crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD as usize;
         let mut app = AppState::test_new();
-        app.status_session_name = session_name.into();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.status_focused_cwd = Some(PathBuf::from(cwd));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some(branch.into());
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let (left, right) = fitted_segments(
-            left_segments(&app, &metrics, false, &app.palette),
-            right_segments(&metrics, &app.palette),
-            WIDTH,
-        );
-        assert!(segment_width(&left) + segment_width(&right) <= WIDTH);
+        let segments = fitted_segments(status_segments(&app, &metrics, &app.palette), WIDTH);
+        assert!(segment_width(&segments) <= WIDTH);
 
         let mut terminal =
             Terminal::new(TestBackend::new(WIDTH as u16, 1)).expect("create status terminal");
@@ -844,35 +661,19 @@ mod tests {
     }
 
     #[test]
-    fn minimum_desktop_status_fits_long_ascii_session_and_required_metrics() {
-        assert_long_session_fits_status_row(
-            "a-very-long-session-name-that-must-not-displace-required-metrics",
+    fn minimum_desktop_status_fits_long_ascii_context_and_required_metrics() {
+        assert_long_context_fits_status_row(
+            "/a/very/long/folder/path/that/must/not/displace/required/metrics",
+            "feature/a-very-long-branch-that-must-elide",
         );
     }
 
     #[test]
-    fn minimum_desktop_status_fits_wide_session_and_required_metrics() {
-        assert_long_session_fits_status_row("重要な長いセッション名が必須メトリクスを隠さない");
-    }
-
-    #[test]
-    fn status_identity_uses_stable_public_workspace_and_tab_numbers() {
-        let mut filler = crate::workspace::Workspace::test_new("filler");
-        filler.id = "w2".into();
-        let mut workspace = crate::workspace::Workspace::test_adversarial_identity_state();
-        workspace.id = "wA".into();
-        let expected_tab = workspace
-            .public_tab_number(workspace.active_tab_index())
-            .expect("public tab number");
-        assert_ne!(expected_tab, workspace.active_tab_index() + 1);
-        let mut app = AppState::test_new();
-        app.workspaces = vec![filler, workspace];
-        app.active = Some(1);
-
-        let (workspace_label, tab_label, _, _, _) = focused_identity(&app);
-
-        assert_eq!(workspace_label, "10");
-        assert_eq!(tab_label, expected_tab.to_string());
+    fn minimum_desktop_status_fits_wide_context_and_required_metrics() {
+        assert_long_context_fits_status_row(
+            "/重要な/長い/フォルダー/必須/メトリクス",
+            "機能/長いブランチ名",
+        );
     }
 
     #[test]
@@ -966,8 +767,8 @@ mod tests {
     #[test]
     fn status_metrics_fallback_format_is_explicit() {
         // AC3/AC5: unavailable snapshots render stable units without sampling in render.
-        let palette = Palette::catppuccin();
-        let segments = right_segments(&StatusMetrics::default(), &palette);
+        let app = AppState::test_new();
+        let segments = status_segments(&app, &StatusMetrics::default(), &app.palette);
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
@@ -996,63 +797,44 @@ mod tests {
     }
 
     #[test]
-    fn unknown_network_kind_uses_neutral_label() {
-        let metrics = StatusMetrics {
-            net_down_kib: Some(12),
-            net_up_kib: Some(3),
-            net_kind: NetKind::Unknown,
-            ..StatusMetrics::default()
-        };
-        let rendered = right_segments(&metrics, &Palette::catppuccin())
+    fn status_elision_drops_folder_branch_then_device() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.status_focused_cwd = Some(PathBuf::from("/home/test/work/status"));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some("feature/native-status".into());
+        let metrics = crate::platform::status_metrics::status_metrics_fixture();
+        let full = status_segments(&app, &metrics, &app.palette);
+
+        assert_eq!(
+            full.iter()
+                .filter_map(|segment| segment.elide_rank)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        let optional_width = full[..3]
+            .iter()
+            .map(|segment| display_width(&segment.text))
+            .sum::<usize>();
+        let required = fitted_segments(
+            status_segments(&app, &metrics, &app.palette),
+            segment_width(&full) - optional_width,
+        );
+        let rendered = required
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-
-        assert!(rendered.contains(" NET ↓12K/s ↑3K/s"), "{rendered}");
-        assert!(!rendered.contains(''), "{rendered}");
+        assert!(!rendered.contains("~/work/status"), "{rendered}");
+        assert!(!rendered.contains("feature/native-status"), "{rendered}");
+        assert!(!rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("CPU 12%"), "{rendered}");
+        assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
     }
 
     #[test]
-    fn status_elision_drops_optional_tail_in_declared_order() {
-        // AC3: time, date, and battery elide before network and identity context.
-        let palette = Palette::catppuccin();
-        let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let full = right_segments(&metrics, &palette);
-        let full_width = segment_width(&full);
-        let time_width = display_width(full.last().expect("time segment").text.as_str());
-        let date_width = display_width(full[full.len() - 2].text.as_str());
-
-        let (_, without_time) = fitted_segments(
-            Vec::new(),
-            right_segments(&metrics, &palette),
-            full_width - time_width,
-        );
-        assert!(!without_time
-            .iter()
-            .any(|segment| segment.text.contains(&metrics.time)));
-        assert!(without_time
-            .iter()
-            .any(|segment| segment.text.contains(&metrics.date)));
-
-        let (_, without_date) = fitted_segments(
-            Vec::new(),
-            right_segments(&metrics, &palette),
-            full_width - time_width - date_width,
-        );
-        assert!(!without_date
-            .iter()
-            .any(|segment| segment.text.contains(&metrics.date)));
-        assert!(without_date
-            .iter()
-            .any(|segment| segment.text.contains("MEM ")));
-        assert!(without_date
-            .iter()
-            .any(|segment| segment.text.contains("CPU ")));
-    }
-
-    #[test]
-    fn status_identity_theme_network_battery_date_time_segments_match_state() {
-        // AC4: all parity values and colors derive from AppState plus the active palette.
+    fn status_content_order_theme_and_removed_segments_match_contract() {
         let mut app = AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("status");
         workspace.identity_cwd = PathBuf::from("/home/test/work/status");
@@ -1061,39 +843,77 @@ mod tests {
         workspace.switch_tab(1);
         app.workspaces = vec![workspace];
         app.active = Some(0);
-        app.status_session_name = "session".into();
         app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
+        app.status_focused_cwd = app.status_git_cwd.clone();
         app.status_git_branch = Some("feature/native-status".into());
+        app.status_home_dir = Some(PathBuf::from("/home/test"));
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let (workspace_label, tab_label, pane_label, _, _) = focused_identity(&app);
-        let left = left_segments(&app, &metrics, false, &app.palette);
-        let right = right_segments(&metrics, &app.palette);
-        let left_text = left
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect::<String>();
-        let right_text = right
+        let segments = status_segments(&app, &metrics, &app.palette);
+        let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
 
-        assert!(left_text.contains(&format!(
-            "session:{workspace_label}.{tab_label}.{pane_label}"
-        )));
-        assert!(left_text.contains("testhost"));
-        assert!(left_text.contains("testuser"));
-        assert!(left_text.contains("~/work/status"));
-        assert!(left_text.contains("feature/native-status"));
-        assert!(right_text.contains("10.0.0.2"));
-        assert!(right_text.contains("100.64.0.1"));
-        assert!(right_text.contains("↓120K/s ↑34K/s"));
-        assert!(right_text.contains("88%"));
-        assert!(right_text.contains("2026-01-02"));
-        assert!(right_text.contains("03:04"));
-        assert_eq!(left[0].style.fg, Some(app.palette.blue));
+        let ordered = [
+            "~/work/status",
+            "feature/native-stat",
+            "testhost",
+            "CPU 12%",
+            "MEM 8.0/16.0 GiB",
+        ];
+        let mut previous = 0;
+        for value in ordered {
+            let index = rendered
+                .find(value)
+                .unwrap_or_else(|| panic!("{value}: {rendered}"));
+            assert!(index >= previous, "{value} is out of order: {rendered}");
+            previous = index;
+        }
+        for removed in [
+            "testuser",
+            "10.0.0.2",
+            "100.64.0.1",
+            "203.0.113.10",
+            "↓",
+            "↑",
+            "session:",
+            "88%",
+            "2026-01-02",
+            "03:04",
+            env!("CARGO_PKG_VERSION"),
+        ] {
+            assert!(!rendered.contains(removed), "{removed}: {rendered}");
+        }
         assert_eq!(
-            right
+            segments
+                .iter()
+                .find(|segment| segment.text.contains("~/work/status"))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.mauve)
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .find(|segment| segment.text.contains("feature/native-stat"))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.yellow)
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .find(|segment| segment.text.contains("testhost"))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.green)
+        );
+        assert_eq!(
+            segments
                 .iter()
                 .find(|segment| segment.text.contains("MEM "))
                 .unwrap()
@@ -1102,7 +922,7 @@ mod tests {
             Some(app.palette.yellow)
         );
         assert_eq!(
-            right
+            segments
                 .iter()
                 .find(|segment| segment.text.contains("CPU "))
                 .unwrap()

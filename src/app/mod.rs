@@ -545,9 +545,6 @@ impl App {
 
         let mut state = AppState {
             status_metrics: None,
-            status_session_name: crate::session::active_name()
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
             status_home_dir: status_home_dir(),
             status_git_cwd: None,
             status_git_branch: None,
