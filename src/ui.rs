@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_status_bar_renders_identity_and_metrics_segments() {
+    fn desktop_status_bar_renders_only_right_aligned_contract_segments() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
@@ -1067,7 +1067,7 @@ mod tests {
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
 
-        // Wide enough that identity + metrics fit despite a long real cwd/branch.
+        // Wide enough that context, identity, build, and metrics all fit.
         let width = 220u16;
         compute_view(&mut app, Rect::new(0, 0, width, 24));
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
@@ -1080,17 +1080,23 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        // AC4: fixture metrics provide deterministic identity and segment-parity evidence.
+        // Fixture metrics provide deterministic right-side renderer evidence.
         assert!(
             row0.contains("testhost"),
             "status bar missing hostname: {row0:?}"
         );
         assert!(
-            row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
+            row0.contains("8.0") && row0.contains("12"),
             "status bar missing resource metrics: {row0:?}"
         );
+        assert!(
+            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "status bar missing build identity: {row0:?}"
+        );
         assert!(!row0.contains("testuser"), "{row0:?}");
-        assert!(!row0.contains(env!("CARGO_PKG_VERSION")), "{row0:?}");
+        assert!(!row0.contains("session:"), "{row0:?}");
+        assert!(!row0.contains("↓"), "{row0:?}");
+        assert!(!row0.contains("↑"), "{row0:?}");
         let first_content = row0
             .char_indices()
             .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
@@ -1122,6 +1128,10 @@ mod tests {
         );
         assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
         assert!(row0.contains("CPU 12%"), "{row0:?}");
+        assert!(
+            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "{row0:?}"
+        );
     }
 
     #[test]
@@ -1149,6 +1159,10 @@ mod tests {
             );
             assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
             assert!(row0.contains("CPU 12%"), "{row0:?}");
+            assert!(
+                row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+                "{row0:?}"
+            );
             rendered.push((
                 "sampled metrics",
                 width,

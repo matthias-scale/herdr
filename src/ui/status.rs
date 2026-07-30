@@ -20,12 +20,12 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: folder · branch · device · CPU · memory. The row
-/// before the first surviving segment is intentionally blank.
+/// Contents, left to right: folder · branch · device · Herdr version · CPU ·
+/// memory. The row before the first surviving segment is intentionally blank.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
-/// first surviving segment. On narrow widths, folder, branch, then device elide
-/// in that order; CPU and memory remain required.
+/// first surviving segment. On narrow widths, folder, branch, device, then
+/// version elide in that order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -146,6 +146,13 @@ fn status_segments(
         style: Style::default().fg(p.green),
         preserve_bg: false,
         elide_rank: Some(3),
+    });
+
+    out.push(Segment {
+        text: format!(" Herdr v{} ", crate::build_info::version()),
+        style: Style::default().fg(p.blue),
+        preserve_bg: false,
+        elide_rank: Some(4),
     });
 
     out.push(Segment {
@@ -614,8 +621,6 @@ mod tests {
     fn required_metrics_survive_optional_segment_elision() {
         // CPU/MEM are required while optional right-side context elides by rank.
         let mut app = AppState::test_new();
-        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
-        app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from("/very/long/focused/folder"));
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some("feature/very-long-branch".into());
@@ -628,6 +633,7 @@ mod tests {
         assert!(rendered.contains("MEM 8.0/16.0 GiB"));
         assert!(rendered.contains("CPU 12%"));
         assert!(!rendered.contains("feature/very-long"));
+        assert!(!rendered.contains("testhost"));
     }
 
     fn assert_long_context_fits_status_row(cwd: &str, branch: &str) {
@@ -635,8 +641,6 @@ mod tests {
 
         const WIDTH: usize = crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD as usize;
         let mut app = AppState::test_new();
-        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
-        app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from(cwd));
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some(branch.into());
@@ -797,24 +801,31 @@ mod tests {
     }
 
     #[test]
-    fn status_elision_drops_folder_branch_then_device() {
+    fn status_elision_drops_folder_branch_device_then_version() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_git_cwd = app.status_focused_cwd.clone();
-        app.status_git_branch = Some("feature/native-status".into());
+        app.status_git_branch = Some("feat/status".into());
+        app.status_home_dir = Some(PathBuf::from("/home/test"));
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let full = status_segments(&app, &metrics, &app.palette);
 
-        assert_eq!(
-            full.iter()
-                .filter_map(|segment| segment.elide_rank)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+        let folder_width = display_width(&full[0].text);
+        let without_folder = fitted_segments(
+            status_segments(&app, &metrics, &app.palette),
+            segment_width(&full) - folder_width,
         );
+        let rendered = without_folder
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(!rendered.contains("~/work/status"), "{rendered}");
+        assert!(rendered.contains("feat/status"), "{rendered}");
+        assert!(rendered.contains("testhost"), "{rendered}");
 
-        let optional_width = full[..3]
+        let optional_width = full[..4]
             .iter()
             .map(|segment| display_width(&segment.text))
             .sum::<usize>();
@@ -827,8 +838,9 @@ mod tests {
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         assert!(!rendered.contains("~/work/status"), "{rendered}");
-        assert!(!rendered.contains("feature/native-status"), "{rendered}");
+        assert!(!rendered.contains("feat/status"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
+        assert!(!rendered.contains("Herdr v"), "{rendered}");
         assert!(rendered.contains("CPU 12%"), "{rendered}");
         assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
     }
@@ -838,14 +850,14 @@ mod tests {
         let mut app = AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("status");
         workspace.identity_cwd = PathBuf::from("/home/test/work/status");
-        workspace.cached_git_branch = Some("feature/native-status".into());
+        workspace.cached_git_branch = Some("feat/status".into());
         workspace.test_add_tab(Some("logs"));
         workspace.switch_tab(1);
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_focused_cwd = app.status_git_cwd.clone();
-        app.status_git_branch = Some("feature/native-status".into());
+        app.status_git_branch = Some("feat/status".into());
         app.status_home_dir = Some(PathBuf::from("/home/test"));
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
@@ -854,11 +866,13 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
+        let version = format!("Herdr v{}", crate::build_info::version());
 
         let ordered = [
             "~/work/status",
-            "feature/native-stat",
+            "feat/status",
             "testhost",
+            version.as_str(),
             "CPU 12%",
             "MEM 8.0/16.0 GiB",
         ];
@@ -881,7 +895,6 @@ mod tests {
             "88%",
             "2026-01-02",
             "03:04",
-            env!("CARGO_PKG_VERSION"),
         ] {
             assert!(!rendered.contains(removed), "{removed}: {rendered}");
         }
@@ -897,7 +910,7 @@ mod tests {
         assert_eq!(
             segments
                 .iter()
-                .find(|segment| segment.text.contains("feature/native-stat"))
+                .find(|segment| segment.text.contains("feat/status"))
                 .unwrap()
                 .style
                 .fg,
@@ -911,6 +924,15 @@ mod tests {
                 .style
                 .fg,
             Some(app.palette.green)
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .find(|segment| segment.text.contains("Herdr v"))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.blue)
         );
         assert_eq!(
             segments
