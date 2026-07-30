@@ -596,19 +596,22 @@ fn status_interface_ipv4s() -> StatusNetworkInterfaces {
             // SAFETY: a non-null ifa_addr points to a sockaddr for this node.
             Some(unsafe { (*interface.ifa_addr).sa_family as i32 })
         };
-        let up = interface.ifa_flags & (libc::IFF_UP as u32) != 0;
         let name = status_interface_name(interface);
-        vpn_active |= name
-            .as_deref()
-            .is_some_and(|name| status_active_tunnel(name, up));
-        if family == Some(libc::AF_INET) {
+        let address = if family == Some(libc::AF_INET) {
             // SAFETY: the family check above establishes sockaddr_in layout.
             let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
-            let address = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
-            if let Some(name) = name {
-                ipv4s.push(StatusInterfaceIpv4 { name, address, up });
-            }
-        }
+            Some(Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr)))
+        } else {
+            None
+        };
+        observe_status_interface(
+            family,
+            name,
+            interface.ifa_flags,
+            address,
+            &mut ipv4s,
+            &mut vpn_active,
+        );
         current = interface.ifa_next;
     }
     drop(interfaces);
@@ -673,11 +676,34 @@ fn select_status_network_interfaces(
 }
 
 fn status_tunnel_interface(name: &str) -> bool {
-    name.starts_with("utun") || name.starts_with("tun") || name.contains("tailscale")
+    ["utun", "tun", "ipsec", "ppp"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name.contains("tailscale")
 }
 
 fn status_active_tunnel(name: &str, up: bool) -> bool {
     up && status_tunnel_interface(name)
+}
+
+fn observe_status_interface(
+    family: Option<i32>,
+    name: Option<String>,
+    flags: u32,
+    address: Option<Ipv4Addr>,
+    ipv4s: &mut Vec<StatusInterfaceIpv4>,
+    vpn_active: &mut bool,
+) {
+    let Some(name) = name else {
+        return;
+    };
+    let up = flags & (libc::IFF_UP as u32) != 0;
+    *vpn_active |= status_active_tunnel(&name, up);
+    if family == Some(libc::AF_INET) {
+        if let Some(address) = address {
+            ipv4s.push(StatusInterfaceIpv4 { name, address, up });
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -887,26 +913,69 @@ mod status_metric_tests {
 
     #[test]
     fn vpn_activity_tracks_ipv6_only_up_and_down_tunnels() {
-        assert!(super::status_active_tunnel("utun7", true));
-        assert!(!super::status_active_tunnel("utun7", false));
-
-        let ipv4s = vec![super::StatusInterfaceIpv4 {
+        let mut ipv4s = vec![super::StatusInterfaceIpv4 {
             name: "en0".into(),
             address: Ipv4Addr::new(192, 168, 1, 5),
             up: true,
         }];
+        let mut vpn_active = false;
+        super::observe_status_interface(
+            Some(libc::AF_INET6),
+            Some("utun7".into()),
+            libc::IFF_UP as u32,
+            None,
+            &mut ipv4s,
+            &mut vpn_active,
+        );
+        assert!(vpn_active);
+        assert_eq!(ipv4s.len(), 1);
         let selected = super::select_status_network_interfaces(
             Some("en0"),
             ipv4s.clone(),
             HashMap::new(),
-            false,
+            vpn_active,
         );
-        assert!(!selected.vpn_active);
-
-        let selected =
-            super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new(), true);
         assert!(selected.vpn_active);
         assert_eq!(selected.tailscale_ip, None);
+
+        let mut vpn_active = false;
+        super::observe_status_interface(
+            Some(libc::AF_INET6),
+            Some("utun7".into()),
+            0,
+            None,
+            &mut ipv4s,
+            &mut vpn_active,
+        );
+        assert!(!vpn_active);
+        assert_eq!(ipv4s.len(), 1);
+        let selected =
+            super::select_status_network_interfaces(Some("en0"), ipv4s, HashMap::new(), vpn_active);
+        assert!(!selected.vpn_active);
+    }
+
+    #[test]
+    fn ipsec_and_ppp_are_vpn_interfaces_not_lan_fallbacks() {
+        for name in ["ipsec0", "ppp0"] {
+            assert!(super::status_active_tunnel(name, true));
+            let ipv4s = vec![
+                super::StatusInterfaceIpv4 {
+                    name: name.into(),
+                    address: Ipv4Addr::new(10, 10, 0, 2),
+                    up: true,
+                },
+                super::StatusInterfaceIpv4 {
+                    name: "en0".into(),
+                    address: Ipv4Addr::new(192, 168, 1, 5),
+                    up: true,
+                },
+            ];
+            let selected =
+                super::select_status_network_interfaces(None, ipv4s, HashMap::new(), true);
+            assert_eq!(selected.primary.as_deref(), Some("en0"));
+            assert_eq!(selected.local_ip.as_deref(), Some("192.168.1.5"));
+            assert!(selected.vpn_active);
+        }
     }
 }
 

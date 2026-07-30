@@ -321,6 +321,26 @@ fn status_active_tunnel(name: &str, up: bool) -> bool {
     up && status_tunnel_interface(name)
 }
 
+fn observe_status_interface(
+    family: Option<i32>,
+    name: Option<String>,
+    flags: u32,
+    address: Option<std::net::Ipv4Addr>,
+    ipv4s: &mut Vec<StatusInterfaceIpv4>,
+    vpn_active: &mut bool,
+) {
+    let Some(name) = name else {
+        return;
+    };
+    let up = flags & (libc::IFF_UP as u32) != 0;
+    *vpn_active |= status_active_tunnel(&name, up);
+    if family == Some(libc::AF_INET) {
+        if let Some(address) = address {
+            ipv4s.push(StatusInterfaceIpv4 { name, address, up });
+        }
+    }
+}
+
 fn status_interface_ipv4s(default_interface: Option<&str>) -> StatusInterfaceSelection {
     let mut ipv4s = Vec::new();
     let mut vpn_active = false;
@@ -342,23 +362,24 @@ fn status_interface_ipv4s(default_interface: Option<&str>) -> StatusInterfaceSel
                     .into_owned(),
             )
         };
-        let up = interface.ifa_flags & (libc::IFF_UP as u32) != 0;
-        vpn_active |= name
-            .as_deref()
-            .is_some_and(|name| status_active_tunnel(name, up));
-        if !interface.ifa_addr.is_null()
-            && unsafe { (*interface.ifa_addr).sa_family as i32 } == libc::AF_INET
-        {
+        let family = (!interface.ifa_addr.is_null())
+            .then(|| unsafe { (*interface.ifa_addr).sa_family as i32 });
+        let address = if family == Some(libc::AF_INET) {
             let address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
-            let ip = std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
-            if let Some(name) = name {
-                ipv4s.push(StatusInterfaceIpv4 {
-                    name,
-                    address: ip,
-                    up,
-                });
-            }
-        }
+            Some(std::net::Ipv4Addr::from(u32::from_be(
+                address.sin_addr.s_addr,
+            )))
+        } else {
+            None
+        };
+        observe_status_interface(
+            family,
+            name,
+            interface.ifa_flags,
+            address,
+            &mut ipv4s,
+            &mut vpn_active,
+        );
         current = interface.ifa_next;
     }
     unsafe { libc::freeifaddrs(interfaces) };
@@ -514,21 +535,40 @@ mod status_metric_tests {
 
     #[test]
     fn vpn_activity_tracks_ipv6_only_up_and_down_tunnels() {
-        assert!(super::status_active_tunnel("wg0", true));
-        assert!(!super::status_active_tunnel("wg0", false));
-
-        let interfaces = vec![StatusInterfaceIpv4 {
+        let mut interfaces = vec![StatusInterfaceIpv4 {
             name: "eth0".into(),
             address: Ipv4Addr::new(192, 168, 1, 20),
             up: true,
         }];
+        let mut vpn_active = false;
+        super::observe_status_interface(
+            Some(libc::AF_INET6),
+            Some("wg0".into()),
+            libc::IFF_UP as u32,
+            None,
+            &mut interfaces,
+            &mut vpn_active,
+        );
+        assert!(vpn_active);
+        assert_eq!(interfaces.len(), 1);
         let selected =
-            super::select_status_interface_ipv4s(Some("eth0"), interfaces.clone(), false);
-        assert!(!selected.vpn_active);
-
-        let selected = super::select_status_interface_ipv4s(Some("eth0"), interfaces, true);
+            super::select_status_interface_ipv4s(Some("eth0"), interfaces.clone(), vpn_active);
         assert!(selected.vpn_active);
         assert_eq!(selected.tailscale_ip, None);
+
+        let mut vpn_active = false;
+        super::observe_status_interface(
+            Some(libc::AF_INET6),
+            Some("wg0".into()),
+            0,
+            None,
+            &mut interfaces,
+            &mut vpn_active,
+        );
+        assert!(!vpn_active);
+        assert_eq!(interfaces.len(), 1);
+        let selected = super::select_status_interface_ipv4s(Some("eth0"), interfaces, vpn_active);
+        assert!(!selected.vpn_active);
     }
 }
 
