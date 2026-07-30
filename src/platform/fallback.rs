@@ -113,3 +113,17 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
 pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
     Ok(false)
 }
+
+pub(crate) fn sample_status_metrics(
+    _sampler: &mut super::status_metrics::StatusMetricSampler,
+) -> super::status_metrics::StatusMetrics {
+    let hostname = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| super::status_metrics::short_hostname(&value))
+        .unwrap_or_else(|| "localhost".into());
+    super::status_metrics::StatusMetrics {
+        hostname,
+        ..super::status_metrics::StatusMetrics::default()
+    }
+}

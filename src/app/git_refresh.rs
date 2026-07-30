@@ -11,12 +11,14 @@ struct WorkspaceGitRefreshItem {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
     cache_key_hint: Option<PathBuf>,
+    demand: GitStatusRefreshDemand,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshTarget {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
+    demand: GitStatusRefreshDemand,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +26,7 @@ struct WorkspaceGitRefreshJob {
     cache_key: PathBuf,
     cached: Option<GitStatusCacheEntry>,
     targets: Vec<WorkspaceGitRefreshTarget>,
+    demand: GitStatusRefreshDemand,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +45,11 @@ impl App {
             return;
         }
 
+        if self.state.status_bar_enabled && self.sync_status_focused_runtime_cwd() {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+
         let refresh_repo_discovery = self.git_identity_refresh_requested
             || now.saturating_duration_since(self.last_git_repo_discovery_refresh)
                 >= GIT_REPO_DISCOVERY_REFRESH_INTERVAL;
@@ -56,17 +64,12 @@ impl App {
         self.git_refresh_in_flight = true;
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
-        let mut demand = self.git_refresh_demand();
-        if self.git_identity_refresh_requested {
-            demand.branch = true;
-        }
         self.git_identity_refresh_requested = false;
         if refresh_repo_discovery {
             self.last_git_repo_discovery_refresh = now;
         }
         std::thread::spawn(move || {
-            let output =
-                refresh_workspace_git_statuses_with_cache_and_demand(workspaces, &cache, demand);
+            let output = refresh_workspace_git_statuses(workspaces, &cache);
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
                 results: output.results,
                 cache_updates: output.cache_updates,
@@ -100,6 +103,12 @@ impl App {
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
+        let mut demand = self.sidebar_git_refresh_demand();
+        demand.branch |= self.state.status_bar_enabled;
+        demand
+    }
+
+    fn sidebar_git_refresh_demand(&self) -> GitStatusRefreshDemand {
         let mut demand = GitStatusRefreshDemand::default();
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token.parts().0 {
@@ -115,21 +124,61 @@ impl App {
         &self,
         refresh_repo_discovery: bool,
     ) -> Vec<WorkspaceGitRefreshItem> {
-        self.state
-            .workspaces
-            .iter()
-            .filter_map(|ws| {
-                let cwd =
-                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
-                let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
-                    .then(|| ws.cached_git_status_key.clone());
-                Some(WorkspaceGitRefreshItem {
-                    workspace_id: ws.id.clone(),
-                    resolved_identity_cwd: cwd,
-                    cache_key_hint,
+        let mut workspace_demand = self.sidebar_git_refresh_demand();
+        workspace_demand.branch |= self.git_identity_refresh_requested;
+        let mut items = if workspace_demand.is_empty() {
+            Vec::new()
+        } else {
+            self.state
+                .workspaces
+                .iter()
+                .filter_map(|ws| {
+                    let cwd = ws.resolved_identity_cwd_from(
+                        &self.state.terminals,
+                        &self.terminal_runtimes,
+                    )?;
+                    let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
+                        .then(|| ws.cached_git_status_key.clone());
+                    Some(WorkspaceGitRefreshItem {
+                        workspace_id: ws.id.clone(),
+                        resolved_identity_cwd: cwd,
+                        cache_key_hint,
+                        demand: workspace_demand,
+                    })
                 })
-            })
-            .collect()
+                .collect::<Vec<_>>()
+        };
+
+        if self.state.status_bar_enabled {
+            if let Some(ws) = self
+                .state
+                .active
+                .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+            {
+                if let Some(cwd) = self.state.status_focused_cwd.clone() {
+                    if let Some(existing) = items.iter_mut().find(|item| {
+                        item.workspace_id == ws.id && item.resolved_identity_cwd == cwd
+                    }) {
+                        existing.demand.branch = true;
+                    } else {
+                        let cache_key_hint = (!refresh_repo_discovery
+                            && ws.cached_identity_cwd == cwd)
+                            .then(|| ws.cached_git_status_key.clone());
+                        items.push(WorkspaceGitRefreshItem {
+                            workspace_id: ws.id.clone(),
+                            resolved_identity_cwd: cwd,
+                            cache_key_hint,
+                            demand: GitStatusRefreshDemand {
+                                branch: true,
+                                ahead_behind: false,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        items
     }
 }
 
@@ -148,9 +197,12 @@ fn deduplicate_git_refresh_items(
         let target = WorkspaceGitRefreshTarget {
             workspace_id: item.workspace_id,
             resolved_identity_cwd: item.resolved_identity_cwd,
+            demand: item.demand,
         };
         if let Some(&index) = indexes.get(&cache_key) {
             jobs[index].targets.push(target);
+            jobs[index].demand.branch |= item.demand.branch;
+            jobs[index].demand.ahead_behind |= item.demand.ahead_behind;
             continue;
         }
 
@@ -160,16 +212,16 @@ fn deduplicate_git_refresh_items(
             cache_key,
             cached,
             targets: vec![target],
+            demand: item.demand,
         });
     }
 
     jobs
 }
 
-fn refresh_workspace_git_statuses_with_cache_and_demand(
+fn refresh_workspace_git_statuses(
     items: Vec<WorkspaceGitRefreshItem>,
     cache: &HashMap<PathBuf, GitStatusCacheEntry>,
-    demand: GitStatusRefreshDemand,
 ) -> WorkspaceGitRefreshOutput {
     let mut results = Vec::new();
     let mut cache_updates = Vec::new();
@@ -178,7 +230,7 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
         let (snapshot, cache_entry) = crate::workspace::git_status_snapshot_for_cwd_with_demand(
             &job.cache_key,
             job.cached.as_ref(),
-            demand,
+            job.demand,
         );
         if let Some(cache_entry) = cache_entry {
             cache_updates.push((job.cache_key.clone(), cache_entry));
@@ -188,7 +240,7 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
                 target.workspace_id,
                 target.resolved_identity_cwd,
                 job.cache_key.clone(),
-                demand,
+                target.demand,
             )
         }));
     }
@@ -219,21 +271,22 @@ mod tests {
             .output()
             .expect("run git init");
 
-        let output = refresh_workspace_git_statuses_with_cache_and_demand(
+        let output = refresh_workspace_git_statuses(
             vec![
                 WorkspaceGitRefreshItem {
                     workspace_id: "one".into(),
                     resolved_identity_cwd: nested.clone(),
                     cache_key_hint: None,
+                    demand: GitStatusRefreshDemand::ALL,
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
                     resolved_identity_cwd: other.clone(),
                     cache_key_hint: None,
+                    demand: GitStatusRefreshDemand::ALL,
                 },
             ],
             &HashMap::new(),
-            GitStatusRefreshDemand::ALL,
         );
 
         assert_eq!(output.cache_updates.len(), 1);
@@ -302,11 +355,74 @@ mod tests {
     }
 
     #[test]
+    fn focused_nested_pane_refreshes_its_branch_without_rebinding_workspace_branch() {
+        let outer = std::env::temp_dir().join(format!(
+            "herdr-focused-status-branch-{}",
+            std::process::id()
+        ));
+        let nested = outer.join("nested");
+        let _ = std::fs::remove_dir_all(&outer);
+        std::fs::create_dir_all(&nested).expect("create nested fixture");
+        for (cwd, branch) in [(&outer, "outer-branch"), (&nested, "nested-branch")] {
+            let output = std::process::Command::new("git")
+                .args(["init", "-b", branch])
+                .arg(cwd)
+                .output()
+                .expect("initialize fixture repository");
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let mut app = test_app(&crate::config::Config::default());
+        let mut ws = Workspace::test_new("test");
+        ws.identity_cwd = outer.clone();
+        ws.cached_identity_cwd = outer.clone();
+        let root = ws.tabs[0].root_pane;
+        let root_terminal = ws.terminal_id(root).expect("root terminal").clone();
+        let focused = ws.test_split(ratatui::layout::Direction::Horizontal);
+        let focused_terminal = ws.terminal_id(focused).expect("focused terminal").clone();
+        app.state.terminals.insert(
+            root_terminal.clone(),
+            crate::terminal::TerminalState::new(root_terminal, outer.clone()),
+        );
+        app.state.terminals.insert(
+            focused_terminal.clone(),
+            crate::terminal::TerminalState::new(focused_terminal, nested.clone()),
+        );
+        app.state.workspaces.push(ws);
+        app.state.active = Some(0);
+        app.state.sync_status_focused_cwd(&app.terminal_runtimes);
+
+        let items = app.workspace_git_refresh_items(true);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.resolved_identity_cwd == outer));
+        assert!(items
+            .iter()
+            .any(|item| item.resolved_identity_cwd == nested));
+        let output = refresh_workspace_git_statuses(items, &HashMap::new());
+
+        assert!(app
+            .state
+            .apply_workspace_git_statuses(&app.terminal_runtimes, output.results));
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("outer-branch")
+        );
+        assert_eq!(app.state.status_git_cwd.as_ref(), Some(&nested));
+        assert_eq!(
+            app.state.status_git_branch.as_deref(),
+            Some("nested-branch")
+        );
+
+        std::fs::remove_dir_all(outer).expect("remove fixture");
+    }
+
+    #[test]
     fn cwd_identity_refresh_runs_once_without_sidebar_git_tokens() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
         app.state.workspaces.push(Workspace::test_new("test"));
+        app.state.active = Some(0);
         let now = Instant::now();
 
         app.request_git_identity_refresh(now);
@@ -318,18 +434,107 @@ mod tests {
     }
 
     #[test]
-    fn due_git_refresh_does_not_start_without_sidebar_consumer() {
+    fn due_git_refresh_starts_for_status_branch_without_sidebar_consumer() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
         app.state.workspaces.push(Workspace::test_new("test"));
+        app.state.active = Some(0);
         let now = Instant::now();
         app.last_git_remote_status_refresh = now - GIT_REMOTE_STATUS_REFRESH_INTERVAL;
 
         app.start_git_status_refresh_if_due(now);
 
-        assert!(!app.git_refresh_in_flight);
-        assert!(app.event_rx.try_recv().is_err());
+        assert!(app.git_refresh_in_flight);
+    }
+
+    #[test]
+    fn status_branch_refresh_targets_only_the_active_focused_cwd() {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        let inactive = Workspace::test_new("inactive");
+        let active = Workspace::test_new("active");
+        let focused_cwd = active.identity_cwd.clone();
+        let active_id = active.id.clone();
+        app.state.workspaces = vec![inactive, active];
+        app.state.active = Some(1);
+        app.state.status_focused_cwd = Some(focused_cwd.clone());
+
+        let items = app.workspace_git_refresh_items(false);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].workspace_id, active_id);
+        assert_eq!(items[0].resolved_identity_cwd, focused_cwd);
+        assert_eq!(
+            items[0].demand,
+            GitStatusRefreshDemand {
+                branch: true,
+                ahead_behind: false,
+            }
+        );
+    }
+
+    #[test]
+    fn disabled_status_bar_without_sidebar_consumer_stops_git_refresh() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+
+        assert!(app.git_refresh_demand().is_empty());
+        assert!(app.git_refresh_deadline().is_none());
+    }
+
+    #[test]
+    fn disabled_status_bar_keeps_sidebar_git_refresh() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Branch]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+
+        assert_eq!(
+            app.git_refresh_demand(),
+            GitStatusRefreshDemand {
+                branch: true,
+                ahead_behind: false,
+            }
+        );
+        assert!(app.git_refresh_deadline().is_some());
+    }
+
+    #[test]
+    fn disabled_status_bar_sidebar_branch_skips_focused_cwd_refresh_item() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Branch]];
+        let mut app = test_app(&config);
+        let outer = PathBuf::from("/repo");
+        let nested = outer.join("nested");
+        let mut ws = Workspace::test_new("test");
+        ws.identity_cwd = outer.clone();
+        ws.cached_identity_cwd = outer.clone();
+        let root = ws.tabs[0].root_pane;
+        let root_terminal = ws.terminal_id(root).expect("root terminal").clone();
+        let focused = ws.test_split(ratatui::layout::Direction::Horizontal);
+        let focused_terminal = ws.terminal_id(focused).expect("focused terminal").clone();
+        app.state.terminals.insert(
+            root_terminal.clone(),
+            crate::terminal::TerminalState::new(root_terminal, outer.clone()),
+        );
+        app.state.terminals.insert(
+            focused_terminal.clone(),
+            crate::terminal::TerminalState::new(focused_terminal, nested),
+        );
+        app.state.workspaces.push(ws);
+        app.state.active = Some(0);
+
+        let items = app.workspace_git_refresh_items(false);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].resolved_identity_cwd, outer);
     }
 
     #[test]
@@ -337,7 +542,10 @@ mod tests {
         let cases = [
             (
                 crate::config::SpaceSidebarToken::Workspace,
-                GitStatusRefreshDemand::default(),
+                GitStatusRefreshDemand {
+                    branch: true,
+                    ahead_behind: false,
+                },
             ),
             (
                 crate::config::SpaceSidebarToken::Branch,
@@ -349,7 +557,7 @@ mod tests {
             (
                 crate::config::SpaceSidebarToken::GitStatus,
                 GitStatusRefreshDemand {
-                    branch: false,
+                    branch: true,
                     ahead_behind: true,
                 },
             ),
@@ -362,16 +570,12 @@ mod tests {
             app.state.workspaces.push(Workspace::test_new("test"));
 
             assert_eq!(app.git_refresh_demand(), expected, "token: {token:?}");
-            assert_eq!(
-                app.git_refresh_deadline().is_some(),
-                !expected.is_empty(),
-                "token: {token:?}"
-            );
+            assert!(app.git_refresh_deadline().is_some(), "token: {token:?}");
         }
     }
 
     #[test]
-    fn unnamed_linked_worktree_does_not_force_periodic_branch_refresh() {
+    fn unnamed_linked_worktree_keeps_status_branch_refresh() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -386,11 +590,11 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
     #[test]
-    fn custom_named_linked_worktree_does_not_require_branch_refresh() {
+    fn custom_named_linked_worktree_keeps_status_branch_refresh() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -404,7 +608,7 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
     #[test]
@@ -415,11 +619,11 @@ mod tests {
         app.last_git_remote_status_refresh = now - GIT_REMOTE_STATUS_REFRESH_INTERVAL;
 
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, false),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, false),
             None
         );
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             Some(now)
         );
     }

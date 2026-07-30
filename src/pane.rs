@@ -24,6 +24,11 @@ use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_CWD_QUERY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
 mod agent_detection;
 mod cursor;
 mod input;
@@ -2759,6 +2764,9 @@ impl PaneRuntime {
 
     /// Get the current working directory of the child shell process.
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        TEST_CWD_QUERY_COUNT.with(|count| count.set(count.get() + 1));
+
         if let Some(cwd) = self
             .reported_cwd
             .lock()
@@ -2822,6 +2830,14 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    pub(crate) fn test_reset_cwd_query_count() {
+        TEST_CWD_QUERY_COUNT.with(|count| count.set(0));
+    }
+
+    pub(crate) fn test_cwd_query_count() -> usize {
+        TEST_CWD_QUERY_COUNT.with(Cell::get)
+    }
+
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
     }

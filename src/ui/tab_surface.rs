@@ -194,7 +194,8 @@ mod tests {
         let full_area = Rect::new(0, 0, 106, 20);
         crate::ui::compute_view(&mut app, full_area);
         let area = app.view.terminal_area;
-        assert_eq!(area, Rect::new(26, 1, 80, 19));
+        // Status bar occupies row 0; tab bar at y=1; terminal below.
+        assert_eq!(area, Rect::new(26, 2, 80, 18));
         let surface = compute_tab_surface(
             &app,
             &TerminalRuntimeRegistry::new(),
@@ -257,8 +258,20 @@ mod tests {
         format!("{:x}", Sha256::digest(encoded))
     }
 
+    fn frame_rect_text(frame: &crate::protocol::FrameData, area: Rect) -> String {
+        (area.y..area.y + area.height)
+            .flat_map(|y| {
+                let row_start = y as usize * frame.width as usize;
+                (area.x..area.x + area.width)
+                    .map(move |x| frame.cells[row_start + x as usize].symbol.as_str())
+                    .chain(std::iter::once("\n"))
+            })
+            .collect()
+    }
+
     fn full_app_characterization_state(uri: &str) -> AppState {
         let mut workspace = Workspace::test_new("characterization");
+        workspace.id = "w1".into();
         workspace.identity_cwd = std::path::PathBuf::from("characterization");
         workspace.cached_git_branch = None;
         workspace.cached_git_ahead_behind = None;
@@ -290,11 +303,14 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_full_app_semantic_frame_is_characterized() {
+        // AC2/AC8: deterministic frame covers geometry used by the integration gate.
         let uri = "https://example.com/full-app";
         let mut app = full_app_characterization_state(uri);
+        app.status_bar_enabled = false;
         let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
 
         assert_eq!((frame.width, frame.height), (106, 20));
+        assert_eq!(app.view.status_bar_rect, Rect::default());
         assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
         assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 80, 1));
         assert_eq!(app.view.terminal_area, Rect::new(26, 1, 80, 19));
@@ -306,6 +322,35 @@ mod tests {
             frame_digest(&frame),
             "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_full_app_status_and_sidebar_geometry_is_characterized() {
+        let uri = "https://example.com/full-app-status";
+        let mut app = full_app_characterization_state(uri);
+        let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
+
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 106, 1));
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 26, 19));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 80, 18));
+        assert_eq!(app.view.pane_infos.len(), 2);
+        assert!(!app.view.split_borders.is_empty());
+        assert!(frame.cursor.is_some());
+        assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        let status = frame_rect_text(&frame, app.view.status_bar_rect);
+        assert!(status.starts_with(' '), "{status:?}");
+        assert!(status.contains("CPU 12%"), "{status:?}");
+        assert!(status.contains("MEM 8.0/16.0 GiB"), "{status:?}");
+        assert!(
+            status.trim_end().ends_with("MEM 8.0/16.0 GiB"),
+            "{status:?}"
+        );
+        let sidebar = frame_rect_text(&frame, app.view.sidebar_rect);
+        assert!(sidebar.contains("characterization"), "{sidebar:?}");
+        let terminal = frame_rect_text(&frame, app.view.terminal_area);
+        assert!(terminal.contains("LINK"), "{terminal:?}");
+        assert!(terminal.contains("RIGHT"), "{terminal:?}");
     }
 
     #[tokio::test]

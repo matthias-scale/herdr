@@ -55,9 +55,11 @@ use self::settings::render_settings_overlay;
 #[cfg(test)]
 pub(crate) use self::sidebar::workspace_drop_indicator_row;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+#[cfg(test)]
+pub(crate) use self::status::focused_identity as focused_status_identity_for_test;
 use self::status::{
-    copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
-    toast_notification_rect,
+    copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
+    render_toast_notification, toast_notification_rect,
 };
 pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
@@ -215,6 +217,17 @@ fn compute_view_internal(
         return;
     }
 
+    // The top status row spans the whole client, with sidebar + tabs below.
+    // Reserve it before the horizontal split so the row is never squeezed
+    // into the main column only.
+    let (status_bar_rect, body_area) = if app.status_bar_enabled && area.height > 1 {
+        let [status_bar_rect, body_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        (status_bar_rect, body_area)
+    } else {
+        (Rect::default(), area)
+    };
+
     let sidebar_w = if app.sidebar_collapsed {
         match app.sidebar_collapsed_mode {
             crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
@@ -226,7 +239,7 @@ fn compute_view_internal(
     };
 
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(body_area);
 
     let (tab_bar_rect, terminal_area) = app
         .active
@@ -297,6 +310,7 @@ fn compute_view_internal(
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
+        status_bar_rect,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
         tab_bar_rect,
@@ -360,6 +374,7 @@ fn compute_mobile_view(
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
+        status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
@@ -450,11 +465,14 @@ fn render_navigation_chrome(
 ) {
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
-    } else if app.view.sidebar_rect.width > 0 {
-        if app.sidebar_collapsed {
-            render_sidebar_collapsed(app, frame, app.view.sidebar_rect);
-        } else {
-            render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
+    } else {
+        render_status_bar(app, frame, app.view.status_bar_rect);
+        if app.view.sidebar_rect.width > 0 {
+            if app.sidebar_collapsed {
+                render_sidebar_collapsed(app, frame, app.view.sidebar_rect);
+            } else {
+                render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
+            }
         }
     }
 }
@@ -583,6 +601,7 @@ mod tests {
     use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
     use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
 
     #[test]
     fn copy_feedback_offset_only_increases_when_toast_rect_overlaps() {
@@ -804,16 +823,19 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         let single_tab_terminal_area = app.view.terminal_area;
+        // Full-width status bar occupies row 0; chrome starts at y=1.
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(single_tab_terminal_area, Rect::new(26, 0, 54, 20));
+        assert_eq!(single_tab_terminal_area, Rect::new(26, 1, 54, 19));
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
 
         app.workspaces[0].test_add_tab(Some("logs"));
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 54, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
         assert_eq!(app.view.tab_hit_areas.len(), 2);
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.width > 0));
         assert!(app.view.new_tab_hit_area.width > 0);
@@ -857,8 +879,9 @@ mod tests {
         let one_tab_size = app.workspaces[0].tabs[0].runtimes[&one_tab_pane].current_size();
         let two_tab_size =
             app.workspaces[1].tabs[background_tab].runtimes[&two_tab_pane].current_size();
-        assert_eq!(one_tab_size, (20, 53));
-        assert_eq!(two_tab_size, (19, 53));
+        // Status bar reserves one full-width row; single-tab workspaces reclaim the tab bar.
+        assert_eq!(one_tab_size, (19, 53));
+        assert_eq!(two_tab_size, (18, 53));
     }
 
     #[tokio::test]
@@ -971,9 +994,11 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
-        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 0, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 80, 19));
+        // Status bar is full-width on row 0; sidebar/tabs/terminal sit below.
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 0, 19));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 80, 18));
         assert!(app.view.workspace_card_areas.is_empty());
 
         let backend = TestBackend::new(80, 20);
@@ -982,7 +1007,223 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_sidebar_keeps_active_workspace_highlight_in_terminal_mode() {
+    fn desktop_status_bar_spans_full_width_above_sidebar() {
+        // AC1 provenance is enforced by the merge-parent check; AC2 covers its geometry.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 100, 1));
+        assert_eq!(app.view.sidebar_rect.y, 1);
+        assert_eq!(app.view.sidebar_rect.height, 23);
+        assert!(app.view.sidebar_rect.x == 0);
+        assert_eq!(app.view.sidebar_rect.width, 26);
+        // Terminal/tab chrome never occupy the status-bar row.
+        assert!(app.view.terminal_area.y >= 1);
+        assert!(app.view.tab_bar_rect.y >= 1 || app.view.tab_bar_rect == Rect::default());
+    }
+
+    #[test]
+    fn disabled_status_bar_returns_its_row_to_the_body() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+        app.status_bar_enabled = false;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.view.status_bar_rect, Rect::default());
+        assert_eq!(app.view.sidebar_rect.y, 0);
+        assert_eq!(app.view.sidebar_rect.height, 24);
+    }
+
+    #[test]
+    fn status_view_computation_keeps_the_scheduled_focused_cwd_projection() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        let projected = PathBuf::from("/scheduled/focused");
+        app.status_focused_cwd = Some(projected.clone());
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.status_focused_cwd, Some(projected));
+    }
+
+    #[test]
+    fn desktop_status_bar_renders_only_right_aligned_contract_segments() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+
+        // Wide enough that context, identity, and metrics all fit.
+        let width = 220u16;
+        compute_view(&mut app, Rect::new(0, 0, width, 24));
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
+
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        // Fixture metrics provide deterministic right-side renderer evidence.
+        assert!(
+            row0.contains("testhost"),
+            "status bar missing hostname: {row0:?}"
+        );
+        assert!(
+            row0.contains("8.0") && row0.contains("12"),
+            "status bar missing resource metrics: {row0:?}"
+        );
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
+        assert!(!row0.contains("testuser"), "{row0:?}");
+        assert!(!row0.contains("session:"), "{row0:?}");
+        assert!(!row0.contains("↓"), "{row0:?}");
+        assert!(!row0.contains("↑"), "{row0:?}");
+        let first_content = row0
+            .char_indices()
+            .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+            .expect("status row content");
+        assert!(
+            first_content > 0,
+            "status row is not right-aligned: {row0:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_keeps_memory_and_cpu_legible_at_120_columns() {
+        // AC3/AC7: the ordinary-width renderer retains both required metric segments.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        let width = 120;
+        compute_view(&mut app, Rect::new(0, 0, width, 24));
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
+        assert!(row0.contains("CPU 12%"), "{row0:?}");
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
+    }
+
+    #[test]
+    fn status_bar_visual_evidence_covers_wide_and_120_column_layouts() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("focused"),
+            Workspace::test_new("queued"),
+        ];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+        app.status_home_dir = Some(PathBuf::from("/home/test"));
+        app.status_focused_cwd = Some(PathBuf::from("/home/test/work/native-status"));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some("feat/native-status".into());
+
+        let mut rendered = Vec::new();
+        for (width, height) in [(220, 8), (120, 12)] {
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let row0 = buffer_row_text(
+                terminal.backend().buffer(),
+                app.view.status_bar_rect,
+                app.view.status_bar_rect.y,
+            );
+            assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
+            assert!(row0.contains("CPU 12%"), "{row0:?}");
+            assert!(!row0.contains("Herdr v"), "{row0:?}");
+            rendered.push((
+                "sampled metrics",
+                width,
+                height,
+                terminal.backend().buffer().clone(),
+            ));
+        }
+
+        app.status_metrics = None;
+        let width = 120;
+        let height = 4;
+        compute_view(&mut app, Rect::new(0, 0, width, height));
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        assert!(row0.contains("MEM --/-- GiB"), "{row0:?}");
+        assert!(row0.contains("CPU --%"), "{row0:?}");
+        rendered.push((
+            "unavailable fallback",
+            width,
+            height,
+            terminal.backend().buffer().clone(),
+        ));
+
+        let Ok(path) = std::env::var("HERDR_STATUS_EVIDENCE_HTML") else {
+            return;
+        };
+        let mut html = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>Herdr native status row</title>\
+             <style>body{margin:0;padding:24px;background:#11111b;color:#cdd6f4;\
+             font-family:\"JetBrainsMono Nerd Font Mono\",monospace}h1{font-size:20px}\
+             h2{font-size:14px;color:#a6adc8;margin:24px 0 8px}.terminal{display:grid;\
+             width:max-content;font-size:12px;line-height:16px;box-shadow:0 0 0 1px #45475a}\
+             .cell{width:1ch;height:16px;white-space:pre;overflow:visible}</style>\
+             <h1>Native full-width desktop status row</h1>",
+        );
+        for (label, width, height, buffer) in rendered {
+            html.push_str(&format!(
+                "<h2>{width} columns × {height} rows — {label}</h2>\
+                 <div class=\"terminal\" style=\"grid-template-columns:repeat({width},1ch)\">"
+            ));
+            for cell in buffer.content() {
+                let symbol = cell
+                    .symbol()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                html.push_str(&format!(
+                    "<span class=\"cell\" style=\"color:{};background:{}\">{symbol}</span>",
+                    color_css(cell.fg, "#cdd6f4"),
+                    color_css(cell.bg, "#11111b"),
+                ));
+            }
+            html.push_str("</div>");
+        }
+        std::fs::write(path, html).expect("write status-row visual evidence");
+    }
+
+    #[test]
+    fn collapsed_sidebar_status_geometry_keeps_active_workspace_highlight() {
+        // AC2/AC7: collapsed desktop content remains aligned below status row 0.
         let mut app = crate::app::state::AppState::test_new();
         app.sidebar_collapsed = true;
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -1316,6 +1557,30 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn color_css(color: Color, reset: &'static str) -> String {
+        match color {
+            Color::Reset => reset.into(),
+            Color::Black => "#45475a".into(),
+            Color::Red => "#f38ba8".into(),
+            Color::Green => "#a6e3a1".into(),
+            Color::Yellow => "#f9e2af".into(),
+            Color::Blue => "#89b4fa".into(),
+            Color::Magenta => "#cba6f7".into(),
+            Color::Cyan => "#94e2d5".into(),
+            Color::Gray => "#bac2de".into(),
+            Color::DarkGray => "#585b70".into(),
+            Color::LightRed => "#eba0ac".into(),
+            Color::LightGreen => "#a6e3a1".into(),
+            Color::LightYellow => "#f9e2af".into(),
+            Color::LightBlue => "#89dceb".into(),
+            Color::LightMagenta => "#f5c2e7".into(),
+            Color::LightCyan => "#89dceb".into(),
+            Color::White => "#cdd6f4".into(),
+            Color::Rgb(red, green, blue) => format!("#{red:02x}{green:02x}{blue:02x}"),
+            Color::Indexed(index) => format!("color-mix(in srgb, #cdd6f4 {}%, #11111b)", index),
+        }
     }
 
     fn temp_git_repo(branch: &str) -> std::path::PathBuf {

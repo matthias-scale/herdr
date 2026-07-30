@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 #[cfg(test)]
 use std::time::Duration;
@@ -226,6 +226,8 @@ impl App {
         let mut changed = false;
         let mut resized = false;
 
+        changed |= self.schedule_status_metrics(now);
+
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
             changed |= resized;
@@ -328,6 +330,59 @@ impl App {
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
         }
         changed
+    }
+
+    /// Drop a snapshot that outlived its staleness window so the status row
+    /// shows unavailable metrics instead of silently aging values.
+    pub(crate) fn discard_stale_status_metrics(&mut self, now: Instant) -> bool {
+        let stale = self
+            .state
+            .status_metrics
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.is_stale_at(now));
+        if stale {
+            self.state.status_metrics = None;
+        }
+        stale
+    }
+
+    pub(crate) fn schedule_status_metrics(&mut self, now: Instant) -> bool {
+        let stale = self.discard_stale_status_metrics(now);
+        if !self.status_metric_refresh_enabled
+            || !self.state.status_bar_enabled
+            || !self.status_metric_refresh.begin(now)
+        {
+            return stale;
+        }
+
+        let tx = self.event_tx.clone();
+        let sampler = Arc::clone(&self.status_metric_sampler);
+        let spawn_result = std::thread::Builder::new()
+            .name("herdr-status-metrics".into())
+            .spawn(move || {
+                let snapshot = std::panic::catch_unwind(|| {
+                    // The sampler only carries the previous CPU delta,
+                    // so a poisoned lock stays usable; recovering keeps a single
+                    // collector panic from disabling metrics for the session.
+                    let mut sampler = sampler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    Box::new(crate::platform::status_metrics::StatusMetricsSnapshot {
+                        metrics: crate::platform::sample_status_metrics(&mut sampler),
+                        sampled_at: Instant::now(),
+                    })
+                })
+                .inspect_err(|_| {
+                    tracing::warn!("status metric collection panicked; retrying next interval");
+                })
+                .ok();
+                let _ =
+                    tx.blocking_send(crate::events::AppEvent::StatusMetricsRefreshed { snapshot });
+            });
+        if spawn_result.is_err() {
+            self.status_metric_refresh.finish();
+        }
+        stale
     }
 
     /// Clears temporary copied-token highlights, such as after double-click copy.
@@ -504,13 +559,13 @@ impl App {
         self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
     }
 
-    pub(crate) fn next_headless_loop_deadline_with_git_refresh(
+    pub(crate) fn next_headless_loop_deadline_with_client_refresh(
         &self,
         now: Instant,
         needs_render: bool,
-        include_git_refresh: bool,
+        include_client_refresh: bool,
     ) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, false, include_git_refresh)
+        self.next_loop_deadline_with_resize_poll(now, needs_render, false, include_client_refresh)
     }
 
     fn next_loop_deadline_with_resize_poll(
@@ -518,7 +573,7 @@ impl App {
         now: Instant,
         needs_render: bool,
         include_resize_poll: bool,
-        include_git_refresh: bool,
+        include_client_refresh: bool,
     ) -> Option<Instant> {
         let render_deadline = if needs_render {
             self.last_render_at
@@ -535,7 +590,15 @@ impl App {
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,
-            include_git_refresh
+            self.status_metric_refresh.deadline().filter(|_| {
+                include_client_refresh
+                    && self.status_metric_refresh_enabled
+                    && self.state.status_bar_enabled
+            }),
+            self.state.status_metrics.as_ref().map(|snapshot| {
+                snapshot.sampled_at + crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER
+            }),
+            include_client_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
             self.next_auto_update_check,
@@ -618,6 +681,52 @@ mod tests {
             is_focused: true,
         });
         (app, pane_id)
+    }
+
+    #[test]
+    fn disabled_status_bar_suppresses_metric_sampling_and_deadline() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        let mut app = super::super::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let now = Instant::now();
+
+        assert!(!app.schedule_status_metrics(now));
+        assert!(!app.status_metric_refresh.in_flight());
+        assert!(app.status_metric_refresh.deadline().is_some());
+        assert_eq!(
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_status_metrics_are_dropped_without_sampling() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let now = Instant::now();
+        let sampled_at = now
+            .checked_sub(crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER)
+            .expect("stale instant")
+            - Duration::from_millis(1);
+        app.state.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: crate::platform::status_metrics::StatusMetrics::default(),
+            sampled_at,
+        });
+
+        assert!(app.discard_stale_status_metrics(now));
+        assert!(app.state.status_metrics.is_none());
+        assert!(!app.discard_stale_status_metrics(now));
     }
 
     #[test]

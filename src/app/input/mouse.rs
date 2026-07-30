@@ -1206,13 +1206,14 @@ impl AppState {
     }
 
     pub(super) fn screen_rect(&self) -> Rect {
-        let sidebar = self.view.sidebar_rect;
-        let terminal = self.view.terminal_area;
-        let x = sidebar.x.min(terminal.x);
-        let y = sidebar.y.min(terminal.y);
-        let right = (sidebar.x + sidebar.width).max(terminal.x + terminal.width);
-        let bottom = (sidebar.y + sidebar.height).max(terminal.y + terminal.height);
-        Rect::new(x, y, right.saturating_sub(x), bottom.saturating_sub(y))
+        if self.view.layout == ViewLayout::Mobile {
+            self.view.mobile_header_rect.union(self.view.terminal_area)
+        } else {
+            self.view
+                .status_bar_rect
+                .union(self.view.sidebar_rect)
+                .union(self.view.terminal_area)
+        }
     }
 
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {

@@ -256,7 +256,7 @@ impl App {
 
 impl AppState {
     pub(super) fn onboarding_full_area(&self) -> Rect {
-        self.view.sidebar_rect.union(self.view.terminal_area)
+        self.screen_rect()
     }
 
     pub(crate) fn navigator_popup_rect(&self) -> Rect {

@@ -774,6 +774,8 @@ pub enum ViewLayout {
 
 pub struct ViewState {
     pub layout: ViewLayout,
+    /// Full-width top status row. Empty on mobile or at tiny heights.
+    pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
@@ -1415,6 +1417,17 @@ pub(crate) struct PaneFocusTarget {
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
+    /// Server-owned native metric snapshot consumed by pure rendering.
+    pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
+    pub(crate) status_home_dir: Option<std::path::PathBuf>,
+    pub(crate) status_git_cwd: Option<std::path::PathBuf>,
+    pub(crate) status_git_branch: Option<String>,
+    /// Runtime-resolved cwd of the focused pane, projected from the same
+    /// source the Git refresh uses so rendering never re-derives a weaker one.
+    pub(crate) status_focused_cwd: Option<std::path::PathBuf>,
+    pub(crate) status_focus_projection_initialized: bool,
+    /// Whether the full-width top status row is enabled by configuration.
+    pub(crate) status_bar_enabled: bool,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -1792,6 +1805,16 @@ impl AppState {
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {
+            status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+                metrics: crate::platform::status_metrics::status_metrics_fixture(),
+                sampled_at: std::time::Instant::now(),
+            }),
+            status_home_dir: Some(std::path::PathBuf::from("/home/test")),
+            status_git_cwd: None,
+            status_git_branch: None,
+            status_focused_cwd: None,
+            status_focus_projection_initialized: false,
+            status_bar_enabled: true,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1840,6 +1863,7 @@ impl AppState {
             mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
+                status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),

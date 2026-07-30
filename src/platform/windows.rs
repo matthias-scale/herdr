@@ -53,6 +53,68 @@ use windows_sys::{
 
 use super::{ClipboardImage, ForegroundJob, Signal};
 
+pub(crate) fn sample_status_metrics(
+    sampler: &mut super::status_metrics::StatusMetricSampler,
+) -> super::status_metrics::StatusMetrics {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::{
+            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+            Threading::GetSystemTimes,
+        },
+    };
+
+    let hostname = std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| super::status_metrics::short_hostname(&value))
+        .unwrap_or_else(|| "localhost".into());
+    let mut memory = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..MEMORYSTATUSEX::default()
+    };
+    let memory_ok = unsafe { GlobalMemoryStatusEx(&mut memory) } != 0;
+    let (mem_used_gib, mem_total_gib) = if memory_ok {
+        (
+            Some(memory.ullTotalPhys.saturating_sub(memory.ullAvailPhys) as f32 / 1_073_741_824.0),
+            Some(memory.ullTotalPhys as f32 / 1_073_741_824.0),
+        )
+    } else {
+        (None, None)
+    };
+
+    let mut idle = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let cpu_percent = if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0 {
+        let ticks = |value: FILETIME| {
+            (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
+        };
+        sampler.cpu_percent(ticks(idle), ticks(kernel).saturating_add(ticks(user)))
+    } else {
+        None
+    };
+
+    super::status_metrics::StatusMetrics {
+        cpu_percent,
+        mem_used_gib,
+        mem_total_gib,
+        hostname,
+    }
+}
+
+#[cfg(test)]
+mod status_metric_tests {
+    #[test]
+    fn platform_metric_sampler_returns_local_windows_snapshot() {
+        // AC6: Windows collection stays in windows.rs and uses Win32 APIs.
+        let metrics = super::sample_status_metrics(
+            &mut crate::platform::status_metrics::StatusMetricSampler::new(),
+        );
+        assert!(!metrics.hostname.is_empty());
+    }
+}
+
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
 

@@ -12,6 +12,259 @@ use super::{
     LimitedRead, Signal,
 };
 
+pub(crate) fn sample_status_metrics(
+    sampler: &mut super::status_metrics::StatusMetricSampler,
+) -> super::status_metrics::StatusMetrics {
+    let hostname = status_hostname();
+    let total_bytes = status_sysctl_u64(c"hw.memsize");
+    let mem_total_gib = total_bytes.map(|value| value as f32 / 1_073_741_824.0);
+    let mem_used_gib = total_bytes
+        .and_then(status_used_memory_bytes)
+        .map(|value| value as f32 / 1_073_741_824.0);
+    let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
+
+    super::status_metrics::StatusMetrics {
+        cpu_percent,
+        mem_used_gib,
+        mem_total_gib,
+        hostname,
+    }
+}
+
+fn status_hostname() -> String {
+    let mut hostname = [0u8; 256];
+    // SAFETY: `hostname` is writable for the length passed to libc.
+    if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
+        let end = hostname
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(hostname.len());
+        super::status_metrics::short_hostname(&String::from_utf8_lossy(&hostname[..end]))
+    } else {
+        "localhost".into()
+    }
+}
+
+fn status_sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
+    let mut value = 0u64;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: name and output pointers reference valid storage.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && size == std::mem::size_of::<u64>()).then_some(value)
+}
+
+type StatusMachPortDeallocator =
+    unsafe fn(libc::mach_port_t, libc::mach_port_t) -> libc::kern_return_t;
+
+struct StatusMachHostPort {
+    port: libc::mach_port_t,
+    deallocate: StatusMachPortDeallocator,
+}
+
+impl StatusMachHostPort {
+    fn acquire() -> Option<Self> {
+        // SAFETY: `mach_host_self` returns a send right owned by the caller.
+        let port = unsafe { status_mach_host_self() };
+        (port != 0).then_some(Self {
+            port,
+            deallocate: deallocate_status_mach_port,
+        })
+    }
+
+    fn get(&self) -> libc::mach_port_t {
+        self.port
+    }
+}
+
+impl Drop for StatusMachHostPort {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns exactly one send right returned by
+        // `mach_host_self`; the task-self port is process-owned and borrowed.
+        let _ = unsafe { (self.deallocate)(status_mach_task_self(), self.port) };
+    }
+}
+
+unsafe fn deallocate_status_mach_port(
+    task: libc::mach_port_t,
+    name: libc::mach_port_t,
+) -> libc::kern_return_t {
+    // SAFETY: the caller guarantees that `name` is an owned send right in `task`.
+    unsafe { status_mach_port_deallocate(task, name) }
+}
+
+unsafe fn status_mach_task_self() -> libc::mach_port_t {
+    // SAFETY: the kernel owns this process-global task-self port name.
+    unsafe { STATUS_MACH_TASK_SELF }
+}
+
+fn status_used_memory_bytes(total: u64) -> Option<u64> {
+    const HOST_VM_INFO64: libc::c_int = 4;
+    #[repr(C)]
+    #[derive(Default)]
+    struct VmStatistics64 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        zero_fill_count: u64,
+        reactivations: u64,
+        pageins: u64,
+        pageouts: u64,
+        faults: u64,
+        cow_faults: u64,
+        lookups: u64,
+        hits: u64,
+        purges: u64,
+        purgeable_count: u32,
+        speculative_count: u32,
+        decompressions: u64,
+        compressions: u64,
+        swapins: u64,
+        swapouts: u64,
+        compressor_page_count: u32,
+        throttled_count: u32,
+        external_page_count: u32,
+        internal_page_count: u32,
+        total_uncompressed_pages_in_compressor: u64,
+    }
+    let mut stats = VmStatistics64::default();
+    let mut count = (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<libc::integer_t>())
+        as libc::mach_msg_type_number_t;
+    let host = StatusMachHostPort::acquire()?;
+    let result = unsafe {
+        status_host_statistics64(
+            host.get(),
+            HOST_VM_INFO64,
+            (&raw mut stats).cast(),
+            &mut count,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    let page_size = status_sysctl_u64(c"hw.pagesize").unwrap_or(4096);
+    let pages = u64::from(stats.internal_page_count)
+        .saturating_add(u64::from(stats.wire_count))
+        .saturating_add(u64::from(stats.compressor_page_count));
+    Some(pages.saturating_mul(page_size).min(total))
+}
+
+fn status_cpu_ticks() -> Option<(u64, u64)> {
+    const HOST_CPU_LOAD_INFO: libc::c_int = 3;
+    #[repr(C)]
+    struct CpuLoad {
+        ticks: [u32; 4],
+    }
+    let mut load = CpuLoad { ticks: [0; 4] };
+    let mut count = 4;
+    let host = StatusMachHostPort::acquire()?;
+    let result = unsafe {
+        status_host_statistics(
+            host.get(),
+            HOST_CPU_LOAD_INFO,
+            (&raw mut load).cast(),
+            &mut count,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    Some((
+        u64::from(load.ticks[2]),
+        load.ticks.iter().map(|tick| u64::from(*tick)).sum(),
+    ))
+}
+
+unsafe extern "C" {
+    #[link_name = "mach_task_self_"]
+    static STATUS_MACH_TASK_SELF: libc::mach_port_t;
+    #[link_name = "mach_host_self"]
+    fn status_mach_host_self() -> libc::mach_port_t;
+    #[link_name = "mach_port_deallocate"]
+    fn status_mach_port_deallocate(
+        task: libc::mach_port_t,
+        name: libc::mach_port_t,
+    ) -> libc::kern_return_t;
+    #[link_name = "host_statistics"]
+    fn status_host_statistics(
+        host: libc::mach_port_t,
+        flavor: libc::c_int,
+        output: *mut libc::integer_t,
+        count: *mut libc::mach_msg_type_number_t,
+    ) -> libc::c_int;
+    #[link_name = "host_statistics64"]
+    fn status_host_statistics64(
+        host: libc::mach_port_t,
+        flavor: libc::c_int,
+        output: *mut libc::integer_t,
+        count: *mut libc::mach_msg_type_number_t,
+    ) -> libc::c_int;
+}
+
+#[cfg(test)]
+mod status_metric_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn record_deallocation(
+        _task: libc::mach_port_t,
+        _name: libc::mach_port_t,
+    ) -> libc::kern_return_t {
+        DEALLOCATIONS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    #[test]
+    fn platform_metric_sampler_returns_local_macos_snapshot() {
+        let metrics = super::sample_status_metrics(
+            &mut crate::platform::status_metrics::StatusMetricSampler::new(),
+        );
+        assert!(!metrics.hostname.is_empty());
+    }
+
+    #[test]
+    fn mach_host_port_guard_deallocates_exactly_once() {
+        DEALLOCATIONS.store(0, Ordering::SeqCst);
+        {
+            let _host = super::StatusMachHostPort {
+                port: 42,
+                deallocate: record_deallocation,
+            };
+        }
+        assert_eq!(DEALLOCATIONS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn status_sampler_source_has_no_process_or_network_client_path() {
+        let source = include_str!("macos.rs");
+        let sampler = source
+            .split_once("pub(crate) fn sample_status_metrics")
+            .expect("sampler start")
+            .1
+            .split_once("#[cfg(test)]\nmod status_metric_tests")
+            .expect("sampler end")
+            .0;
+
+        for forbidden in [
+            "noninteractive_process::command",
+            "Command::new",
+            "http://",
+            "https://",
+        ] {
+            assert!(!sampler.contains(forbidden), "found {forbidden}");
+        }
+    }
+}
+
 const PROC_PGRP_ONLY: u32 = 2;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
 

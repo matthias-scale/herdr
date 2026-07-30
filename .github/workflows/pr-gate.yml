@@ -6,16 +6,17 @@ on:
 
 jobs:
   check-contributor:
+    # pull_request_target loads this workflow from the PR base ref. Skip the
+    # entire job on forks before actions/github-script resolves the maintainer
+    # token, which intentionally exists only in the canonical repository.
+    if: ${{ github.repository == 'ogulcancelik/herdr' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
       pull-requests: write
     steps:
-      # The intake policy is canonical-repository only, and its maintainer token
-      # does not exist on forks, so skip the step there instead of failing.
       - name: Check pull request intake policy
-        if: ${{ false }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ secrets.KANGAL_GITHUB_TOKEN }}

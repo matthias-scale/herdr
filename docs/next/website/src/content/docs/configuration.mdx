@@ -256,6 +256,19 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+### Status row
+
+Desktop layouts show a right-aligned, full-width status row above the tab bar. Its compact information order is focused folder, Git branch, device name, CPU, then memory. The left side stays blank. Literal `CPU` and `MEM` segments stay visible at desktop widths, use percent and GiB, and show `CPU --%` or `MEM --/-- GiB` when a sample is unavailable. The row does not display or sample network details or usernames, and it does not show the Herdr version, battery, date, or time. As the terminal narrows, optional segments disappear in this order: folder, branch, then device name.
+
+The sampler starts immediately, refreshes every two seconds with at most one sample in flight, and retries failures at the next interval. Samples that reach four seconds old are discarded so unavailable values render instead. CPU and memory metrics come from native APIs or local proc files.
+
+```toml
+[ui.status_bar]
+enabled = false
+```
+
+Disabling the row also stops the background metric sampler, so nothing is collected while it is hidden.
+
 ### Sidebar row layouts
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:

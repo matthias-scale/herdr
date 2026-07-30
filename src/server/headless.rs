@@ -653,6 +653,10 @@ impl HeadlessServer {
 
             // 7. Render virtually and stream frames.
             if needs_render && self.app.can_render_now(now) {
+                if self.app.sync_status_context_before_render() {
+                    needs_full_render = true;
+                    needs_graphics_render = false;
+                }
                 crate::render_prof::event("render.attempt");
                 let render_request = self.app.render_dirty.take();
                 let pty_dirty = !render_request.pty_sources.is_empty();
@@ -721,7 +725,7 @@ impl HeadlessServer {
             // 8. Wait for next event.
             let next_deadline = self
                 .app
-                .next_headless_loop_deadline_with_git_refresh(
+                .next_headless_loop_deadline_with_client_refresh(
                     now,
                     needs_render,
                     self.has_app_client(),
@@ -4034,7 +4038,13 @@ impl HeadlessServer {
     /// Similar to `App::handle_scheduled_tasks` but without resize polling
     /// (the server doesn't have a terminal to resize).
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
-        let mut changed = false;
+        // Nothing renders the status row without an attached app client, so a
+        // detached server never samples native metrics.
+        let mut changed = if self.has_app_client() {
+            self.app.schedule_status_metrics(now)
+        } else {
+            self.app.discard_stale_status_metrics(now)
+        };
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -4724,6 +4734,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn pre_render_status_context_matches_headless_client_focus_mutation() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("headless-status-focus");
+        let first_tab = workspace.active_tab;
+        let first_pane = workspace.tabs[first_tab].root_pane;
+        let second_tab = workspace.test_add_tab(Some("second"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        workspace.switch_tab(first_tab);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        let first_terminal = server.app.state.workspaces[0]
+            .terminal_id(first_pane)
+            .expect("first terminal")
+            .clone();
+        let second_terminal = server.app.state.workspaces[0]
+            .terminal_id(second_pane)
+            .expect("second terminal")
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .cwd = "/first".into();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .cwd = "/second".into();
+        server.app.state.sync_status_focused_cached_cwd();
+        server.app.state.status_git_cwd = Some("/first".into());
+        server.app.state.status_git_branch = Some("first-branch".into());
+
+        server.app.route_client_input(vec![0x02, b'n']);
+        assert_eq!(server.app.state.workspaces[0].active_tab, second_tab);
+        let (_, _, _, stale_cwd, stale_branch) =
+            crate::ui::focused_status_identity_for_test(&server.app.state);
+        assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/first")));
+        assert_eq!(stale_branch.as_deref(), Some("first-branch"));
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(server.app.sync_status_context_before_render());
+        server.render_and_stream();
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&server.app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+    }
+
     fn shutdown_test_runtimes(server: &mut HeadlessServer) {
         for (_, runtime) in server.app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -4974,6 +5040,7 @@ mod tests {
     ) {
         let mut server = test_headless_server();
         let mut workspace = crate::workspace::Workspace::test_new("test");
+        workspace.id = "w1".into();
         let pane_id = workspace.focused_pane_id().expect("focused pane");
         workspace.insert_test_runtime(
             pane_id,
@@ -5741,7 +5808,7 @@ next_tab = ""
 
         assert!(!server.has_app_client());
         assert_eq!(
-            server.app.next_headless_loop_deadline_with_git_refresh(
+            server.app.next_headless_loop_deadline_with_client_refresh(
                 Instant::now(),
                 false,
                 server.has_app_client()
@@ -5777,7 +5844,7 @@ next_tab = ""
 
         assert!(!server.has_app_client());
         assert_eq!(
-            server.app.next_headless_loop_deadline_with_git_refresh(
+            server.app.next_headless_loop_deadline_with_client_refresh(
                 Instant::now(),
                 false,
                 server.has_app_client()
@@ -5789,6 +5856,38 @@ next_tab = ""
     #[test]
     fn semantic_app_client_marks_git_refresh_due_on_first_attach() {
         app_client_marks_git_refresh_due_on_first_attach(RenderEncoding::SemanticFrame);
+    }
+
+    #[test]
+    fn detached_headless_server_does_not_start_status_metric_sampling() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(!server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn attached_app_client_starts_status_metric_sampling_immediately() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(server.app.status_metric_refresh.in_flight());
     }
 
     #[test]
@@ -7679,7 +7778,9 @@ next_tab = ""
         );
         assert!(!mobile_surface.contains("background"));
 
-        let foreground_terminal_area = Rect::new(26, 1, 94, 39);
+        // Full-width status bar occupies row 0; terminal chrome starts at y=1 (tab bar)
+        // and the terminal surface at y=2.
+        let foreground_terminal_area = Rect::new(26, 2, 94, 38);
         let expected_pane_size = (
             foreground_terminal_area.height,
             foreground_terminal_area.width.saturating_sub(1),

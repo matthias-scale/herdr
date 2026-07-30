@@ -197,6 +197,19 @@ pub struct ClipboardToastConfig {
     pub position: ToastClipboardPosition,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StatusBarConfig {
+    /// Show the full-width top status row on desktop layouts. Default: true.
+    pub enabled: bool,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum NewTerminalCwdConfig {
     #[default]
@@ -812,6 +825,8 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
+    /// Full-width top status row.
+    pub status_bar: StatusBarConfig,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Expanded sidebar row composition.
@@ -1014,6 +1029,7 @@ impl Default for UiConfig {
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            status_bar: StatusBarConfig::default(),
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),

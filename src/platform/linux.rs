@@ -19,6 +19,102 @@ struct ProcGroupMember {
     comm: String,
 }
 
+pub(crate) fn sample_status_metrics(
+    sampler: &mut super::status_metrics::StatusMetricSampler,
+) -> super::status_metrics::StatusMetrics {
+    let hostname = status_hostname();
+    let (mem_used_gib, mem_total_gib) = status_memory().unwrap_or((0.0, 0.0));
+    let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
+
+    super::status_metrics::StatusMetrics {
+        cpu_percent,
+        mem_used_gib: (mem_total_gib > 0.0).then_some(mem_used_gib),
+        mem_total_gib: (mem_total_gib > 0.0).then_some(mem_total_gib),
+        hostname,
+    }
+}
+
+fn status_hostname() -> String {
+    let mut hostname = [0u8; 256];
+    // SAFETY: `hostname` is writable for the length passed to libc.
+    if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
+        let end = hostname
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(hostname.len());
+        super::status_metrics::short_hostname(&String::from_utf8_lossy(&hostname[..end]))
+    } else {
+        "localhost".into()
+    }
+}
+
+fn status_memory() -> Option<(f32, f32)> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_status_memory(&contents)
+}
+
+fn parse_status_memory(contents: &str) -> Option<(f32, f32)> {
+    let mut total_kib = None;
+    let mut available_kib = None;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("MemTotal:") {
+            total_kib = value.split_whitespace().next()?.parse::<u64>().ok();
+        } else if let Some(value) = line.strip_prefix("MemAvailable:") {
+            available_kib = value.split_whitespace().next()?.parse::<u64>().ok();
+        }
+    }
+    let total = total_kib?;
+    let available = available_kib?;
+    let used = total.saturating_sub(available);
+    Some((used as f32 / 1_048_576.0, total as f32 / 1_048_576.0))
+}
+
+fn status_cpu_ticks() -> Option<(u64, u64)> {
+    let contents = std::fs::read_to_string("/proc/stat").ok()?;
+    let mut fields = contents.lines().next()?.split_whitespace();
+    (fields.next()? == "cpu").then_some(())?;
+    let values = fields
+        .take(8)
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (values.len() == 8).then_some(())?;
+    let idle = values[3].saturating_add(values[4]);
+    Some((idle, values.iter().sum()))
+}
+
+#[cfg(test)]
+mod status_metric_tests {
+    #[test]
+    fn platform_metric_sampler_returns_local_linux_snapshot() {
+        // AC6: Linux collection stays in linux.rs and uses /proc, /sys, libc.
+        let metrics = super::sample_status_metrics(
+            &mut crate::platform::status_metrics::StatusMetricSampler::new(),
+        );
+        assert!(!metrics.hostname.is_empty());
+    }
+
+    #[test]
+    fn memory_requires_valid_total_and_available_values() {
+        assert_eq!(
+            super::parse_status_memory(
+                "MemTotal:       16777216 kB\nMemAvailable:    8388608 kB\n"
+            ),
+            Some((8.0, 16.0))
+        );
+        assert_eq!(
+            super::parse_status_memory("MemTotal:       16777216 kB\n"),
+            None
+        );
+        assert_eq!(
+            super::parse_status_memory(
+                "MemTotal:       16777216 kB\nMemAvailable:    unavailable kB\n"
+            ),
+            None
+        );
+    }
+}
+
 pub fn raise_server_nofile_limit() {}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
