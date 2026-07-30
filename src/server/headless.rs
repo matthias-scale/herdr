@@ -653,6 +653,10 @@ impl HeadlessServer {
 
             // 7. Render virtually and stream frames.
             if needs_render && self.app.can_render_now(now) {
+                if self.app.sync_status_context_before_render() {
+                    needs_full_render = true;
+                    needs_graphics_render = false;
+                }
                 crate::render_prof::event("render.attempt");
                 let render_request = self.app.render_dirty.take();
                 let pty_dirty = !render_request.pty_sources.is_empty();
@@ -4728,6 +4732,62 @@ mod tests {
             server_event_rx,
             server_event_tx,
         }
+    }
+
+    #[tokio::test]
+    async fn pre_render_status_context_matches_headless_client_focus_mutation() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("headless-status-focus");
+        let first_tab = workspace.active_tab;
+        let first_pane = workspace.tabs[first_tab].root_pane;
+        let second_tab = workspace.test_add_tab(Some("second"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        workspace.switch_tab(first_tab);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        let first_terminal = server.app.state.workspaces[0]
+            .terminal_id(first_pane)
+            .expect("first terminal")
+            .clone();
+        let second_terminal = server.app.state.workspaces[0]
+            .terminal_id(second_pane)
+            .expect("second terminal")
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .cwd = "/first".into();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .cwd = "/second".into();
+        server.app.state.sync_status_focused_cached_cwd();
+        server.app.state.status_git_cwd = Some("/first".into());
+        server.app.state.status_git_branch = Some("first-branch".into());
+
+        server.app.route_client_input(vec![0x02, b'n']);
+        assert_eq!(server.app.state.workspaces[0].active_tab, second_tab);
+        let (_, _, _, stale_cwd, stale_branch) =
+            crate::ui::focused_status_identity_for_test(&server.app.state);
+        assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/first")));
+        assert_eq!(stale_branch.as_deref(), Some("first-branch"));
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(server.app.sync_status_context_before_render());
+        server.render_and_stream();
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&server.app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
     }
 
     fn shutdown_test_runtimes(server: &mut HeadlessServer) {
