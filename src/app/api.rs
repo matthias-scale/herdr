@@ -95,6 +95,7 @@ impl App {
         } else {
             self.last_git_remote_status_refresh = Instant::now();
         }
+        self.record_status_context_focus();
         let changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
@@ -845,7 +846,7 @@ impl App {
             return;
         }
 
-        self.state.sync_status_focused_cached_cwd();
+        self.sync_status_context_before_render();
         if self.state.status_bar_enabled {
             self.request_git_identity_refresh(std::time::Instant::now());
         }

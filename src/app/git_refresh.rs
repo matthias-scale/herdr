@@ -45,9 +45,7 @@ impl App {
             return;
         }
 
-        if self.state.status_bar_enabled
-            && self.state.sync_status_focused_cwd(&self.terminal_runtimes)
-        {
+        if self.state.status_bar_enabled && self.sync_status_focused_runtime_cwd() {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
