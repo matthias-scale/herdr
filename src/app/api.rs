@@ -845,6 +845,11 @@ impl App {
             return;
         }
 
+        if self.state.status_bar_enabled {
+            self.state.sync_status_focused_cwd(&self.terminal_runtimes);
+            self.request_git_identity_refresh(std::time::Instant::now());
+        }
+
         if let Some((ws_idx, pane_id)) = self.last_focus {
             self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Lost);
         }
@@ -1397,6 +1402,51 @@ mod tests {
             },
         );
         app
+    }
+
+    #[test]
+    fn status_focus_transition_projects_cwd_and_invalidates_stale_branch() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("status-focus");
+        let root = workspace.tabs[0].root_pane;
+        let nested = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.status_bar_enabled = true;
+        let root_terminal = app.state.workspaces[0]
+            .terminal_id(root)
+            .expect("root terminal")
+            .clone();
+        let nested_terminal = app.state.workspaces[0]
+            .terminal_id(nested)
+            .expect("nested terminal")
+            .clone();
+        app.state.terminals.get_mut(&root_terminal).unwrap().cwd = "/repo".into();
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
+        app.last_focus = Some((0, root));
+        app.state.status_focused_cwd = Some("/repo".into());
+        app.state.status_git_cwd = Some("/repo".into());
+        app.state.status_git_branch = Some("root-branch".into());
+
+        assert!(app.state.focus_pane_in_workspace(0, nested));
+        app.sync_focus_events();
+
+        assert_eq!(
+            app.state.status_focused_cwd,
+            Some(std::path::PathBuf::from("/repo/nested"))
+        );
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
+        assert!(app.git_identity_refresh_requested);
     }
 
     #[tokio::test]

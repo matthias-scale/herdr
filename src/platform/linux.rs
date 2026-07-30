@@ -1,8 +1,8 @@
 use std::{
     collections::{HashSet, VecDeque},
-    io::Write,
+    io::{Read, Write},
     os::fd::RawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -46,7 +46,7 @@ pub(crate) fn sample_status_metrics(
         battery_charging,
         local_ip: interfaces.local_ip,
         tailscale_ip: interfaces.tailscale_ip.clone(),
-        public_ip: super::status_metrics::compatible_public_ip(),
+        public_ip: status_public_ip(),
         net_down_kib,
         net_up_kib,
         net_kind: status_net_kind(interface.as_deref()),
@@ -74,8 +74,88 @@ fn status_identity() -> (String, String) {
     let user = std::env::var("USER")
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(status_username_from_effective_uid);
     (host, user)
+}
+
+fn status_username_from_effective_uid() -> String {
+    let uid = unsafe { libc::geteuid() };
+    let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut size = if configured_size > 0 {
+        configured_size as usize
+    } else {
+        16 * 1024
+    };
+    size = size.clamp(1024, 1024 * 1024);
+
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0 as libc::c_char; size];
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == 0 && !result.is_null() {
+            let name = unsafe { std::ffi::CStr::from_ptr((*result).pw_name) }
+                .to_string_lossy()
+                .into_owned();
+            if !name.is_empty() {
+                return name;
+            }
+            break;
+        }
+        if status != libc::ERANGE || size >= 1024 * 1024 {
+            break;
+        }
+        size = (size * 2).min(1024 * 1024);
+    }
+
+    uid.to_string()
+}
+
+fn status_public_ip() -> Option<String> {
+    read_compatible_public_ip(
+        Path::new("/tmp/tmux-powerline-wan-ip"),
+        std::time::SystemTime::now(),
+    )
+}
+
+fn read_compatible_public_ip(path: &Path, now: std::time::SystemTime) -> Option<String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let path_metadata = std::fs::symlink_metadata(path).ok()?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
+    {
+        return None;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES as u64
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o022 != 0
+    {
+        return None;
+    }
+
+    let modified = metadata.modified().ok()?;
+    let mut bytes = Vec::with_capacity(super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1);
+    file.take((super::status_metrics::COMPATIBLE_WAN_CACHE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    super::status_metrics::compatible_public_ip_from_cache(&bytes, modified, now)
 }
 
 fn status_local_date_time() -> (String, String) {
@@ -310,8 +390,13 @@ fn select_status_interface_ipv4s(
 #[cfg(test)]
 mod status_metric_tests {
     use std::net::Ipv4Addr;
+    use std::time::SystemTime;
 
     use super::StatusInterfaceIpv4;
+
+    fn wan_fixture_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("herdr-status-wan-{}-{label}", std::process::id()))
+    }
 
     #[test]
     fn platform_metric_sampler_returns_local_linux_snapshot() {
@@ -323,6 +408,26 @@ mod status_metric_tests {
         assert!(!metrics.username.is_empty());
         assert_eq!(metrics.date.len(), 10);
         assert_eq!(metrics.time.len(), 5);
+    }
+
+    #[test]
+    fn native_identity_lookup_returns_effective_user() {
+        assert!(!super::status_username_from_effective_uid().is_empty());
+    }
+
+    #[test]
+    fn wan_cache_reader_rejects_symlinks() {
+        let target = wan_fixture_path("linux-symlink-target");
+        let link = wan_fixture_path("linux-symlink");
+        std::fs::write(&target, "203.0.113.9\n").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        assert_eq!(
+            super::read_compatible_public_ip(&link, SystemTime::now()),
+            None
+        );
+        std::fs::remove_file(link).expect("remove symlink");
+        std::fs::remove_file(target).expect("remove target");
     }
 
     #[test]
