@@ -1590,10 +1590,7 @@ mod tests {
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         // Status bar occupies row 0; sidebar list starts at y=1.
-        assert_eq!(
-            app.state.workspace_drop_target_at_row(0),
-            None
-        );
+        assert_eq!(app.state.workspace_drop_target_at_row(0), None);
         assert_eq!(
             app.state.workspace_drop_target_at_row(1),
             Some(crate::app::state::WorkspaceDropTarget::Before(0))

@@ -4857,6 +4857,9 @@ mod tests {
             .attached_terminal_id
             .clone();
         app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
         app.state.ensure_test_terminals();
         app.state
             .terminals
