@@ -590,6 +590,7 @@ impl App {
             navigator: state::NavigatorState::default(),
             copy_mode: None,
             sidebar_presentation: state::SidebarPresentationState::default(),
+            sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
             tab_scroll: 0,
@@ -1530,12 +1531,21 @@ impl App {
                     self.request_git_identity_refresh(Instant::now());
                 }
                 let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                let mut sidebar_projection_changed = false;
                 if self.state.agent_panel_sort != agent_panel_sort {
                     self.state.agent_panel_sort = agent_panel_sort;
-                    self.state.workspace_scroll = 0;
+                    sidebar_projection_changed = true;
+                }
+                if self.state.sidebar_agents != config.ui.sidebar.agents
+                    || self.state.sidebar_spaces != config.ui.sidebar.spaces
+                {
+                    sidebar_projection_changed = true;
                 }
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                if sidebar_projection_changed {
+                    self.state.mark_sidebar_projection_changed();
+                }
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
@@ -3064,6 +3074,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
         let mut app = test_app();
+        let previous_revision = app.state.sidebar_projection_revision;
 
         std::fs::write(
             &path,
@@ -3074,7 +3085,8 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(app.state.workspace_scroll, 5);
+        assert_eq!(app.state.workspace_scroll, 0);
+        assert_eq!(app.state.sidebar_projection_revision, previous_revision + 1);
         assert_eq!(
             app.state.sidebar_agents.rows,
             vec![vec![
@@ -3099,6 +3111,7 @@ mod tests {
         assert_eq!(app.state.sidebar_spaces.row_gap, 3);
 
         let previous_agents = app.state.sidebar_agents.clone();
+        let previous_revision = app.state.sidebar_projection_revision;
         std::fs::write(
             &path,
             "[ui.sidebar.agents]\nrows = [[\"agent\"]]\n\n[ui.sidebar.agents.rows_by_agent]\nclaude-code = [[\"terminal_title\"]]\n",
@@ -3107,6 +3120,7 @@ mod tests {
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(app.state.sidebar_agents, previous_agents);
+        assert_eq!(app.state.sidebar_projection_revision, previous_revision);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

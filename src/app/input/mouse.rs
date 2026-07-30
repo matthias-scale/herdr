@@ -597,7 +597,7 @@ impl AppState {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,
                             AgentPanelSort::Priority => AgentPanelSort::Spaces,
                         };
-                        self.workspace_scroll = 0;
+                        self.mark_sidebar_projection_changed();
                         self.mark_session_dirty();
                         return None;
                     }

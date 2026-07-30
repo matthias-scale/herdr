@@ -644,6 +644,8 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) workspace_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
+    /// Global projection revision last reconciled into this attach.
+    pub(crate) projection_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1504,6 +1506,9 @@ pub struct AppState {
     pub navigator: NavigatorState,
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
+    /// Monotonic client-only revision for changes that replace the sidebar row
+    /// projection. Each attach resets its own offsets when it next reconciles.
+    pub(crate) sidebar_projection_revision: u64,
     pub(crate) workspace_picker_forces_spaces_tree: bool,
     pub workspace_scroll: usize,
     pub tab_scroll: usize,
@@ -1658,9 +1663,18 @@ impl AppState {
             &mut self.mobile_switcher_scroll,
             &mut other.mobile_switcher_scroll,
         );
+        std::mem::swap(
+            &mut self.sidebar_presentation.projection_revision,
+            &mut other.projection_revision,
+        );
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
+        if self.sidebar_presentation.projection_revision != self.sidebar_projection_revision {
+            self.workspace_scroll = 0;
+            self.mobile_switcher_scroll = 0;
+            self.sidebar_presentation.projection_revision = self.sidebar_projection_revision;
+        }
         let current_ids = self
             .workspaces
             .iter()
@@ -1692,6 +1706,12 @@ impl AppState {
             }
         }
         self.sidebar_presentation.known_workspace_ids = current_ids;
+    }
+
+    pub(crate) fn mark_sidebar_projection_changed(&mut self) {
+        self.sidebar_projection_revision = self.sidebar_projection_revision.wrapping_add(1);
+        self.workspace_scroll = 0;
+        self.mobile_switcher_scroll = 0;
     }
 
     pub(crate) fn sidebar_shows_spaces_tree(&self) -> bool {
@@ -2002,6 +2022,7 @@ impl AppState {
             navigator: NavigatorState::default(),
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
+            sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
             tab_scroll: 0,

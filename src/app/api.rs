@@ -316,6 +316,9 @@ impl App {
         }
         self.sync_full_lifecycle_authority_detection_pauses();
         if terminal_cwd_reported {
+            if self.state.status_bar_enabled {
+                self.project_status_context_from_cached();
+            }
             self.request_git_identity_refresh(Instant::now());
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
@@ -1477,6 +1480,56 @@ mod tests {
         let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
         assert_eq!(cwd, None);
         assert_eq!(branch, None);
+    }
+
+    #[tokio::test]
+    async fn focused_cwd_report_clears_stale_branch_while_refresh_is_in_flight() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("status-cwd-report");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.status_bar_enabled = true;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        let old_cwd = std::env::current_dir().expect("current directory");
+        let new_cwd = std::env::temp_dir().join(format!(
+            "herdr-status-cwd-report-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&new_cwd).expect("create reported cwd");
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = old_cwd.clone();
+        app.state.status_focused_cwd = Some(old_cwd.clone());
+        app.state.status_git_cwd = Some(old_cwd);
+        app.state.status_git_branch = Some("stale-branch".into());
+        app.state.status_focus_projection_initialized = true;
+        app.git_refresh_in_flight = true;
+
+        app.handle_internal_event(AppEvent::TerminalCwdReported {
+            pane_id,
+            cwd: new_cwd.clone(),
+        });
+
+        assert_eq!(app.state.status_focused_cwd, Some(new_cwd.clone()));
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
+        assert!(app.git_identity_refresh_requested);
+        assert!(app.git_refresh_due_after_in_flight);
+        let _ = std::fs::remove_dir_all(new_cwd);
     }
 
     #[tokio::test]

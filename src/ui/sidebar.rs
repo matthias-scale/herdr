@@ -2244,6 +2244,37 @@ mod tests {
     }
 
     #[test]
+    fn projection_change_resets_scroll_for_each_attached_client() {
+        let mut app = app_with_agents(&["one", "two"]);
+        let mut client_a = SidebarPresentationState {
+            workspace_scroll: 4,
+            mobile_switcher_scroll: 5,
+            ..SidebarPresentationState::default()
+        };
+        let mut client_b = SidebarPresentationState {
+            workspace_scroll: 6,
+            mobile_switcher_scroll: 7,
+            ..SidebarPresentationState::default()
+        };
+
+        app.mark_sidebar_projection_changed();
+        let revision = app.sidebar_projection_revision;
+
+        app.swap_sidebar_presentation(&mut client_a);
+        app.reconcile_sidebar_presentation();
+        app.swap_sidebar_presentation(&mut client_a);
+        app.swap_sidebar_presentation(&mut client_b);
+        app.reconcile_sidebar_presentation();
+        app.swap_sidebar_presentation(&mut client_b);
+
+        for client in [&client_a, &client_b] {
+            assert_eq!(client.workspace_scroll, 0);
+            assert_eq!(client.mobile_switcher_scroll, 0);
+            assert_eq!(client.projection_revision, revision);
+        }
+    }
+
+    #[test]
     fn sidebar_disclosure_resets_on_reconnect() {
         let mut app = app_with_agents(&["one", "two"]);
         app.toggle_workspace_agent_disclosure(1);
