@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -20,12 +20,12 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: folder · branch · device · Herdr build version ·
-/// CPU · memory. The row before the first surviving segment is intentionally blank.
+/// Contents, left to right: branch · device · CPU · memory. The row before the
+/// first surviving segment is intentionally blank.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
-/// first surviving segment. On narrow widths, folder, branch, then device elide
-/// in that order; build version, CPU, and memory remain required.
+/// first surviving segment. On narrow widths, branch then device elide in that
+/// order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -100,9 +100,7 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
 }
 
 pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
-    1 + display_width(&format!(" Herdr v{} ", crate::build_info::version()))
-        + display_width(" CPU 100% ")
-        + display_width(" MEM 9999.9/9999.9 GiB ")
+    1 + display_width(" CPU 100% ") + display_width(" MEM 9999.9/9999.9 GiB ")
 }
 
 fn status_segments(
@@ -112,17 +110,7 @@ fn status_segments(
 ) -> Vec<Segment> {
     let mut out = Vec::new();
 
-    let (cwd, branch) = focused_context(app);
-
-    if let Some(cwd) = cwd {
-        let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 32);
-        out.push(Segment {
-            text: format!("  {display} "),
-            style: Style::default().fg(p.mauve),
-            preserve_bg: false,
-            elide_rank: Some(1),
-        });
-    }
+    let (_, branch) = focused_context(app);
 
     if let Some(branch) = branch {
         let branch = shorten_branch(&branch, 20);
@@ -130,7 +118,7 @@ fn status_segments(
             text: format!("  {branch} "),
             style: Style::default().fg(p.yellow),
             preserve_bg: false,
-            elide_rank: Some(2),
+            elide_rank: Some(1),
         });
     }
 
@@ -138,14 +126,7 @@ fn status_segments(
         text: format!(" {} ", metrics.hostname),
         style: Style::default().fg(p.green),
         preserve_bg: false,
-        elide_rank: Some(3),
-    });
-
-    out.push(Segment {
-        text: format!(" Herdr v{} ", crate::build_info::version()),
-        style: Style::default().fg(p.blue),
-        preserve_bg: false,
-        elide_rank: None,
+        elide_rank: Some(2),
     });
 
     out.push(Segment {
@@ -205,72 +186,6 @@ pub(crate) fn focused_context(app: &AppState) -> (Option<PathBuf>, Option<String
         None
     };
     (cwd, branch)
-}
-
-/// Both separators are accepted everywhere: Windows paths use `\`, and a
-/// Windows session attached to a Unix server still renders `/` paths.
-const PATH_SEPARATORS: [char; 2] = ['/', '\\'];
-
-fn shorten_path(path: &Path, home: Option<&Path>, max_width: usize) -> String {
-    let raw = path.to_string_lossy();
-    let display = if let Some(home) = home {
-        if let Ok(rest) = path.strip_prefix(home) {
-            // Powerline `pwd` collapses $HOME to `~` (keeping the slash as `~/…`).
-            let suffix = rest.to_string_lossy();
-            if suffix.is_empty() {
-                "~".into()
-            } else {
-                format!("~/{}", suffix.trim_start_matches(['/', '\\']))
-            }
-        } else {
-            raw.into_owned()
-        }
-    } else {
-        raw.into_owned()
-    };
-    if display_width(&display) <= max_width {
-        return display;
-    }
-    // Left-truncate like powerline: keep the trailing path, prefix with `…/`.
-    left_truncate_path(&display, max_width)
-}
-
-fn left_truncate_path(display: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    // Never shorter than the final path component if possible.
-    let file = display.rsplit(PATH_SEPARATORS).next().unwrap_or(display);
-    let file_w = display_width(file);
-    if file_w >= max_width {
-        return truncate_end(file, max_width);
-    }
-    let ellipsis = "…/";
-    let ellipsis_w = display_width(ellipsis);
-    if ellipsis_w + file_w >= max_width {
-        return truncate_end(file, max_width);
-    }
-    let budget = max_width.saturating_sub(ellipsis_w);
-    // Take a suffix of `display` that fits in budget, then force a clean `…/rest`.
-    let mut width = 0usize;
-    let mut start = display.len();
-    for (idx, ch) in display.char_indices().rev() {
-        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_w > budget {
-            break;
-        }
-        width += ch_w;
-        start = idx;
-    }
-    let mut suffix = &display[start..];
-    // Drop a partial leading component so we always start on a path boundary when possible.
-    if let Some(separator) = suffix.find(PATH_SEPARATORS) {
-        suffix = &suffix[separator + 1..];
-    }
-    if suffix.is_empty() {
-        suffix = file;
-    }
-    format!("{ellipsis}{suffix}")
 }
 
 fn shorten_branch(branch: &str, max_width: usize) -> String {
@@ -592,21 +507,8 @@ mod tests {
     }
 
     #[test]
-    fn shorten_path_uses_tilde_for_home() {
-        // AC4: cwd parity uses immutable state captured before rendering.
-        let home = "/tmp/herdr-status-home-fixture";
-        let path = PathBuf::from(format!("{home}/Code/personal/home"));
-        let display = shorten_path(&path, Some(Path::new(home)), 80);
-        assert!(
-            display.starts_with("~/") || display.starts_with("~\\"),
-            "expected tilde-shortened path, got {display}"
-        );
-        assert!(display.contains("Code"));
-    }
-
-    #[test]
     fn required_metrics_survive_optional_segment_elision() {
-        // Build version and CPU/MEM are required while other context elides by rank.
+        // CPU/MEM are required while branch and device elide by rank.
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
@@ -622,12 +524,11 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("MEM    8.0/  16.0 GiB"));
         assert!(rendered.contains("CPU  12%"));
-        assert!(rendered.contains(&format!("Herdr v{}", crate::build_info::version())));
         assert!(!rendered.contains("feature/very-long"));
     }
 
     #[test]
-    fn review_findings_narrow_desktop_never_truncates_build_version() {
+    fn review_findings_narrow_desktop_keeps_required_metrics() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut app = AppState::test_new();
@@ -657,10 +558,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(
-            rendered.contains(&format!("Herdr v{}", crate::build_info::version())),
-            "{rendered}"
-        );
+        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
     }
 
     #[test]
@@ -690,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_desktop_never_truncates_build_version() {
+    fn narrow_desktop_never_truncates_required_metrics() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut app = AppState::test_new();
@@ -734,10 +633,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(
-            rendered.contains(&format!("Herdr v{}", crate::build_info::version())),
-            "{rendered}"
-        );
+        assert!(rendered.contains("CPU 100%"), "{rendered}");
+        assert!(rendered.contains("MEM 9999.9/9999.9 GiB"), "{rendered}");
         assert!(
             rendered.starts_with(' '),
             "left side must stay blank: {rendered:?}"
@@ -772,10 +669,7 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
         assert!(rendered.contains("CPU  12%"), "{rendered}");
-        assert!(
-            rendered.contains(&format!("Herdr v{}", crate::build_info::version())),
-            "{rendered}"
-        );
+        assert!(!rendered.contains("Herdr v"), "{rendered}");
     }
 
     #[test]
@@ -948,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn status_elision_drops_folder_branch_then_device() {
+    fn status_elision_drops_branch_then_device() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
@@ -962,7 +856,7 @@ mod tests {
             full.iter()
                 .filter_map(|segment| segment.elide_rank)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![1, 2]
         );
 
         let optional_width = full
@@ -978,10 +872,9 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(!rendered.contains("~/work/status"), "{rendered}");
         assert!(!rendered.contains("feature/native-status"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
-        assert!(rendered.contains("Herdr v"), "{rendered}");
+        assert!(!rendered.contains("Herdr v"), "{rendered}");
         assert!(rendered.contains("CPU  12%"), "{rendered}");
         assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
     }
@@ -999,21 +892,17 @@ mod tests {
         app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_focused_cwd = app.status_git_cwd.clone();
         app.status_git_branch = Some("feature/native-status".into());
-        app.status_home_dir = Some(PathBuf::from("/home/test"));
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let segments = status_segments(&app, &metrics, &app.palette);
-        assert_eq!(segments.len(), 6, "only the six visible contract fields");
+        assert_eq!(segments.len(), 4, "only the four visible contract fields");
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        let version = format!("Herdr v{}", crate::build_info::version());
         let ordered = [
-            "~/work/status",
             "feature/native-stat",
             "testhost",
-            version.as_str(),
             "CPU  12%",
             "MEM    8.0/  16.0 GiB",
         ];
@@ -1036,21 +925,14 @@ mod tests {
             "workspace:",
             "tab:",
             "pane:",
+            "~/work/status",
+            "Herdr v",
             "88%",
             "2026-01-02",
             "03:04",
         ] {
             assert!(!rendered.contains(removed), "{removed}: {rendered}");
         }
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains("~/work/status"))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.mauve)
-        );
         assert_eq!(
             segments
                 .iter()
@@ -1068,15 +950,6 @@ mod tests {
                 .style
                 .fg,
             Some(app.palette.green)
-        );
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains("Herdr v"))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.blue)
         );
         assert_eq!(
             segments

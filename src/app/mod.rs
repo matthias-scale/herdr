@@ -234,20 +234,6 @@ fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> boo
     auto_updates_enabled(no_session) && check_enabled
 }
 
-/// Home directory used to collapse the status-row path to `~`.
-/// Windows shells normally expose the profile as `USERPROFILE`, not `HOME`.
-fn status_home_dir() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    const KEYS: &[&str] = &["USERPROFILE", "HOME"];
-    #[cfg(not(windows))]
-    const KEYS: &[&str] = &["HOME"];
-
-    KEYS.iter()
-        .filter_map(std::env::var_os)
-        .find(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-}
-
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
     if no_session {
         return std::collections::HashMap::new();
@@ -548,7 +534,6 @@ impl App {
         let mut state = AppState {
             view_observed_at: Instant::now(),
             status_metrics: None,
-            status_home_dir: status_home_dir(),
             status_git_cwd: None,
             status_git_branch: None,
             status_focused_cwd: None,

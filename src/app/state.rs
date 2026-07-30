@@ -1445,7 +1445,6 @@ pub struct AppState {
     pub(crate) view_observed_at: Instant,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
-    pub(crate) status_home_dir: Option<std::path::PathBuf>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
     pub(crate) status_git_branch: Option<String>,
     /// Runtime-resolved cwd of the focused pane, projected from the same
@@ -1956,7 +1955,6 @@ impl AppState {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),
             }),
-            status_home_dir: Some(std::path::PathBuf::from("/home/test")),
             status_git_cwd: None,
             status_git_branch: None,
             status_focused_cwd: None,
