@@ -1530,6 +1530,8 @@ impl App {
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 if self.state.status_bar_enabled && !status_bar_was_enabled {
                     self.project_status_context_from_cached();
+                    self.state.status_git_cwd = None;
+                    self.state.status_git_branch = None;
                     self.request_git_identity_refresh(Instant::now());
                 }
                 self.state.agent_panel_sort =
@@ -2945,6 +2947,57 @@ mod tests {
         let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
         assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        assert!(app.git_identity_refresh_requested);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn status_context_reenable_invalidates_same_cwd_stale_branch_without_io() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-enable-status-same-cwd");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[ui.status_bar]\nenabled = true\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut startup_config = Config::default();
+        startup_config.ui.status_bar.enabled = false;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &startup_config,
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("reload-status-same-cwd")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .terminal_id(pane)
+            .expect("focused terminal")
+            .clone();
+        app.state.terminals.get_mut(&terminal).unwrap().cwd = "/repo".into();
+        let (runtime, _input_rx) = TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal, runtime);
+        app.last_focus = Some((0, pane));
+        assert!(app.sync_status_context_before_render());
+        app.state.status_git_cwd = Some("/repo".into());
+        app.state.status_git_branch = Some("old-branch".into());
+        app.state.workspaces[0].cached_git_branch = Some("new-branch".into());
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo")));
+        assert_eq!(branch, None);
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
         assert!(app.git_identity_refresh_requested);
 
