@@ -842,7 +842,10 @@ mod tests {
     }
 
     fn recv_server_event(receiver: &mut mpsc::Receiver<ServerEvent>, context: &str) -> ServerEvent {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        // These tests assert transport behavior, not a one-second latency SLO.
+        // Keep the wait bounded while allowing full-suite socket contention to
+        // delay decoding the 1 MiB boundary payload.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match receiver.try_recv() {
                 Ok(event) => return event,
