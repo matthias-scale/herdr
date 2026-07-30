@@ -58,7 +58,7 @@ pub(crate) use self::sidebar::{
 };
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 #[cfg(test)]
-pub(crate) use self::status::focused_status_context as focused_status_context_for_test;
+pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
     render_toast_notification, toast_notification_rect,
@@ -1104,7 +1104,7 @@ mod tests {
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
 
-        // Wide enough that identity + metrics fit despite a long real cwd/branch.
+        // Wide enough that context, build identity, and metrics all fit.
         let width = 220u16;
         compute_view(&mut app, Rect::new(0, 0, width, 24));
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
@@ -1126,11 +1126,16 @@ mod tests {
             row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
             "status bar missing resource metrics: {row0:?}"
         );
-        assert!(!row0.contains("testuser"), "{row0:?}");
         assert!(
-            row0.contains(&crate::build_info::version()),
-            "status bar missing Herdr build version: {row0:?}"
+            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "status bar missing build identity: {row0:?}"
         );
+        assert!(!row0.contains("testuser"), "{row0:?}");
+        for hidden_identity in ["session:", "workspace:", "tab:", "pane:"] {
+            assert!(!row0.contains(hidden_identity), "{row0:?}");
+        }
+        assert!(!row0.contains("↓"), "{row0:?}");
+        assert!(!row0.contains("↑"), "{row0:?}");
         let first_content = row0
             .char_indices()
             .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
@@ -1160,8 +1165,12 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
-        assert!(row0.contains("CPU 12%"), "{row0:?}");
+        assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
+        assert!(row0.contains("CPU  12%"), "{row0:?}");
+        assert!(
+            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "{row0:?}"
+        );
     }
 
     #[test]
@@ -1187,8 +1196,12 @@ mod tests {
                 app.view.status_bar_rect,
                 app.view.status_bar_rect.y,
             );
-            assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
-            assert!(row0.contains("CPU 12%"), "{row0:?}");
+            assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
+            assert!(row0.contains("CPU  12%"), "{row0:?}");
+            assert!(
+                row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+                "{row0:?}"
+            );
             rendered.push((
                 "sampled metrics",
                 width,
@@ -1209,8 +1222,12 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM --/-- GiB"), "{row0:?}");
-        assert!(row0.contains("CPU --%"), "{row0:?}");
+        assert!(row0.contains("MEM     --/    -- GiB"), "{row0:?}");
+        assert!(row0.contains("CPU  --%"), "{row0:?}");
+        assert!(
+            row0.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "{row0:?}"
+        );
         rendered.push((
             "unavailable fallback",
             width,

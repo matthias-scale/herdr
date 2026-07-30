@@ -1166,6 +1166,8 @@ impl App {
                         frame,
                     );
                 })?;
+                self.status_metrics_visible =
+                    self.state.view.status_bar_rect != ratatui::layout::Rect::default();
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
                         &self.state,

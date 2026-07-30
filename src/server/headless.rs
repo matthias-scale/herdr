@@ -4096,7 +4096,10 @@ impl HeadlessServer {
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
         let has_app_client = self.has_app_client();
-        self.app.status_metrics_visible = self.has_renderable_status_target();
+        // A client resize updates its announced geometry before that geometry
+        // has produced a frame. Wait for the pending render to finish so a
+        // narrow-to-wide resize cannot start collection for an unseen row.
+        self.app.status_metrics_visible = !geometry_dirty && self.has_renderable_status_target();
         let mut changed = if has_app_client {
             self.app.take_due_agent_activity_refresh(now)
         } else {
@@ -5947,7 +5950,7 @@ next_tab = ""
     }
 
     #[test]
-    fn attached_app_client_starts_status_metric_sampling_immediately() {
+    fn attached_app_client_starts_status_metric_sampling_after_first_render() {
         let mut server = test_headless_server();
         server.app.status_metric_refresh_enabled = true;
         let (writer, _control_rx, _render_rx) = test_client_writer();
@@ -5963,13 +5966,52 @@ next_tab = ""
             writer,
         }));
 
+        server.handle_scheduled_tasks_headless(Instant::now(), true);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        server.render_and_stream();
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
         assert!(server.app.status_metric_refresh.in_flight());
     }
 
     #[test]
-    fn review_findings_status_sampling_tracks_renderable_clients() {
+    fn narrow_to_wide_resize_waits_for_new_geometry_frame_before_sampling() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 40,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+        }));
+        server.handle_scheduled_tasks_headless(Instant::now(), true);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn status_sampling_tracks_renderable_clients() {
         let mut server = test_headless_server();
         server.app.status_metric_refresh_enabled = true;
         let (writer, _control_rx, _render_rx) = test_client_writer();

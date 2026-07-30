@@ -226,13 +226,12 @@ impl App {
         let mut changed = self.take_due_agent_activity_refresh(now);
         let mut resized = false;
 
-        changed |= self.schedule_status_metrics(now);
-
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
             changed |= resized;
             self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
         }
+        changed |= self.schedule_status_metrics_after_resize_poll(now, resized);
 
         if self
             .config_diagnostic_deadline
@@ -345,6 +344,15 @@ impl App {
         }
         self.agent_activity_refresh_deadline = None;
         true
+    }
+
+    fn schedule_status_metrics_after_resize_poll(&mut self, now: Instant, resized: bool) -> bool {
+        if resized {
+            // The previous frame no longer proves that the status row is
+            // renderable. The next render restores visibility when appropriate.
+            self.status_metrics_visible = false;
+        }
+        self.schedule_status_metrics(now)
     }
 
     /// Drop a snapshot that outlived its staleness window so the status row
@@ -728,6 +736,25 @@ mod tests {
             app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             None
         );
+    }
+
+    #[test]
+    fn resize_invalidates_renderability_before_metric_sampling() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let now = Instant::now();
+        app.status_metrics_visible = true;
+        app.status_metric_refresh =
+            crate::platform::status_metrics::StatusMetricRefresh::immediate(now);
+
+        assert!(!app.schedule_status_metrics_after_resize_poll(now, true));
+        assert!(!app.status_metrics_visible);
+        assert!(!app.status_metric_refresh.in_flight());
     }
 
     #[test]

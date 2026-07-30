@@ -258,6 +258,17 @@ mod tests {
         format!("{:x}", Sha256::digest(encoded))
     }
 
+    fn frame_rect_text(frame: &crate::protocol::FrameData, area: Rect) -> String {
+        (area.y..area.y + area.height)
+            .flat_map(|y| {
+                let row_start = y as usize * frame.width as usize;
+                (area.x..area.x + area.width)
+                    .map(move |x| frame.cells[row_start + x as usize].symbol.as_str())
+                    .chain(std::iter::once("\n"))
+            })
+            .collect()
+    }
+
     fn frame_text(frame: &crate::protocol::FrameData) -> String {
         frame
             .cells
@@ -320,6 +331,14 @@ mod tests {
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
+        let status = frame_rect_text(&frame, app.view.status_bar_rect);
+        assert!(status.starts_with(' '), "{status:?}");
+        assert!(status.contains("CPU  12%"), "{status:?}");
+        assert!(status.contains("MEM    8.0/  16.0 GiB"), "{status:?}");
+        assert!(
+            status.trim_end().ends_with("MEM    8.0/  16.0 GiB"),
+            "{status:?}"
+        );
         let text = frame_text(&frame);
         assert!(text
             .lines()
@@ -327,10 +346,6 @@ mod tests {
         assert!(!text
             .lines()
             .any(|line| line.trim_start().starts_with("agents")));
-        assert_eq!(
-            frame_digest(&frame),
-            "0b38ae503f29887a9068704b6f7c5fcbf503138bfdf7ee3fe65fbcb7cb947882"
-        );
     }
 
     #[tokio::test]

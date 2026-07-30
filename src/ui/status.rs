@@ -99,22 +99,10 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
     segments
 }
 
-pub(crate) fn minimum_required_status_width(app: &AppState) -> usize {
-    // Native collectors derive memory from u64 byte counters, so this is the
-    // longest authoritative GiB value they can produce. Using fixed maxima
-    // keeps the desktop/mobile cutoff independent of each sampled snapshot.
-    const MAX_NATIVE_MEMORY_GIB: f32 = u64::MAX as f32 / 1_073_741_824.0;
-    let maximum = StatusMetrics {
-        cpu_percent: Some(100),
-        mem_used_gib: Some(MAX_NATIVE_MEMORY_GIB),
-        mem_total_gib: Some(MAX_NATIVE_MEMORY_GIB),
-        hostname: String::new(),
-    };
-    status_segments(app, &maximum, &app.palette)
-        .iter()
-        .filter(|segment| segment.elide_rank.is_none())
-        .map(|segment| display_width(&segment.text))
-        .sum()
+pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
+    1 + display_width(&format!(" Herdr v{} ", crate::build_info::version()))
+        + display_width(" CPU 100% ")
+        + display_width(" MEM 9999.9/9999.9 GiB ")
 }
 
 fn status_segments(
@@ -124,7 +112,7 @@ fn status_segments(
 ) -> Vec<Segment> {
     let mut out = Vec::new();
 
-    let (cwd, branch) = focused_status_context(app);
+    let (cwd, branch) = focused_context(app);
 
     if let Some(cwd) = cwd {
         let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 32);
@@ -154,7 +142,7 @@ fn status_segments(
     });
 
     out.push(Segment {
-        text: format!(" Herdr {} ", crate::build_info::version()),
+        text: format!(" Herdr v{} ", crate::build_info::version()),
         style: Style::default().fg(p.blue),
         preserve_bg: false,
         elide_rank: None,
@@ -163,16 +151,25 @@ fn status_segments(
     out.push(Segment {
         text: metrics
             .cpu_percent
-            .map(|cpu| format!(" CPU {cpu}% "))
-            .unwrap_or_else(|| " CPU --% ".into()),
+            .filter(|cpu| *cpu <= 100)
+            .map(|cpu| format!(" CPU {cpu:>3}% "))
+            .unwrap_or_else(|| " CPU  --% ".into()),
         style: Style::default().fg(p.red),
         preserve_bg: false,
         elide_rank: None,
     });
 
     let memory = match (metrics.mem_used_gib, metrics.mem_total_gib) {
-        (Some(used), Some(total)) => format!(" MEM {used:.1}/{total:.1} GiB "),
-        _ => " MEM --/-- GiB ".into(),
+        (Some(used), Some(total))
+            if used.is_finite()
+                && total.is_finite()
+                && used >= 0.0
+                && total >= used
+                && total <= 9_999.9 =>
+        {
+            format!(" MEM {used:>6.1}/{total:>6.1} GiB ")
+        }
+        _ => " MEM     --/    -- GiB ".into(),
     };
     out.push(Segment {
         text: memory,
@@ -183,7 +180,7 @@ fn status_segments(
     out
 }
 
-pub(crate) fn focused_status_context(app: &AppState) -> (Option<PathBuf>, Option<String>) {
+pub(crate) fn focused_context(app: &AppState) -> (Option<PathBuf>, Option<String>) {
     let Some(ws_idx) = app.active else {
         return (None, None);
     };
@@ -623,9 +620,9 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("MEM 8.0/16.0 GiB"));
-        assert!(rendered.contains("CPU 12%"));
-        assert!(rendered.contains(&crate::build_info::version()));
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"));
+        assert!(rendered.contains("CPU  12%"));
+        assert!(rendered.contains(&format!("Herdr v{}", crate::build_info::version())));
         assert!(!rendered.contains("feature/very-long"));
     }
 
@@ -661,7 +658,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains(&format!("Herdr {}", crate::build_info::version())),
+            rendered.contains(&format!("Herdr v{}", crate::build_info::version())),
             "{rendered}"
         );
     }
@@ -692,6 +689,61 @@ mod tests {
         assert!(segment_width(&required) <= unavailable_width);
     }
 
+    #[test]
+    fn narrow_desktop_never_truncates_build_version() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 0;
+        let required = minimum_required_status_width(&app) as u16;
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: StatusMetrics {
+                cpu_percent: Some(100),
+                mem_used_gib: Some(9_999.9),
+                mem_total_gib: Some(9_999.9),
+                hostname: "wide-metrics".into(),
+            },
+            sampled_at: std::time::Instant::now(),
+        });
+        assert_eq!(
+            minimum_required_status_width(&app) as u16,
+            required,
+            "live samples must not move the desktop/mobile breakpoint"
+        );
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required - 1, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Mobile);
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Desktop);
+        let mut terminal = Terminal::new(TestBackend::new(required, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, required, 1)))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "{rendered}"
+        );
+        assert!(
+            rendered.starts_with(' '),
+            "left side must stay blank: {rendered:?}"
+        );
+    }
+
     fn assert_long_context_fits_status_row(cwd: &str, branch: &str) {
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -718,8 +770,12 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
-        assert!(rendered.contains("CPU 12%"), "{rendered}");
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
+        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(
+            rendered.contains(&format!("Herdr v{}", crate::build_info::version())),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -760,7 +816,7 @@ mod tests {
         app.status_git_cwd = Some(PathBuf::from("/repo/nested"));
         app.status_git_branch = Some("nested-branch".into());
 
-        let (cwd, branch) = focused_status_context(&app);
+        let (cwd, branch) = focused_context(&app);
 
         assert_eq!(cwd, Some(PathBuf::from("/repo/nested")));
         assert_eq!(branch.as_deref(), Some("nested-branch"));
@@ -803,7 +859,7 @@ mod tests {
 
         assert!(app.focus_pane_in_workspace(0, nested));
         assert!(app.sync_status_focused_cwd(&runtimes));
-        let (cwd, branch) = focused_status_context(&app);
+        let (cwd, branch) = focused_context(&app);
 
         assert_eq!(app.status_focused_cwd, Some(nested_cwd.clone()));
         assert_eq!(cwd, Some(nested_cwd));
@@ -820,7 +876,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
 
-        let (cwd, branch) = focused_status_context(&app);
+        let (cwd, branch) = focused_context(&app);
 
         assert_eq!(cwd, Some(PathBuf::from("/repo")));
         assert_eq!(branch.as_deref(), Some("workspace-root"));
@@ -835,8 +891,41 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("MEM --/-- GiB"));
-        assert!(rendered.contains("CPU --%"));
+        assert!(rendered.contains("MEM     --/    -- GiB"));
+        assert!(rendered.contains("CPU  --%"));
+    }
+
+    #[test]
+    fn status_metrics_outside_bounded_display_contract_use_fallbacks() {
+        let app = AppState::test_new();
+        let baseline = status_segments(
+            &app,
+            &StatusMetrics {
+                cpu_percent: Some(12),
+                mem_used_gib: Some(8.0),
+                mem_total_gib: Some(16.0),
+                hostname: "testhost".into(),
+            },
+            &app.palette,
+        );
+        let metrics = StatusMetrics {
+            cpu_percent: Some(101),
+            mem_used_gib: Some(10_000.0),
+            mem_total_gib: Some(10_000.0),
+            hostname: "testhost".into(),
+        };
+        let rendered = status_segments(&app, &metrics, &app.palette)
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("CPU  --%"), "{rendered}");
+        assert!(rendered.contains("MEM     --/    -- GiB"), "{rendered}");
+        let fallback = status_segments(&app, &metrics, &app.palette);
+        assert_eq!(
+            segment_width(&baseline),
+            segment_width(&fallback),
+            "metric values and fallbacks must not shift or re-elide the row"
+        );
     }
 
     #[test]
@@ -892,12 +981,9 @@ mod tests {
         assert!(!rendered.contains("~/work/status"), "{rendered}");
         assert!(!rendered.contains("feature/native-status"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
-        assert!(
-            rendered.contains(&crate::build_info::version()),
-            "{rendered}"
-        );
-        assert!(rendered.contains("CPU 12%"), "{rendered}");
-        assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
+        assert!(rendered.contains("Herdr v"), "{rendered}");
+        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
     }
 
     #[test]
@@ -917,19 +1003,19 @@ mod tests {
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let segments = status_segments(&app, &metrics, &app.palette);
+        assert_eq!(segments.len(), 6, "only the six visible contract fields");
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        let build_version = crate::build_info::version();
-
+        let version = format!("Herdr v{}", crate::build_info::version());
         let ordered = [
             "~/work/status",
             "feature/native-stat",
             "testhost",
-            build_version.as_str(),
-            "CPU 12%",
-            "MEM 8.0/16.0 GiB",
+            version.as_str(),
+            "CPU  12%",
+            "MEM    8.0/  16.0 GiB",
         ];
         let mut previous = 0;
         for value in ordered {
@@ -946,22 +1032,16 @@ mod tests {
             "203.0.113.10",
             "↓",
             "↑",
+            "session:",
+            "workspace:",
+            "tab:",
+            "pane:",
             "88%",
             "2026-01-02",
             "03:04",
-            "session:",
         ] {
             assert!(!rendered.contains(removed), "{removed}: {rendered}");
         }
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains(&build_version))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.blue)
-        );
         assert_eq!(
             segments
                 .iter()
@@ -988,6 +1068,15 @@ mod tests {
                 .style
                 .fg,
             Some(app.palette.green)
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .find(|segment| segment.text.contains("Herdr v"))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.blue)
         );
         assert_eq!(
             segments
