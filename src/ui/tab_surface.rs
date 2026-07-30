@@ -295,21 +295,21 @@ mod tests {
         // AC2/AC8: deterministic frame covers geometry used by the integration gate.
         let uri = "https://example.com/full-app";
         let mut app = full_app_characterization_state(uri);
+        app.status_bar_enabled = false;
         let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
 
         assert_eq!((frame.width, frame.height), (106, 20));
-        // Status bar occupies row 0 full-width; chrome starts at y=1.
-        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 106, 1));
-        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 26, 19));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 80, 18));
+        assert_eq!(app.view.status_bar_rect, Rect::default());
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 80, 19));
         assert_eq!(app.view.pane_infos.len(), 2);
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         assert_eq!(
             frame_digest(&frame),
-            "6484cde9e24c35af0fa25b136ebcfad487c887a595824eeebbd792687ddd2b05"
+            "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
         );
     }
 

@@ -1523,14 +1523,6 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
-                let status_bar_was_enabled = self.state.status_bar_enabled;
-                self.state.status_bar_enabled = config.ui.status_bar.enabled;
-                if self.state.status_bar_enabled && !status_bar_was_enabled {
-                    self.project_status_context_from_cached();
-                    self.state.status_git_cwd = None;
-                    self.state.status_git_branch = None;
-                    self.request_git_identity_refresh(Instant::now());
-                }
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
@@ -1542,6 +1534,14 @@ impl App {
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
+                let status_bar_was_enabled = self.state.status_bar_enabled;
+                self.state.status_bar_enabled = config.ui.status_bar.enabled;
+                if self.state.status_bar_enabled && !status_bar_was_enabled {
+                    self.project_status_context_from_cached();
+                    self.state.status_git_cwd = None;
+                    self.state.status_git_branch = None;
+                    self.request_git_identity_refresh(Instant::now());
+                }
             }
         }
 
