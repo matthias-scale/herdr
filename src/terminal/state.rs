@@ -1365,6 +1365,22 @@ impl TerminalState {
             })
     }
 
+    pub(crate) fn agent_session_matches(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_id: &str,
+    ) -> bool {
+        self.current_session_identity_for_persistence().is_some_and(
+            |(current_source, current_agent, current_kind, current_value)| {
+                current_source == source
+                    && current_agent == agent_label
+                    && current_kind == crate::agent_resume::AgentSessionRefKind::Id
+                    && current_value == session_id
+            },
+        )
+    }
+
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
         self.current_session_identity_for_persistence().is_some_and(
             |(current_source, current_agent, _, _)| {

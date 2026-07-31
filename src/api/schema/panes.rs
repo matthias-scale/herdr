@@ -352,6 +352,8 @@ pub struct PaneReportMetadataParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applies_to_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,

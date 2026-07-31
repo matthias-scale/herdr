@@ -2924,6 +2924,21 @@ mod tests {
         assert!(cmd.get_env("CODEX_THREAD_ID").is_none());
     }
 
+    #[test]
+    fn pane_launch_env_binds_hooks_to_owning_herdr_binary() {
+        let mut cmd = CommandBuilder::new("shell");
+
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        assert_eq!(
+            cmd.get_env(crate::integration::HERDR_BIN_PATH_ENV_VAR),
+            std::env::current_exe()
+                .ok()
+                .as_deref()
+                .map(std::path::Path::as_os_str)
+        );
+    }
+
     #[tokio::test]
     async fn cwd_returns_accepted_report_without_rechecking_filesystem() {
         let stamp = std::time::SystemTime::now()

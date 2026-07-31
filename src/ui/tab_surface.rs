@@ -340,9 +340,7 @@ mod tests {
             "{status:?}"
         );
         let text = frame_text(&frame);
-        assert!(text
-            .lines()
-            .any(|line| line.trim_start().starts_with("spaces")));
+        assert!(text.lines().any(|line| line.contains("Spaces")));
         assert!(!text
             .lines()
             .any(|line| line.trim_start().starts_with("agents")));

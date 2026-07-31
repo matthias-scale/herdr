@@ -1293,7 +1293,7 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
 
 fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+        eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--agent-session-id ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
         return Ok(2);
     };
 
@@ -1301,6 +1301,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let mut source = None;
     let mut agent = None;
     let mut applies_to_source = None;
+    let mut agent_session_id = None;
     let mut title = None;
     let mut display_agent = None;
     let mut state_labels = std::collections::HashMap::new();
@@ -1336,6 +1337,14 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
                     return Ok(2);
                 };
                 applies_to_source = Some(value.clone());
+                index += 2;
+            }
+            "--agent-session-id" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --agent-session-id");
+                    return Ok(2);
+                };
+                agent_session_id = Some(value.clone());
                 index += 2;
             }
             "--title" => {
@@ -1470,6 +1479,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         source,
         agent,
         applies_to_source,
+        agent_session_id,
         title,
         display_agent,
         state_labels,

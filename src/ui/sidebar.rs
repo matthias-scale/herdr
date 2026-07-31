@@ -1,7 +1,7 @@
 mod tokens;
 
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -12,12 +12,12 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, Palette};
+use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
-const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
+const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 
@@ -50,32 +50,6 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, _split_ratio: f32) -> (Rect,
     // Both legacy callers receive the same unified content rectangle. The
     // sidebar no longer has independent Spaces and Agents sections.
     (content, content)
-}
-
-fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
-    match sort {
-        AgentPanelSort::Spaces => "grouped",
-        AgentPanelSort::Priority => "priority",
-    }
-}
-
-pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect {
-    agent_panel_header_label_rect(area, agent_panel_sort_label(sort))
-}
-
-fn agent_panel_header_label_rect(area: Rect, label: &str) -> Rect {
-    if area.width == 0 || area.height == 0 {
-        return Rect::default();
-    }
-
-    let width = display_width_u16(label).min(area.width);
-    Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
-}
-
-fn active_agent_view_label(app: &AppState) -> Option<&str> {
-    app.agent_view_override
-        .as_ref()
-        .map(|view| view.label.as_deref().unwrap_or("filtered"))
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -532,8 +506,7 @@ pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect 
     }
 
     let body_y = area.y.saturating_add(WORKSPACE_SECTION_HEADER_ROWS);
-    let footer_y = area.y + area.height.saturating_sub(1);
-    let body_height = footer_y.saturating_sub(body_y);
+    let body_height = area.y.saturating_add(area.height).saturating_sub(body_y);
     let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
     Rect::new(area.x, body_y, body_width, body_height)
 }
@@ -1089,7 +1062,46 @@ pub(super) fn render_sidebar(
 
     let (ws_area, _) = expanded_sidebar_sections(area, app.sidebar_section_split);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_sidebar_toggle(app, frame, area, false, p);
+    render_sidebar_header(app, frame, area, p);
+}
+
+fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Palette) {
+    if area.width <= 1 || area.height == 0 {
+        return;
+    }
+    let toggle = expanded_sidebar_toggle_rect(area);
+    let new_space = sidebar_header_new_space_rect(area);
+    let overflow = sidebar_header_overflow_rect(area);
+    frame.render_widget(
+        Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
+        toggle,
+    );
+    let title_x = toggle.x.saturating_add(toggle.width).saturating_add(1);
+    let title_right = new_space.x.saturating_sub(1);
+    if title_right > title_x {
+        let title = if app.sidebar_shows_spaces_tree() {
+            "Spaces"
+        } else {
+            "Agents"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                title,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(title_x, area.y, title_right - title_x, 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled("＋", Style::default().fg(p.accent))),
+        new_space,
+    );
+    let overflow_style = if app.global_menu_attention_badge_visible() {
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.overlay0)
+    };
+    frame.render_widget(Paragraph::new(Span::styled("…", overflow_style)), overflow);
 }
 
 fn resolved_token_spans(
@@ -1311,35 +1323,7 @@ fn render_workspace_list(
         _ => None,
     };
 
-    let list_bottom = area.y + area.height.saturating_sub(1);
-    if area.height > 0 {
-        let header = if app.sidebar_shows_spaces_tree() {
-            " spaces".to_string()
-        } else {
-            " agents".to_string()
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                header,
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            )])),
-            Rect::new(area.x, area.y, area.width, 1),
-        );
-        let control_label = active_agent_view_label(app)
-            .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                control_label,
-                Style::default().fg(if app.agent_view_override.is_some() {
-                    p.accent
-                } else {
-                    p.overlay0
-                }),
-            ))
-            .alignment(Alignment::Right),
-            agent_panel_header_label_rect(area, control_label),
-        );
-    }
+    let list_bottom = area.y + area.height;
 
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
@@ -1586,31 +1570,6 @@ fn render_workspace_list(
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
-
-    if app.mouse_capture && list_bottom > area.y {
-        let new_rect = app.sidebar_new_button_rect();
-        frame.render_widget(
-            Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
-            new_rect,
-        );
-
-        let menu_rect = app.global_launcher_rect();
-        let menu_line = if app.global_menu_attention_badge_visible() {
-            Line::from(vec![
-                Span::styled(
-                    "● ",
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("menu", Style::default().fg(p.overlay0)),
-            ])
-        } else {
-            Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
-        };
-        frame.render_widget(
-            Paragraph::new(menu_line).alignment(Alignment::Right),
-            menu_rect,
-        );
-    }
 }
 
 fn render_agent_card(
@@ -1801,12 +1760,21 @@ pub(crate) fn expanded_sidebar_toggle_rect(area: Rect) -> Rect {
     if area.width <= 1 || area.height == 0 {
         return Rect::default();
     }
-    Rect::new(
-        area.x + area.width.saturating_sub(2),
-        area.y + area.height.saturating_sub(1),
-        1,
-        1,
-    )
+    Rect::new(area.x, area.y, 1, 1)
+}
+
+pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
+    if area.width < 6 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(area.x + area.width.saturating_sub(5), area.y, 2, 1)
+}
+
+pub(crate) fn sidebar_header_overflow_rect(area: Rect) -> Rect {
+    if area.width < 3 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(area.x + area.width.saturating_sub(2), area.y, 1, 1)
 }
 
 fn render_sidebar_toggle(
@@ -1903,10 +1871,9 @@ mod tests {
             .map(|row| row_text(terminal.backend().buffer(), row, 27))
             .collect::<Vec<_>>();
         assert_eq!(
-            text.iter()
-                .filter(|line| line.trim_start().starts_with("spaces"))
-                .count(),
-            1
+            text.iter().filter(|line| line.contains("Spaces")).count(),
+            1,
+            "{text:?}"
         );
         assert!(!text
             .iter()
@@ -2861,7 +2828,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![crate::config::AgentSidebarToken::Custom("b".into())],
         ];
         app.agent_panel_sort = AgentPanelSort::Priority;
-        let area = Rect::new(0, 0, 20, 6);
+        let area = Rect::new(0, 0, 20, 4);
         let ws_area = workspace_list_rect(area, app.sidebar_section_split);
 
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
@@ -2941,8 +2908,31 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 26, 20);
         let toggle = expanded_sidebar_toggle_rect(area);
 
-        assert_eq!(toggle.x, area.x + area.width - 2);
-        assert_eq!(toggle.y, area.y + area.height - 1);
+        assert_eq!(toggle.x, area.x);
+        assert_eq!(toggle.y, area.y);
+    }
+
+    #[test]
+    fn expanded_sidebar_header_matches_deployed_controls() {
+        for width in [26, 18] {
+            let app = crate::app::state::AppState::test_new();
+            let area = Rect::new(0, 0, width, 8);
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 8)).expect("test terminal should initialize");
+
+            terminal
+                .draw(|frame| {
+                    render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+                })
+                .expect("sidebar should render");
+
+            let header = row_text(terminal.backend().buffer(), 0, width - 1);
+            assert!(header.starts_with('«'));
+            assert!(header.contains("Spaces"));
+            assert!(header.contains('＋'));
+            assert!(header.contains('…'));
+            assert!(!row_text(terminal.backend().buffer(), 7, width - 1).contains("menu"));
+        }
     }
 
     #[test]
@@ -3372,7 +3362,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         app.sidebar_spaces.row_gap = 0;
-        let area = Rect::new(0, 0, 30, 5);
+        let area = Rect::new(0, 0, 30, 3);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         assert_eq!(app.view.workspace_card_areas.len(), 2);
         let list_area = workspace_list_rect(area, app.sidebar_section_split);
@@ -3441,7 +3431,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spacious[3].rect.y,
             spacious[2].rect.y + spacious[2].rect.height + 2
         );
-        let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 7));
+        let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
         assert_eq!(spacious_metrics.viewport_rows, 2);
         assert_eq!(spacious_metrics.max_offset_from_bottom, 2);
 
@@ -3450,7 +3440,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(packed
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
-        let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 7));
+        let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
         assert_eq!(packed_metrics.viewport_rows, 4);
         assert_eq!(packed_metrics.max_offset_from_bottom, 0);
     }
@@ -3561,12 +3551,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.active = None;
         app.mode = Mode::Terminal;
 
-        let ws_area = Rect::new(0, 0, 30, 6);
+        let ws_area = Rect::new(0, 0, 30, 5);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
-        assert_eq!(metrics.viewport_rows, 1);
-        assert_eq!(metrics.max_offset_from_bottom, 1);
-        assert_eq!(metrics.offset_from_bottom, 1);
+        assert_eq!(metrics.viewport_rows, 2);
+        assert_eq!(metrics.max_offset_from_bottom, 0);
+        assert_eq!(metrics.offset_from_bottom, 0);
     }
 
     #[test]
@@ -3582,7 +3572,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.mode = Mode::Terminal;
         app.workspace_scroll = 1;
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 2));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);

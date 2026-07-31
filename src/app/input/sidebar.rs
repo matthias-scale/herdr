@@ -121,14 +121,12 @@ impl AppState {
         if ws_area == Rect::default() {
             return Rect::default();
         }
-        let y = ws_area.y + ws_area.height.saturating_sub(1);
-        Rect::new(ws_area.x, y, ws_area.width, 1)
+        let y = ws_area.y + ws_area.height;
+        Rect::new(ws_area.x, y, ws_area.width, 0)
     }
 
     pub(crate) fn sidebar_new_button_rect(&self) -> Rect {
-        let footer = self.sidebar_footer_rect();
-        let width = 5u16.min(footer.width.max(1));
-        Rect::new(footer.x, footer.y, width, footer.height)
+        crate::ui::sidebar_header_new_space_rect(self.view.sidebar_rect)
     }
 
     pub(crate) fn global_launcher_rect(&self) -> Rect {
@@ -136,15 +134,7 @@ impl AppState {
             return self.view.mobile_menu_hit_area;
         }
 
-        let footer = self.sidebar_footer_rect();
-        let width = if self.global_menu_attention_badge_visible() {
-            8
-        } else {
-            6
-        }
-        .min(footer.width.max(1));
-        let x = footer.x + footer.width.saturating_sub(width.saturating_add(1));
-        Rect::new(x, footer.y, width, footer.height)
+        crate::ui::sidebar_header_overflow_rect(self.view.sidebar_rect)
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
@@ -180,7 +170,10 @@ impl AppState {
         let max_x = screen.x + screen.width.saturating_sub(menu_w);
         let desired_x = launcher.x + launcher.width.saturating_sub(menu_w);
         let x = desired_x.min(max_x);
-        let y = launcher.y.saturating_sub(menu_h);
+        let y = launcher
+            .y
+            .saturating_add(1)
+            .min(screen.y + screen.height.saturating_sub(menu_h));
         Rect::new(x, y, menu_w, menu_h)
     }
 
@@ -381,20 +374,6 @@ impl AppState {
             workspace_ids,
             before_workspace_id,
         })
-    }
-
-    pub(super) fn on_agent_panel_sort_toggle(&self, col: u16, row: u16) -> bool {
-        if self.sidebar_collapsed || self.agent_view_override.is_some() {
-            return false;
-        }
-
-        let area = self.workspace_list_rect();
-        let rect = crate::ui::agent_panel_toggle_rect(area, self.agent_panel_sort);
-        rect.width > 0
-            && col >= rect.x
-            && col < rect.x + rect.width
-            && row >= rect.y
-            && row < rect.y + rect.height
     }
 
     pub(super) fn agent_detail_target_at(
@@ -821,30 +800,6 @@ mod tests {
             app.state.agent_detail_target_at(body.y),
             Some((0, 0, first_pane))
         );
-    }
-
-    #[test]
-    fn clicking_agent_panel_toggle_switches_sort() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("test")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.workspace_scroll = 3;
-
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
-        );
-        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            toggle.x,
-            toggle.y,
-        ));
-
-        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
-        assert_eq!(app.state.workspace_scroll, 0);
     }
 
     #[test]
@@ -1601,7 +1556,7 @@ mod tests {
         );
         assert_eq!(
             app.state.workspace_drop_target_at_row(3),
-            Some(crate::app::state::WorkspaceDropTarget::Before(0))
+            Some(crate::app::state::WorkspaceDropTarget::Before(1))
         );
         assert_eq!(
             app.state.workspace_drop_target_at_row(4),
