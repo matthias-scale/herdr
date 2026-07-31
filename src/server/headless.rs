@@ -3127,6 +3127,17 @@ impl HeadlessServer {
             return false;
         }
 
+        let focused_work_title_before = match &msg.request.method {
+            api::schema::Method::PaneReportMetadata(params)
+                if params.source.trim() == crate::work_title::WORK_TITLE_SOURCE =>
+            {
+                Some((
+                    params.pane_id.clone(),
+                    self.app.focused_pane_tab_label(&params.pane_id),
+                ))
+            }
+            _ => None,
+        };
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
@@ -3267,6 +3278,13 @@ impl HeadlessServer {
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
         let _ = msg.respond_to.send(response);
+
+        if let Some((pane_id, title_before)) = focused_work_title_before {
+            let title_after = self.app.focused_pane_tab_label(&pane_id);
+            if title_after.is_some() && title_after != title_before {
+                self.send_to_foreground_client(ServerMessage::WindowTitle { title: title_after });
+            }
+        }
 
         if let Some(revision_before) = pane_graphics_revision_before {
             changed |= revision_before != self.app.state.pane_graphics_revision;
@@ -10381,6 +10399,155 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
             "stale idle report must not forward a done sound"
+        );
+    }
+
+    #[test]
+    fn focused_work_title_updates_the_herdr_tab_and_outer_client_title_once() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("agent-fleet");
+        workspace.tabs[0].set_custom_name("auto-title".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        let public_pane_id = format!("{}:p1", workspace.id);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let session_ref = crate::agent_resume::AgentSessionRef::id("session-1").unwrap();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Working,
+        );
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: session_ref.clone(),
+        });
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            crate::detect::AgentState::Working,
+            None,
+            Some(session_ref),
+            None,
+        );
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let report = |title: &str, seq| {
+            api::schema::Method::PaneReportMetadata(api::schema::PaneReportMetadataParams {
+                pane_id: public_pane_id.clone(),
+                source: crate::work_title::WORK_TITLE_SOURCE.into(),
+                agent: Some("codex".into()),
+                applies_to_source: Some("herdr:codex".into()),
+                agent_session_id: Some("session-1".into()),
+                title: Some(title.into()),
+                display_agent: None,
+                state_labels: HashMap::new(),
+                tokens: HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                seq: Some(seq),
+                ttl_ms: None,
+            })
+        };
+        let send = |server: &mut HeadlessServer, method| {
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            assert!(
+                server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    request: api::schema::Request {
+                        id: "work-title".into(),
+                        method,
+                    },
+                    respond_to,
+                    response_write_complete: None,
+                })
+            );
+            let response = response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap();
+            let _: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        };
+
+        send(&mut server, report("Fix Billing Retry Regression", 20));
+        assert_eq!(
+            server.app.state.workspaces[0].tabs[0]
+                .custom_name
+                .as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        let entries = crate::ui::agent_panel_entries(&server.app.state);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(entries[0].agent_label.as_deref(), Some("codex"));
+        assert_eq!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("work title window update")
+            ),
+            ServerMessage::WindowTitle {
+                title: Some("Fix Billing Retry Regression".into())
+            }
+        );
+
+        send(&mut server, report("Fix Billing Retry Regression", 21));
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "unchanged normalized title must not flicker"
+        );
+
+        send(&mut server, report("Review Auth Migration Safety", 22));
+        assert_eq!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("changed work title window update")
+            ),
+            ServerMessage::WindowTitle {
+                title: Some("Review Auth Migration Safety".into())
+            }
+        );
+
+        send(&mut server, report("Overwrite Newer Work Title", 19));
+        assert_eq!(
+            server.app.state.workspaces[0].tabs[0]
+                .custom_name
+                .as_deref(),
+            Some("Review Auth Migration Safety")
+        );
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "stale turn must not overwrite either title surface"
         );
     }
 

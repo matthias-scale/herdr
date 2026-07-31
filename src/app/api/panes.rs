@@ -1297,6 +1297,9 @@ impl App {
             Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
         };
         let title = normalize_presentation_text(params.title);
+        let work_title = (source == crate::work_title::WORK_TITLE_SOURCE)
+            .then(|| title.clone())
+            .flatten();
         let display_agent = normalize_presentation_text(params.display_agent);
         let applies_to_source = match params.applies_to_source {
             Some(applies_to_source) => match normalize_metadata_source(applies_to_source) {
@@ -1479,12 +1482,56 @@ impl App {
                 ttl,
             });
         }
+        if let Some(title) = work_title {
+            self.apply_work_title_to_tab(ws_idx, pane_id, title);
+        }
         if token_changed {
             self.sync_agent_metadata_deadline();
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    fn apply_work_title_to_tab(&mut self, ws_idx: usize, pane_id: PaneId, title: String) {
+        let Some(tab_idx) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.find_tab_index_for_pane(pane_id))
+        else {
+            return;
+        };
+        let Some(tab) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
+        else {
+            return;
+        };
+        if tab.custom_name.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        tab.set_custom_name(title.clone());
+
+        let workspace_id = self.state.workspaces[ws_idx].id.clone();
+        let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
+            crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
+        });
+        crate::logging::tab_renamed(&workspace_id, &tab_id);
+        if self.state.active == Some(ws_idx) {
+            self.state.refresh_tab_bar_view();
+        }
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabRenamed,
+            data: EventData::TabRenamed {
+                tab_id,
+                workspace_id: self.public_workspace_id(ws_idx),
+                label: title,
+            },
+        });
     }
 
     pub(super) fn handle_pane_clear_agent_authority(
@@ -4192,6 +4239,18 @@ mod tests {
                 .reported_at,
             reported_at
         );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(
+            app.event_hub
+                .events_after(0)
+                .iter()
+                .filter(|(_, event)| event.event == EventKind::TabRenamed)
+                .count(),
+            1
+        );
 
         let stale = guarded_work_title_params(
             pane_id,
@@ -4240,6 +4299,10 @@ mod tests {
         );
         assert_eq!(metadata.agent_label.as_deref(), Some("codex"));
         assert_eq!(metadata.applies_to_source.as_deref(), Some("herdr:codex"));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
     }
 
     #[test]
