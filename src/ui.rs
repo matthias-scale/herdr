@@ -52,11 +52,9 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-#[cfg(test)]
-pub(crate) use self::sidebar::{
-    expanded_sidebar_sections, workspace_drop_indicator_row, workspace_list_body_rect,
-};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+#[cfg(test)]
+pub(crate) use self::sidebar::{workspace_drop_indicator_row, workspace_list_body_rect};
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
@@ -80,11 +78,12 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_counts_by_workspace, agent_panel_entries, agent_panel_toggle_rect,
-        all_agent_panel_entries, collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
+        agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
+        collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, sidebar_row_index_for_workspace,
+        relative_agent_navigation_entry, sidebar_header_new_space_rect,
+        sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, workspace_agent_chevron_rect,
         workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,

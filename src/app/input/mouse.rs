@@ -5,9 +5,8 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, MenuListState, Mode,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -589,16 +588,6 @@ impl AppState {
                             start_col: mouse.column,
                             start_row: mouse.row,
                         });
-                        return None;
-                    }
-
-                    if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
-                        self.agent_panel_sort = match self.agent_panel_sort {
-                            AgentPanelSort::Spaces => AgentPanelSort::Priority,
-                            AgentPanelSort::Priority => AgentPanelSort::Spaces,
-                        };
-                        self.mark_sidebar_projection_changed();
-                        self.mark_session_dirty();
                         return None;
                     }
 
