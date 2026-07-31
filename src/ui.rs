@@ -84,11 +84,11 @@ pub(crate) use self::{
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, sidebar_header_new_space_rect,
         sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, workspace_agent_chevron_rect,
-        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry, SidebarRow,
-        WorkspaceListEntry,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_group_chevron_rect,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
     },
 };
 
@@ -1287,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_workspace_rows_show_state_before_name_without_numbers() {
+    fn expanded_sidebar_workspace_rows_omit_redundant_branch_line() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
@@ -1317,7 +1317,9 @@ mod tests {
 
         assert!(line1.starts_with(" · one"));
         assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        assert_eq!(card.height, 1);
+        assert!(line2.is_empty());
+        assert!(!line1.contains("main"));
 
         std::fs::remove_dir_all(repo).ok();
     }

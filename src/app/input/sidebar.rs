@@ -871,6 +871,7 @@ mod tests {
             ("logs", Agent::Claude),
             ("review", Agent::Codex),
             ("ops", Agent::Gemini),
+            ("deploy", Agent::Claude),
         ] {
             let tab_idx = ws.test_add_tab(Some(tab_name));
             let pane_id = ws.tabs[tab_idx].root_pane;
@@ -901,8 +902,8 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_sort = AgentPanelSort::Priority;
-        app.state.view.sidebar_rect = Rect::new(0, 0, 26, 8);
-        app.state.view.terminal_area = Rect::new(26, 0, 80, 8);
+        app.state.view.sidebar_rect = Rect::new(0, 0, 26, 5);
+        app.state.view.terminal_area = Rect::new(26, 0, 80, 5);
 
         let detail_area = app.state.workspace_list_rect();
         assert!(crate::ui::should_show_scrollbar(

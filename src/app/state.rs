@@ -1756,7 +1756,7 @@ impl AppState {
         else {
             return false;
         };
-        if crate::ui::all_agent_panel_entries(self)
+        if crate::ui::sidebar_thread_entries(self)
             .iter()
             .all(|entry| entry.ws_idx != ws_idx)
         {
