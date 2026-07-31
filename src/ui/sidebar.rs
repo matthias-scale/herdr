@@ -1307,8 +1307,13 @@ fn resolved_token_spans(
                     apply_token_style(workspace_style, token.style),
                 ));
             }
-            ResolvedTokenKind::Tab(text)
-            | ResolvedTokenKind::Pane(text)
+            ResolvedTokenKind::Tab(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(workspace_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::Pane(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::Branch(text) => {
                 spans.push(Span::styled(
@@ -1414,24 +1419,16 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
-        if highlighted {
-            let bg = if selected {
-                p.surface0
-            } else if is_dragged {
-                p.surface1
-            } else {
-                p.surface_dim
-            };
+        if is_dragged {
             let buf = frame.buffer_mut();
             for y in row_y..row_y + row_height {
                 if y >= list_bottom {
                     break;
                 }
                 for x in card.rect.x..card.rect.x + card.rect.width {
-                    buf[(x, y)].set_style(Style::default().bg(bg));
+                    buf[(x, y)].set_style(Style::default().bg(p.surface1));
                 }
             }
         }
@@ -1651,11 +1648,7 @@ fn render_agent_card(
     let rows = resolved_agent_rows(app, detail);
     let height = (rows.len().max(1) as u16).min(rect.height);
     let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-    let row_style = if is_active {
-        Style::default().bg(p.surface_dim)
-    } else {
-        Style::default()
-    };
+    let row_style = Style::default();
     let name_style = if is_active {
         Style::default().fg(p.text).add_modifier(Modifier::BOLD)
     } else {
@@ -2483,14 +2476,14 @@ row_gap = 1
         assert_eq!(workspace_style.fg, Some(app.palette.text));
         assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(workspace_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
 
         let agent_x = find_symbol_x(buffer, agent_row, 25, "F");
         let agent_style = buffer[(agent_x, agent_row)].style();
-        assert_eq!(agent_style.fg, Some(app.palette.overlay0));
-        assert!(agent_style.add_modifier.contains(Modifier::DIM));
-        assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(agent_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(agent_style.fg, Some(app.palette.text));
+        assert!(!agent_style.add_modifier.contains(Modifier::DIM));
+        assert!(agent_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(agent_style.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
@@ -2676,7 +2669,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(active.fg, Some(app.palette.text));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
-        assert_eq!(active.bg, Some(app.palette.surface_dim));
+        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
 
         let inactive = buffer[(find_symbol_x(buffer, second_row, 25, "t"), second_row)].style();
         assert_eq!(inactive.fg, Some(app.palette.subtext0));
@@ -2722,12 +2715,12 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             assert_eq!(style.fg, Some(ratatui::style::Color::Rgb(0xab, 0xcd, 0xef)));
             assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
-            assert_eq!(style.bg, Some(app.palette.surface_dim));
+            assert_eq!(style.bg, Some(ratatui::style::Color::Reset));
         }
         assert_eq!(separator.fg, Some(app.palette.overlay0));
         assert!(separator.add_modifier.contains(Modifier::DIM));
         assert!(!separator.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(separator.bg, Some(app.palette.surface_dim));
+        assert_eq!(separator.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
