@@ -20,6 +20,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
+const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 #[derive(Clone)]
 pub(crate) struct AgentPanelEntry {
@@ -60,11 +61,15 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
 }
 
-pub(crate) fn all_agent_panel_entries_from(
+pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    collect_sidebar_thread_entries_with_runtimes(app, None)
+}
+
+pub(crate) fn sidebar_thread_entries_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<AgentPanelEntry> {
-    collect_agent_panel_entries_with_runtimes(app, Some(terminal_runtimes))
+    collect_sidebar_thread_entries_with_runtimes(app, Some(terminal_runtimes))
 }
 
 pub(crate) fn relative_agent_navigation_entry(
@@ -130,22 +135,21 @@ fn collect_agent_panel_entries_with_runtimes(
         .iter()
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
-            let multi_tab = ws.tabs.len() > 1;
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
-                    let show_tab = multi_tab
-                        || ws
-                            .tabs
-                            .get(detail.tab_idx)
-                            .is_some_and(|tab| !tab.is_auto_named());
+                    let thread_title = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .and_then(|tab| tab.custom_name.clone())
+                        .unwrap_or_else(|| DEFAULT_THREAD_TITLE.to_string());
                     AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
-                        primary_tab_label: show_tab.then_some(detail.tab_label),
+                        primary_tab_label: Some(thread_title),
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
                         terminal_title_stripped: detail.terminal_title_stripped,
@@ -162,6 +166,69 @@ fn collect_agent_panel_entries_with_runtimes(
                 })
         })
         .collect()
+}
+
+fn collect_sidebar_thread_entries_with_runtimes(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelEntry> {
+    let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
+    let mut represented_tabs = entries
+        .iter()
+        .map(|entry| (entry.ws_idx, entry.tab_idx))
+        .collect::<std::collections::HashSet<_>>();
+    let empty_runtimes;
+    let terminal_runtimes = match terminal_runtimes {
+        Some(terminal_runtimes) => terminal_runtimes,
+        None => {
+            empty_runtimes = TerminalRuntimeRegistry::new();
+            &empty_runtimes
+        }
+    };
+
+    for (ws_idx, workspace) in app.workspaces.iter().enumerate() {
+        let workspace_label = workspace.display_name_from(&app.terminals, terminal_runtimes);
+        for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
+            if !represented_tabs.insert((ws_idx, tab_idx)) {
+                continue;
+            }
+            let pane_id = tab.layout.focused();
+            let Some(pane) = tab.panes.get(&pane_id) else {
+                continue;
+            };
+            let Some(terminal) = app.terminals.get(&pane.attached_terminal_id) else {
+                continue;
+            };
+            let presentation = terminal.effective_presentation();
+            entries.push(AgentPanelEntry {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                primary_label: workspace_label.clone(),
+                primary_tab_label: Some(
+                    tab.custom_name
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_THREAD_TITLE.to_string()),
+                ),
+                pane_label: terminal
+                    .effective_title()
+                    .or_else(|| terminal.manual_label.clone()),
+                terminal_title: terminal.terminal_title.clone(),
+                terminal_title_stripped: terminal.terminal_title_stripped(),
+                agent_label: None,
+                agent_kind_label: None,
+                agent: None,
+                state: terminal.state,
+                seen: pane.seen,
+                last_agent_state_change_seq: terminal.last_agent_state_change_seq,
+                activity_at: terminal.agent_activity_at(),
+                state_labels: presentation.state_labels,
+                tokens: terminal.metadata_tokens.values(),
+            });
+        }
+    }
+    entries.sort_by_key(|entry| (entry.ws_idx, entry.tab_idx));
+    entries
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -330,8 +397,8 @@ fn sidebar_rows_inner(
     }
 
     let agents = match terminal_runtimes {
-        Some(runtimes) => all_agent_panel_entries_from(app, runtimes),
-        None => all_agent_panel_entries(app),
+        Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
+        None => sidebar_thread_entries(app),
     };
     let mut agents_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
     for entry in agents {
@@ -1240,8 +1307,13 @@ fn resolved_token_spans(
                     apply_token_style(workspace_style, token.style),
                 ));
             }
-            ResolvedTokenKind::Tab(text)
-            | ResolvedTokenKind::Pane(text)
+            ResolvedTokenKind::Tab(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(workspace_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::Pane(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::Branch(text) => {
                 spans.push(Span::styled(
@@ -1336,7 +1408,7 @@ fn render_workspace_list(
         &app.view.workspace_card_areas
     };
     let entries = workspace_list_entries(app);
-    let all_agents = all_agent_panel_entries_from(app, terminal_runtimes);
+    let all_agents = sidebar_thread_entries_from(app, terminal_runtimes);
     let agent_counts = agent_counts_by_workspace(&all_agents);
 
     for card in cards {
@@ -1347,24 +1419,16 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged;
         let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
-        if highlighted {
-            let bg = if selected {
-                p.surface0
-            } else if is_dragged {
-                p.surface1
-            } else {
-                p.surface_dim
-            };
+        if is_dragged {
             let buf = frame.buffer_mut();
             for y in row_y..row_y + row_height {
                 if y >= list_bottom {
                     break;
                 }
                 for x in card.rect.x..card.rect.x + card.rect.width {
-                    buf[(x, y)].set_style(Style::default().bg(bg));
+                    buf[(x, y)].set_style(Style::default().bg(p.surface1));
                 }
             }
         }
@@ -1584,11 +1648,7 @@ fn render_agent_card(
     let rows = resolved_agent_rows(app, detail);
     let height = (rows.len().max(1) as u16).min(rect.height);
     let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-    let row_style = if is_active {
-        Style::default().bg(p.surface_dim)
-    } else {
-        Style::default()
-    };
+    let row_style = Style::default();
     let name_style = if is_active {
         Style::default().fg(p.text).add_modifier(Modifier::BOLD)
     } else {
@@ -1879,7 +1939,8 @@ mod tests {
             .iter()
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
-        assert!(text.iter().any(|line| line.contains("pi")));
+        assert!(text.iter().any(|line| line.contains(DEFAULT_THREAD_TITLE)));
+        assert!(!text.iter().any(|line| line.contains("pi")));
     }
 
     #[test]
@@ -1996,13 +2057,46 @@ mod tests {
             .into_iter()
             .find(|card| card.ws_idx == 0)
             .unwrap();
-        let empty_has_agents = agent_counts_by_workspace(&all_agent_panel_entries(&app))
+        let empty_has_agents = agent_counts_by_workspace(&sidebar_thread_entries(&app))
             .contains_key(&empty_card.ws_idx);
-        assert!(!empty_has_agents);
-        assert_eq!(
+        assert!(empty_has_agents);
+        assert_ne!(
             workspace_agent_chevron_rect(&app, &empty_card, empty_has_agents),
             Rect::default()
         );
+        let empty_threads = sidebar_thread_entries(&app)
+            .into_iter()
+            .filter(|entry| entry.ws_idx == 0)
+            .collect::<Vec<_>>();
+        assert_eq!(empty_threads.len(), 1);
+        assert_eq!(
+            empty_threads[0].primary_tab_label.as_deref(),
+            Some(DEFAULT_THREAD_TITLE)
+        );
+        assert_eq!(empty_threads[0].agent, None);
+        assert!(all_agent_panel_entries(&app)
+            .iter()
+            .all(|entry| entry.ws_idx != 0));
+    }
+
+    #[test]
+    fn shell_only_custom_tab_uses_its_title_without_becoming_an_agent() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("repo-folder");
+        workspace.tabs[0].custom_name = Some("Review Auth Migration".into());
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let entries = sidebar_thread_entries(&app);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
+            Some("Review Auth Migration")
+        );
+        assert_eq!(entries[0].agent_label, None);
+        assert!(all_agent_panel_entries(&app).is_empty());
+        assert_eq!(row_kinds(&app), vec![('w', 0), ('a', 0)]);
     }
 
     #[test]
@@ -2339,9 +2433,10 @@ row_gap = 1
     }
 
     #[test]
-    fn default_agent_rows_remove_redundant_state_text() {
+    fn default_agent_rows_show_only_the_tab_title() {
         let mut app = crate::app::state::AppState::test_new();
-        let workspace = Workspace::test_new("one");
+        let mut workspace = Workspace::test_new("repo-folder");
+        workspace.tabs[0].custom_name = Some("Fix Billing Retry".into());
         let pane_id = workspace.tabs[0].root_pane;
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
@@ -2366,31 +2461,29 @@ row_gap = 1
 
         let first = row_text(buffer, workspace_row, 25);
         let agent_window = row_text(buffer, agent_row, 25);
-        let agent_label_row = (agent_row..agent_row + agent_cards[0].rect.height)
-            .find(|row| row_text(buffer, *row, 25).contains("pi"))
-            .unwrap();
-        let second = row_text(buffer, agent_label_row, 25);
-        assert!(first.contains("one"));
-        assert!(agent_window.ends_with("--"), "{agent_window:?}");
-        assert!(second.trim_start().starts_with("pi"), "{second:?}");
-        assert!(!second.ends_with("--"), "{second:?}");
-        assert!(second.len() > second.trim_start().len());
+        assert!(first.contains("repo-folder"));
+        assert!(
+            agent_window.contains("Fix Billing Retry"),
+            "{agent_window:?}"
+        );
+        assert!(!agent_window.contains("repo-folder"), "{agent_window:?}");
+        assert!(!agent_window.contains("pi"), "{agent_window:?}");
         assert!(!first.contains("working"));
-        assert!(!second.contains("working"));
+        assert!(!agent_window.contains("working"));
 
         let workspace_x = find_symbol_x(buffer, workspace_row, 25, "o");
         let workspace_style = buffer[(workspace_x, workspace_row)].style();
         assert_eq!(workspace_style.fg, Some(app.palette.text));
         assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(workspace_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
 
-        let agent_x = find_symbol_x(buffer, agent_label_row, 25, "p");
-        let agent_style = buffer[(agent_x, agent_label_row)].style();
-        assert_eq!(agent_style.fg, Some(app.palette.overlay0));
-        assert!(agent_style.add_modifier.contains(Modifier::DIM));
-        assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(agent_style.bg, Some(app.palette.surface_dim));
+        let agent_x = find_symbol_x(buffer, agent_row, 25, "F");
+        let agent_style = buffer[(agent_x, agent_row)].style();
+        assert_eq!(agent_style.fg, Some(app.palette.text));
+        assert!(!agent_style.add_modifier.contains(Modifier::DIM));
+        assert!(agent_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(agent_style.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
@@ -2454,7 +2547,8 @@ row_gap = 1
 
     #[test]
     fn narrow_agent_rows_elide_activity_age_before_window_context() {
-        let app = app_with_agents(&["one"]);
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("one".into());
         let area = Rect::new(0, 0, 12, 12);
         let mut terminal = Terminal::new(TestBackend::new(12, 12)).unwrap();
         terminal
@@ -2575,7 +2669,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(active.fg, Some(app.palette.text));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
-        assert_eq!(active.bg, Some(app.palette.surface_dim));
+        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
 
         let inactive = buffer[(find_symbol_x(buffer, second_row, 25, "t"), second_row)].style();
         assert_eq!(inactive.fg, Some(app.palette.subtext0));
@@ -2621,12 +2715,12 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             assert_eq!(style.fg, Some(ratatui::style::Color::Rgb(0xab, 0xcd, 0xef)));
             assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
-            assert_eq!(style.bg, Some(app.palette.surface_dim));
+            assert_eq!(style.bg, Some(ratatui::style::Color::Reset));
         }
         assert_eq!(separator.fg, Some(app.palette.overlay0));
         assert!(separator.add_modifier.contains(Modifier::DIM));
         assert!(!separator.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(separator.bg, Some(app.palette.surface_dim));
+        assert_eq!(separator.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
@@ -2724,7 +2818,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let card = &compute_agent_card_areas(&app, area)[0];
+        let card = compute_agent_card_areas(&app, area)
+            .into_iter()
+            .find(|card| card.tab_idx == tab_idx)
+            .unwrap();
         let first = (card.rect.y..card.rect.y + card.rect.height)
             .map(|row| row_text(buffer, row, 17))
             .find(|line| line.contains("logs"))
@@ -2738,7 +2835,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             });
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
-        assert!(first.contains('·'), "rendered row: {first:?}");
+        assert!(!first.contains("very-long-workspace-name"), "{first:?}");
     }
 
     #[test]
@@ -2936,7 +3033,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn agent_panel_tab_label_visibility_tracks_tab_identity() {
+    fn agent_panel_tab_labels_use_titles_and_safe_defaults() {
         let mut app = crate::app::state::AppState::test_new();
         let single_auto = Workspace::test_new("auto");
         let mut single_custom = Workspace::test_new("custom");
@@ -2973,9 +3070,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             labels,
             [
-                ("auto", None),
+                ("auto", Some("New Thread")),
                 ("custom", Some("focus")),
-                ("multi", Some("1")),
+                ("multi", Some("New Thread")),
                 ("multi", Some("logs")),
             ]
         );

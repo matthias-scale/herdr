@@ -552,7 +552,7 @@ impl AppState {
                     let (cards, _) =
                         crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
                     let agent_counts = crate::ui::agent_counts_by_workspace(
-                        &crate::ui::all_agent_panel_entries(self),
+                        &crate::ui::sidebar_thread_entries(self),
                     );
                     if let Some(card) = cards.iter().find(|card| {
                         let chevron = crate::ui::workspace_agent_chevron_rect(

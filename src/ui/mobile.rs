@@ -185,7 +185,7 @@ pub(crate) fn mobile_switcher_target_at(
         return rows.get(idx).map(|entry| match entry {
             SidebarRow::Workspace { ws_idx, indented } => {
                 let agent_count =
-                    crate::ui::agent_counts_by_workspace(&crate::ui::all_agent_panel_entries(app))
+                    crate::ui::agent_counts_by_workspace(&crate::ui::sidebar_thread_entries(app))
                         .get(ws_idx)
                         .copied()
                         .unwrap_or(0);
@@ -563,7 +563,7 @@ fn render_mobile_switcher_content(
             .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
     });
     let agent_counts = crate::ui::agent_counts_by_workspace(
-        &super::sidebar::all_agent_panel_entries_from(app, terminal_runtimes),
+        &super::sidebar::sidebar_thread_entries_from(app, terminal_runtimes),
     );
     for (entry_idx, row) in rows.iter().enumerate() {
         match row {
@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switcher_uses_compact_tab_label_for_auto_tab_labels() {
+    fn mobile_switcher_uses_safe_default_for_auto_tab_titles() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         let removed_tab = workspace.test_add_tab(None);
@@ -1582,8 +1582,8 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 10)].symbol())
             .collect::<String>();
 
-        assert!(row.contains("tab 2"), "mobile tab row: {row:?}");
-        assert!(!row.contains("tab 3"), "mobile tab row: {row:?}");
+        assert!(row.contains("New Thread"), "mobile tab row: {row:?}");
+        assert!(!row.contains("tab 2"), "mobile tab row: {row:?}");
     }
 
     #[cfg(unix)]
