@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-codex-session",
+  "turn_id": "fixture-turn-20",
+  "transcript_path": "/tmp/fixture-codex-session.jsonl",
+  "cwd": "/tmp/fixture-workspace",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Fix billing retry regression"
+}

@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=7
+# HERDR_INTEGRATION_VERSION=8
 
 set -eu
 
@@ -13,13 +13,18 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|title) ;;
   *) exit 0 ;;
 esac
 
 [ "${HERDR_ENV:-}" = "1" ] || exit 0
 [ -n "${HERDR_SOCKET_PATH:-}" ] || exit 0
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+if [ "$action" = "title" ]; then
+  command -v herdr >/dev/null 2>&1 || exit 0
+  herdr agent turn-title --provider claude <"$hook_input_file" >/dev/null 2>&1 || true
+  exit 0
+fi
 command -v python3 >/dev/null 2>&1 || exit 0
 
 HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'

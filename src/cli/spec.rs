@@ -374,6 +374,16 @@ fn agent_command() -> Command {
                         .required(true),
                 ),
         )
+        .subcommand(
+            Command::new("turn-title")
+                .hide(true)
+                .about("Set the current turn's guarded work title")
+                .arg(
+                    option("provider", "PROVIDER")
+                        .required(true)
+                        .value_parser(["claude", "codex"]),
+                ),
+        )
         .subcommand(id_command("focus", "target", "Focus an agent"))
         .subcommand(
             Command::new("wait")

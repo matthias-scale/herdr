@@ -1,9 +1,10 @@
-use std::time::{Duration, Instant};
+use std::io::Read;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
     AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, Method,
-    ReadFormat, ReadSource, Request,
+    PaneReportAgentSessionParams, ReadFormat, ReadSource, Request,
 };
 
 pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
@@ -24,6 +25,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
         "explain" => agent_explain(&args[1..]),
+        "turn-title" => agent_turn_title(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
             Ok(0)
@@ -33,6 +35,84 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
+    let mut provider = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--provider" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Ok(0);
+                };
+                provider = crate::work_title::WorkTitleProvider::parse(value);
+                index += 2;
+            }
+            _ => return Ok(0),
+        }
+    }
+    let Some(provider) = provider else {
+        return Ok(0);
+    };
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Ok(0);
+    }
+    let pane_id = std::env::var("HERDR_PANE_ID").ok();
+    let seq = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0);
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return Ok(0);
+    }
+    let Some(metadata) =
+        crate::work_title::request_from_turn_start(provider, pane_id.as_deref(), &input, seq)
+    else {
+        return Ok(0);
+    };
+    let Some(session_id) = metadata.agent_session_id.clone() else {
+        return Ok(0);
+    };
+    if provider == crate::work_title::WorkTitleProvider::Codex
+        && std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some_and(|value| value != session_id)
+    {
+        return Ok(0);
+    }
+    let Some(agent) = metadata.agent.clone() else {
+        return Ok(0);
+    };
+    let Some(source) = metadata.applies_to_source.clone() else {
+        return Ok(0);
+    };
+    let session_request = Request {
+        id: format!("cli:agent:turn-title:session:{seq}"),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
+            pane_id: metadata.pane_id.clone(),
+            source,
+            agent,
+            seq: Some(seq),
+            agent_session_id: Some(session_id),
+            agent_session_path: None,
+            session_start_source: None,
+        }),
+    };
+    let Ok(response) = super::send_request(&session_request) else {
+        return Ok(0);
+    };
+    if response.get("error").is_some() {
+        return Ok(0);
+    }
+    let _ = super::send_request_unchecked(&Request {
+        id: format!("cli:agent:turn-title:metadata:{seq}"),
+        method: Method::PaneReportMetadata(metadata),
+    });
+    Ok(0)
 }
 
 fn agent_explain(args: &[String]) -> std::io::Result<i32> {

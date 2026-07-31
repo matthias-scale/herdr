@@ -7,6 +7,7 @@
 - The default sidebar is now one Spaces tree with independently disclosed Agent children; priority and API-filtered views remain one-at-a-time flat projections, while configured previous/next Agent actions traverse the canonical unfiltered list across all workspaces.
 - Expanded Agent window rows now end with a fixed-width activity age: the current active duration while working, or the time since the latest active interval in any non-working state. The runtime owns this timestamp across client attachments and server handoff; the field refreshes at visible unit boundaries and elides at narrow sidebar widths.
 - Completed background agents keep their `done` status until that agent's pane is opened; opening another pane in the same tab does not clear it.
+- Claude Code and Codex integrations now recalculate a sanitized, session-guarded Herdr agent title at the start of each user turn without an additional model call.
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 

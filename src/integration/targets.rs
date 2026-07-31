@@ -145,6 +145,7 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
     remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
+    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("title"))?;
     remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
     remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
     remove_hook_commands(hooks, "SessionEnd", &hook_path, Some("release"))?;
@@ -153,6 +154,13 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         hooks,
         "SessionStart",
         hook_command(&hook_path, Some("session")),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        hook_command(&hook_path, Some("title")),
         10,
         Some("*"),
     )?;
@@ -197,6 +205,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
     remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
+    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("title"))?;
     remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
     remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
@@ -204,6 +213,13 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         hooks,
         "SessionStart",
         hook_command(&hook_path, Some("session")),
+        10,
+        None,
+    )?;
+    ensure_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        hook_command(&hook_path, Some("title")),
         10,
         None,
     )?;
@@ -583,6 +599,8 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
             updated_settings |=
                 remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
             updated_settings |=
+                remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("title"))?;
+            updated_settings |=
                 remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
             updated_settings |=
                 remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
@@ -637,6 +655,8 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
                 remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
             updated_hooks |=
                 remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
+            updated_hooks |=
+                remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("title"))?;
             updated_hooks |=
                 remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
             updated_hooks |=
