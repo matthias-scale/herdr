@@ -2809,6 +2809,74 @@ fn bundled_integration_assets_report_session_refs() {
 }
 
 #[test]
+#[cfg(unix)]
+fn codex_title_hook_prefers_owning_binary_over_stale_path() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let base = unique_base();
+    let stale_bin_dir = base.join("stale-bin");
+    fs::create_dir_all(&stale_bin_dir).unwrap();
+    let exact_bin = base.join("owning-herdr");
+    let exact_record = base.join("exact-record");
+    let stale_record = base.join("stale-record");
+    fs::write(
+        &exact_bin,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HERDR_TEST_EXACT_RECORD\"\ncat >> \"$HERDR_TEST_EXACT_RECORD\"\n",
+    )
+    .unwrap();
+    fs::write(
+        stale_bin_dir.join("herdr"),
+        "#!/bin/sh\nprintf stale > \"$HERDR_TEST_STALE_RECORD\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&exact_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(
+        stale_bin_dir.join("herdr"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/codex/herdr-agent-state.sh");
+    let path = format!(
+        "{}:{}",
+        stale_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new("bash")
+        .arg(hook_path)
+        .arg("title")
+        .env("PATH", path)
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", base.join("unused.sock"))
+        .env("HERDR_PANE_ID", "p_preview")
+        .env("HERDR_BIN_PATH", &exact_bin)
+        .env("HERDR_TEST_EXACT_RECORD", &exact_record)
+        .env("HERDR_TEST_STALE_RECORD", &stale_record)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"{"hook_event_name":"UserPromptSubmit","session_id":"preview","prompt":"write a poem"}"#,
+        )
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let exact = fs::read_to_string(&exact_record).unwrap();
+    assert!(exact.starts_with("agent turn-title --provider codex\n"));
+    assert!(exact.contains("\"prompt\":\"write a poem\""));
+    assert!(!stale_record.exists());
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn process_owned_integration_assets_do_not_report_release() {
     for (name, asset) in [
         ("pi", PI_EXTENSION_ASSET),
