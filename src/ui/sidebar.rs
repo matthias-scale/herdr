@@ -3572,7 +3572,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.mode = Mode::Terminal;
         app.workspace_scroll = 1;
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 3));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);
