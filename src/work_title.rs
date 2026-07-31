@@ -7,7 +7,7 @@ use crate::api::schema::PaneReportMetadataParams;
 
 pub(crate) const WORK_TITLE_SOURCE: &str = "herdr:work-title";
 pub(crate) const WORK_TITLE_MAX_CHARS: usize = 48;
-const WORK_TITLE_MIN_WORDS: usize = 3;
+const WORK_TITLE_MIN_WORDS: usize = 1;
 const WORK_TITLE_MAX_WORDS: usize = 7;
 
 #[derive(Debug, Deserialize)]
@@ -98,7 +98,7 @@ pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
     let sanitized = sanitize_prompt(prompt);
     let relevant = relevant_objective_clause(&sanitized);
     let raw_words = objective_words(relevant);
-    let mut words: Vec<String> = raw_words
+    let words: Vec<String> = raw_words
         .iter()
         .filter(|word| !is_stopword(word))
         .take(WORK_TITLE_MAX_WORDS)
@@ -110,8 +110,6 @@ pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
     if words.is_empty() {
         return None;
     }
-    pad_short_title(&mut words);
-
     let mut title_words = Vec::new();
     for word in words.into_iter().take(WORK_TITLE_MAX_WORDS) {
         let word = title_case_word(&word);
@@ -173,28 +171,6 @@ fn objective_words(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn pad_short_title(words: &mut Vec<String>) {
-    match words.len() {
-        1 => {
-            words.insert(0, "update".to_string());
-            words.push("behavior".to_string());
-        }
-        2 if is_action_word(&words[0]) => {
-            let suffix = match words[0].as_str() {
-                "fix" | "debug" | "repair" => "issue",
-                "review" | "audit" | "verify" => "safety",
-                "measure" | "compare" => "results",
-                "merge" => "changes",
-                "remove" | "disable" => "behavior",
-                _ => "support",
-            };
-            words.push(suffix.to_string());
-        }
-        2 => words.insert(0, "update".to_string()),
-        _ => {}
-    }
-}
-
 fn title_case_word(word: &str) -> String {
     if word.eq_ignore_ascii_case("pr")
         || word.eq_ignore_ascii_case("ci")
@@ -241,31 +217,6 @@ fn looks_like_identifier(word: &str) -> bool {
             .chars()
             .any(|character| character.is_ascii_alphabetic());
     hex || opaque
-}
-
-fn is_action_word(word: &str) -> bool {
-    matches!(
-        word,
-        "add"
-            | "audit"
-            | "build"
-            | "compare"
-            | "create"
-            | "debug"
-            | "deploy"
-            | "disable"
-            | "fix"
-            | "implement"
-            | "measure"
-            | "merge"
-            | "recalculate"
-            | "remove"
-            | "repair"
-            | "review"
-            | "set"
-            | "update"
-            | "verify"
-    )
 }
 
 fn is_stopword(word: &str) -> bool {
@@ -402,6 +353,14 @@ mod tests {
     }
 
     #[test]
+    fn short_first_turn_uses_the_prompt_without_filler() {
+        assert_eq!(
+            calculate_work_title("write a poem").as_deref(),
+            Some("Write Poem")
+        );
+    }
+
+    #[test]
     fn correction_uses_the_latest_objective_clause() {
         assert_eq!(
             calculate_work_title(
@@ -429,7 +388,7 @@ mod tests {
             "Fix \u{1b}[31mbilling\u{1b}[0m for jane@example.com using api_key=sk-live-abcdef /Users/jane/private",
         )
         .unwrap();
-        assert_eq!(title, "Fix Billing Issue");
+        assert_eq!(title, "Fix Billing");
         for forbidden in ["jane", "example", "sk", "users", "\u{1b}"] {
             assert!(!title.to_ascii_lowercase().contains(forbidden));
         }

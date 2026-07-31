@@ -4273,12 +4273,23 @@ mod tests {
     #[test]
     fn turn_start_fixture_reaches_guarded_herdr_title() {
         let (mut app, pane_id) = app_with_test_workspace();
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = bind_test_agent_session(
             &mut app,
             &pane_id,
             "herdr:codex",
             "codex",
             "fixture-codex-session",
+        );
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id("fixture-codex-session"),
+            Some(1),
         );
         let params = crate::work_title::request_from_turn_start(
             crate::work_title::WorkTitleProvider::Codex,
@@ -4301,6 +4312,17 @@ mod tests {
         assert_eq!(metadata.applies_to_source.as_deref(), Some("herdr:codex"));
         assert_eq!(
             app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(
+            app.agent_info(0, internal_pane_id)
+                .and_then(|agent| agent.title)
+                .as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
             Some("Fix Billing Retry Regression")
         );
     }

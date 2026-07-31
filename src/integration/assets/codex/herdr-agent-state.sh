@@ -21,8 +21,13 @@ esac
 [ -n "${HERDR_SOCKET_PATH:-}" ] || exit 0
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 if [ "$action" = "title" ]; then
-  command -v herdr >/dev/null 2>&1 || exit 0
-  herdr agent turn-title --provider codex <"$hook_input_file" >/dev/null 2>&1 || true
+  herdr_bin="${HERDR_BIN_PATH:-herdr}"
+  if [ "$herdr_bin" = "herdr" ]; then
+    command -v herdr >/dev/null 2>&1 || exit 0
+  elif [ ! -x "$herdr_bin" ]; then
+    exit 0
+  fi
+  "$herdr_bin" agent turn-title --provider codex <"$hook_input_file" >/dev/null 2>&1 || true
   exit 0
 fi
 command -v python3 >/dev/null 2>&1 || exit 0

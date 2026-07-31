@@ -68,7 +68,7 @@ Native session restore requires current Herdr integrations: Pi integration versi
 
 Claude Code and Codex integrations recalculate the pane's Herdr agent title on every `UserPromptSubmit`, before the provider begins the turn. Both adapters call the same deterministic title engine; there is no extra model request or prompt context. Pi and other integrations remain compatible because work titles use presentation metadata without changing lifecycle authority, native model labels, or session identifiers.
 
-Titles contain 3–7 words and at most 48 visible characters. The engine removes terminal escapes, control characters, paths, user identifiers, and secret-like values, then derives a concrete outcome phrase from the latest objective. A terse continuation can retain the existing normalized title. Herdr skips an unchanged title and binds every accepted update to the reporting pane, provider, native session ID, and monotonic sequence. A delayed report from an older turn or session cannot replace a newer title. Missing hook, socket, pane, or independent subagent pane support is a silent no-op.
+Titles contain 1–7 useful words and at most 48 visible characters. The engine removes terminal escapes, control characters, paths, user identifiers, and secret-like values, then derives a concrete outcome phrase from the latest objective. A terse continuation can retain the existing normalized title. Herdr skips an unchanged title and binds every accepted update to the reporting pane, provider, native session ID, and monotonic sequence. A delayed report from an older turn or session cannot replace a newer title. Missing hook, socket, pane, or independent subagent pane support is a silent no-op.
 
 ## Pi
 

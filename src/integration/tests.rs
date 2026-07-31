@@ -2721,6 +2721,7 @@ fn bundled_integration_assets_report_session_refs() {
     );
     assert!(!CLAUDE_HOOK_ASSET.contains("\"state\": action"));
     assert!(!CLAUDE_HOOK_ASSET.contains("pane.release_agent"));
+    assert!(CLAUDE_HOOK_ASSET.contains("HERDR_BIN_PATH"));
     assert!(
         CODEX_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE")
             || CODEX_HOOK_ASSET.contains("In.ReadToEnd")
@@ -2734,6 +2735,7 @@ fn bundled_integration_assets_report_session_refs() {
             || CODEX_HOOK_ASSET.contains("--session-start-source")
     );
     assert!(CODEX_HOOK_ASSET.contains("CODEX_THREAD_ID"));
+    assert!(CODEX_HOOK_ASSET.contains("HERDR_BIN_PATH"));
     assert!(
         CODEX_HOOK_ASSET.contains("pane.report_agent_session")
             || CODEX_HOOK_ASSET.contains("report-agent-session")

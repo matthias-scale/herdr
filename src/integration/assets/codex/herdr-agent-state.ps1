@@ -13,7 +13,8 @@ if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 $inputText = [Console]::In.ReadToEnd()
 if ($Action -eq "title") {
     try {
-        $inputText | & herdr agent turn-title --provider codex 2>$null | Out-Null
+        $herdrBin = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+        $inputText | & $herdrBin agent turn-title --provider codex 2>$null | Out-Null
     } catch {
     }
     exit 0

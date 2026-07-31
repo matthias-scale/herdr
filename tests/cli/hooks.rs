@@ -280,6 +280,14 @@ fn claude_and_codex_turn_title_fixtures_reach_guarded_metadata() {
             "Fix Billing Retry Regression",
             vec![("CODEX_THREAD_ID", "fixture-codex-session")],
         ),
+        (
+            "codex",
+            include_str!("../fixtures/work-titles/codex-short-user-prompt-submit.json"),
+            "fixture-codex-short-session",
+            "herdr:codex",
+            "Write Poem",
+            vec![("CODEX_THREAD_ID", "fixture-codex-short-session")],
+        ),
     ] {
         let requests = run_turn_title_cli(provider, fixture, &envs);
         assert_eq!(requests[0]["method"], "ping");
