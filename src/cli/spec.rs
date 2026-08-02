@@ -36,6 +36,7 @@ pub(super) fn command() -> Command {
         .subcommand(workspace_command())
         .subcommand(worktree_command())
         .subcommand(tab_command())
+        .subcommand(window_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
@@ -293,6 +294,18 @@ fn tab_command() -> Command {
                 .arg(required("label", "LABEL").num_args(1..)),
         )
         .subcommand(id_command("close", "tab_id", "Close a tab"))
+}
+
+fn window_command() -> Command {
+    Command::new("window")
+        .about("Cycle tabs across all workspaces")
+        .subcommand(
+            Command::new("next").about("Focus the next tab in canonical workspace/tab order"),
+        )
+        .subcommand(
+            Command::new("previous")
+                .about("Focus the previous tab in canonical workspace/tab order"),
+        )
 }
 
 fn notification_command() -> Command {
@@ -563,7 +576,7 @@ fn pane_command() -> Command {
                 .about("Move a pane")
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(option("tab", "TAB_ID"))
-                .arg(option("split", "DIRECTION").value_parser(["right", "down"]))
+                .arg(option("split", "DIRECTION").value_parser(["left", "right", "up", "down"]))
                 .arg(option("target-pane", "ID"))
                 .arg(option("ratio", "FLOAT"))
                 .arg(flag("new-tab"))
@@ -911,7 +924,7 @@ fn required_direction_option() -> Arg {
 }
 
 fn split_direction_option() -> Arg {
-    option("direction", "DIRECTION").value_parser(["right", "down"])
+    option("direction", "DIRECTION").value_parser(["left", "right", "up", "down"])
 }
 
 fn pane_agent_state_option(name: &'static str) -> Arg {
@@ -1115,6 +1128,22 @@ mod tests {
     }
 
     #[test]
+    fn spec_exposes_window_cycle_commands_to_help_and_completion() {
+        let cmd = super::command();
+        let window = command_path(&cmd, &["window"]);
+        assert_eq!(
+            window.get_about().map(|about| about.to_string()),
+            Some("Cycle tabs across all workspaces".into())
+        );
+        assert!(window
+            .get_subcommands()
+            .any(|command| command.get_name() == "next"));
+        assert!(window
+            .get_subcommands()
+            .any(|command| command.get_name() == "previous"));
+    }
+
+    #[test]
     fn spec_matches_all_integration_targets() {
         let cmd = super::command();
         let install = command_path(&cmd, &["integration", "install"]);
@@ -1260,7 +1289,10 @@ mod tests {
         let pane_split = command_path(&cmd, &["pane", "split"]);
         assert!(has_option(pane_split, "direction"));
         assert!(!has_option(pane_split, "split"));
-        assert_eq!(option_values(pane_split, "direction"), ["right", "down"]);
+        assert_eq!(
+            option_values(pane_split, "direction"),
+            ["left", "right", "up", "down"]
+        );
     }
 
     #[test]

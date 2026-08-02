@@ -61,16 +61,24 @@ impl App {
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
+        let before = matches!(
+            params.direction,
+            crate::api::schema::SplitDirection::Left | crate::api::schema::SplitDirection::Up
+        );
         let direction = match params.direction {
-            crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
-            crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+            crate::api::schema::SplitDirection::Left
+            | crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
+            crate::api::schema::SplitDirection::Up | crate::api::schema::SplitDirection::Down => {
+                ratatui::layout::Direction::Vertical
+            }
         };
         let shell_config = crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode);
         let split_result = match params.ratio {
-            Some(ratio) => ws.split_pane_with_ratio(
+            Some(ratio) => ws.split_pane_with_ratio_and_placement(
                 target_pane_id,
                 direction,
                 ratio,
+                before,
                 rows,
                 cols,
                 split_cwd,
@@ -80,9 +88,10 @@ impl App {
                 extra_env,
                 params.focus,
             ),
-            None => ws.split_pane(
+            None => ws.split_pane_with_placement(
                 target_pane_id,
                 direction,
+                before,
                 rows,
                 cols,
                 split_cwd,
@@ -1940,8 +1949,12 @@ fn split_direction_to_layout(
     direction: crate::api::schema::SplitDirection,
 ) -> ratatui::layout::Direction {
     match direction {
-        crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
-        crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+        crate::api::schema::SplitDirection::Left | crate::api::schema::SplitDirection::Right => {
+            ratatui::layout::Direction::Horizontal
+        }
+        crate::api::schema::SplitDirection::Up | crate::api::schema::SplitDirection::Down => {
+            ratatui::layout::Direction::Vertical
+        }
     }
 }
 

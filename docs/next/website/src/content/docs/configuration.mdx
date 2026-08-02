@@ -126,6 +126,8 @@ focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
 ```
 
 The default keymap is prefix-first so Herdr does not steal input from shells, editors, tmux, or terminal apps. Search `keys.` in the [Config reference](/docs/config-reference/) to see every action and default binding. The in-app help panel at `prefix+?` shows the active bindings.
@@ -254,11 +256,11 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one workspace tree: each workspace keeps its roll-up row and can disclose its detected agents underneath. Linked-worktree and agent disclosure are independent. Compact and mobile navigation preserve the same ownership tree.
+The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one workspace tree: each workspace keeps its roll-up row, every tab is shown even when it has no detected agent, and each tab exposes panes in layout order. Linked-worktree and agent disclosure are independent. Compact and mobile navigation preserve the same ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
 
-Set `ui.agent_panel_sort = "priority"` to replace the tree with one flat attention-ordered Agent projection. A transient `agent.view.set` query likewise replaces it with one labeled filtered projection. Opening the workspace picker temporarily restores the Spaces tree without clearing either projection. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
+`ui.agent_panel_sort = "priority"` remains accepted for compatibility and attention summaries, but the final sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query likewise keeps the ownership projection. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
-Each expanded Agent window row ends with a compact activity age. Working windows show the duration of the current active interval; idle windows show the time since their latest active interval ended. The fixed-width field refreshes only when its displayed value changes, so labels stay aligned, and it disappears before window context is elided at narrow sidebar widths.
+Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`) and a completed pane stays `done` when it is viewed. Activity age is supplementary only and never replaces `done`.
 
 ### Status row
 
@@ -271,7 +273,7 @@ The sampler starts when a renderable status row first exists, refreshes every tw
 enabled = false
 ```
 
-Disabling the row also stops the background metric sampler, so nothing is collected while it is hidden.
+The row is enabled by default. For an isolated preview, set `enabled = true` in that preview's own config; no terminal font-size control is involved. Disabling the row also stops the background metric sampler, so nothing is collected while it is hidden.
 
 ### Sidebar row layouts
 

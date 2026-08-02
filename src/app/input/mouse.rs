@@ -591,6 +591,12 @@ impl AppState {
                         return None;
                     }
 
+                    if let Some((ws_idx, _tab_idx, pane_id)) = self.tab_target_at(mouse.row) {
+                        self.selected = ws_idx;
+                        self.mode = Mode::Terminal;
+                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                    }
+
                     if let Some((ws_idx, _tab_idx, pane_id)) =
                         self.agent_detail_target_at(mouse.row)
                     {

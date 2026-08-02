@@ -691,11 +691,28 @@ fn parse_pane_placement(value: &str) -> Option<PluginPanePlacement> {
 
 fn parse_split_direction(value: &str) -> Option<SplitDirection> {
     match value {
+        "left" => Some(SplitDirection::Left),
         "right" => Some(SplitDirection::Right),
+        "up" => Some(SplitDirection::Up),
         "down" => Some(SplitDirection::Down),
         _ => {
             eprintln!("invalid split direction: {value}");
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod split_direction_tests {
+    #[test]
+    fn plugin_split_direction_parser_accepts_all_physical_directions() {
+        for (raw, expected) in [
+            ("left", crate::api::schema::SplitDirection::Left),
+            ("right", crate::api::schema::SplitDirection::Right),
+            ("up", crate::api::schema::SplitDirection::Up),
+            ("down", crate::api::schema::SplitDirection::Down),
+        ] {
+            assert_eq!(super::parse_split_direction(raw), Some(expected));
         }
     }
 }

@@ -4884,10 +4884,15 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
+        // The nested pane row reserves indentation; make this test's explicit
+        // wide-sidebar contract large enough for the optional age field.
+        app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,
             &app.terminal_runtimes,
-            ratatui::layout::Rect::new(0, 0, 80, 20),
+            // Keep this characterization in a wide viewport rather than testing
+            // the separately-covered narrow-row age elision.
+            ratatui::layout::Rect::new(0, 0, 160, 20),
         );
         app.sync_agent_activity_refresh_deadline(observed);
 

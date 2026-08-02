@@ -630,6 +630,14 @@ pub struct AgentCardArea {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabCardArea {
+    pub ws_idx: usize,
+    pub tab_idx: usize,
+    pub pane_id: PaneId,
+    pub rect: Rect,
+}
+
 /// Attach-local sidebar state. The headless server swaps one instance into
 /// `AppState` while routing input or rendering for that client; the monolithic
 /// app keeps its own instance directly.
@@ -1715,9 +1723,9 @@ impl AppState {
     }
 
     pub(crate) fn sidebar_shows_spaces_tree(&self) -> bool {
-        self.workspace_picker_forces_spaces_tree
-            || (self.agent_view_override.is_none()
-                && self.agent_panel_sort == AgentPanelSort::Spaces)
+        // The final sidebar is always a stable ownership projection. Priority
+        // remains available for attention summaries, but may not reorder rows.
+        true
     }
 
     pub(crate) fn begin_workspace_picker_presentation(&mut self) {

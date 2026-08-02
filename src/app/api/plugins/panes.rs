@@ -103,12 +103,19 @@ impl App {
                 Ok(env) => env,
                 Err((code, message)) => return encode_error(id, &code, message),
             };
-        let direction = match params
+        let requested_direction = params
             .direction
-            .unwrap_or(crate::api::schema::SplitDirection::Right)
-        {
-            crate::api::schema::SplitDirection::Right => Direction::Horizontal,
-            crate::api::schema::SplitDirection::Down => Direction::Vertical,
+            .unwrap_or(crate::api::schema::SplitDirection::Right);
+        let before = matches!(
+            requested_direction,
+            crate::api::schema::SplitDirection::Left | crate::api::schema::SplitDirection::Up
+        );
+        let direction = match requested_direction {
+            crate::api::schema::SplitDirection::Left
+            | crate::api::schema::SplitDirection::Right => Direction::Horizontal,
+            crate::api::schema::SplitDirection::Up | crate::api::schema::SplitDirection::Down => {
+                Direction::Vertical
+            }
         };
         let cwd = Some(self.plugin_pane_cwd(plugin, params.cwd));
         let (rows, cols) = self.state.estimate_pane_size();
@@ -116,9 +123,10 @@ impl App {
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
-        let result = ws.split_pane_argv_command(
+        let result = ws.split_pane_argv_command_with_placement(
             target_pane,
             direction,
+            before,
             rows.max(4),
             cols.max(10),
             cwd,

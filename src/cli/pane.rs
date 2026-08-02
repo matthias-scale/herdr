@@ -606,7 +606,7 @@ fn parse_pane_split_args(
 
     let Some(direction) = direction else {
         return Err(
-            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
+            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
                 .into(),
         );
     };
@@ -791,7 +791,7 @@ fn parse_pane_move_args(args: &[String]) -> Result<PaneMoveParams, String> {
 }
 
 fn pane_move_usage() -> String {
-    "usage: herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]"
+    "usage: herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]"
         .into()
 }
 
@@ -864,10 +864,12 @@ fn parse_pane_swap_args(args: &[String]) -> Result<PaneSwapParams, String> {
 
 fn parse_split_direction(value: &str) -> Result<SplitDirection, String> {
     match value {
+        "left" => Ok(SplitDirection::Left),
         "right" => Ok(SplitDirection::Right),
+        "up" => Ok(SplitDirection::Up),
         "down" => Ok(SplitDirection::Down),
         _ => Err(format!(
-            "invalid split direction: {value} (expected right or down)"
+            "invalid split direction: {value} (expected left, right, up, or down)"
         )),
     }
 }
@@ -1546,6 +1548,19 @@ mod tests {
         assert_eq!(params.target_pane_id, Some("issue-1".into()));
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
         assert_eq!(params.ratio, Some(0.333));
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_all_physical_directions() {
+        for (raw, expected) in [
+            ("left", crate::api::schema::SplitDirection::Left),
+            ("right", crate::api::schema::SplitDirection::Right),
+            ("up", crate::api::schema::SplitDirection::Up),
+            ("down", crate::api::schema::SplitDirection::Down),
+        ] {
+            let params = parse_pane_split_args(&args(&["--direction", raw]), None).unwrap();
+            assert_eq!(params.direction, expected);
+        }
     }
 
     #[test]
