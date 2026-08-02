@@ -382,12 +382,34 @@ fn sidebar_rows_inner(
         if app.workspace_agents_expanded(ws_idx) {
             let depth = if indented { 2 } else { 1 };
             if let Some(entries) = agents_by_workspace.remove(&ws_idx) {
+                let tab_states = entries.iter().fold(
+                    std::collections::HashMap::<usize, (AgentState, bool)>::new(),
+                    |mut states, entry| {
+                        let candidate = (entry.state, entry.seen);
+                        states
+                            .entry(entry.tab_idx)
+                            .and_modify(|state| {
+                                if workspace_attention_priority(candidate.0, candidate.1)
+                                    > workspace_attention_priority(state.0, state.1)
+                                {
+                                    *state = candidate;
+                                }
+                            })
+                            .or_insert(candidate);
+                        states
+                    },
+                );
                 let mut current_tab = None;
                 for entry in entries {
                     let tab = entry.tab_idx;
                     if current_tab != Some(tab) {
+                        let mut tab_entry = entry.clone();
+                        if let Some((state, seen)) = tab_states.get(&tab) {
+                            tab_entry.state = *state;
+                            tab_entry.seen = *seen;
+                        }
                         rows.push(SidebarRow::Tab {
-                            entry: Box::new(entry.clone()),
+                            entry: Box::new(tab_entry),
                             depth,
                         });
                         current_tab = Some(tab);
@@ -2175,6 +2197,31 @@ mod tests {
         assert!(all_agent_panel_entries(&app)
             .iter()
             .any(|entry| entry.ws_idx == 0));
+    }
+
+    #[test]
+    fn tab_rows_roll_up_state_across_all_owned_panes() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("rollup");
+        let blocked_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let blocked_terminal = app.workspaces[0].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&blocked_terminal).unwrap().state = AgentState::Blocked;
+        app.active = Some(0);
+        app.reconcile_sidebar_presentation();
+
+        let tab = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(tab.state, AgentState::Blocked);
     }
 
     #[test]

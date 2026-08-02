@@ -171,6 +171,7 @@ impl TileLayout {
         moved: PaneId,
         direction: Direction,
         ratio: f32,
+        before: bool,
     ) -> bool {
         if target == moved {
             return false;
@@ -188,7 +189,7 @@ impl TileLayout {
             direction,
             moved,
             valid_split_ratio(ratio),
-            false,
+            before,
         );
         self.focus = moved;
         true
@@ -805,7 +806,7 @@ mod tests {
         let (mut layout, root) = TileLayout::new();
         let moved = pane(99);
 
-        assert!(layout.insert_pane_near(root, moved, Direction::Horizontal, 0.25));
+        assert!(layout.insert_pane_near(root, moved, Direction::Horizontal, 0.25, false));
 
         assert_eq!(layout.pane_count(), 2);
         assert_eq!(layout.pane_ids(), vec![root, moved]);
@@ -814,6 +815,18 @@ mod tests {
         assert_eq!(splits, vec![(Direction::Horizontal, 0.25)]);
         assert_eq!(pane_rect(&layout, root), Rect::new(0, 0, 25, 40));
         assert_eq!(pane_rect(&layout, moved), Rect::new(25, 0, 75, 40));
+    }
+
+    #[test]
+    fn insert_existing_pane_near_target_honors_leading_placement() {
+        let (mut layout, root) = TileLayout::new();
+        let moved = pane(99);
+
+        assert!(layout.insert_pane_near(root, moved, Direction::Vertical, 0.25, true));
+
+        assert_eq!(layout.pane_ids(), vec![moved, root]);
+        assert_eq!(pane_rect(&layout, moved), Rect::new(0, 0, 120, 10));
+        assert_eq!(pane_rect(&layout, root), Rect::new(0, 10, 120, 30));
     }
 
     #[test]

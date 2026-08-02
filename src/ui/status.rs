@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -20,12 +20,12 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: folder · branch · device · CPU · memory. The row before the
+/// Contents, left to right: branch · device · CPU · memory. The row before the
 /// first surviving segment is intentionally blank.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
-/// first surviving segment. On narrow widths, folder, branch, then device elide
-/// in that order; CPU and memory remain required.
+/// first surviving segment. On narrow widths, branch then device elide in that
+/// order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -110,17 +110,7 @@ fn status_segments(
 ) -> Vec<Segment> {
     let mut out = Vec::new();
 
-    let (cwd, branch) = focused_context(app);
-
-    if let Some(cwd) = cwd {
-        let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 32);
-        out.push(Segment {
-            text: format!("  {display} "),
-            style: Style::default().fg(p.mauve),
-            preserve_bg: false,
-            elide_rank: Some(1),
-        });
-    }
+    let (_, branch) = focused_context(app);
 
     if let Some(branch) = branch {
         let branch = shorten_branch(&branch, 20);
@@ -128,7 +118,7 @@ fn status_segments(
             text: format!("  {branch} "),
             style: Style::default().fg(p.yellow),
             preserve_bg: false,
-            elide_rank: Some(2),
+            elide_rank: Some(1),
         });
     }
 
@@ -136,7 +126,7 @@ fn status_segments(
         text: format!(" {} ", metrics.hostname),
         style: Style::default().fg(p.green),
         preserve_bg: false,
-        elide_rank: Some(3),
+        elide_rank: Some(2),
     });
 
     out.push(Segment {
@@ -196,67 +186,6 @@ pub(crate) fn focused_context(app: &AppState) -> (Option<PathBuf>, Option<String
         None
     };
     (cwd, branch)
-}
-
-/// Both separators are accepted everywhere: Windows paths use `\\`, and a
-/// Windows session attached to a Unix server still renders `/` paths.
-const PATH_SEPARATORS: [char; 2] = ['/', '\\'];
-
-fn shorten_path(path: &Path, home: Option<&Path>, max_width: usize) -> String {
-    let raw = path.to_string_lossy();
-    let display = if let Some(home) = home {
-        if let Ok(rest) = path.strip_prefix(home) {
-            let suffix = rest.to_string_lossy();
-            if suffix.is_empty() {
-                "~".into()
-            } else {
-                format!("~/{}", suffix.trim_start_matches(['/', '\\']))
-            }
-        } else {
-            raw.into_owned()
-        }
-    } else {
-        raw.into_owned()
-    };
-    if display_width(&display) <= max_width {
-        return display;
-    }
-    left_truncate_path(&display, max_width)
-}
-
-fn left_truncate_path(display: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let file = display.rsplit(PATH_SEPARATORS).next().unwrap_or(display);
-    let file_width = display_width(file);
-    if file_width >= max_width {
-        return truncate_end(file, max_width);
-    }
-    let ellipsis = "…/";
-    let ellipsis_width = display_width(ellipsis);
-    if ellipsis_width + file_width >= max_width {
-        return truncate_end(file, max_width);
-    }
-    let budget = max_width.saturating_sub(ellipsis_width);
-    let mut width = 0usize;
-    let mut start = display.len();
-    for (index, character) in display.char_indices().rev() {
-        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-        if width + character_width > budget {
-            break;
-        }
-        width += character_width;
-        start = index;
-    }
-    let mut suffix = &display[start..];
-    if let Some(separator) = suffix.find(PATH_SEPARATORS) {
-        suffix = &suffix[separator + 1..];
-    }
-    if suffix.is_empty() {
-        suffix = file;
-    }
-    format!("{ellipsis}{suffix}")
 }
 
 fn shorten_branch(branch: &str, max_width: usize) -> String {
@@ -913,14 +842,13 @@ mod tests {
     }
 
     #[test]
-    fn status_elision_drops_folder_branch_then_device() {
+    fn status_elision_drops_branch_then_device() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some("feature/native-status".into());
-        app.status_home_dir = Some(PathBuf::from("/home/test"));
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let full = status_segments(&app, &metrics, &app.palette);
 
@@ -928,19 +856,18 @@ mod tests {
             full.iter()
                 .filter_map(|segment| segment.elide_rank)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![1, 2]
         );
 
-        let without_folder = fitted_segments(
+        let without_branch = fitted_segments(
             status_segments(&app, &metrics, &app.palette),
             segment_width(&full) - display_width(&full[0].text),
         );
-        let rendered = without_folder
+        let rendered = without_branch
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(!rendered.contains("~/work/status"), "{rendered}");
-        assert!(rendered.contains("feature/native-stat"), "{rendered}");
+        assert!(!rendered.contains("feature/native-stat"), "{rendered}");
         assert!(rendered.contains("testhost"), "{rendered}");
 
         let optional_width = full
@@ -976,17 +903,15 @@ mod tests {
         app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_focused_cwd = app.status_git_cwd.clone();
         app.status_git_branch = Some("feature/native-status".into());
-        app.status_home_dir = Some(PathBuf::from("/home/test"));
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let segments = status_segments(&app, &metrics, &app.palette);
-        assert_eq!(segments.len(), 5, "all visible status context fields");
+        assert_eq!(segments.len(), 4, "all visible status context fields");
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         let ordered = [
-            "~/work/status",
             "feature/native-stat",
             "testhost",
             "CPU  12%",
@@ -1011,6 +936,7 @@ mod tests {
             "workspace:",
             "tab:",
             "pane:",
+            "~/work/status",
             "Herdr v",
             "88%",
             "2026-01-02",

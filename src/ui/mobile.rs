@@ -633,10 +633,7 @@ fn render_mobile_switcher_content(
                     .unwrap_or_else(|| content.width.saturating_sub(used).saturating_sub(1));
                 title_spans.push(Span::styled(
                     truncate_end(&name, name_width as usize),
-                    Style::default()
-                        .fg(p.text)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
+                    mobile_item_title_style(selected, active, p).bg(bg),
                 ));
                 if let Some(columns) = disclosure_columns {
                     let used = title_spans
@@ -694,10 +691,7 @@ fn render_mobile_switcher_content(
                             entry.pane_label.as_deref().unwrap_or("Pane"),
                             content.width.saturating_sub(5) as usize,
                         ),
-                        Style::default()
-                            .fg(p.text)
-                            .bg(bg)
-                            .add_modifier(Modifier::BOLD),
+                        mobile_item_title_style(false, active, p).bg(bg),
                     ),
                 ]);
                 render_two_line_item(
@@ -713,7 +707,12 @@ fn render_mobile_switcher_content(
                 );
             }
             SidebarRow::Tab { entry, depth } => {
-                let bg = mobile_item_bg(false, false, p);
+                let active = app.active == Some(entry.ws_idx)
+                    && app
+                        .workspaces
+                        .get(entry.ws_idx)
+                        .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
+                let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
                 let title = Line::from(vec![
                     Span::styled(indent, Style::default().bg(bg)),
@@ -723,10 +722,7 @@ fn render_mobile_switcher_content(
                             entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
                             content.width.saturating_sub(5) as usize,
                         ),
-                        Style::default()
-                            .fg(p.text)
-                            .bg(bg)
-                            .add_modifier(Modifier::BOLD),
+                        mobile_item_title_style(false, active, p).bg(bg),
                     ),
                 ]);
                 render_two_line_item(
@@ -781,10 +777,7 @@ fn render_mobile_switcher_content(
                 Span::styled("  ", Style::default().bg(bg)),
                 Span::styled(
                     truncate_end(&label, content.width.saturating_sub(3) as usize),
-                    Style::default()
-                        .fg(p.text)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
+                    mobile_item_title_style(false, active, p).bg(bg),
                 ),
             ]);
             render_one_line_item(
@@ -831,7 +824,10 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
             entry.seen,
         ))
         .cloned()
-        .unwrap_or_else(|| super::status::state_label(entry.state, entry.seen).to_string());
+        .unwrap_or_else(|| match entry.state {
+            AgentState::Idle => "done".to_string(),
+            _ => super::status::state_label(entry.state, entry.seen).to_string(),
+        });
     parts.push(status);
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
@@ -956,9 +952,15 @@ fn fill_visible_doc_rect(
 }
 
 fn mobile_item_bg(_selected: bool, _active: bool, p: &Palette) -> ratatui::style::Color {
-    // Selection is foreground/bold only.  Keeping the base panel background
-    // avoids a competing block highlight on small terminal clients.
     p.panel_bg
+}
+
+fn mobile_item_title_style(selected: bool, active: bool, p: &Palette) -> Style {
+    if selected || active {
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0)
+    }
 }
 
 fn inset_for_left_scrollbar(area: Rect) -> Rect {
@@ -1566,6 +1568,28 @@ mod tests {
         let entry = agent_entry(None, Some("pi"));
 
         assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+    }
+
+    #[test]
+    fn mobile_agent_detail_keeps_completed_idle_panes_done_after_viewing() {
+        let mut entry = agent_entry(None, Some("pi"));
+        entry.seen = true;
+        entry.state_labels.clear();
+
+        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
+    }
+
+    #[test]
+    fn mobile_item_titles_distinguish_selection_without_background_weight() {
+        let palette = Palette::default();
+        let inactive = mobile_item_title_style(false, false, &palette);
+        let selected = mobile_item_title_style(true, false, &palette);
+
+        assert_eq!(inactive.fg, Some(palette.subtext0));
+        assert!(!inactive.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(selected.fg, Some(palette.text));
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(mobile_item_bg(true, false, &palette), palette.panel_bg);
     }
 
     #[test]

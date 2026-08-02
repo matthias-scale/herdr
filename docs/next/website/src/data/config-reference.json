@@ -719,7 +719,7 @@
         {
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
-          "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
+          "default": "[[\"state_icon\", \"pane\", \"state_text\"]]",
           "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {
@@ -737,7 +737,7 @@
         {
           "key": "ui.sidebar.spaces.rows",
           "type": "list of token rows",
-          "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
+          "default": "[[\"state_icon\", \"workspace\"]]",
           "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {

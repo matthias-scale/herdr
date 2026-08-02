@@ -881,7 +881,7 @@ impl App {
                     [target_tab_idx]
                     .layout
                     .focused();
-                let direction = split_direction_to_layout(split);
+                let (direction, before) = split_direction_to_layout(split);
                 let moved_pane_id = match self.state.workspaces[target_ws_idx]
                     .insert_moved_pane_into_tab(
                         target_tab_idx,
@@ -889,6 +889,7 @@ impl App {
                         moved,
                         direction,
                         ratio,
+                        before,
                     ) {
                     Ok(pane_id) => pane_id,
                     Err(moved) => {
@@ -1947,14 +1948,14 @@ fn encode_unchanged_pane_move(
 
 fn split_direction_to_layout(
     direction: crate::api::schema::SplitDirection,
-) -> ratatui::layout::Direction {
+) -> (ratatui::layout::Direction, bool) {
     match direction {
-        crate::api::schema::SplitDirection::Left | crate::api::schema::SplitDirection::Right => {
-            ratatui::layout::Direction::Horizontal
+        crate::api::schema::SplitDirection::Left => (ratatui::layout::Direction::Horizontal, true),
+        crate::api::schema::SplitDirection::Right => {
+            (ratatui::layout::Direction::Horizontal, false)
         }
-        crate::api::schema::SplitDirection::Up | crate::api::schema::SplitDirection::Down => {
-            ratatui::layout::Direction::Vertical
-        }
+        crate::api::schema::SplitDirection::Up => (ratatui::layout::Direction::Vertical, true),
+        crate::api::schema::SplitDirection::Down => (ratatui::layout::Direction::Vertical, false),
     }
 }
 
@@ -2718,6 +2719,44 @@ mod tests {
             app.state.workspaces[0].tabs[0].terminal_id(source),
             Some(&source_terminal)
         );
+    }
+
+    #[test]
+    fn api_pane_move_to_existing_tab_preserves_four_way_placement() {
+        for (split, moved_first) in [
+            (SplitDirection::Left, true),
+            (SplitDirection::Right, false),
+            (SplitDirection::Up, true),
+            (SplitDirection::Down, false),
+        ] {
+            let mut app = app_with_linked_worktree();
+            let source = app.state.workspaces[0].tabs[0].root_pane;
+            let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
+            let target = app.state.workspaces[0].tabs[target_tab].root_pane;
+            seed_terminal_states(&mut app);
+            let source_public = app.public_pane_id(0, source).unwrap();
+            let target_public = app.public_pane_id(0, target).unwrap();
+            let target_tab_public = app.public_tab_id(0, target_tab).unwrap();
+
+            let response = app.handle_pane_move(
+                "req".into(),
+                PaneMoveParams {
+                    pane_id: source_public,
+                    destination: PaneMoveDestination::Tab {
+                        tab_id: target_tab_public,
+                        target_pane_id: Some(target_public),
+                        split: split.clone(),
+                        ratio: None,
+                    },
+                    focus: true,
+                },
+            );
+
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert!(matches!(success.result, ResponseResult::PaneMove { .. }));
+            let pane_ids = app.state.workspaces[0].tabs[0].layout.pane_ids();
+            assert_eq!(pane_ids.first() == Some(&source), moved_first, "{split:?}");
+        }
     }
 
     #[test]

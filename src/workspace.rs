@@ -1247,12 +1247,13 @@ impl Workspace {
         moved: MovedPane,
         direction: Direction,
         ratio: f32,
+        before: bool,
     ) -> Result<PaneId, MovedPane> {
         let pane_id = moved.pane_id;
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return Err(moved);
         };
-        tab.insert_existing_pane(target_pane_id, moved, direction, ratio)?;
+        tab.insert_existing_pane(target_pane_id, moved, direction, ratio, before)?;
         if !self.public_pane_numbers.contains_key(&pane_id) {
             self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
         }
@@ -1896,7 +1897,14 @@ mod tests {
         let missing_target = PaneId::alloc();
 
         let recovered = target
-            .insert_moved_pane_into_tab(0, missing_target, taken.moved, Direction::Horizontal, 0.5)
+            .insert_moved_pane_into_tab(
+                0,
+                missing_target,
+                taken.moved,
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
             .expect_err("invalid target should return the moved pane");
 
         assert_eq!(recovered.pane_id, source_pane);
