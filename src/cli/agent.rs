@@ -71,6 +71,13 @@ fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
     let Some(metadata) =
         crate::work_title::request_from_turn_start(provider, pane_id.as_deref(), &input, seq)
     else {
+        tracing::debug!(
+            ?provider,
+            pane_id_present = pane_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "ignored work title hook without a valid guarded title request"
+        );
         return Ok(0);
     };
     let Some(session_id) = metadata.agent_session_id.clone() else {
@@ -82,6 +89,10 @@ fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
             .filter(|value| !value.trim().is_empty())
             .is_some_and(|value| value != session_id)
     {
+        tracing::debug!(
+            ?provider,
+            "ignored work title hook for a different Codex session"
+        );
         return Ok(0);
     }
     let Some(agent) = metadata.agent.clone() else {
@@ -103,15 +114,24 @@ fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
         }),
     };
     let Ok(response) = super::send_request(&session_request) else {
+        tracing::debug!(
+            ?provider,
+            "could not reach Herdr to guard work title session"
+        );
         return Ok(0);
     };
     if response.get("error").is_some() {
+        tracing::debug!(?provider, "Herdr rejected the guarded work title session");
         return Ok(0);
     }
-    let _ = super::send_request_unchecked(&Request {
+    if super::send_request_unchecked(&Request {
         id: format!("cli:agent:turn-title:metadata:{seq}"),
         method: Method::PaneReportMetadata(metadata),
-    });
+    })
+    .is_err()
+    {
+        tracing::debug!(?provider, "could not deliver guarded work title metadata");
+    }
     Ok(0)
 }
 
