@@ -203,6 +203,11 @@ pub(crate) fn mobile_switcher_target_at(
                 tab_idx: entry.tab_idx,
                 pane_id: entry.pane_id,
             },
+            SidebarRow::Tab { entry, .. } => MobileSwitcherTarget::Agent {
+                ws_idx: entry.ws_idx,
+                tab_idx: entry.tab_idx,
+                pane_id: entry.pane_id,
+            },
         });
     }
     cursor = sidebar_end;
@@ -686,7 +691,7 @@ fn render_mobile_switcher_content(
                     Span::styled(" ", Style::default().bg(bg)),
                     Span::styled(
                         truncate_end(
-                            entry.agent_label.as_deref().unwrap_or(&entry.primary_label),
+                            entry.pane_label.as_deref().unwrap_or("Pane"),
                             content.width.saturating_sub(5) as usize,
                         ),
                         Style::default()
@@ -704,6 +709,35 @@ fn render_mobile_switcher_content(
                     bg,
                     title,
                     truncate_end(&mobile_agent_detail(entry), content.width as usize),
+                    p.overlay0,
+                );
+            }
+            SidebarRow::Tab { entry, depth } => {
+                let bg = mobile_item_bg(false, false, p);
+                let indent = " ".repeat(2 + usize::from(*depth) * 3);
+                let title = Line::from(vec![
+                    Span::styled(indent, Style::default().bg(bg)),
+                    Span::styled("▾ ", Style::default().fg(p.accent).bg(bg)),
+                    Span::styled(
+                        truncate_end(
+                            entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
+                            content.width.saturating_sub(5) as usize,
+                        ),
+                        Style::default()
+                            .fg(p.text)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]);
+                render_two_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    bg,
+                    title,
+                    String::new(),
                     p.overlay0,
                 );
             }
@@ -790,9 +824,6 @@ fn render_mobile_switcher_content(
 
 fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
-    if let Some(tab_label) = entry.primary_tab_label.as_deref() {
-        parts.push(tab_label.to_string());
-    }
     let status = entry
         .state_labels
         .get(super::sidebar::agent_panel_status_key(
@@ -924,14 +955,10 @@ fn fill_visible_doc_rect(
     }
 }
 
-fn mobile_item_bg(selected: bool, active: bool, p: &Palette) -> ratatui::style::Color {
-    if selected {
-        p.surface0
-    } else if active {
-        p.surface_dim
-    } else {
-        p.panel_bg
-    }
+fn mobile_item_bg(_selected: bool, _active: bool, p: &Palette) -> ratatui::style::Color {
+    // Selection is foreground/bold only.  Keeping the base panel background
+    // avoids a competing block highlight on small terminal clients.
+    p.panel_bg
 }
 
 fn inset_for_left_scrollbar(area: Rect) -> Rect {
@@ -1222,6 +1249,7 @@ mod tests {
             activity_at: None,
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
+            tab_first_pane: false,
         }
     }
 
@@ -1527,10 +1555,10 @@ mod tests {
     }
 
     #[test]
-    fn mobile_agent_detail_includes_tab_context_when_available() {
+    fn mobile_agent_detail_keeps_tab_title_owned_by_the_tab_row() {
         let entry = agent_entry(Some("mobile-state"), Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  mobile-state · idle · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
     }
 
     #[test]
@@ -1578,12 +1606,19 @@ mod tests {
             })
             .unwrap();
 
-        let row = (0..40)
-            .map(|x| terminal.backend().buffer()[(x, 10)].symbol())
-            .collect::<String>();
+        let rows = (0..20)
+            .map(|y| {
+                (0..40)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let tab_row = rows
+            .iter()
+            .find(|row| row.contains("New Thread"))
+            .expect("explicit mobile tab row");
 
-        assert!(row.contains("New Thread"), "mobile tab row: {row:?}");
-        assert!(!row.contains("tab 2"), "mobile tab row: {row:?}");
+        assert!(!tab_row.contains("tab 2"), "mobile tab row: {tab_row:?}");
     }
 
     #[cfg(unix)]

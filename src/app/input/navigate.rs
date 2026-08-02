@@ -320,6 +320,14 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::PreviousWindow => {
+                self.focus_relative_window(false);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::NextWindow => {
+                self.focus_relative_window(true);
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CloseTab => {
                 if !self.close_active_tab_via_api_requires_confirmation() {
                     leave_navigate_mode(&mut self.state);
@@ -369,6 +377,14 @@ impl App {
             }
             NavigateAction::SplitHorizontal => {
                 self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Down);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::SplitLeft => {
+                self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Left);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::SplitUp => {
+                self.split_focused_pane_via_api(crate::api::schema::SplitDirection::Up);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::ClosePane => {
@@ -459,6 +475,37 @@ impl App {
             return;
         };
         self.runtime_tab_focus("tui.tab.focus", tab_id);
+    }
+
+    /// Windows are Herdr tabs. Canonical workspace/vector/tab order is used so
+    /// agent lifecycle or cwd changes cannot affect global navigation.
+    fn focus_relative_window(&mut self, forward: bool) {
+        let windows = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| (0..ws.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx)))
+            .collect::<Vec<_>>();
+        let Some(active_ws) = self.state.active else {
+            return;
+        };
+        let active_tab = self.state.workspaces[active_ws].active_tab_index();
+        let Some(current) = windows
+            .iter()
+            .position(|window| *window == (active_ws, active_tab))
+        else {
+            return;
+        };
+        let Some(next) = crate::workspace::relative_window_index(windows.len(), current, forward)
+        else {
+            return;
+        };
+        let (ws_idx, tab_idx) = windows[next];
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return;
+        };
+        self.runtime_tab_focus("tui.window.focus_relative", tab_id);
     }
 
     pub(crate) fn close_active_tab_via_api_requires_confirmation(&mut self) -> bool {
@@ -1323,6 +1370,8 @@ pub(crate) enum NavigateAction {
     RenameTab,
     PreviousTab,
     NextTab,
+    PreviousWindow,
+    NextWindow,
     CloseTab,
     RenamePane,
     FocusPaneLeft,
@@ -1335,6 +1384,8 @@ pub(crate) enum NavigateAction {
     SwapPaneRight,
     SplitVertical,
     SplitHorizontal,
+    SplitLeft,
+    SplitUp,
     ClosePane,
     EditScrollback,
     CopyMode,
@@ -1364,6 +1415,8 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::NextAgent
             | NavigateAction::PreviousTab
             | NavigateAction::NextTab
+            | NavigateAction::PreviousWindow
+            | NavigateAction::NextWindow
             | NavigateAction::FocusPaneLeft
             | NavigateAction::FocusPaneDown
             | NavigateAction::FocusPaneUp
@@ -1464,6 +1517,8 @@ fn non_indexed_action_for_key(
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.previous_tab, NavigateAction::PreviousTab),
         (&kb.next_tab, NavigateAction::NextTab),
+        (&kb.previous_window, NavigateAction::PreviousWindow),
+        (&kb.next_window, NavigateAction::NextWindow),
         (&kb.close_tab, NavigateAction::CloseTab),
         (&kb.rename_pane, NavigateAction::RenamePane),
         (&kb.edit_scrollback, NavigateAction::EditScrollback),
@@ -1481,6 +1536,8 @@ fn non_indexed_action_for_key(
         (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
         (&kb.split_vertical, NavigateAction::SplitVertical),
         (&kb.split_horizontal, NavigateAction::SplitHorizontal),
+        (&kb.split_left, NavigateAction::SplitLeft),
+        (&kb.split_up, NavigateAction::SplitUp),
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
@@ -1661,6 +1718,31 @@ pub(super) fn execute_navigate_action_in_context(
             state.next_tab();
             leave_navigate_mode(state);
         }
+        NavigateAction::PreviousWindow | NavigateAction::NextWindow => {
+            let windows = state
+                .workspaces
+                .iter()
+                .enumerate()
+                .flat_map(|(ws_idx, ws)| (0..ws.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx)))
+                .collect::<Vec<_>>();
+            if let Some(active_ws) = state.active {
+                let active_tab = state.workspaces[active_ws].active_tab_index();
+                if let Some(current) = windows
+                    .iter()
+                    .position(|window| *window == (active_ws, active_tab))
+                {
+                    let forward = matches!(action, NavigateAction::NextWindow);
+                    if let Some(next) =
+                        crate::workspace::relative_window_index(windows.len(), current, forward)
+                    {
+                        let (ws_idx, tab_idx) = windows[next];
+                        state.switch_workspace(ws_idx);
+                        state.switch_tab(tab_idx);
+                    }
+                }
+            }
+            leave_navigate_mode(state);
+        }
         NavigateAction::CloseTab => {
             if !state.close_tab() {
                 leave_navigate_mode(state);
@@ -1701,6 +1783,14 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::SplitHorizontal => {
             state.split_pane(terminal_runtimes, Direction::Vertical);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::SplitLeft => {
+            state.split_pane_with_placement(terminal_runtimes, Direction::Horizontal, true);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::SplitUp => {
+            state.split_pane_with_placement(terminal_runtimes, Direction::Vertical, true);
             leave_navigate_mode(state);
         }
         NavigateAction::ClosePane => {
@@ -1960,7 +2050,7 @@ mod tests {
 
         app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
 
-        assert!(!app.state.sidebar_shows_spaces_tree());
+        assert!(app.state.sidebar_shows_spaces_tree());
         let target_pane = app.state.workspaces[1].tabs[0].root_pane;
         let target_row = crate::ui::sidebar_rows(&app.state)
             .iter()

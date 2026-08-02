@@ -129,6 +129,8 @@ pub enum LayoutSnapshot {
     Pane(u32),
     Split {
         direction: DirectionSnapshot,
+        #[serde(default)]
+        leading: bool,
         ratio: f32,
         first: Box<LayoutSnapshot>,
         second: Box<LayoutSnapshot>,
@@ -432,6 +434,7 @@ pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
         Node::Pane(id) => LayoutSnapshot::Pane(id.raw()),
         Node::Split {
             direction,
+            leading,
             ratio,
             first,
             second,
@@ -440,6 +443,7 @@ pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
                 Direction::Horizontal => DirectionSnapshot::Horizontal,
                 Direction::Vertical => DirectionSnapshot::Vertical,
             },
+            leading: *leading,
             ratio: *ratio,
             first: Box::new(capture_node(first)),
             second: Box::new(capture_node(second)),
@@ -618,10 +622,12 @@ mod tests {
     fn round_trip_layout_snapshot() {
         let layout = LayoutSnapshot::Split {
             direction: DirectionSnapshot::Horizontal,
+            leading: true,
             ratio: 0.6,
             first: Box::new(LayoutSnapshot::Pane(0)),
             second: Box::new(LayoutSnapshot::Split {
                 direction: DirectionSnapshot::Vertical,
+                leading: true,
                 ratio: 0.5,
                 first: Box::new(LayoutSnapshot::Pane(1)),
                 second: Box::new(LayoutSnapshot::Pane(2)),
@@ -676,6 +682,7 @@ mod tests {
                     custom_name: Some("api".to_string()),
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
+                        leading: false,
                         ratio: 0.5,
                         first: Box::new(LayoutSnapshot::Pane(0)),
                         second: Box::new(LayoutSnapshot::Pane(1)),
@@ -1238,6 +1245,7 @@ mod tests {
                     custom_name: None,
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
+                        leading: false,
                         ratio: 0.5,
                         first: Box::new(LayoutSnapshot::Pane(0)),
                         second: Box::new(LayoutSnapshot::Pane(1)),

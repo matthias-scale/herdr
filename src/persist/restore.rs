@@ -838,6 +838,7 @@ pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Op
         Node::Pane(id) => surviving.contains(&id).then_some(Node::Pane(id)),
         Node::Split {
             direction,
+            leading,
             ratio,
             first,
             second,
@@ -847,6 +848,7 @@ pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Op
             match (first, second) {
                 (Some(first), Some(second)) => Some(Node::Split {
                     direction,
+                    leading,
                     ratio,
                     first: Box::new(first),
                     second: Box::new(second),
@@ -887,6 +889,7 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
         }
         LayoutSnapshot::Split {
             direction,
+            leading,
             ratio,
             first,
             second,
@@ -899,6 +902,7 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
             };
             Node::Split {
                 direction: dir,
+                leading: *leading,
                 ratio: *ratio,
                 first: Box::new(first_node),
                 second: Box::new(second_node),
@@ -949,10 +953,12 @@ mod tests {
     fn capture_and_restore_node_round_trip() {
         let node = Node::Split {
             direction: Direction::Horizontal,
+            leading: true,
             ratio: 0.5,
             first: Box::new(Node::Pane(PaneId::from_raw(0))),
             second: Box::new(Node::Split {
                 direction: Direction::Vertical,
+                leading: true,
                 ratio: 0.3,
                 first: Box::new(Node::Pane(PaneId::from_raw(1))),
                 second: Box::new(Node::Pane(PaneId::from_raw(2))),
@@ -962,6 +968,8 @@ mod tests {
         let snap = super::super::snapshot::capture_node(&node);
         let (restored, id_map) = restore_node_remapped(&snap);
 
+        assert!(matches!(snap, LayoutSnapshot::Split { leading: true, .. }));
+        assert!(matches!(&restored, Node::Split { leading: true, .. }));
         assert_eq!(id_map.len(), 3);
         let ids = collect_pane_ids(&restored);
         assert_eq!(ids.len(), 3);
@@ -975,6 +983,7 @@ mod tests {
         let missing = PaneId::from_raw(12);
         let node = Node::Split {
             direction: Direction::Horizontal,
+            leading: false,
             ratio: 0.5,
             first: Box::new(Node::Pane(keep)),
             second: Box::new(Node::Pane(missing)),
@@ -1275,6 +1284,7 @@ mod tests {
                     custom_name: None,
                     layout: LayoutSnapshot::Split {
                         direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                        leading: false,
                         ratio: 0.5,
                         first: Box::new(LayoutSnapshot::Pane(10)),
                         second: Box::new(LayoutSnapshot::Pane(20)),
@@ -1445,10 +1455,12 @@ mod tests {
         let terminal_id = &workspace.tabs[3].panes[&agent_pane].attached_terminal_id;
         assert!(terminals[terminal_id].agent_name.is_none());
         assert_eq!(terminals[terminal_id].managed_agent_kind(), None);
-        assert!(workspace
+        let restored_detail = workspace
             .pane_details(&terminals)
             .into_iter()
-            .all(|detail| detail.pane_id != agent_pane));
+            .find(|detail| detail.pane_id == agent_pane)
+            .expect("agentless panes remain visible in the final ownership projection");
+        assert!(restored_detail.agent.is_none());
     }
 
     #[test]
@@ -1467,6 +1479,7 @@ mod tests {
                 custom_name: None,
                 layout: LayoutSnapshot::Split {
                     direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                    leading: false,
                     ratio: 0.5,
                     first: Box::new(LayoutSnapshot::Pane(10)),
                     second: Box::new(LayoutSnapshot::Pane(20)),

@@ -11,8 +11,6 @@ use super::{Tab, Workspace};
 pub struct PaneDetail {
     pub pane_id: PaneId,
     pub tab_idx: usize,
-    pub tab_label: String,
-    pub label: String,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
@@ -32,32 +30,40 @@ impl Tab {
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
         tab_idx: usize,
-        tab_label: &str,
     ) -> Vec<PaneDetail> {
         self.layout
             .pane_ids()
             .iter()
-            .filter_map(|id| {
+            .enumerate()
+            .filter_map(|(pane_idx, id)| {
                 let pane = self.panes.get(id)?;
                 let terminal = terminals.get(&pane.attached_terminal_id)?;
                 let agent_kind_label = terminal.effective_agent_label().map(str::to_string);
                 let fallback_agent_label = terminal
                     .agent_name
                     .as_deref()
-                    .or(agent_kind_label.as_deref())?
-                    .to_string();
+                    .or(agent_kind_label.as_deref())
+                    .map(str::to_string);
                 let agent_label = terminal
                     .effective_display_agent()
-                    .unwrap_or_else(|| fallback_agent_label.clone());
+                    .or(fallback_agent_label)
+                    .unwrap_or_else(|| "Terminal".to_string());
                 let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx,
-                    tab_label: tab_label.to_string(),
-                    label: agent_label.clone(),
+                    // A pane is a child of the tab in every sidebar projection.
+                    // Never derive its label from the effective tab title: that
+                    // would render the persisted title twice. Keep this order
+                    // deterministic for agentless panes as well.
                     pane_label: terminal
-                        .effective_title()
-                        .or_else(|| terminal.manual_label.clone()),
+                        .manual_label
+                        .clone()
+                        .or_else(|| terminal.effective_display_agent())
+                        .or_else(|| terminal.agent_name.clone())
+                        .or(agent_kind_label.clone())
+                        .or_else(|| terminal.terminal_title_stripped())
+                        .or_else(|| Some(format!("Pane {}", pane_idx + 1))),
                     terminal_title: terminal.terminal_title.clone(),
                     terminal_title_stripped: terminal.terminal_title_stripped(),
                     agent_label,
@@ -103,22 +109,10 @@ impl Workspace {
     }
 
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
-        let multi_tab = self.tabs.len() > 1;
         self.tabs
             .iter()
             .enumerate()
-            .flat_map(|(tab_idx, tab)| {
-                let tab_label = self
-                    .tab_display_name(tab_idx)
-                    .unwrap_or_else(|| (tab_idx + 1).to_string());
-                tab.pane_details(terminals, tab_idx, &tab_label).into_iter()
-            })
-            .map(|mut detail| {
-                if multi_tab {
-                    detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
-                }
-                detail
-            })
+            .flat_map(|(tab_idx, tab)| tab.pane_details(terminals, tab_idx).into_iter())
             .collect()
     }
 }
@@ -209,17 +203,14 @@ mod tests {
         let labels: Vec<_> = ws
             .pane_details(&terminals)
             .into_iter()
-            .map(|detail| (detail.label, detail.agent_label, detail.agent))
+            .map(|detail| (detail.agent_label, detail.agent))
             .collect();
 
-        assert_eq!(
-            labels,
-            vec![("planner".into(), "planner".into(), Some(Agent::Pi))]
-        );
+        assert_eq!(labels, vec![("planner".into(), Some(Agent::Pi))]);
     }
 
     #[test]
-    fn pane_details_includes_tab_context_for_multi_tab_workspace() {
+    fn pane_details_keeps_pane_labels_independent_from_tab_titles() {
         let mut ws = Workspace::test_new("test");
         ws.tabs[0].custom_name = Some("main".into());
         let root_pane = ws.tabs[0].root_pane;
@@ -248,14 +239,14 @@ mod tests {
         let labels: Vec<_> = ws
             .pane_details(&terminals)
             .into_iter()
-            .map(|detail| (detail.label, detail.agent_label, detail.agent))
+            .map(|detail| (detail.agent_label, detail.agent))
             .collect();
 
         assert_eq!(
             labels,
             vec![
-                ("main·pi".into(), "pi".into(), Some(Agent::Pi)),
-                ("review·claude".into(), "claude".into(), Some(Agent::Claude)),
+                ("pi".into(), Some(Agent::Pi)),
+                ("claude".into(), Some(Agent::Claude)),
             ]
         );
     }
@@ -281,5 +272,23 @@ mod tests {
 
         assert_eq!(ws.tabs[1].number, 3);
         assert_eq!(survivor.tab_idx, 1);
+    }
+
+    #[test]
+    fn pane_details_include_agentless_panes_in_layout_order_with_fallback_labels() {
+        let mut ws = Workspace::test_new("test");
+        let second = ws.test_split(Direction::Horizontal);
+        let mut terminals = HashMap::new();
+        for pane_id in ws.tabs[0].layout.pane_ids() {
+            let terminal = terminal_for_pane(&ws, pane_id);
+            terminals.insert(terminal.id.clone(), terminal);
+        }
+
+        let details = ws.pane_details(&terminals);
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].pane_id, ws.tabs[0].layout.pane_ids()[0]);
+        assert_eq!(details[1].pane_id, second);
+        assert_eq!(details[0].pane_label.as_deref(), Some("Pane 1"));
+        assert_eq!(details[1].pane_label.as_deref(), Some("Pane 2"));
     }
 }

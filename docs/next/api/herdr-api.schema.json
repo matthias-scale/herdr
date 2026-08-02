@@ -1024,7 +1024,9 @@
         },
         "SplitDirection": {
           "enum": [
+            "left",
             "right",
+            "up",
             "down"
           ],
           "type": "string"
@@ -3634,7 +3636,9 @@
         },
         "SplitDirection": {
           "enum": [
+            "left",
             "right",
+            "up",
             "down"
           ],
           "type": "string"
@@ -9747,7 +9751,9 @@
         },
         "SplitDirection": {
           "enum": [
+            "left",
             "right",
+            "up",
             "down"
           ],
           "type": "string"

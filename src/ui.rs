@@ -52,9 +52,10 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
-pub(crate) use self::sidebar::{workspace_drop_indicator_row, workspace_list_body_rect};
+pub(crate) use self::sidebar::workspace_drop_indicator_row;
+use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
@@ -1263,8 +1264,9 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_sidebar_status_geometry_keeps_active_workspace_highlight() {
-        // AC2/AC7: collapsed desktop content remains aligned below status row 0.
+    fn collapsed_sidebar_status_geometry_keeps_active_workspace_foreground_emphasis() {
+        // AC2/AC7: collapsed desktop content remains aligned below status row
+        // 0 and uses foreground emphasis without a selection fill.
         let mut app = crate::app::state::AppState::test_new();
         app.sidebar_collapsed = true;
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -1283,7 +1285,9 @@ mod tests {
         let active_row = ws_area.y + 1;
         let active_style = buffer[(ws_area.x, active_row)].style();
 
-        assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(active_style.fg, Some(app.palette.text));
+        assert!(active_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(active_style.bg, Some(Color::Reset));
     }
 
     #[test]

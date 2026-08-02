@@ -53,7 +53,9 @@ pub struct ClientWindowTitleSetParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitDirection {
+    Left,
     Right,
+    Up,
     Down,
 }
 
