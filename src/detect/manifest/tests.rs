@@ -748,19 +748,26 @@ fn codex_background_terminal_screen_does_not_override_osc_idle() {
 }
 
 #[test]
-fn codex_screen_working_fallback_handles_static_osc_title() {
-    let screen = "• I’ll run it and wait for completion.\n\n\
-        ◦ Working (1m 16s • esc to interrupt) · 1 background…\n\n\
-        › Use /skills to list available skills\n\n\
-        gpt-5.6-sol default · /work\n";
-    let result = osc_explain(Agent::Codex, screen, "project", "");
+fn codex_screen_working_fallback_handles_static_osc_title_and_progress_decorations() {
+    for progress_line in [
+        "◦ Working (1m 16s • esc to interrupt) · 1 background…",
+        "Working (1m 16s • esc to interrupt)",
+    ] {
+        let screen = format!(
+            "• I’ll run it and wait for completion.\n\n{progress_line}\n\n\
+             › Use /skills to list available skills\n\n\
+             gpt-5.6-sol default · /work\n"
+        );
+        let result = osc_explain(Agent::Codex, &screen, "project", "");
 
-    assert_eq!(result.state, AgentState::Working);
-    assert_eq!(
-        result.matched_rule.as_ref().map(|r| r.id.as_str()),
-        Some("screen_working_fallback")
-    );
-    assert!(result.visible_working);
+        assert_eq!(result.state, AgentState::Working, "{progress_line}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|r| r.id.as_str()),
+            Some("screen_working_fallback"),
+            "{progress_line}"
+        );
+        assert!(result.visible_working, "{progress_line}");
+    }
 }
 
 #[test]
