@@ -60,6 +60,15 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::StatusMetricsRefreshed { snapshot } => {
+                let should_repaint = self
+                    .status_metric_refresh
+                    .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
+                if let Some(snapshot) = snapshot {
+                    self.state.status_metrics = Some(*snapshot);
+                }
+                should_repaint && self.status_metrics_visible
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -86,9 +95,16 @@ impl App {
         } else {
             self.last_git_remote_status_refresh = Instant::now();
         }
+        let projected_focus = self
+            .state
+            .status_bar_enabled
+            .then(|| self.focused_status_context_key());
         let changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+        if let Some(projected_focus) = projected_focus {
+            self.status_context_focus = projected_focus;
+        }
         if changed {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
@@ -97,6 +113,15 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::StatusMetricsRefreshed { snapshot } = ev {
+            self.status_metric_refresh
+                .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
+            if let Some(snapshot) = snapshot {
+                self.state.status_metrics = Some(*snapshot);
+            }
+            return;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -291,6 +316,9 @@ impl App {
         }
         self.sync_full_lifecycle_authority_detection_pauses();
         if terminal_cwd_reported {
+            if self.state.status_bar_enabled {
+                self.project_status_context_from_cached();
+            }
             self.request_git_identity_refresh(Instant::now());
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
@@ -791,6 +819,19 @@ impl App {
         }
     }
 
+    pub(crate) fn focused_pane_tab_label(&self, pane_id: &str) -> Option<String> {
+        let (ws_idx, pane_id) = self.parse_pane_id(pane_id)?;
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)?
+            .find_tab_index_for_pane(pane_id)?;
+        if !self.state.is_active_pane(ws_idx, tab_idx, pane_id) {
+            return None;
+        }
+        self.state.workspaces.get(ws_idx)?.tab_display_name(tab_idx)
+    }
+
     pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
         // Token updates bypass plugin hooks so a hook cannot refresh its own
         // token and recursively trigger workspace.updated.
@@ -825,6 +866,11 @@ impl App {
                 self.send_pane_focus_event(ws_idx, pane_id, event);
             }
             return;
+        }
+
+        self.sync_status_context_before_render();
+        if self.state.status_bar_enabled {
+            self.request_git_identity_refresh(std::time::Instant::now());
         }
 
         if let Some((ws_idx, pane_id)) = self.last_focus {
@@ -1379,6 +1425,173 @@ mod tests {
             },
         );
         app
+    }
+
+    #[tokio::test]
+    async fn status_focus_transition_uses_cached_cwd_without_runtime_queries() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("status-focus");
+        let root = workspace.tabs[0].root_pane;
+        let nested = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.status_bar_enabled = true;
+        let root_terminal = app.state.workspaces[0]
+            .terminal_id(root)
+            .expect("root terminal")
+            .clone();
+        let nested_terminal = app.state.workspaces[0]
+            .terminal_id(nested)
+            .expect("nested terminal")
+            .clone();
+        app.state.terminals.get_mut(&root_terminal).unwrap().cwd = "/repo".into();
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
+        let (runtime, _input_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes
+            .insert(nested_terminal.clone(), runtime);
+        app.last_focus = Some((0, root));
+        app.state.status_focused_cwd = Some("/repo".into());
+        app.state.status_git_cwd = Some("/repo".into());
+        app.state.status_git_branch = Some("root-branch".into());
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(app.state.focus_pane_in_workspace(0, nested));
+        app.sync_focus_events();
+
+        assert_eq!(
+            app.state.status_focused_cwd,
+            Some(std::path::PathBuf::from("/repo/nested"))
+        );
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
+        assert!(app.git_identity_refresh_requested);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
+        assert_eq!(branch, None);
+
+        app.state.terminals.remove(&root_terminal);
+        app.state.status_focused_cwd = Some("/repo/nested".into());
+        app.state.status_git_cwd = Some("/repo/nested".into());
+        app.state.status_git_branch = Some("nested-branch".into());
+        assert!(app.state.focus_pane_in_workspace(0, root));
+        app.sync_focus_events();
+
+        assert_eq!(app.state.status_focused_cwd, None);
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, None);
+        assert_eq!(branch, None);
+    }
+
+    #[tokio::test]
+    async fn focused_cwd_report_clears_stale_branch_while_refresh_is_in_flight() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("status-cwd-report");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.status_bar_enabled = true;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        let old_cwd = std::env::current_dir().expect("current directory");
+        let new_cwd = std::env::temp_dir().join(format!(
+            "herdr-status-cwd-report-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&new_cwd).expect("create reported cwd");
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = old_cwd.clone();
+        app.state.status_focused_cwd = Some(old_cwd.clone());
+        app.state.status_git_cwd = Some(old_cwd);
+        app.state.status_git_branch = Some("stale-branch".into());
+        app.state.status_focus_projection_initialized = true;
+        app.git_refresh_in_flight = true;
+
+        app.handle_internal_event(AppEvent::TerminalCwdReported {
+            pane_id,
+            cwd: new_cwd.clone(),
+        });
+
+        assert_eq!(app.state.status_focused_cwd, Some(new_cwd.clone()));
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
+        assert!(app.git_identity_refresh_requested);
+        assert!(app.git_refresh_due_after_in_flight);
+        let _ = std::fs::remove_dir_all(new_cwd);
+    }
+
+    #[tokio::test]
+    async fn disabled_status_focus_transition_survives_reenable() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("disabled-status-focus");
+        let root = workspace.tabs[0].root_pane;
+        let nested = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let root_terminal = app.state.workspaces[0]
+            .terminal_id(root)
+            .expect("root terminal")
+            .clone();
+        let nested_terminal = app.state.workspaces[0]
+            .terminal_id(nested)
+            .expect("nested terminal")
+            .clone();
+        app.state.terminals.get_mut(&root_terminal).unwrap().cwd = "/repo".into();
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
+        let (runtime, _input_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes
+            .insert(nested_terminal.clone(), runtime);
+        app.state.status_bar_enabled = true;
+        app.state.sync_status_focused_cached_cwd();
+        app.state.status_git_cwd = Some("/repo".into());
+        app.state.status_git_branch = Some("root-branch".into());
+        app.last_focus = Some((0, root));
+
+        app.state.status_bar_enabled = false;
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(app.state.focus_pane_in_workspace(0, nested));
+        app.sync_focus_events();
+
+        assert!(!app.git_identity_refresh_requested);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        app.state.status_bar_enabled = true;
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
+        assert_eq!(branch, None);
     }
 
     #[tokio::test]

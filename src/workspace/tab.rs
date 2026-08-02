@@ -561,6 +561,17 @@ impl Tab {
             })
     }
 
+    pub fn cached_cwd_for_pane(
+        &self,
+        pane_id: PaneId,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<PathBuf> {
+        let terminal_id = self.terminal_id(pane_id)?;
+        terminals
+            .get(terminal_id)
+            .map(|terminal| terminal.cwd.clone())
+    }
+
     pub fn foreground_cwd_for_pane(
         &self,
         pane_id: PaneId,

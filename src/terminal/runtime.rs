@@ -493,6 +493,14 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) fn test_reset_cwd_query_count() {
+        crate::pane::PaneRuntime::test_reset_cwd_query_count();
+    }
+
+    pub(crate) fn test_cwd_query_count() -> usize {
+        crate::pane::PaneRuntime::test_cwd_query_count()
+    }
+
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) = crate::pane::PaneRuntime::test_with_channel(cols, rows);
         (Self(runtime), rx)

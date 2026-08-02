@@ -62,6 +62,12 @@ Herdr はインテグレーションを 2 つの異なる方法で使います:
 
 エージェントネイティブのセッション復元には最新の Herdr インテグレーションが必要です: Pi インテグレーションはバージョン `2`、OMP は `3`、Claude Code は `6`、Codex は `5`、GitHub Copilot CLI は `2`、Devin CLI は `2`、Droid は `2`、Kimi Code CLI は `3`、Qoder CLI は `2`、Cursor Agent CLI は `1`、OpenCode は `5`、Kilo Code CLI は `1`、Hermes Agent は `2`、MastraCode は `1` です。インストール済みバージョンは `herdr integration status` で確認してください。
 
+## 作業タイトルの自動更新
+
+Claude Code と Codex の連携は、各 `UserPromptSubmit` でプロバイダーがターンを開始する前に Herdr のエージェントタイトルを再計算します。両方のアダプターは同じ決定論的エンジンを使うため、追加のモデル呼び出しやプロンプトコンテキストはありません。タイトルは 1〜7 個の有効な語、表示文字数 48 文字以内で、制御文字、端末エスケープ、パス、ユーザー識別子、機密情報らしい値を除去します。
+
+更新はペイン、プロバイダー、ネイティブセッション ID、単調増加シーケンスに結び付けられます。同じ正規化済みタイトルは書き込まず、古いターンやセッションの遅延更新は新しいタイトルを上書きできません。必要なフック、ソケット、ペイン、またはサブエージェント専用ペインがない場合は安全に何もしません。
+
 ## Pi
 
 Pi インテグレーションをインストールします:
@@ -255,6 +261,20 @@ herdr integration install mastracode
 Herdr は `~/.mastracode` を使います。インストールは `hooks/herdr-agent-state.sh` を書き込み、`hooks.json` に Herdr のコマンドエントリを追加します。ディレクトリがなければ作成します。アンインストールは一致するフックエントリを削除し、フックスクリプトを削除します。
 
 Herdr は保存された MastraCode スレッドを `mastracode --thread <id>` で resume します。
+
+## Grok CLI
+
+Grok CLI フックをインストールします:
+
+```bash
+herdr integration install grok
+```
+
+このフックは、Grok CLI が Herdr のペイン内で動いている間、Grok の `SessionStart` フックを通じてセッション識別を報告します。Grok の状態は Herdr のスクリーンマニフェスト検出から得られます。
+
+Herdr はデフォルトで `~/.grok` を使い、`GROK_HOME` が設定されていればそちらを使います。Grok の設定ディレクトリはあらかじめ存在している必要があります。Grok はそのディレクトリ内のすべての `hooks/*.json` ファイルを統合するため、インストールは Herdr の `SessionStart` エントリを含む自己完結型の `hooks/herdr.json` を `hooks/herdr-agent-state.sh` スクリプトの隣に書き込み、他のフックファイルは編集しません。アンインストールは Herdr が所有するこの 2 ファイルだけを削除します。
+
+Grok がセッション開始イベントを発行した後、Herdr は報告されたセッション id を使って `grok --resume <id>` でペインを resume できます。
 
 ## カスタムステータスラベル
 

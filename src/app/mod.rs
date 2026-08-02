@@ -94,12 +94,18 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    pub(crate) status_metric_refresh: crate::platform::status_metrics::StatusMetricRefresh,
+    pub(crate) status_metric_sampler:
+        Arc<std::sync::Mutex<crate::platform::status_metrics::StatusMetricSampler>>,
+    pub(crate) status_metric_refresh_enabled: bool,
+    pub(crate) status_metrics_visible: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
+    pub(crate) status_context_focus: Option<(String, usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
@@ -127,6 +133,7 @@ pub struct App {
     pub(crate) update_manifest_check_enabled: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
+    pub(crate) agent_activity_refresh_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
@@ -525,6 +532,13 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            view_observed_at: Instant::now(),
+            status_metrics: None,
+            status_git_cwd: None,
+            status_git_branch: None,
+            status_focused_cwd: None,
+            status_focus_projection_initialized: false,
+            status_bar_enabled: config.ui.status_bar.enabled,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -575,15 +589,20 @@ impl App {
             keybind_help: state::KeybindHelpState::default(),
             navigator: state::NavigatorState::default(),
             copy_mode: None,
+            sidebar_presentation: state::SidebarPresentationState::default(),
+            sidebar_projection_revision: 0,
+            workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
-            agent_panel_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
+                status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                agent_card_areas: Vec::new(),
+                visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -730,6 +749,14 @@ impl App {
             copy_feedback_deadline: None,
             last_api_notification_at: None,
             state,
+            status_metric_refresh: crate::platform::status_metrics::StatusMetricRefresh::immediate(
+                Instant::now(),
+            ),
+            status_metric_sampler: Arc::new(std::sync::Mutex::new(
+                crate::platform::status_metrics::StatusMetricSampler::new(),
+            )),
+            status_metric_refresh_enabled: !cfg!(test),
+            status_metrics_visible: false,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,
@@ -755,6 +782,7 @@ impl App {
             update_manifest_check_enabled: config.update.manifest_check,
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
+            agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
@@ -768,6 +796,7 @@ impl App {
             api_rx,
             event_hub,
             last_focus,
+            status_context_focus: None,
             no_session,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
@@ -865,6 +894,44 @@ impl App {
 
     fn request_repaint(&mut self) {
         self.full_redraw_pending = true;
+    }
+
+    fn focused_status_context_key(&self) -> Option<(String, usize, crate::layout::PaneId)> {
+        self.state.active.and_then(|workspace_idx| {
+            self.state
+                .workspaces
+                .get(workspace_idx)
+                .and_then(|workspace| {
+                    let tab_number = workspace.public_tab_number(workspace.active_tab)?;
+                    workspace
+                        .focused_pane_id()
+                        .map(|pane_id| (workspace.id.clone(), tab_number, pane_id))
+                })
+        })
+    }
+
+    fn project_status_context_from_cached(&mut self) -> bool {
+        let current_focus = self.focused_status_context_key();
+        let changed = self.state.sync_status_focused_cached_cwd();
+        self.status_context_focus = current_focus;
+        changed
+    }
+
+    pub(crate) fn sync_status_focused_runtime_cwd(&mut self) -> bool {
+        let current_focus = self.focused_status_context_key();
+        let changed = self.state.sync_status_focused_cwd(&self.terminal_runtimes);
+        self.status_context_focus = current_focus;
+        changed
+    }
+
+    pub(crate) fn sync_status_context_before_render(&mut self) -> bool {
+        let current_focus = self.focused_status_context_key();
+        if self.state.status_focus_projection_initialized
+            && current_focus == self.status_context_focus
+        {
+            return false;
+        }
+        self.project_status_context_from_cached()
     }
 
     pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
@@ -1043,6 +1110,7 @@ impl App {
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
 
             if needs_render && self.can_render_now(now) {
+                self.sync_status_context_before_render();
                 let _ = self.render_dirty.take();
                 let _sync_output = SyncOutputGuard::begin()?;
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
@@ -1084,6 +1152,8 @@ impl App {
                         frame,
                     );
                 })?;
+                self.status_metrics_visible =
+                    self.state.view.status_bar_rect != ratatui::layout::Rect::default();
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
                         &self.state,
@@ -1091,12 +1161,15 @@ impl App {
                         cell_size,
                     )?;
                 }
+                self.status_metrics_visible =
+                    self.state.view.status_bar_rect != ratatui::layout::Rect::default();
                 self.sync_pending_agent_resume_deadline(now);
                 if self.start_pending_agent_resumes(self.pending_agent_resume_due(now)) {
                     self.render_dirty.request_generic();
                     self.render_notify.notify_one();
                 }
                 self.last_render_at = Some(now);
+                self.sync_agent_activity_refresh_deadline(self.state.view_observed_at);
                 needs_render = false;
                 continue;
             }
@@ -1449,11 +1522,30 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
-                self.state.agent_panel_sort =
-                    agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                let status_bar_was_enabled = self.state.status_bar_enabled;
+                self.state.status_bar_enabled = config.ui.status_bar.enabled;
+                if self.state.status_bar_enabled && !status_bar_was_enabled {
+                    self.project_status_context_from_cached();
+                    self.state.status_git_cwd = None;
+                    self.state.status_git_branch = None;
+                    self.request_git_identity_refresh(Instant::now());
+                }
+                let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                let mut sidebar_projection_changed = false;
+                if self.state.agent_panel_sort != agent_panel_sort {
+                    self.state.agent_panel_sort = agent_panel_sort;
+                    sidebar_projection_changed = true;
+                }
+                if self.state.sidebar_agents != config.ui.sidebar.agents
+                    || self.state.sidebar_spaces != config.ui.sidebar.spaces
+                {
+                    sidebar_projection_changed = true;
+                }
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
-                self.state.agent_panel_scroll = 0;
+                if sidebar_projection_changed {
+                    self.state.mark_sidebar_projection_changed();
+                }
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
@@ -2815,6 +2907,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    #[tokio::test]
+    async fn status_context_reenable_projects_mutated_cached_focus_without_io() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-enable-status-focus");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[ui.status_bar]\nenabled = true\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut startup_config = Config::default();
+        startup_config.ui.status_bar.enabled = false;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &startup_config,
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("reload-status-focus");
+        let nested = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(nested);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let nested_terminal = app.state.workspaces[0]
+            .terminal_id(nested)
+            .expect("nested terminal")
+            .clone();
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/old".into();
+        let (runtime, _input_rx) = TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes
+            .insert(nested_terminal.clone(), runtime);
+        app.last_focus = Some((0, nested));
+        assert!(app.sync_status_context_before_render());
+        app.state.status_git_cwd = Some("/repo/old".into());
+        app.state.status_git_branch = Some("old-branch".into());
+        app.state.terminals.get_mut(&nested_terminal).unwrap().cwd = "/repo/nested".into();
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.status_bar_enabled);
+        assert!(app.state.status_focus_projection_initialized);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo/nested")));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        assert!(app.git_identity_refresh_requested);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn status_context_reenable_invalidates_same_cwd_stale_branch_without_io() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-enable-status-same-cwd");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[ui.status_bar]\nenabled = true\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut startup_config = Config::default();
+        startup_config.ui.status_bar.enabled = false;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &startup_config,
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("reload-status-same-cwd")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .terminal_id(pane)
+            .expect("focused terminal")
+            .clone();
+        app.state.terminals.get_mut(&terminal).unwrap().cwd = "/repo".into();
+        let (runtime, _input_rx) = TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal, runtime);
+        app.last_focus = Some((0, pane));
+        assert!(app.sync_status_context_before_render());
+        app.state.status_git_cwd = Some("/repo".into());
+        app.state.status_git_branch = Some("old-branch".into());
+        app.state.workspaces[0].cached_git_branch = Some("new-branch".into());
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo")));
+        assert_eq!(branch, None);
+        assert_eq!(app.state.status_git_cwd, None);
+        assert_eq!(app.state.status_git_branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+        assert!(app.git_identity_refresh_requested);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
     #[test]
     fn reload_config_requests_client_reload_for_host_cursor_only_change() {
         let _guard = config_env_lock().lock().unwrap();
@@ -2877,17 +3074,19 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
         let mut app = test_app();
+        let previous_revision = app.state.sidebar_projection_revision;
 
         std::fs::write(
             &path,
             "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"$summary\"]]\nrow_gap = 1\n\n[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"terminal_title_stripped\"]]\n\n[ui.sidebar.spaces]\nrows = [[\"workspace\", \"$jj_status\"]]\nrow_gap = 3\n",
         )
         .unwrap();
-        app.state.agent_panel_scroll = 5;
+        app.state.workspace_scroll = 5;
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(app.state.agent_panel_scroll, 0);
+        assert_eq!(app.state.workspace_scroll, 0);
+        assert_eq!(app.state.sidebar_projection_revision, previous_revision + 1);
         assert_eq!(
             app.state.sidebar_agents.rows,
             vec![vec![
@@ -2912,6 +3111,7 @@ mod tests {
         assert_eq!(app.state.sidebar_spaces.row_gap, 3);
 
         let previous_agents = app.state.sidebar_agents.clone();
+        let previous_revision = app.state.sidebar_projection_revision;
         std::fs::write(
             &path,
             "[ui.sidebar.agents]\nrows = [[\"agent\"]]\n\n[ui.sidebar.agents.rows_by_agent]\nclaude-code = [[\"terminal_title\"]]\n",
@@ -2920,6 +3120,7 @@ mod tests {
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(app.state.sidebar_agents, previous_agents);
+        assert_eq!(app.state.sidebar_projection_revision, previous_revision);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -3446,7 +3647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outer_focus_gained_marks_visible_done_panes_seen() {
+    async fn outer_focus_gained_marks_only_focused_done_pane_seen() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("test");
         let root_pane = workspace.tabs[0].root_pane;
@@ -3496,6 +3697,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.outer_terminal_focus = Some(false);
+        let focused_pane = app.state.workspaces[0].focused_pane_id().unwrap();
 
         let handled = app
             .handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
@@ -3503,8 +3705,14 @@ mod tests {
 
         assert!(handled);
         assert_eq!(app.state.outer_terminal_focus, Some(true));
-        assert!(app.state.workspaces[0].tabs[0].panes[&root_pane].seen);
-        assert!(app.state.workspaces[0].tabs[0].panes[&split_pane].seen);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&root_pane].seen,
+            root_pane == focused_pane
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&split_pane].seen,
+            split_pane == focused_pane
+        );
         assert!(!app.state.workspaces[0].tabs[background_tab].panes[&background_pane].seen);
     }
 
@@ -4030,6 +4238,10 @@ mod tests {
         let terminal_id = workspace.terminal_id(pane).unwrap().clone();
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.status_bar_enabled = false;
+        app.state.reconcile_sidebar_presentation();
         app.state
             .terminals
             .get_mut(&terminal_id)
@@ -4644,6 +4856,81 @@ mod tests {
     }
 
     #[test]
+    fn activity_age_refresh_uses_authoritative_transition_boundary() {
+        let mut app = test_app();
+        let started = Instant::now();
+        let workspace = Workspace::test_new("activity");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        app.state.ensure_test_terminals();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+
+        let observed = started + Duration::from_secs(7);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            ratatui::layout::Rect::new(0, 0, 80, 20),
+        );
+        app.sync_agent_activity_refresh_deadline(observed);
+
+        assert_eq!(
+            app.agent_activity_refresh_deadline,
+            Some(started + Duration::from_secs(8))
+        );
+        assert!(!app.take_due_agent_activity_refresh(observed));
+        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
+        assert!(app.agent_activity_refresh_deadline.is_none());
+    }
+
+    #[test]
+    fn headless_activity_refresh_deadline_requires_an_attached_client() {
+        let mut app = test_app();
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(2);
+        app.next_resize_poll = now + Duration::from_secs(1);
+        app.config_diagnostic_deadline = None;
+        app.toast_deadline = None;
+        app.next_auto_update_check = None;
+        app.next_agent_manifest_update_check = None;
+        app.agent_metadata_deadline = None;
+        app.pending_agent_resume_deadline = None;
+        app.session_save_deadline = None;
+        app.selection_autoscroll_deadline = None;
+        app.selection_highlight_clear_deadline = None;
+        app.state.status_bar_enabled = false;
+        app.state.status_metrics = None;
+        app.state.workspaces.clear();
+        app.agent_activity_refresh_deadline = Some(deadline);
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
+            Some(deadline)
+        );
+        assert_eq!(
+            app.next_headless_loop_deadline_with_client_refresh(now, false, false),
+            None
+        );
+    }
+
+    #[test]
     fn headless_next_loop_deadline_ignores_resize_poll() {
         let mut app = test_app();
         let now = Instant::now();
@@ -4652,7 +4939,7 @@ mod tests {
         app.next_auto_update_check = Some(now + Duration::from_secs(6));
 
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             app.session_save_deadline
         );
     }
@@ -4669,7 +4956,7 @@ mod tests {
         app.state.workspaces.clear();
 
         assert_eq!(
-            app.next_headless_loop_deadline_with_git_refresh(now, false, true),
+            app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             None
         );
     }
@@ -5001,6 +5288,191 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(second_root));
+    }
+
+    #[tokio::test]
+    async fn pre_render_status_context_matches_deferred_new_tab_click() {
+        let mut app = test_app();
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app.state.new_terminal_cwd = crate::config::NewTerminalCwdConfig::Path(
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("new-tab-status")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prompt_new_tab_name = false;
+        app.state.ensure_test_terminals();
+        let previous_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let previous_terminal = app.state.workspaces[0]
+            .terminal_id(previous_pane)
+            .expect("previous terminal")
+            .clone();
+        app.state.terminals.get_mut(&previous_terminal).unwrap().cwd = "/old-focus".into();
+        app.state.sync_status_focused_cached_cwd();
+        app.state.status_git_cwd = Some("/old-focus".into());
+        app.state.status_git_branch = Some("old-branch".into());
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let new_tab_area = app.state.view.new_tab_hit_area;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: new_tab_area.x + 1,
+                row: new_tab_area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+        assert!(app.state.request_new_tab);
+        app.state.request_new_tab = false;
+        let label = app.state.requested_new_tab_name.take();
+        app.runtime_tab_create(
+            "test.tab.create",
+            crate::api::schema::TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: true,
+                label,
+                env: Default::default(),
+            },
+        );
+
+        let active_tab = app.state.workspaces[0].active_tab;
+        assert_eq!(active_tab, 1);
+        let active_pane = app.state.workspaces[0].tabs[active_tab].root_pane;
+        let active_terminal = app.state.workspaces[0]
+            .terminal_id(active_pane)
+            .expect("active terminal");
+        let expected_cwd = app.state.terminals[active_terminal].cwd.clone();
+        let (stale_cwd, stale_branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/old-focus")));
+        assert_eq!(stale_branch.as_deref(), Some("old-branch"));
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(app.sync_status_context_before_render());
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(expected_cwd));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+
+        api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn pre_render_status_context_preserves_bounded_refresh_projection() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("runtime-status")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .terminal_id(pane)
+            .expect("focused terminal")
+            .clone();
+        app.state.terminals.get_mut(&terminal).unwrap().cwd = "/cached".into();
+        assert!(app.sync_status_context_before_render());
+
+        app.state.status_focused_cwd = Some("/runtime".into());
+        app.state.status_git_cwd = Some("/runtime".into());
+        app.state.status_git_branch = Some("runtime-branch".into());
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(!app.sync_status_context_before_render());
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
+        assert_eq!(branch.as_deref(), Some("runtime-branch"));
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+    }
+
+    #[test]
+    fn status_context_disabled_git_result_does_not_claim_new_focus() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("disabled-git-status");
+        let first_tab = workspace.active_tab;
+        let first_pane = workspace.tabs[first_tab].root_pane;
+        let second_tab = workspace.test_add_tab(Some("second"));
+        let second_pane = workspace.tabs[second_tab].root_pane;
+        workspace.switch_tab(first_tab);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let first_terminal = app.state.workspaces[0]
+            .terminal_id(first_pane)
+            .expect("first terminal")
+            .clone();
+        let second_terminal = app.state.workspaces[0]
+            .terminal_id(second_pane)
+            .expect("second terminal")
+            .clone();
+        app.state.terminals.get_mut(&first_terminal).unwrap().cwd = "/first".into();
+        app.state.terminals.get_mut(&second_terminal).unwrap().cwd = "/second".into();
+        assert!(app.sync_status_context_before_render());
+        app.state.status_git_cwd = Some("/first".into());
+        app.state.status_git_branch = Some("first-branch".into());
+        let first_focus = app.status_context_focus.clone();
+
+        app.state.status_bar_enabled = false;
+        app.state.workspaces[0].switch_tab(second_tab);
+        app.git_refresh_in_flight = true;
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            results: Vec::new(),
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(app.status_context_focus, first_focus);
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(app.sync_status_context_before_render());
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
+        assert_eq!(branch, None);
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
+    }
+
+    #[test]
+    fn status_context_inactive_tab_reorder_preserves_runtime_projection() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("tab-reorder-status");
+        workspace.test_add_tab(Some("middle"));
+        let active_tab = workspace.test_add_tab(Some("active"));
+        workspace.switch_tab(active_tab);
+        let focused_pane = workspace.tabs[active_tab].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let terminal = app.state.workspaces[0]
+            .terminal_id(focused_pane)
+            .expect("focused terminal")
+            .clone();
+        app.state.terminals.get_mut(&terminal).unwrap().cwd = "/cached".into();
+        assert!(app.sync_status_context_before_render());
+        app.state.status_focused_cwd = Some("/runtime".into());
+        app.state.status_git_cwd = Some("/runtime".into());
+        app.state.status_git_branch = Some("runtime-branch".into());
+        let projected_focus = app.status_context_focus.clone();
+        let previous_active_tab = app.state.workspaces[0].active_tab;
+
+        assert!(app.state.workspaces[0].move_tab(0, 3));
+        assert_ne!(app.state.workspaces[0].active_tab, previous_active_tab);
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(focused_pane)
+        );
+        assert_eq!(app.focused_status_context_key(), projected_focus);
+
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+        assert!(!app.sync_status_context_before_render());
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&app.state);
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/runtime")));
+        assert_eq!(branch.as_deref(), Some("runtime-branch"));
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
     }
 
     #[tokio::test]

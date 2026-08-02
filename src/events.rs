@@ -54,6 +54,10 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// A bounded background native-metric sample completed.
+    StatusMetricsRefreshed {
+        snapshot: Option<Box<crate::platform::status_metrics::StatusMetricsSnapshot>>,
+    },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.

@@ -390,14 +390,7 @@ impl AgentsSidebarConfig {
 impl Default for AgentsSidebarConfig {
     fn default() -> Self {
         Self {
-            rows: vec![
-                vec![
-                    AgentSidebarToken::StateIcon,
-                    AgentSidebarToken::Workspace,
-                    AgentSidebarToken::Tab,
-                ],
-                vec![AgentSidebarToken::Agent],
-            ],
+            rows: vec![vec![AgentSidebarToken::StateIcon, AgentSidebarToken::Tab]],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
         }
@@ -415,10 +408,10 @@ pub struct SpacesSidebarConfig {
 impl Default for SpacesSidebarConfig {
     fn default() -> Self {
         Self {
-            rows: vec![
-                vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
-                vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
-            ],
+            rows: vec![vec![
+                SpaceSidebarToken::StateIcon,
+                SpaceSidebarToken::Workspace,
+            ]],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
         }
     }
@@ -436,27 +429,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_compact_agent_and_existing_space_layouts() {
+    fn defaults_show_only_thread_titles_and_space_names() {
         let config = SidebarConfig::default();
         assert_eq!(
             config.agents.rows,
-            vec![
-                vec![
-                    AgentSidebarToken::StateIcon,
-                    AgentSidebarToken::Workspace,
-                    AgentSidebarToken::Tab,
-                ],
-                vec![AgentSidebarToken::Agent],
-            ]
+            vec![vec![AgentSidebarToken::StateIcon, AgentSidebarToken::Tab,]]
         );
         assert!(config.agents.rows_by_agent.is_empty());
         assert_eq!(config.agents.row_gap, 0);
         assert_eq!(
             config.spaces.rows,
-            vec![
-                vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
-                vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
-            ]
+            vec![vec![
+                SpaceSidebarToken::StateIcon,
+                SpaceSidebarToken::Workspace,
+            ]]
         );
         assert_eq!(config.spaces.row_gap, 0);
     }

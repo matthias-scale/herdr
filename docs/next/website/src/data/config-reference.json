@@ -341,13 +341,13 @@
           "key": "keys.previous_agent",
           "type": "keybinding",
           "default": "unset",
-          "description": "Focus the previous agent shown in the agent panel. Unset by default."
+          "description": "Focus the previous detected agent in canonical workspace, tab, and pane order, wrapping at both ends and ignoring sidebar ordering, filtering, and disclosure. Unset by default."
         },
         {
           "key": "keys.next_agent",
           "type": "keybinding",
           "default": "unset",
-          "description": "Focus the next agent shown in the agent panel. Unset by default."
+          "description": "Focus the next detected agent in canonical workspace, tab, and pane order, wrapping at both ends and ignoring sidebar ordering, filtering, and disclosure. Unset by default."
         },
         {
           "key": "keys.focus_agent",
@@ -669,6 +669,12 @@
           "type": "boolean",
           "default": "false",
           "description": "Hide the tab row when the workspace has one tab."
+        },
+        {
+          "key": "ui.status_bar.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the full-width top status row on desktop layouts."
         },
         {
           "key": "ui.agent_panel_sort",

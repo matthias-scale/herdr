@@ -52,12 +52,14 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-#[cfg(test)]
-pub(crate) use self::sidebar::workspace_drop_indicator_row;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+#[cfg(test)]
+pub(crate) use self::sidebar::{workspace_drop_indicator_row, workspace_list_body_rect};
+#[cfg(test)]
+pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
-    copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
-    toast_notification_rect,
+    copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
+    render_toast_notification, toast_notification_rect,
 };
 pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
@@ -76,15 +78,17 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
-        agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
-        WorkspaceListEntry,
+        agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
+        collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
+        relative_agent_navigation_entry, sidebar_header_new_space_rect,
+        sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_group_chevron_rect,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
     },
 };
 
@@ -210,10 +214,23 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    if is_mobile_width(area, app.mobile_width_threshold) {
+    app.view_observed_at = std::time::Instant::now();
+    app.reconcile_sidebar_presentation();
+    if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
     }
+
+    // Full-width top status row (tmux-parity): spans the whole client, with
+    // sidebar + tabs below. Reserve it before the horizontal split so the bar
+    // is never squeezed into the main column only.
+    let (status_bar_rect, body_area) = if app.status_bar_enabled && area.height > 1 {
+        let [status_bar_rect, body_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        (status_bar_rect, body_area)
+    } else {
+        (Rect::default(), area)
+    };
 
     let sidebar_w = if app.sidebar_collapsed {
         match app.sidebar_collapsed_mode {
@@ -226,7 +243,7 @@ fn compute_view_internal(
     };
 
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(body_area);
 
     let (tab_bar_rect, terminal_area) = app
         .active
@@ -236,14 +253,18 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            app.ensure_workspace_visible_in_sidebar(active, sidebar_area);
+        }
     } else {
-        app.workspace_scroll = app
-            .workspace_scroll
-            .min(app.workspaces.len().saturating_sub(1));
-        app.agent_panel_scroll = 0;
+        let (ws_area, _, _) = collapsed_sidebar_sections(sidebar_area);
+        app.workspace_scroll = collapsed_sidebar_row_scroll(app, ws_area);
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            if let Some(target) = sidebar_row_index_for_workspace(app, active) {
+                app.workspace_scroll =
+                    collapsed_sidebar_scroll_for_target(app, ws_area, app.workspace_scroll, target);
+            }
+        }
     }
 
     let workspace_card_areas = if app.sidebar_collapsed {
@@ -295,10 +316,21 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
 
+    let agent_card_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_agent_card_areas(app, sidebar_area)
+    };
+    let visible_agent_activity_instants =
+        sidebar::visible_agent_activity_instants_from(app, terminal_runtimes, &agent_card_areas);
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
+        status_bar_rect,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        agent_card_areas,
+        visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -312,6 +344,16 @@ fn compute_view_internal(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+}
+
+fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
+    is_mobile_width(area, app.mobile_width_threshold)
+        || (app.status_bar_enabled
+            && usize::from(area.width) < status::minimum_required_status_width(app))
+}
+
+pub(crate) fn status_bar_is_renderable(app: &AppState, area: Rect) -> bool {
+    app.status_bar_enabled && area.height > 1 && !uses_mobile_layout(app, area)
 }
 
 fn compute_mobile_view(
@@ -360,8 +402,11 @@ fn compute_mobile_view(
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
+        status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        agent_card_areas: Vec::new(),
+        visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -374,6 +419,11 @@ fn compute_mobile_view(
         pane_infos,
         split_borders,
     };
+    if app.mode == Mode::Navigate {
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            app.ensure_mobile_workspace_visible(active);
+        }
+    }
     app.sync_copy_mode_search_geometry();
 }
 
@@ -391,6 +441,10 @@ pub fn render_with_runtime_registry(
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
+
+    if app.view.layout != ViewLayout::Mobile {
+        render_status_bar(app, frame, app.view.status_bar_rect);
+    }
 
     render_navigation_chrome(app, terminal_runtimes, frame);
     if app.view.layout != ViewLayout::Mobile {
@@ -583,6 +637,7 @@ mod tests {
     use crate::{app::state::ViewLayout, layout::PaneInfo, workspace::Workspace};
     use ratatui::style::Color;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
 
     #[test]
     fn copy_feedback_offset_only_increases_when_toast_rect_overlaps() {
@@ -804,16 +859,19 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         let single_tab_terminal_area = app.view.terminal_area;
+        // Full-width status bar occupies row 0; chrome starts at y=1.
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(single_tab_terminal_area, Rect::new(26, 0, 54, 20));
+        assert_eq!(single_tab_terminal_area, Rect::new(26, 1, 54, 19));
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
 
         app.workspaces[0].test_add_tab(Some("logs"));
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 54, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
         assert_eq!(app.view.tab_hit_areas.len(), 2);
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.width > 0));
         assert!(app.view.new_tab_hit_area.width > 0);
@@ -857,8 +915,9 @@ mod tests {
         let one_tab_size = app.workspaces[0].tabs[0].runtimes[&one_tab_pane].current_size();
         let two_tab_size =
             app.workspaces[1].tabs[background_tab].runtimes[&two_tab_pane].current_size();
-        assert_eq!(one_tab_size, (20, 53));
-        assert_eq!(two_tab_size, (19, 53));
+        // Status bar reserves one full-width row; single-tab workspaces reclaim the tab bar.
+        assert_eq!(one_tab_size, (19, 53));
+        assert_eq!(two_tab_size, (18, 53));
     }
 
     #[tokio::test]
@@ -971,9 +1030,11 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
-        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 0, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 80, 19));
+        // Status bar is full-width on row 0; sidebar/tabs/terminal sit below.
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 0, 19));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 80, 18));
         assert!(app.view.workspace_card_areas.is_empty());
 
         let backend = TestBackend::new(80, 20);
@@ -982,7 +1043,228 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_sidebar_keeps_active_workspace_highlight_in_terminal_mode() {
+    fn desktop_status_bar_spans_full_width_above_sidebar() {
+        // AC1 provenance is enforced by the merge-parent check; AC2 covers its geometry.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 100, 1));
+        assert_eq!(app.view.sidebar_rect.y, 1);
+        assert_eq!(app.view.sidebar_rect.height, 23);
+        assert!(app.view.sidebar_rect.x == 0);
+        assert_eq!(app.view.sidebar_rect.width, 26);
+        // Terminal/tab chrome never occupy the status-bar row.
+        assert!(app.view.terminal_area.y >= 1);
+        assert!(app.view.tab_bar_rect.y >= 1 || app.view.tab_bar_rect == Rect::default());
+    }
+
+    #[test]
+    fn disabled_status_bar_returns_its_row_to_the_body() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+        app.status_bar_enabled = false;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.view.status_bar_rect, Rect::default());
+        assert_eq!(app.view.sidebar_rect.y, 0);
+        assert_eq!(app.view.sidebar_rect.height, 24);
+    }
+
+    #[test]
+    fn status_view_computation_keeps_the_scheduled_focused_cwd_projection() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        let projected = PathBuf::from("/scheduled/focused");
+        app.status_focused_cwd = Some(projected.clone());
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+
+        assert_eq!(app.status_focused_cwd, Some(projected));
+    }
+
+    #[test]
+    fn desktop_status_bar_renders_only_branch_device_and_metrics_segments() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+
+        app.status_focused_cwd = Some(PathBuf::from("/repo"));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some("feature/native-status".into());
+
+        // Wide enough that every contracted field fits.
+        let width = 220u16;
+        compute_view(&mut app, Rect::new(0, 0, width, 24));
+        assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
+
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        // AC4: fixture metrics provide deterministic segment-parity evidence.
+        assert!(
+            row0.contains("testhost"),
+            "status bar missing hostname: {row0:?}"
+        );
+        assert!(row0.contains("feature/native-stat"), "{row0:?}");
+        assert!(
+            row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
+            "status bar missing resource metrics: {row0:?}"
+        );
+        assert!(!row0.contains("/repo"), "{row0:?}");
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
+        assert!(!row0.contains("testuser"), "{row0:?}");
+        for hidden_identity in ["session:", "workspace:", "tab:", "pane:"] {
+            assert!(!row0.contains(hidden_identity), "{row0:?}");
+        }
+        assert!(!row0.contains("↓"), "{row0:?}");
+        assert!(!row0.contains("↑"), "{row0:?}");
+        let first_content = row0
+            .char_indices()
+            .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+            .expect("status row content");
+        assert!(
+            first_content > 0,
+            "status row is not right-aligned: {row0:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_keeps_memory_and_cpu_legible_at_120_columns() {
+        // AC3/AC7: the ordinary-width renderer retains both required metric segments.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        let width = 120;
+        compute_view(&mut app, Rect::new(0, 0, width, 24));
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
+        assert!(row0.contains("CPU  12%"), "{row0:?}");
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
+    }
+
+    #[test]
+    fn status_bar_visual_evidence_covers_wide_and_120_column_layouts() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("focused"),
+            Workspace::test_new("queued"),
+        ];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.sidebar_width = 26;
+
+        let mut rendered = Vec::new();
+        for (width, height) in [(220, 8), (120, 12)] {
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let row0 = buffer_row_text(
+                terminal.backend().buffer(),
+                app.view.status_bar_rect,
+                app.view.status_bar_rect.y,
+            );
+            assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
+            assert!(row0.contains("CPU  12%"), "{row0:?}");
+            assert!(!row0.contains("Herdr v"), "{row0:?}");
+            rendered.push((
+                "sampled metrics",
+                width,
+                height,
+                terminal.backend().buffer().clone(),
+            ));
+        }
+
+        app.status_metrics = None;
+        let width = 120;
+        let height = 4;
+        compute_view(&mut app, Rect::new(0, 0, width, height));
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row0 = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.status_bar_rect,
+            app.view.status_bar_rect.y,
+        );
+        assert!(row0.contains("MEM     --/    -- GiB"), "{row0:?}");
+        assert!(row0.contains("CPU  --%"), "{row0:?}");
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
+        rendered.push((
+            "unavailable fallback",
+            width,
+            height,
+            terminal.backend().buffer().clone(),
+        ));
+
+        let Ok(path) = std::env::var("HERDR_STATUS_EVIDENCE_HTML") else {
+            return;
+        };
+        let mut html = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>Herdr native status row</title>\
+             <style>body{margin:0;padding:24px;background:#11111b;color:#cdd6f4;\
+             font-family:\"JetBrainsMono Nerd Font Mono\",monospace}h1{font-size:20px}\
+             h2{font-size:14px;color:#a6adc8;margin:24px 0 8px}.terminal{display:grid;\
+             width:max-content;font-size:12px;line-height:16px;box-shadow:0 0 0 1px #45475a}\
+             .cell{width:1ch;height:16px;white-space:pre;overflow:visible}</style>\
+             <h1>Native full-width desktop status row</h1>",
+        );
+        for (label, width, height, buffer) in rendered {
+            html.push_str(&format!(
+                "<h2>{width} columns × {height} rows — {label}</h2>\
+                 <div class=\"terminal\" style=\"grid-template-columns:repeat({width},1ch)\">"
+            ));
+            for cell in buffer.content() {
+                let symbol = cell
+                    .symbol()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                html.push_str(&format!(
+                    "<span class=\"cell\" style=\"color:{};background:{}\">{symbol}</span>",
+                    color_css(cell.fg, "#cdd6f4"),
+                    color_css(cell.bg, "#11111b"),
+                ));
+            }
+            html.push_str("</div>");
+        }
+        std::fs::write(path, html).expect("write status-row visual evidence");
+    }
+
+    #[test]
+    fn collapsed_sidebar_status_geometry_keeps_active_workspace_highlight() {
+        // AC2/AC7: collapsed desktop content remains aligned below status row 0.
         let mut app = crate::app::state::AppState::test_new();
         app.sidebar_collapsed = true;
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -1005,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_workspace_rows_show_state_before_name_without_numbers() {
+    fn expanded_sidebar_workspace_rows_omit_redundant_branch_line() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
@@ -1035,7 +1317,9 @@ mod tests {
 
         assert!(line1.starts_with(" · one"));
         assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        assert_eq!(card.height, 1);
+        assert!(line2.is_empty());
+        assert!(!line1.contains("main"));
 
         std::fs::remove_dir_all(repo).ok();
     }
@@ -1316,6 +1600,30 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn color_css(color: Color, reset: &'static str) -> String {
+        match color {
+            Color::Reset => reset.into(),
+            Color::Black => "#45475a".into(),
+            Color::Red => "#f38ba8".into(),
+            Color::Green => "#a6e3a1".into(),
+            Color::Yellow => "#f9e2af".into(),
+            Color::Blue => "#89b4fa".into(),
+            Color::Magenta => "#cba6f7".into(),
+            Color::Cyan => "#94e2d5".into(),
+            Color::Gray => "#bac2de".into(),
+            Color::DarkGray => "#585b70".into(),
+            Color::LightRed => "#eba0ac".into(),
+            Color::LightGreen => "#a6e3a1".into(),
+            Color::LightYellow => "#f9e2af".into(),
+            Color::LightBlue => "#89dceb".into(),
+            Color::LightMagenta => "#f5c2e7".into(),
+            Color::LightCyan => "#89dceb".into(),
+            Color::White => "#cdd6f4".into(),
+            Color::Rgb(red, green, blue) => format!("#{red:02x}{green:02x}{blue:02x}"),
+            Color::Indexed(index) => format!("color-mix(in srgb, #cdd6f4 {}%, #11111b)", index),
+        }
     }
 
     fn temp_git_repo(branch: &str) -> std::path::PathBuf {

@@ -9,11 +9,11 @@ mod types;
 mod version;
 
 pub(crate) use actions::{install_target, uninstall_target};
-#[cfg(test)]
-pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
     apply_pane_base_env, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
 };
+#[cfg(test)]
+pub(crate) use env::{integration_env_lock, HERDR_BIN_PATH_ENV_VAR};
 pub(crate) use registry::{
     installed_integration_statuses, integration_recommendations, integration_target_label,
     print_outdated_update_notice,
@@ -36,7 +36,7 @@ const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/claude/herdr-agent-state.sh")
 };
-const CLAUDE_INTEGRATION_VERSION: u32 = 7;
+const CLAUDE_INTEGRATION_VERSION: u32 = 8;
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -47,7 +47,7 @@ const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/codex/herdr-agent-state.sh")
 };
-const CODEX_INTEGRATION_VERSION: u32 = 7;
+const CODEX_INTEGRATION_VERSION: u32 = 8;
 const KIMI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {

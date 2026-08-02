@@ -24,6 +24,11 @@ use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_CWD_QUERY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
 mod agent_detection;
 mod cursor;
 mod input;
@@ -1572,6 +1577,7 @@ impl PaneRuntime {
             input_state: self.input_state(),
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
+            agent_activity: None,
         }
     }
 
@@ -1767,6 +1773,7 @@ impl PaneRuntime {
             input_state,
             terminal_title,
             initial_history_ansi,
+            agent_activity: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2759,6 +2766,9 @@ impl PaneRuntime {
 
     /// Get the current working directory of the child shell process.
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        TEST_CWD_QUERY_COUNT.with(|count| count.set(count.get() + 1));
+
         if let Some(cwd) = self
             .reported_cwd
             .lock()
@@ -2822,6 +2832,14 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    pub(crate) fn test_reset_cwd_query_count() {
+        TEST_CWD_QUERY_COUNT.with(|count| count.set(0));
+    }
+
+    pub(crate) fn test_cwd_query_count() -> usize {
+        TEST_CWD_QUERY_COUNT.with(Cell::get)
+    }
+
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
     }
@@ -2904,6 +2922,21 @@ mod tests {
         apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
 
         assert!(cmd.get_env("CODEX_THREAD_ID").is_none());
+    }
+
+    #[test]
+    fn pane_launch_env_binds_hooks_to_owning_herdr_binary() {
+        let mut cmd = CommandBuilder::new("shell");
+
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        assert_eq!(
+            cmd.get_env(crate::integration::HERDR_BIN_PATH_ENV_VAR),
+            std::env::current_exe()
+                .ok()
+                .as_deref()
+                .map(std::path::Path::as_os_str)
+        );
     }
 
     #[tokio::test]

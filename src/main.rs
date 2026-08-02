@@ -54,6 +54,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
     io::stdout().flush()
 }
 
+mod activity_age;
 mod agent_resume;
 mod api;
 mod app;
@@ -99,6 +100,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod work_title;
 mod workspace;
 mod worktree;
 
@@ -343,6 +345,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
+
+# Full-width top status row on desktop layouts.
+[ui.status_bar]
+# enabled = true
 
 # Background notification popup delivery
 [ui.toast]
@@ -889,5 +895,10 @@ mod tests {
         assert!(NESTED_HERDR_MESSAGES
             .iter()
             .all(|message| !message.starts_with("herdr:")));
+    }
+
+    #[test]
+    fn default_config_exposes_status_bar_enabled_setting() {
+        assert!(DEFAULT_CONFIG.contains("[ui.status_bar]\n# enabled = true"));
     }
 }

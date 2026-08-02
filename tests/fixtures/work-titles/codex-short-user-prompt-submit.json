@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-codex-short-session",
+  "turn_id": "fixture-turn-short",
+  "transcript_path": "/tmp/fixture-codex-short-session.jsonl",
+  "cwd": "/tmp/fixture-workspace",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "write a poem"
+}

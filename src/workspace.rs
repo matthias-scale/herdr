@@ -487,7 +487,8 @@ impl Workspace {
         if idx < self.tabs.len() {
             self.active_tab = idx;
             if let Some(tab) = self.tabs.get_mut(idx) {
-                for pane in tab.panes.values_mut() {
+                let focused = tab.layout.focused();
+                if let Some(pane) = tab.panes.get_mut(&focused) {
                     pane.seen = true;
                 }
             }
@@ -1183,6 +1184,24 @@ impl Workspace {
 
     pub fn focused_pane_id(&self) -> Option<PaneId> {
         self.active_tab().map(|tab| tab.layout.focused())
+    }
+
+    pub fn focused_cwd_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        self.active_tab()
+            .and_then(|tab| tab.cwd_for_pane(tab.layout.focused(), terminals, terminal_runtimes))
+            .or_else(|| Some(self.identity_cwd.clone()))
+    }
+
+    pub fn focused_cached_cwd(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<PathBuf> {
+        self.active_tab()
+            .and_then(|tab| tab.cached_cwd_for_pane(tab.layout.focused(), terminals))
     }
 
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
