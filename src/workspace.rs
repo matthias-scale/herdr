@@ -31,6 +31,33 @@ pub use self::{
     tab::{NewPane, Tab},
 };
 
+/// Return the adjacent canonical window index, wrapping at either end.
+/// Callers supply their own workspace/tab ordered list so this remains a pure
+/// identity-free policy shared by TUI and CLI navigation.
+pub(crate) fn relative_window_index(len: usize, current: usize, forward: bool) -> Option<usize> {
+    if len == 0 || current >= len {
+        return None;
+    }
+    Some(if forward {
+        (current + 1) % len
+    } else {
+        current.checked_sub(1).unwrap_or(len - 1)
+    })
+}
+
+#[cfg(test)]
+mod window_navigation_tests {
+    #[test]
+    fn relative_window_index_wraps_and_keeps_singletons_stable() {
+        assert_eq!(super::relative_window_index(0, 0, true), None);
+        assert_eq!(super::relative_window_index(1, 0, true), Some(0));
+        assert_eq!(super::relative_window_index(1, 0, false), Some(0));
+        assert_eq!(super::relative_window_index(3, 2, true), Some(0));
+        assert_eq!(super::relative_window_index(3, 0, false), Some(2));
+        assert_eq!(super::relative_window_index(3, 3, true), None);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeSpaceMembership {
     pub key: String,
@@ -487,7 +514,8 @@ impl Workspace {
         if idx < self.tabs.len() {
             self.active_tab = idx;
             if let Some(tab) = self.tabs.get_mut(idx) {
-                for pane in tab.panes.values_mut() {
+                let focused = tab.layout.focused();
+                if let Some(pane) = tab.panes.get_mut(&focused) {
                     pane.seen = true;
                 }
             }
@@ -681,6 +709,44 @@ impl Workspace {
         Ok(new_pane)
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_focused_with_placement(
+        &mut self,
+        direction: Direction,
+        before: bool,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
+    ) -> std::io::Result<crate::workspace::tab::NewPane> {
+        let pane_number = self.next_public_pane_number;
+        let tab_number = self
+            .active_tab()
+            .map(|tab| tab.number)
+            .expect("workspace must always have at least one tab");
+        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
+        let new_pane = self
+            .active_tab_mut()
+            .expect("workspace must always have at least one tab")
+            .split_focused_with_placement(
+                direction,
+                before,
+                rows,
+                cols,
+                cwd,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                shell_config,
+                &launch_env,
+            )?;
+        self.register_new_pane_with_number(new_pane.pane_id, pane_number);
+        Ok(new_pane)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn split_focused_command(
         &mut self,
@@ -716,6 +782,7 @@ impl Workspace {
         Ok(new_pane)
     }
 
+    #[allow(dead_code)] // Kept for internal callers that retain legacy right/down semantics.
     pub fn split_pane(
         &mut self,
         pane_id: PaneId,
@@ -742,10 +809,44 @@ impl Workspace {
             extra_env,
             focus_new_pane,
             None,
+            false,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_with_placement(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        before: bool,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            None,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            extra_env,
+            focus_new_pane,
+            None,
+            before,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Kept for internal callers that retain legacy right/down semantics.
     pub fn split_pane_with_ratio(
         &mut self,
         pane_id: PaneId,
@@ -773,6 +874,40 @@ impl Workspace {
             extra_env,
             focus_new_pane,
             None,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_with_ratio_and_placement(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        ratio: f32,
+        before: bool,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            extra_env,
+            focus_new_pane,
+            None,
+            before,
         )
     }
 
@@ -803,10 +938,44 @@ impl Workspace {
             extra_env,
             focus_new_pane,
             Some(argv),
+            false,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_argv_command_with_placement(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        before: bool,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        extra_env: Vec<(String, String)>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            None,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            extra_env,
+            focus_new_pane,
+            Some(argv),
+            before,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Kept for internal callers that retain legacy right/down semantics.
     pub fn split_pane_argv_command_with_ratio(
         &mut self,
         pane_id: PaneId,
@@ -834,6 +1003,40 @@ impl Workspace {
             extra_env,
             focus_new_pane,
             Some(argv),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_argv_command_with_ratio_and_placement(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        ratio: f32,
+        before: bool,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        extra_env: Vec<(String, String)>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            extra_env,
+            focus_new_pane,
+            Some(argv),
+            before,
         )
     }
 
@@ -852,6 +1055,7 @@ impl Workspace {
         extra_env: Vec<(String, String)>,
         focus_new_pane: bool,
         argv: Option<&[String]>,
+        before: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         let tab_idx = self.find_tab_index_for_pane(pane_id)?;
         let pane_number = self.next_public_pane_number;
@@ -862,9 +1066,32 @@ impl Workspace {
         tab.layout.focus_pane(pane_id);
         let new_pane = match if let Some(argv) = argv {
             match ratio {
+                Some(ratio) if before => tab.split_focused_argv_command_with_ratio_and_placement(
+                    direction,
+                    ratio,
+                    true,
+                    rows,
+                    cols,
+                    cwd,
+                    argv,
+                    &launch_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                ),
                 Some(ratio) => tab.split_focused_argv_command_with_ratio(
                     direction,
                     ratio,
+                    rows,
+                    cols,
+                    cwd,
+                    argv,
+                    &launch_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                ),
+                None if before => tab.split_focused_argv_command_with_placement(
+                    direction,
+                    true,
                     rows,
                     cols,
                     cwd,
@@ -886,9 +1113,32 @@ impl Workspace {
             }
         } else {
             match ratio {
+                Some(ratio) if before => tab.split_focused_with_ratio_and_placement(
+                    direction,
+                    ratio,
+                    true,
+                    rows,
+                    cols,
+                    cwd,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    shell_config,
+                    &launch_env,
+                ),
                 Some(ratio) => tab.split_focused_with_ratio(
                     direction,
                     ratio,
+                    rows,
+                    cols,
+                    cwd,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    shell_config,
+                    &launch_env,
+                ),
+                None if before => tab.split_focused_with_placement(
+                    direction,
+                    true,
                     rows,
                     cols,
                     cwd,

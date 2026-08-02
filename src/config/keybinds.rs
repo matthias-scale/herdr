@@ -328,6 +328,8 @@ pub struct Keybinds {
     pub rename_tab: ActionKeybinds,
     pub previous_tab: ActionKeybinds,
     pub next_tab: ActionKeybinds,
+    pub previous_window: ActionKeybinds,
+    pub next_window: ActionKeybinds,
     pub switch_tab: Vec<IndexedKeybind>,
     pub switch_workspace: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
@@ -347,6 +349,8 @@ pub struct Keybinds {
     pub last_pane: ActionKeybinds,
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
+    pub split_left: ActionKeybinds,
+    pub split_up: ActionKeybinds,
     pub close_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
@@ -490,6 +494,8 @@ impl Config {
             rename_tab: empty_action!(),
             previous_tab: empty_action!(),
             next_tab: empty_action!(),
+            previous_window: empty_action!(),
+            next_window: empty_action!(),
             switch_tab: Vec::new(),
             switch_workspace: Vec::new(),
             close_tab: empty_action!(),
@@ -509,6 +515,8 @@ impl Config {
             last_pane: empty_action!(),
             split_vertical: empty_action!(),
             split_horizontal: empty_action!(),
+            split_left: empty_action!(),
+            split_up: empty_action!(),
             close_pane: empty_action!(),
             zoom: empty_action!(),
             resize_mode: empty_action!(),
@@ -621,6 +629,8 @@ impl Config {
             apply_action!(keybinds.rename_tab, rename_tab, source);
             apply_action!(keybinds.previous_tab, previous_tab, source);
             apply_action!(keybinds.next_tab, next_tab, source);
+            apply_action!(keybinds.previous_window, previous_window, source);
+            apply_action!(keybinds.next_window, next_window, source);
             apply_indexed!(
                 keybinds.switch_tab,
                 switch_tab,
@@ -650,6 +660,8 @@ impl Config {
             apply_action!(keybinds.cycle_pane_previous, cycle_pane_previous, source);
             apply_action!(keybinds.split_vertical, split_vertical, source);
             apply_action!(keybinds.split_horizontal, split_horizontal, source);
+            apply_action!(keybinds.split_left, split_left, source);
+            apply_action!(keybinds.split_up, split_up, source);
             apply_action!(keybinds.close_pane, close_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);

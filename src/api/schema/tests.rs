@@ -1058,6 +1058,42 @@ fn layout_export_apply_round_trip() {
 }
 
 #[test]
+fn layout_schema_round_trips_leading_and_trailing_split_directions() {
+    let root = LayoutNode::Split {
+        direction: SplitDirection::Left,
+        ratio: 0.4,
+        first: Box::new(LayoutNode::Split {
+            direction: SplitDirection::Up,
+            ratio: 0.3,
+            first: Box::new(LayoutNode::Pane {
+                pane: LayoutPane {
+                    label: Some("above".into()),
+                    ..Default::default()
+                },
+            }),
+            second: Box::new(LayoutNode::Pane {
+                pane: LayoutPane {
+                    label: Some("below".into()),
+                    ..Default::default()
+                },
+            }),
+        }),
+        second: Box::new(LayoutNode::Pane {
+            pane: LayoutPane {
+                label: Some("right".into()),
+                ..Default::default()
+            },
+        }),
+    };
+
+    let json = serde_json::to_value(&root).unwrap();
+    assert_eq!(json["direction"], "left");
+    assert_eq!(json["first"]["direction"], "up");
+    let restored: LayoutNode = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, root);
+}
+
+#[test]
 fn authority_mutation_requests_round_trip() {
     let workspace_move = Request {
         id: "move_ws".into(),

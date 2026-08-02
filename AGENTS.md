@@ -25,6 +25,10 @@ These instructions are layered.
 
 ## Universal Project Rules
 
+Follow the compact [agent workflow](.github/agent-workflow.md) for objective
+overrides, reversible actions, repository preflight, verification, and quiet PR
+monitoring.
+
 ### Principles
 
 - **State is separated from runtime.** `AppState` is pure data, testable without PTYs or async. `PaneState` is separate from `PaneRuntime`. Workspace logic doesn't need real terminals.
@@ -78,13 +82,17 @@ For substantive feature and bug-fix work, default to opening a pull request inst
 
 Immediately before opening a pull request, fetch `origin` and make sure the task branch is based on the current `origin/master`; rebase it when behind, then rerun relevant validation before pushing. If `master` advances while the pull request is under review and GitHub marks it behind, update the branch and repeat checks and bot review on the new head.
 
-After opening or updating a pull request, monitor all checks to completion with `gh pr checks --watch` or an equivalent command. Treat Greptile and CodeRabbit as part of CI: wait for both to review the latest pushed commit, not only for the build and test jobs to pass. Evaluate every actionable finding. Fix findings you agree with and reply with the fix; reply inline with a concise technical reason when you disagree. After any fix, wait for CI and both review bots again on the new head.
+After opening or updating a pull request, monitor all checks to completion with
+`just pr-watch <number>` or an equivalent transition-only watcher. Treat
+Greptile and CodeRabbit as part of CI: wait for both to review the latest pushed
+commit, not only for the build and test jobs to pass. Evaluate every actionable
+finding. Fix findings you agree with and reply with the fix; reply inline with a
+concise technical reason when you disagree. After any fix, wait for CI and both
+review bots again on the new head.
 
 When the current pull request head is green and both bot reviews are complete, report that it is ready and stop. Never merge a pull request; Can performs the final merge.
 
 If the current session is already inside an isolated task worktree, keep using it. Do not create nested worktrees.
-
-Before committing, propose the commit message and get alignment.
 
 After Can confirms the change is integrated, update the shared checkout, remove the task worktree, and delete the task branch locally and remotely.
 
@@ -97,7 +105,10 @@ just test               # cargo nextest + maintenance script tests
 just check              # formatting check + cargo nextest + maintenance script tests
 ```
 
-Run `just check` before committing unless Can explicitly accepts narrower validation. Do not bypass failing checks; fix the failure or explain exactly why a narrower check is enough.
+Run `just check-parallel` on Unix or `just check` on Windows before committing
+unless Can explicitly accepts narrower validation. The parallel recipe
+consolidates independent checks and failure output. Do not bypass failing
+checks; fix the failure or explain exactly why a narrower check is enough.
 
 Unit tests live next to the code (`#[cfg(test)] mod tests`). New `AppState` or `Workspace` behavior should be testable with `AppState::test_new()` and `Workspace::test_new()` without PTYs.
 
@@ -172,8 +183,6 @@ Put local PRDs, planning notes, and exploratory specs under `.local/prd/`; `.loc
 ## Commit Style
 
 Use lowercase conventional commits, no emojis, and no AI co-author lines. Commit subjects feed preview release notes, so keep them descriptive.
-
-Before committing, propose the commit message and get alignment.
 
 When a normal feature or fix commit relates to a GitHub issue, add a commit body line `refs #<issue-number>` after the subject:
 

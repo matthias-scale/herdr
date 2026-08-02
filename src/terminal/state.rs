@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 // Effective state arbitration is intentionally centralized here. Full lifecycle
 // Herdr hook integrations are hook-authoritative while live; screen recovery
 // remains only for session-only/custom hook paths and fallback detection.
@@ -105,6 +107,132 @@ struct AgentNameOwner {
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AgentActivityOwner {
+    Session {
+        source: String,
+        agent_label: String,
+        kind: crate::agent_resume::AgentSessionRefKind,
+        value: String,
+    },
+    Agent {
+        agent_label: String,
+        previous_session: Option<AgentActivitySession>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentActivitySession {
+    source: String,
+    kind: crate::agent_resume::AgentSessionRefKind,
+    value: String,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentActivityHandoffState {
+    state: AgentActivityHandoffStatus,
+    active_elapsed: Option<Duration>,
+    last_active_elapsed: Option<Duration>,
+    owner: Option<AgentActivityOwner>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum AgentActivityHandoffStatus {
+    Idle,
+    Working,
+    Blocked,
+    Unknown,
+}
+
+#[cfg(unix)]
+impl From<AgentState> for AgentActivityHandoffStatus {
+    fn from(state: AgentState) -> Self {
+        match state {
+            AgentState::Idle => Self::Idle,
+            AgentState::Working => Self::Working,
+            AgentState::Blocked => Self::Blocked,
+            AgentState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl From<AgentActivityHandoffStatus> for AgentState {
+    fn from(state: AgentActivityHandoffStatus) -> Self {
+        match state {
+            AgentActivityHandoffStatus::Idle => Self::Idle,
+            AgentActivityHandoffStatus::Working => Self::Working,
+            AgentActivityHandoffStatus::Blocked => Self::Blocked,
+            AgentActivityHandoffStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl AgentActivityOwner {
+    fn agent_label(&self) -> &str {
+        match self {
+            Self::Session { agent_label, .. } | Self::Agent { agent_label, .. } => agent_label,
+        }
+    }
+
+    fn session(&self) -> Option<AgentActivitySession> {
+        match self {
+            Self::Session {
+                source,
+                kind,
+                value,
+                ..
+            } => Some(AgentActivitySession {
+                source: source.clone(),
+                kind: *kind,
+                value: value.clone(),
+            }),
+            Self::Agent {
+                previous_session, ..
+            } => previous_session.clone(),
+        }
+    }
+
+    fn inherit_detection_lineage(&mut self, previous: Option<&Self>) {
+        let Self::Agent {
+            agent_label,
+            previous_session,
+        } = self
+        else {
+            return;
+        };
+        let Some(previous) = previous.filter(|owner| owner.agent_label() == agent_label) else {
+            return;
+        };
+        *previous_session = previous.session();
+    }
+
+    /// Detection can identify an agent before a session hook supplies its
+    /// stronger identity, and can remain after that hook clears. Those
+    /// refinement transitions belong to one live activity interval. A
+    /// detection fallback remembers its last authoritative session so a later
+    /// different session cannot inherit that interval.
+    fn continues_activity_from(&self, previous: &Self) -> bool {
+        match (previous, self) {
+            (Self::Session { .. }, Self::Session { .. }) => previous == self,
+            (
+                Self::Agent {
+                    previous_session, ..
+                },
+                Self::Session { .. },
+            ) => {
+                previous.agent_label() == self.agent_label()
+                    && previous_session
+                        .as_ref()
+                        .is_none_or(|session| Some(session.clone()) == self.session())
+            }
+            _ => previous.agent_label() == self.agent_label(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecentAgentProcessExit {
     agent: Agent,
@@ -140,6 +268,9 @@ pub struct TerminalState {
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
+    agent_active_since: Option<Instant>,
+    agent_last_active_at: Option<Instant>,
+    agent_activity_owner: Option<AgentActivityOwner>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -173,6 +304,9 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
+            agent_active_since: None,
+            agent_last_active_at: None,
+            agent_activity_owner: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -1212,6 +1346,41 @@ impl TerminalState {
         })
     }
 
+    fn current_agent_activity_owner(&self) -> Option<AgentActivityOwner> {
+        self.current_session_identity_for_persistence()
+            .map(
+                |(source, agent_label, kind, value)| AgentActivityOwner::Session {
+                    source,
+                    agent_label,
+                    kind,
+                    value,
+                },
+            )
+            .or_else(|| {
+                self.effective_agent_label()
+                    .map(|label| AgentActivityOwner::Agent {
+                        agent_label: label.to_string(),
+                        previous_session: None,
+                    })
+            })
+    }
+
+    pub(crate) fn agent_session_matches(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_id: &str,
+    ) -> bool {
+        self.current_session_identity_for_persistence().is_some_and(
+            |(current_source, current_agent, current_kind, current_value)| {
+                current_source == source
+                    && current_agent == agent_label
+                    && current_kind == crate::agent_resume::AgentSessionRefKind::Id
+                    && current_value == session_id
+            },
+        )
+    }
+
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
         self.current_session_identity_for_persistence().is_some_and(
             |(current_source, current_agent, _, _)| {
@@ -1713,6 +1882,58 @@ impl TerminalState {
             .and_then(crate::detect::parse_agent_label)
     }
 
+    /// Authoritative runtime timestamp behind the sidebar activity-age field.
+    ///
+    /// Working agents expose the start of their current active interval.
+    /// Non-working agents expose when their most recent active interval ended.
+    pub(crate) fn agent_activity_at(&self) -> Option<Instant> {
+        if self.state == AgentState::Working {
+            self.agent_active_since
+        } else {
+            self.agent_last_active_at
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn agent_activity_handoff_state(
+        &self,
+        now: Instant,
+    ) -> Option<AgentActivityHandoffState> {
+        if self.agent_activity_owner.is_none()
+            && self.agent_active_since.is_none()
+            && self.agent_last_active_at.is_none()
+        {
+            return None;
+        }
+        Some(AgentActivityHandoffState {
+            state: self.state.into(),
+            active_elapsed: self
+                .agent_active_since
+                .map(|started| now.saturating_duration_since(started)),
+            last_active_elapsed: self
+                .agent_last_active_at
+                .map(|ended| now.saturating_duration_since(ended)),
+            owner: self.agent_activity_owner.clone(),
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_agent_activity_handoff_state(
+        &mut self,
+        handoff: AgentActivityHandoffState,
+        now: Instant,
+    ) {
+        self.state = handoff.state.into();
+        self.fallback_state = self.state;
+        self.agent_active_since = handoff
+            .active_elapsed
+            .and_then(|elapsed| now.checked_sub(elapsed));
+        self.agent_last_active_at = handoff
+            .last_active_elapsed
+            .and_then(|elapsed| now.checked_sub(elapsed));
+        self.agent_activity_owner = handoff.owner;
+    }
+
     pub(crate) fn unchanged_effective_state_change_at(&self, now: Instant) -> EffectiveStateChange {
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
@@ -1940,6 +2161,9 @@ impl TerminalState {
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
+        self.agent_active_since = None;
+        self.agent_last_active_at = None;
+        self.agent_activity_owner = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2021,9 +2245,37 @@ impl TerminalState {
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
+        let mut activity_owner = self.current_agent_activity_owner();
+        if let Some(owner) = activity_owner.as_mut() {
+            owner.inherit_detection_lineage(self.agent_activity_owner.as_ref());
+        }
+        let activity_owner_changed =
+            match (self.agent_activity_owner.as_ref(), activity_owner.as_ref()) {
+                (Some(previous), Some(current)) => !current.continues_activity_from(previous),
+                (None, None) => false,
+                _ => true,
+            };
 
         let presentation = self.effective_presentation_for_state_at(state, now);
         self.clear_expiry_pending_for_hidden_metadata();
+
+        if activity_owner_changed {
+            if state == AgentState::Working && activity_owner.is_some() {
+                self.agent_active_since = Some(now);
+                self.agent_last_active_at = None;
+            } else {
+                self.agent_active_since = None;
+                self.agent_last_active_at = None;
+            }
+        } else if previous_state != state {
+            if state == AgentState::Working {
+                self.agent_active_since = Some(now);
+            } else if previous_state == AgentState::Working {
+                self.agent_active_since = None;
+                self.agent_last_active_at = Some(now);
+            }
+        }
+        self.agent_activity_owner = activity_owner;
 
         if previous_agent_label == agent_label
             && previous_state == state
@@ -2057,6 +2309,327 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn activity_timestamp_tracks_working_interval_without_observation_jitter() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started + Duration::from_secs(12),
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        let finished = started + Duration::from_secs(20);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            finished,
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(finished));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            finished + Duration::from_secs(30),
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(finished));
+    }
+
+    #[test]
+    fn review_findings_activity_owner_refinement_preserves_working_interval() {
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Kimi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-root").unwrap();
+        assert!(terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                Some(session_ref.clone()),
+                Some(10),
+                Some("startup".into()),
+            )
+            .is_some());
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        assert!(terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                AgentState::Working,
+                None,
+                Some(session_ref),
+                Some(11),
+            )
+            .is_some());
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn review_fix_handoff_preserves_working_activity_age_and_owner() {
+        let started = Instant::now().checked_sub(Duration::from_secs(45)).unwrap();
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        source.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            true,
+            false,
+            false,
+            started,
+        );
+        let handoff = source
+            .agent_activity_handoff_state(captured_at)
+            .expect("working activity should transfer");
+
+        let restored_at = captured_at + Duration::from_secs(2);
+        let mut restored = test_terminal();
+        restored.restore_agent_activity_handoff_state(handoff, restored_at);
+        restored.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            true,
+            false,
+            false,
+            restored_at + Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            restored.agent_activity_at(),
+            Some(started + Duration::from_secs(2))
+        );
+        assert_eq!(restored.agent_activity_owner, source.agent_activity_owner);
+    }
+
+    #[test]
+    fn review_findings_activity_owner_demotion_records_idle_transition() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-root").unwrap();
+        assert!(terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                Some(session_ref.clone()),
+                Some(10),
+                Some("startup".into()),
+            )
+            .is_some());
+        assert!(terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:kimi".into(),
+                "kimi".into(),
+                AgentState::Working,
+                None,
+                Some(session_ref),
+                Some(11),
+            )
+            .is_some());
+        let working_started = terminal.agent_activity_at().unwrap();
+
+        assert!(terminal
+            .clear_hook_authority_with_mutation(Some("herdr:kimi"), Some(12))
+            .is_some());
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal
+            .agent_activity_at()
+            .is_some_and(|at| at >= working_started));
+    }
+
+    #[test]
+    fn review_findings_same_label_replacement_after_fallback_resets_activity() {
+        let mut terminal = test_terminal();
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        let first_session =
+            crate::agent_resume::AgentSessionRef::path(test_session_path("first.jsonl")).unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            first_session.clone(),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(first_session),
+            Some(20),
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        terminal
+            .clear_hook_authority_with_mutation(Some("herdr:pi"), Some(21))
+            .expect("hook clear should be accepted");
+        assert_eq!(terminal.agent_activity_at(), Some(started));
+
+        let replacement_observed = Instant::now();
+        terminal
+            .set_hook_authority_at(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                crate::agent_resume::AgentSessionRef::path(test_session_path("second.jsonl")),
+                Some(22),
+                replacement_observed,
+            )
+            .expect("replacement hook should be accepted");
+
+        assert_eq!(terminal.agent_activity_at(), Some(replacement_observed));
+    }
+
+    #[test]
+    fn review_findings_activity_timestamp_resets_for_replacement_session() {
+        let mut terminal = test_terminal();
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("first"),
+            Some(1),
+            Some("startup".into()),
+        );
+        terminal.agent_active_since = Some(started);
+
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("second"),
+            Some(2),
+            Some("resume".into()),
+        );
+
+        assert!(terminal.agent_activity_at().is_some_and(|at| at > started));
+    }
+
+    #[test]
+    fn review_findings_activity_timestamp_resets_for_detected_agent_owner() {
+        let mut terminal = test_terminal();
+        let started = Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        let replaced = started + Duration::from_secs(10);
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            replaced,
+        );
+
+        assert_eq!(terminal.agent_activity_at(), Some(replaced));
+    }
+
+    #[test]
+    fn review_findings_idle_activity_does_not_cross_session_owner() {
+        let mut terminal = test_terminal();
+        let started = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("first"),
+            Some(1),
+            Some("startup".into()),
+        );
+        let finished = Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Hermes),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            finished,
+        );
+        assert_eq!(terminal.agent_activity_at(), Some(finished));
+
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:hermes".into(),
+            "hermes".into(),
+            crate::agent_resume::AgentSessionRef::id("second"),
+            Some(2),
+            Some("resume".into()),
+        );
+
+        assert_eq!(terminal.agent_activity_at(), None);
     }
 
     fn test_session_path(name: &str) -> String {

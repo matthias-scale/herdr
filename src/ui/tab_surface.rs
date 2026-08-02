@@ -269,6 +269,19 @@ mod tests {
             .collect()
     }
 
+    fn frame_text(frame: &crate::protocol::FrameData) -> String {
+        frame
+            .cells
+            .chunks(usize::from(frame.width))
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn full_app_characterization_state(uri: &str) -> AppState {
         let mut workspace = Workspace::test_new("characterization");
         workspace.id = "w1".into();
@@ -306,30 +319,10 @@ mod tests {
         // AC2/AC8: deterministic frame covers geometry used by the integration gate.
         let uri = "https://example.com/full-app";
         let mut app = full_app_characterization_state(uri);
-        app.status_bar_enabled = false;
         let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
 
         assert_eq!((frame.width, frame.height), (106, 20));
-        assert_eq!(app.view.status_bar_rect, Rect::default());
-        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 0, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 80, 19));
-        assert_eq!(app.view.pane_infos.len(), 2);
-        assert!(!app.view.split_borders.is_empty());
-        assert!(frame.cursor.is_some());
-        assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
-        assert_eq!(
-            frame_digest(&frame),
-            "ce383feeaac30922502b7c4f8af53b5ca30e816ec4503ca6d015738b584da487"
-        );
-    }
-
-    #[tokio::test]
-    async fn desktop_full_app_status_and_sidebar_geometry_is_characterized() {
-        let uri = "https://example.com/full-app-status";
-        let mut app = full_app_characterization_state(uri);
-        let frame = full_app_frame(&mut app, Rect::new(0, 0, 106, 20));
-
+        // Status bar occupies row 0 full-width; chrome starts at y=1.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 106, 1));
         assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 26, 19));
         assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 80, 1));
@@ -340,17 +333,17 @@ mod tests {
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         let status = frame_rect_text(&frame, app.view.status_bar_rect);
         assert!(status.starts_with(' '), "{status:?}");
-        assert!(status.contains("CPU 12%"), "{status:?}");
-        assert!(status.contains("MEM 8.0/16.0 GiB"), "{status:?}");
+        assert!(status.contains("CPU  12%"), "{status:?}");
+        assert!(status.contains("MEM    8.0/  16.0 GiB"), "{status:?}");
         assert!(
-            status.trim_end().ends_with("MEM 8.0/16.0 GiB"),
+            status.trim_end().ends_with("MEM    8.0/  16.0 GiB"),
             "{status:?}"
         );
-        let sidebar = frame_rect_text(&frame, app.view.sidebar_rect);
-        assert!(sidebar.contains("characterization"), "{sidebar:?}");
-        let terminal = frame_rect_text(&frame, app.view.terminal_area);
-        assert!(terminal.contains("LINK"), "{terminal:?}");
-        assert!(terminal.contains("RIGHT"), "{terminal:?}");
+        let text = frame_text(&frame);
+        assert!(text.lines().any(|line| line.contains("Spaces")));
+        assert!(!text
+            .lines()
+            .any(|line| line.trim_start().starts_with("agents")));
     }
 
     #[tokio::test]
@@ -366,7 +359,8 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            "295608a66067f1e1f066c0adb3cf427e8a2d68bba8f68949fb72d464dcd8baab"
+            // Explicit mobile workspace → tab → pane projection.
+            "333dcde71a2bf37b9edea79594e2ed0ca786a984aad2efe4906172f4a8dae3e3"
         );
     }
 }

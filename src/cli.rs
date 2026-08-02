@@ -21,6 +21,7 @@ mod server;
 mod spec;
 mod status;
 mod tab;
+mod window;
 mod workspace;
 mod worktree;
 
@@ -92,6 +93,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
+        "window" => window::run_window_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
@@ -799,10 +801,12 @@ pub(super) fn normalize_pane_id(value: &str) -> String {
 
 pub(super) fn parse_split_direction(value: &str) -> std::io::Result<SplitDirection> {
     match value {
+        "left" => Ok(SplitDirection::Left),
         "right" => Ok(SplitDirection::Right),
+        "up" => Ok(SplitDirection::Up),
         "down" => Ok(SplitDirection::Down),
         _ => Err(std::io::Error::other(format!(
-            "invalid split direction: {value}"
+            "invalid split direction: {value} (expected left, right, up, or down)"
         ))),
     }
 }

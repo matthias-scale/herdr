@@ -126,6 +126,8 @@ focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
 ```
 
 The default keymap is prefix-first so Herdr does not steal input from shells, editors, tmux, or terminal apps. Search `keys.` in the [Config reference](/docs/config-reference/) to see every action and default binding. The in-app help panel at `prefix+?` shows the active bindings.
@@ -254,7 +256,24 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
+The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one workspace tree: each workspace keeps its roll-up row, every tab is shown even when it has no detected agent, and each tab exposes panes in layout order. Linked-worktree and agent disclosure are independent. Compact and mobile navigation preserve the same ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
+
+`ui.agent_panel_sort = "priority"` remains accepted for compatibility and attention summaries, but the final sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query likewise keeps the ownership projection. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
+
+Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`) and a completed pane stays `done` when it is viewed. Activity age is supplementary only and never replaces `done`.
+
+### Status row
+
+Desktop layouts show a right-aligned, full-width status row above the tab bar. Its only visible fields are Git branch, device name, CPU, then memory; the left side stays blank. The literal `CPU` and `MEM` segments stay visible at desktop widths; metrics use percent and GiB and show `CPU --%` or `MEM --/-- GiB` when a sample is unavailable. The row does not display a folder, Herdr version, session, workspace, tab, or pane identity or sample network details or usernames, and it does not show battery, date, or time. As the terminal narrows, branch then device name disappear.
+
+The sampler starts when a renderable status row first exists, refreshes every two seconds with at most one sample in flight, and retries failures at the next interval. Samples that reach four seconds old are discarded so unavailable values render instead. CPU and memory metrics come from native APIs or local proc files.
+
+```toml
+[ui.status_bar]
+enabled = false
+```
+
+The row is enabled by default. For an isolated preview, set `enabled = true` in that preview's own config; no terminal font-size control is involved. Disabling the row also stops the background metric sampler, so nothing is collected while it is hidden.
 
 ### Status row
 
@@ -324,7 +343,7 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+`row_gap` controls blank terminal rows between Space roots and between Agent children or flat Agent entries. The Agent and Space values remain independent. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
@@ -367,7 +386,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
+Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep compact renderings of the same ownership and disclosure tree.
 
 ## Notifications
 

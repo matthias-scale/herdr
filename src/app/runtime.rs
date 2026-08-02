@@ -185,7 +185,7 @@ impl App {
                     self.request_repaint();
                 }
                 self.state.outer_terminal_focus = Some(true);
-                self.state.mark_active_tab_seen();
+                self.state.mark_active_pane_seen();
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
@@ -223,16 +223,15 @@ impl App {
     }
 
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
-        let mut changed = false;
+        let mut changed = self.take_due_agent_activity_refresh(now);
         let mut resized = false;
-
-        changed |= self.schedule_status_metrics(now);
 
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
             changed |= resized;
             self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
         }
+        changed |= self.schedule_status_metrics_after_resize_poll(now, resized);
 
         if self
             .config_diagnostic_deadline
@@ -332,6 +331,30 @@ impl App {
         changed
     }
 
+    pub(crate) fn sync_agent_activity_refresh_deadline(&mut self, now: Instant) {
+        self.agent_activity_refresh_deadline = self.state.next_agent_activity_age_change(now);
+    }
+
+    pub(crate) fn take_due_agent_activity_refresh(&mut self, now: Instant) -> bool {
+        if self
+            .agent_activity_refresh_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.agent_activity_refresh_deadline = None;
+        true
+    }
+
+    fn schedule_status_metrics_after_resize_poll(&mut self, now: Instant, resized: bool) -> bool {
+        if resized {
+            // The previous frame no longer proves that the status row is
+            // renderable. The next render restores visibility when appropriate.
+            self.status_metrics_visible = false;
+        }
+        self.schedule_status_metrics(now)
+    }
+
     /// Drop a snapshot that outlived its staleness window so the status row
     /// shows unavailable metrics instead of silently aging values.
     pub(crate) fn discard_stale_status_metrics(&mut self, now: Instant) -> bool {
@@ -349,6 +372,7 @@ impl App {
     pub(crate) fn schedule_status_metrics(&mut self, now: Instant) -> bool {
         let stale = self.discard_stale_status_metrics(now);
         if !self.status_metric_refresh_enabled
+            || !self.status_metrics_visible
             || !self.state.status_bar_enabled
             || !self.status_metric_refresh.begin(now)
         {
@@ -593,17 +617,26 @@ impl App {
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh
                     && self.status_metric_refresh_enabled
+                    && self.status_metrics_visible
                     && self.state.status_bar_enabled
             }),
-            self.state.status_metrics.as_ref().map(|snapshot| {
-                snapshot.sampled_at + crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER
-            }),
+            self.status_metrics_visible
+                .then(|| {
+                    self.state.status_metrics.as_ref().map(|snapshot| {
+                        snapshot.sampled_at
+                            + crate::platform::status_metrics::STATUS_METRIC_STALE_AFTER
+                    })
+                })
+                .flatten(),
             include_client_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
+            include_client_refresh
+                .then_some(self.agent_activity_refresh_deadline)
+                .flatten(),
             self.pending_agent_resume_deadline,
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
@@ -703,6 +736,25 @@ mod tests {
             app.next_headless_loop_deadline_with_client_refresh(now, false, true),
             None
         );
+    }
+
+    #[test]
+    fn resize_invalidates_renderability_before_metric_sampling() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let now = Instant::now();
+        app.status_metrics_visible = true;
+        app.status_metric_refresh =
+            crate::platform::status_metrics::StatusMetricRefresh::immediate(now);
+
+        assert!(!app.schedule_status_metrics_after_resize_poll(now, true));
+        assert!(!app.status_metrics_visible);
+        assert!(!app.status_metric_refresh.in_flight());
     }
 
     #[test]

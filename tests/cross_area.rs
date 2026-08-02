@@ -902,11 +902,12 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
         .expect("workspace.create should return workspace_id")
         .to_string();
 
-    // The attached client must receive a frame that includes the new workspace
-    // label, proving client-side state reflects the API surface.
+    // The attached client must receive a frame that includes the recognizable
+    // prefix of the new workspace label. Sidebar disclosure controls may
+    // truncate the suffix at the negotiated client width.
     let saw_workspace_on_client =
         wait_for_frame_matching(&mut client, Duration::from_secs(3), |frame| {
-            frame_contains_text(frame, "api-visible-workspace")
+            frame_contains_text(frame, "api-visible-work")
         })
         .expect("frame decoding should succeed");
     assert!(

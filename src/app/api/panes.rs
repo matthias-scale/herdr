@@ -61,16 +61,24 @@ impl App {
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
+        let before = matches!(
+            params.direction,
+            crate::api::schema::SplitDirection::Left | crate::api::schema::SplitDirection::Up
+        );
         let direction = match params.direction {
-            crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
-            crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+            crate::api::schema::SplitDirection::Left
+            | crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
+            crate::api::schema::SplitDirection::Up | crate::api::schema::SplitDirection::Down => {
+                ratatui::layout::Direction::Vertical
+            }
         };
         let shell_config = crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode);
         let split_result = match params.ratio {
-            Some(ratio) => ws.split_pane_with_ratio(
+            Some(ratio) => ws.split_pane_with_ratio_and_placement(
                 target_pane_id,
                 direction,
                 ratio,
+                before,
                 rows,
                 cols,
                 split_cwd,
@@ -80,9 +88,10 @@ impl App {
                 extra_env,
                 params.focus,
             ),
-            None => ws.split_pane(
+            None => ws.split_pane_with_placement(
                 target_pane_id,
                 direction,
+                before,
                 rows,
                 cols,
                 split_cwd,
@@ -164,7 +173,7 @@ impl App {
         };
 
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        self.state.mark_active_tab_seen();
+        self.state.mark_active_pane_seen();
         self.state.settle_terminal_mode_after_focus();
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
@@ -1297,6 +1306,9 @@ impl App {
             Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
         };
         let title = normalize_presentation_text(params.title);
+        let work_title = (source == crate::work_title::WORK_TITLE_SOURCE)
+            .then(|| title.clone())
+            .flatten();
         let display_agent = normalize_presentation_text(params.display_agent);
         let applies_to_source = match params.applies_to_source {
             Some(applies_to_source) => match normalize_metadata_source(applies_to_source) {
@@ -1305,6 +1317,25 @@ impl App {
             },
             None => None,
         };
+        let raw_agent_session_id_set = params.agent_session_id.is_some();
+        let agent_session_id = params
+            .agent_session_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if raw_agent_session_id_set && agent_session_id.is_none() {
+            return encode_error(
+                id,
+                "invalid_agent_session",
+                "agent_session_id must contain visible text",
+            );
+        }
+        if agent_session_id.is_some() && (agent_label.is_none() || applies_to_source.is_none()) {
+            return encode_error(
+                id,
+                "invalid_metadata_request",
+                "agent_session_id requires agent and applies_to_source guards",
+            );
+        }
         let state_labels = match normalize_state_labels(params.state_labels) {
             Ok(labels) => labels,
             Err(status) => {
@@ -1357,6 +1388,21 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        if let Some(agent_session_id) = agent_session_id.as_deref() {
+            let session_matches = agent_label
+                .as_deref()
+                .zip(applies_to_source.as_deref())
+                .is_some_and(|(agent, source)| {
+                    terminal.agent_session_matches(source, agent, agent_session_id)
+                });
+            if !session_matches {
+                return encode_error(
+                    id,
+                    "agent_session_mismatch",
+                    "metadata report does not match the pane's current agent session",
+                );
+            }
+        }
         if terminal.metadata_report_blocked_by_process_exit(
             &source,
             agent_label.as_deref(),
@@ -1400,6 +1446,25 @@ impl App {
                 );
             }
         }
+        let unchanged_title_only = title.as_ref().is_some_and(|title| {
+            terminal
+                .agent_metadata
+                .get(&source)
+                .is_some_and(|metadata| {
+                    metadata.title.as_ref() == Some(title)
+                        && metadata.agent_label == agent_label
+                        && metadata.applies_to_source == applies_to_source
+                })
+        }) && display_agent.is_none()
+            && state_labels.is_empty()
+            && tokens.is_none()
+            && !params.clear_title
+            && !params.clear_display_agent
+            && !params.clear_state_labels
+            && ttl.is_none();
+        if unchanged_title_only {
+            return encode_success(id, ResponseResult::Ok {});
+        }
         let token_changed = tokens.is_some_and(|tokens| {
             let changed = terminal
                 .metadata_tokens
@@ -1426,12 +1491,56 @@ impl App {
                 ttl,
             });
         }
+        if let Some(title) = work_title {
+            self.apply_work_title_to_tab(ws_idx, pane_id, title);
+        }
         if token_changed {
             self.sync_agent_metadata_deadline();
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    fn apply_work_title_to_tab(&mut self, ws_idx: usize, pane_id: PaneId, title: String) {
+        let Some(tab_idx) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.find_tab_index_for_pane(pane_id))
+        else {
+            return;
+        };
+        let Some(tab) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
+        else {
+            return;
+        };
+        if tab.custom_name.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        tab.set_custom_name(title.clone());
+
+        let workspace_id = self.state.workspaces[ws_idx].id.clone();
+        let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
+            crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
+        });
+        crate::logging::tab_renamed(&workspace_id, &tab_id);
+        if self.state.active == Some(ws_idx) {
+            self.state.refresh_tab_bar_view();
+        }
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabRenamed,
+            data: EventData::TabRenamed {
+                tab_id,
+                workspace_id: self.public_workspace_id(ws_idx),
+                label: title,
+            },
+        });
     }
 
     pub(super) fn handle_pane_clear_agent_authority(
@@ -1840,8 +1949,12 @@ fn split_direction_to_layout(
     direction: crate::api::schema::SplitDirection,
 ) -> ratatui::layout::Direction {
     match direction {
-        crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
-        crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+        crate::api::schema::SplitDirection::Left | crate::api::schema::SplitDirection::Right => {
+            ratatui::layout::Direction::Horizontal
+        }
+        crate::api::schema::SplitDirection::Up | crate::api::schema::SplitDirection::Down => {
+            ratatui::layout::Direction::Vertical
+        }
     }
 }
 
@@ -1931,6 +2044,7 @@ mod tests {
             source: "user:metadata.test-1".into(),
             agent: None,
             applies_to_source: None,
+            agent_session_id: None,
             title: Some("activity".into()),
             display_agent: None,
             state_labels: std::collections::HashMap::new(),
@@ -1946,6 +2060,49 @@ mod tests {
     fn metadata_error_code(response: &str) -> String {
         let response: ErrorResponse = serde_json::from_str(response).unwrap();
         response.error.code
+    }
+
+    fn bind_test_agent_session(
+        app: &mut App,
+        pane_id: &str,
+        source: &str,
+        agent: &str,
+        session_id: &str,
+    ) -> crate::terminal::TerminalId {
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: source.into(),
+                agent: agent.into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session_id).unwrap(),
+            });
+        terminal_id
+    }
+
+    fn guarded_work_title_params(
+        pane_id: String,
+        agent: &str,
+        lifecycle_source: &str,
+        session_id: &str,
+        title: &str,
+        seq: u64,
+    ) -> PaneReportMetadataParams {
+        let mut params = metadata_params(pane_id);
+        params.source = crate::work_title::WORK_TITLE_SOURCE.into();
+        params.agent = Some(agent.into());
+        params.applies_to_source = Some(lifecycle_source.into());
+        params.agent_session_id = Some(session_id.into());
+        params.title = Some(title.into());
+        params.seq = Some(seq);
+        params
     }
 
     #[tokio::test]
@@ -4028,6 +4185,22 @@ mod tests {
     }
 
     #[test]
+    fn pane_report_metadata_validates_session_guard_shape() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut blank = metadata_params(pane_id.clone());
+        blank.agent = Some("codex".into());
+        blank.applies_to_source = Some("herdr:codex".into());
+        blank.agent_session_id = Some(" \n ".into());
+        let response = app.handle_pane_report_metadata("blank".into(), blank);
+        assert_eq!(metadata_error_code(&response), "invalid_agent_session");
+
+        let mut unbound = metadata_params(pane_id);
+        unbound.agent_session_id = Some("session-1".into());
+        let response = app.handle_pane_report_metadata("unbound".into(), unbound);
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_request");
+    }
+
+    #[test]
     fn pane_report_metadata_rejects_ttl_outside_supported_range() {
         let (mut app, pane_id) = app_with_test_workspace();
         for ttl_ms in [0, METADATA_TTL_MAX_MS + 1] {
@@ -4038,5 +4211,247 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    #[test]
+    fn guarded_work_titles_skip_duplicates_and_reject_stale_sessions() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "herdr:codex", "codex", "session-new");
+
+        let first = guarded_work_title_params(
+            pane_id.clone(),
+            "codex",
+            "herdr:codex",
+            "session-new",
+            "Fix Billing Retry Regression",
+            20,
+        );
+        let response = app.handle_pane_report_metadata("first".into(), first);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let revision = app.state.terminals[&terminal_id].revision;
+        let reported_at = app.state.terminals[&terminal_id].agent_metadata
+            [crate::work_title::WORK_TITLE_SOURCE]
+            .reported_at;
+
+        for seq in 21..=40 {
+            let duplicate = guarded_work_title_params(
+                pane_id.clone(),
+                "codex",
+                "herdr:codex",
+                "session-new",
+                "Fix Billing Retry Regression",
+                seq,
+            );
+            let response = app.handle_pane_report_metadata(format!("duplicate-{seq}"), duplicate);
+            let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        }
+        assert_eq!(app.state.terminals[&terminal_id].revision, revision);
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_metadata[crate::work_title::WORK_TITLE_SOURCE]
+                .reported_at,
+            reported_at
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(
+            app.event_hub
+                .events_after(0)
+                .iter()
+                .filter(|(_, event)| event.event == EventKind::TabRenamed)
+                .count(),
+            1
+        );
+
+        let stale = guarded_work_title_params(
+            pane_id,
+            "codex",
+            "herdr:codex",
+            "session-old",
+            "Overwrite Newer Work Title",
+            19,
+        );
+        let response = app.handle_pane_report_metadata("stale".into(), stale);
+        assert_eq!(metadata_error_code(&response), "agent_session_mismatch");
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_metadata[crate::work_title::WORK_TITLE_SOURCE]
+                .title
+                .as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+    }
+
+    #[test]
+    fn turn_start_fixture_reaches_guarded_herdr_title() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:codex",
+            "codex",
+            "fixture-codex-session",
+        );
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id("fixture-codex-session"),
+            Some(1),
+        );
+        let params = crate::work_title::request_from_turn_start(
+            crate::work_title::WorkTitleProvider::Codex,
+            Some(&pane_id),
+            include_str!("../../../tests/fixtures/work-titles/codex-user-prompt-submit.json"),
+            25,
+        )
+        .unwrap();
+
+        let response = app.handle_pane_report_metadata("turn-start".into(), params);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let metadata =
+            &app.state.terminals[&terminal_id].agent_metadata[crate::work_title::WORK_TITLE_SOURCE];
+        assert_eq!(
+            metadata.title.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(metadata.agent_label.as_deref(), Some("codex"));
+        assert_eq!(metadata.applies_to_source.as_deref(), Some("herdr:codex"));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(
+            app.agent_info(0, internal_pane_id)
+                .and_then(|agent| agent.title)
+                .as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+    }
+
+    #[test]
+    fn guarded_work_titles_are_bound_to_each_agent_and_resume_session() {
+        let (mut app, codex_pane) = app_with_test_workspace();
+        app.state.workspaces.push(Workspace::test_new("claude"));
+        app.state.ensure_test_terminals();
+        let claude_internal_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let claude_pane = app.public_pane_id(1, claude_internal_pane).unwrap();
+        let codex_terminal = bind_test_agent_session(
+            &mut app,
+            &codex_pane,
+            "herdr:codex",
+            "codex",
+            "codex-session",
+        );
+        let claude_terminal = bind_test_agent_session(
+            &mut app,
+            &claude_pane,
+            "herdr:claude",
+            "claude",
+            "claude-session",
+        );
+
+        for params in [
+            guarded_work_title_params(
+                codex_pane.clone(),
+                "codex",
+                "herdr:codex",
+                "codex-session",
+                "Audit Local CI Evidence",
+                30,
+            ),
+            guarded_work_title_params(
+                claude_pane,
+                "claude",
+                "herdr:claude",
+                "claude-session",
+                "Review Auth Migration Safety",
+                30,
+            ),
+        ] {
+            let response = app.handle_pane_report_metadata("agent".into(), params);
+            let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        }
+        assert_eq!(
+            app.state.terminals[&codex_terminal].agent_metadata
+                [crate::work_title::WORK_TITLE_SOURCE]
+                .title
+                .as_deref(),
+            Some("Audit Local CI Evidence")
+        );
+        assert_eq!(
+            app.state.terminals[&claude_terminal].agent_metadata
+                [crate::work_title::WORK_TITLE_SOURCE]
+                .title
+                .as_deref(),
+            Some("Review Auth Migration Safety")
+        );
+
+        bind_test_agent_session(
+            &mut app,
+            &codex_pane,
+            "herdr:codex",
+            "codex",
+            "codex-resumed",
+        );
+        let resumed = guarded_work_title_params(
+            codex_pane,
+            "codex",
+            "herdr:codex",
+            "codex-resumed",
+            "Measure Fleet Token Savings",
+            31,
+        );
+        let response = app.handle_pane_report_metadata("resume".into(), resumed);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            app.state.terminals[&codex_terminal].agent_metadata
+                [crate::work_title::WORK_TITLE_SOURCE]
+                .title
+                .as_deref(),
+            Some("Measure Fleet Token Savings")
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_work_title_does_not_touch_pane_input_or_process_state() {
+        let (mut app, pane_id, mut input_rx) = app_with_send_key_runtime(8);
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
+        let process_state = (
+            app.state.terminals[&terminal_id].detected_agent,
+            app.state.terminals[&terminal_id].state,
+        );
+
+        let params = guarded_work_title_params(
+            pane_id,
+            "claude",
+            "herdr:claude",
+            "session-1",
+            "Review Auth Migration Safety",
+            40,
+        );
+        let response = app.handle_pane_report_metadata("title".into(), params);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert!(input_rx.try_recv().is_err());
+        assert_eq!(
+            (
+                app.state.terminals[&terminal_id].detected_agent,
+                app.state.terminals[&terminal_id].state,
+            ),
+            process_state
+        );
     }
 }

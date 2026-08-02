@@ -87,8 +87,7 @@ impl App {
 
     fn replace_agent_view_override(&mut self, view: Option<AgentViewSetParams>) {
         self.state.agent_view_override = view;
-        self.state.agent_panel_scroll = 0;
-        self.state.mobile_switcher_scroll = 0;
+        self.state.mark_sidebar_projection_changed();
     }
 }
 
@@ -125,6 +124,8 @@ mod tests {
     #[test]
     fn set_and_source_guarded_clear_replace_transient_view() {
         let mut app = test_app();
+        app.state.workspace_scroll = 4;
+        app.state.mobile_switcher_scroll = 5;
 
         let set = app.handle_agent_view_set("set".to_string(), working_view("example.views"));
         let set: crate::api::schema::SuccessResponse = serde_json::from_str(&set).unwrap();
@@ -143,6 +144,9 @@ mod tests {
                 .map(|view| view.source.as_str()),
             Some("example.views")
         );
+        assert_eq!(app.state.sidebar_projection_revision, 1);
+        assert_eq!(app.state.workspace_scroll, 0);
+        assert_eq!(app.state.mobile_switcher_scroll, 0);
 
         app.handle_agent_view_clear(
             "wrong-source".to_string(),
@@ -159,6 +163,7 @@ mod tests {
             },
         );
         assert!(app.state.agent_view_override.is_none());
+        assert_eq!(app.state.sidebar_projection_revision, 2);
     }
 
     #[test]

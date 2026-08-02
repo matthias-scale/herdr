@@ -1098,7 +1098,7 @@ impl HeadlessServer {
         apply_keybindings(&mut self.app, &keybindings);
         self.sync_visible_server_config_diagnostic(uses_local_keybindings);
         if outer_terminal_focus == Some(true) {
-            self.app.state.mark_active_tab_seen();
+            self.app.state.mark_active_pane_seen();
         }
         self.app.set_host_terminal_appearance_state(
             host_terminal_appearance,
@@ -1177,11 +1177,18 @@ impl HeadlessServer {
         );
 
         let mut handoff_entries = Vec::new();
+        let handoff_captured_at = Instant::now();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
             let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.agent_activity = self
+                .app
+                .state
+                .terminals
+                .get(terminal_id)
+                .and_then(|terminal| terminal.agent_activity_handoff_state(handoff_captured_at));
             let has_agent_session = self
                 .app
                 .state
@@ -1458,6 +1465,17 @@ impl HeadlessServer {
 
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
+    }
+
+    fn has_renderable_status_target(&self) -> bool {
+        self.clients.values().any(|client| {
+            client.writer.is_some()
+                && client.is_full_app_client()
+                && crate::ui::status_bar_is_renderable(
+                    &self.app.state,
+                    Rect::new(0, 0, client.terminal_size.0, client.terminal_size.1),
+                )
+        })
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
@@ -2680,7 +2698,23 @@ impl HeadlessServer {
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         // Client-local theme reports were applied above; routing them again would update every
         // pane once per palette entry instead of once per captured batch.
+        let mut sidebar_presentation = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .map(|client| std::mem::take(&mut client.sidebar_presentation))
+                .unwrap_or_default()
+        });
+        if let Some(presentation) = &mut sidebar_presentation {
+            self.app.state.swap_sidebar_presentation(presentation);
+            self.app.state.reconcile_sidebar_presentation();
+        }
         self.app.route_client_events_from(client_id, events, false);
+        if let Some(mut presentation) = sidebar_presentation {
+            self.app.state.swap_sidebar_presentation(&mut presentation);
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.sidebar_presentation = presentation;
+            }
+        }
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
         } else {
@@ -3093,6 +3127,17 @@ impl HeadlessServer {
             return false;
         }
 
+        let focused_work_title_before = match &msg.request.method {
+            api::schema::Method::PaneReportMetadata(params)
+                if params.source.trim() == crate::work_title::WORK_TITLE_SOURCE =>
+            {
+                Some((
+                    params.pane_id.clone(),
+                    self.app.focused_pane_tab_label(&params.pane_id),
+                ))
+            }
+            _ => None,
+        };
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
@@ -3233,6 +3278,13 @@ impl HeadlessServer {
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
         let _ = msg.respond_to.send(response);
+
+        if let Some((pane_id, title_before)) = focused_work_title_before {
+            let title_after = self.app.focused_pane_tab_label(&pane_id);
+            if title_after.is_some() && title_after != title_before {
+                self.send_to_foreground_client(ServerMessage::WindowTitle { title: title_after });
+            }
+        }
 
         if let Some(revision_before) = pane_graphics_revision_before {
             changed |= revision_before != self.app.state.pane_graphics_revision;
@@ -3772,6 +3824,7 @@ impl HeadlessServer {
             );
             crate::render_prof::duration_since("full_render.render_virtual", render_started);
             self.app.full_redraw_pending = false;
+            self.app.agent_activity_refresh_deadline = None;
             crate::render_prof::duration_since("full_render.total", full_started);
             debug!(
                 cols,
@@ -3782,11 +3835,21 @@ impl HeadlessServer {
 
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
+        let mut agent_activity_refresh_deadline = None;
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
                 ClientConnectionMode::App => {
+                    let mut sidebar_presentation = self
+                        .clients
+                        .get_mut(&client_id)
+                        .map(|client| std::mem::take(&mut client.sidebar_presentation))
+                        .unwrap_or_default();
+                    self.app
+                        .state
+                        .swap_sidebar_presentation(&mut sidebar_presentation);
+                    self.app.state.reconcile_sidebar_presentation();
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -3802,6 +3865,16 @@ impl HeadlessServer {
                             is_foreground,
                             render_cell_size,
                         );
+                    if let Some(deadline) = self
+                        .app
+                        .state
+                        .next_agent_activity_age_change(self.app.state.view_observed_at)
+                    {
+                        agent_activity_refresh_deadline = Some(
+                            agent_activity_refresh_deadline
+                                .map_or(deadline, |current: Instant| current.min(deadline)),
+                        );
+                    }
                     crate::render_prof::duration_since(
                         "full_render.render_virtual",
                         render_started,
@@ -3822,6 +3895,12 @@ impl HeadlessServer {
                         &hyperlinks,
                     );
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
+                    self.app
+                        .state
+                        .swap_sidebar_presentation(&mut sidebar_presentation);
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.sidebar_presentation = sidebar_presentation;
+                    }
                     frame
                 }
                 ClientConnectionMode::TerminalAttach { terminal_id }
@@ -4025,6 +4104,7 @@ impl HeadlessServer {
             }
         }
 
+        self.app.agent_activity_refresh_deadline = agent_activity_refresh_deadline;
         let (cols, rows) = self.effective_size;
         if !deferred_frame {
             self.app.full_redraw_pending = false;
@@ -4040,7 +4120,22 @@ impl HeadlessServer {
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
-        let mut changed = if self.has_app_client() {
+        let has_app_client = self.has_app_client();
+        // A client resize updates its announced geometry before that geometry
+        // has produced a frame. Wait for the pending render to finish so a
+        // narrow-to-wide resize cannot start collection for an unseen row.
+        self.app.status_metrics_visible = !geometry_dirty && self.has_renderable_status_target();
+        let mut changed = if has_app_client {
+            self.app.take_due_agent_activity_refresh(now)
+        } else {
+            // Activity age is client-only presentation state. Drop a deadline
+            // left by the final rendered frame when the last app client
+            // detaches instead of turning an unrelated server wake into a
+            // render request.
+            self.app.agent_activity_refresh_deadline = None;
+            false
+        };
+        changed |= if self.app.status_metrics_visible {
             self.app.schedule_status_metrics(now)
         } else {
             self.app.discard_stale_status_metrics(now)
@@ -4776,15 +4871,15 @@ mod tests {
 
         server.app.route_client_input(vec![0x02, b'n']);
         assert_eq!(server.app.state.workspaces[0].active_tab, second_tab);
-        let (_, _, _, stale_cwd, stale_branch) =
-            crate::ui::focused_status_identity_for_test(&server.app.state);
+        let (stale_cwd, stale_branch) =
+            crate::ui::focused_status_context_for_test(&server.app.state);
         assert_eq!(stale_cwd, Some(std::path::PathBuf::from("/first")));
         assert_eq!(stale_branch.as_deref(), Some("first-branch"));
 
         crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
         assert!(server.app.sync_status_context_before_render());
         server.render_and_stream();
-        let (_, _, _, cwd, branch) = crate::ui::focused_status_identity_for_test(&server.app.state);
+        let (cwd, branch) = crate::ui::focused_status_context_for_test(&server.app.state);
         assert_eq!(cwd, Some(std::path::PathBuf::from("/second")));
         assert_eq!(branch, None);
         assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
@@ -5869,7 +5964,79 @@ next_tab = ""
     }
 
     #[test]
-    fn attached_app_client_starts_status_metric_sampling_immediately() {
+    fn detached_headless_server_discards_client_activity_refresh_deadline() {
+        let mut server = test_headless_server();
+        let now = Instant::now();
+        server.app.agent_activity_refresh_deadline =
+            Some(now.checked_sub(Duration::from_secs(1)).expect("deadline"));
+
+        assert!(!server.handle_scheduled_tasks_headless(now, false));
+        assert!(server.app.agent_activity_refresh_deadline.is_none());
+    }
+
+    #[test]
+    fn attached_app_client_starts_status_metric_sampling_after_first_render() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        server.handle_scheduled_tasks_headless(Instant::now(), true);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+        assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn narrow_to_wide_resize_waits_for_new_geometry_frame_before_sampling() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 40,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+        }));
+        server.handle_scheduled_tasks_headless(Instant::now(), true);
+        assert!(!server.app.status_metric_refresh.in_flight());
+
+        server.render_and_stream();
+        server.handle_scheduled_tasks_headless(Instant::now(), false);
+        assert!(server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn status_sampling_tracks_renderable_clients() {
         let mut server = test_headless_server();
         server.app.status_metric_refresh_enabled = true;
         let (writer, _control_rx, _render_rx) = test_client_writer();
@@ -5887,7 +6054,22 @@ next_tab = ""
 
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
+        assert!(server.app.status_metrics_visible);
         assert!(server.app.status_metric_refresh.in_flight());
+
+        server.app.status_metric_refresh.finish();
+        server
+            .clients
+            .get_mut(&7)
+            .expect("attached client")
+            .terminal_size = (40, 24);
+        server.handle_scheduled_tasks_headless(
+            Instant::now() + crate::platform::status_metrics::STATUS_METRIC_REFRESH_INTERVAL,
+            false,
+        );
+
+        assert!(!server.app.status_metrics_visible);
+        assert!(!server.app.status_metric_refresh.in_flight());
     }
 
     #[test]
@@ -10217,6 +10399,155 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
             "stale idle report must not forward a done sound"
+        );
+    }
+
+    #[test]
+    fn focused_work_title_updates_the_herdr_tab_and_outer_client_title_once() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("agent-fleet");
+        workspace.tabs[0].set_custom_name("auto-title".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        let public_pane_id = format!("{}:p1", workspace.id);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let session_ref = crate::agent_resume::AgentSessionRef::id("session-1").unwrap();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Working,
+        );
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: session_ref.clone(),
+        });
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            crate::detect::AgentState::Working,
+            None,
+            Some(session_ref),
+            None,
+        );
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let report = |title: &str, seq| {
+            api::schema::Method::PaneReportMetadata(api::schema::PaneReportMetadataParams {
+                pane_id: public_pane_id.clone(),
+                source: crate::work_title::WORK_TITLE_SOURCE.into(),
+                agent: Some("codex".into()),
+                applies_to_source: Some("herdr:codex".into()),
+                agent_session_id: Some("session-1".into()),
+                title: Some(title.into()),
+                display_agent: None,
+                state_labels: HashMap::new(),
+                tokens: HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                seq: Some(seq),
+                ttl_ms: None,
+            })
+        };
+        let send = |server: &mut HeadlessServer, method| {
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            assert!(
+                server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    request: api::schema::Request {
+                        id: "work-title".into(),
+                        method,
+                    },
+                    respond_to,
+                    response_write_complete: None,
+                })
+            );
+            let response = response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap();
+            let _: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        };
+
+        send(&mut server, report("Fix Billing Retry Regression", 20));
+        assert_eq!(
+            server.app.state.workspaces[0].tabs[0]
+                .custom_name
+                .as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        let entries = crate::ui::agent_panel_entries(&server.app.state);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(entries[0].agent_label.as_deref(), Some("codex"));
+        assert_eq!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("work title window update")
+            ),
+            ServerMessage::WindowTitle {
+                title: Some("Fix Billing Retry Regression".into())
+            }
+        );
+
+        send(&mut server, report("Fix Billing Retry Regression", 21));
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "unchanged normalized title must not flicker"
+        );
+
+        send(&mut server, report("Review Auth Migration Safety", 22));
+        assert_eq!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("changed work title window update")
+            ),
+            ServerMessage::WindowTitle {
+                title: Some("Review Auth Migration Safety".into())
+            }
+        );
+
+        send(&mut server, report("Overwrite Newer Work Title", 19));
+        assert_eq!(
+            server.app.state.workspaces[0].tabs[0]
+                .custom_name
+                .as_deref(),
+            Some("Review Auth Migration Safety")
+        );
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "stale turn must not overwrite either title surface"
         );
     }
 

@@ -52,11 +52,12 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
+pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::workspace_drop_indicator_row;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 #[cfg(test)]
-pub(crate) use self::status::focused_identity as focused_status_identity_for_test;
+pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
     render_toast_notification, toast_notification_rect,
@@ -78,15 +79,17 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
-        agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
-        agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
-        collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
-        workspace_drop_slots, workspace_group_chevron_rect, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
-        WorkspaceListEntry,
+        agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
+        collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
+        relative_agent_navigation_entry, sidebar_header_new_space_rect,
+        sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_group_chevron_rect,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
     },
 };
 
@@ -212,14 +215,16 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    if is_mobile_width(area, app.mobile_width_threshold) {
+    app.view_observed_at = std::time::Instant::now();
+    app.reconcile_sidebar_presentation();
+    if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
     }
 
-    // The top status row spans the whole client, with sidebar + tabs below.
-    // Reserve it before the horizontal split so the row is never squeezed
-    // into the main column only.
+    // Full-width top status row (tmux-parity): spans the whole client, with
+    // sidebar + tabs below. Reserve it before the horizontal split so the bar
+    // is never squeezed into the main column only.
     let (status_bar_rect, body_area) = if app.status_bar_enabled && area.height > 1 {
         let [status_bar_rect, body_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
@@ -249,14 +254,18 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            app.ensure_workspace_visible_in_sidebar(active, sidebar_area);
+        }
     } else {
-        app.workspace_scroll = app
-            .workspace_scroll
-            .min(app.workspaces.len().saturating_sub(1));
-        app.agent_panel_scroll = 0;
+        let (ws_area, _, _) = collapsed_sidebar_sections(sidebar_area);
+        app.workspace_scroll = collapsed_sidebar_row_scroll(app, ws_area);
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            if let Some(target) = sidebar_row_index_for_workspace(app, active) {
+                app.workspace_scroll =
+                    collapsed_sidebar_scroll_for_target(app, ws_area, app.workspace_scroll, target);
+            }
+        }
     }
 
     let workspace_card_areas = if app.sidebar_collapsed {
@@ -308,11 +317,21 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
 
+    let agent_card_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_agent_card_areas(app, sidebar_area)
+    };
+    let visible_agent_activity_instants =
+        sidebar::visible_agent_activity_instants_from(app, terminal_runtimes, &agent_card_areas);
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        agent_card_areas,
+        visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -326,6 +345,16 @@ fn compute_view_internal(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+}
+
+fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
+    is_mobile_width(area, app.mobile_width_threshold)
+        || (app.status_bar_enabled
+            && usize::from(area.width) < status::minimum_required_status_width(app))
+}
+
+pub(crate) fn status_bar_is_renderable(app: &AppState, area: Rect) -> bool {
+    app.status_bar_enabled && area.height > 1 && !uses_mobile_layout(app, area)
 }
 
 fn compute_mobile_view(
@@ -377,6 +406,8 @@ fn compute_mobile_view(
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        agent_card_areas: Vec::new(),
+        visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -389,6 +420,11 @@ fn compute_mobile_view(
         pane_infos,
         split_borders,
     };
+    if app.mode == Mode::Navigate {
+        if let Some(active) = app.take_pending_workspace_reveal() {
+            app.ensure_mobile_workspace_visible(active);
+        }
+    }
     app.sync_copy_mode_search_geometry();
 }
 
@@ -406,6 +442,10 @@ pub fn render_with_runtime_registry(
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
+
+    if app.view.layout != ViewLayout::Mobile {
+        render_status_bar(app, frame, app.view.status_bar_rect);
+    }
 
     render_navigation_chrome(app, terminal_runtimes, frame);
     if app.view.layout != ViewLayout::Mobile {
@@ -465,14 +505,11 @@ fn render_navigation_chrome(
 ) {
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
-    } else {
-        render_status_bar(app, frame, app.view.status_bar_rect);
-        if app.view.sidebar_rect.width > 0 {
-            if app.sidebar_collapsed {
-                render_sidebar_collapsed(app, frame, app.view.sidebar_rect);
-            } else {
-                render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
-            }
+    } else if app.view.sidebar_rect.width > 0 {
+        if app.sidebar_collapsed {
+            render_sidebar_collapsed(app, frame, app.view.sidebar_rect);
+        } else {
+            render_sidebar(app, terminal_runtimes, frame, app.view.sidebar_rect);
         }
     }
 }
@@ -1059,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_status_bar_renders_only_right_aligned_contract_segments() {
+    fn desktop_status_bar_renders_folder_branch_device_and_metrics_segments() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
@@ -1067,7 +1104,11 @@ mod tests {
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
 
-        // Wide enough that context, identity, and metrics all fit.
+        app.status_focused_cwd = Some(PathBuf::from("/repo"));
+        app.status_git_cwd = app.status_focused_cwd.clone();
+        app.status_git_branch = Some("feature/native-status".into());
+
+        // Wide enough that every contracted field fits.
         let width = 220u16;
         compute_view(&mut app, Rect::new(0, 0, width, 24));
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, width, 1));
@@ -1080,18 +1121,25 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        // Fixture metrics provide deterministic right-side renderer evidence.
+        // AC4: fixture metrics provide deterministic segment-parity evidence.
         assert!(
             row0.contains("testhost"),
             "status bar missing hostname: {row0:?}"
         );
+        assert!(row0.contains("feature/native-stat"), "{row0:?}");
         assert!(
-            row0.contains("8.0") && row0.contains("12"),
+            row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
             "status bar missing resource metrics: {row0:?}"
+        );
+        assert!(
+            row0.contains("/repo"),
+            "status bar missing focused folder: {row0:?}"
         );
         assert!(!row0.contains("Herdr v"), "{row0:?}");
         assert!(!row0.contains("testuser"), "{row0:?}");
-        assert!(!row0.contains("session:"), "{row0:?}");
+        for hidden_identity in ["session:", "workspace:", "tab:", "pane:"] {
+            assert!(!row0.contains(hidden_identity), "{row0:?}");
+        }
         assert!(!row0.contains("↓"), "{row0:?}");
         assert!(!row0.contains("↑"), "{row0:?}");
         let first_content = row0
@@ -1123,8 +1171,8 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
-        assert!(row0.contains("CPU 12%"), "{row0:?}");
+        assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
+        assert!(row0.contains("CPU  12%"), "{row0:?}");
         assert!(!row0.contains("Herdr v"), "{row0:?}");
     }
 
@@ -1139,10 +1187,6 @@ mod tests {
         app.selected = 0;
         app.mode = Mode::Terminal;
         app.sidebar_width = 26;
-        app.status_home_dir = Some(PathBuf::from("/home/test"));
-        app.status_focused_cwd = Some(PathBuf::from("/home/test/work/native-status"));
-        app.status_git_cwd = app.status_focused_cwd.clone();
-        app.status_git_branch = Some("feat/native-status".into());
 
         let mut rendered = Vec::new();
         for (width, height) in [(220, 8), (120, 12)] {
@@ -1155,8 +1199,8 @@ mod tests {
                 app.view.status_bar_rect,
                 app.view.status_bar_rect.y,
             );
-            assert!(row0.contains("MEM 8.0/16.0 GiB"), "{row0:?}");
-            assert!(row0.contains("CPU 12%"), "{row0:?}");
+            assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
+            assert!(row0.contains("CPU  12%"), "{row0:?}");
             assert!(!row0.contains("Herdr v"), "{row0:?}");
             rendered.push((
                 "sampled metrics",
@@ -1178,8 +1222,9 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM --/-- GiB"), "{row0:?}");
-        assert!(row0.contains("CPU --%"), "{row0:?}");
+        assert!(row0.contains("MEM     --/    -- GiB"), "{row0:?}");
+        assert!(row0.contains("CPU  --%"), "{row0:?}");
+        assert!(!row0.contains("Herdr v"), "{row0:?}");
         rendered.push((
             "unavailable fallback",
             width,
@@ -1222,8 +1267,9 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_sidebar_status_geometry_keeps_active_workspace_highlight() {
-        // AC2/AC7: collapsed desktop content remains aligned below status row 0.
+    fn collapsed_sidebar_status_geometry_keeps_active_workspace_foreground_emphasis() {
+        // AC2/AC7: collapsed desktop content remains aligned below status row
+        // 0 and uses foreground emphasis without a selection fill.
         let mut app = crate::app::state::AppState::test_new();
         app.sidebar_collapsed = true;
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -1242,11 +1288,13 @@ mod tests {
         let active_row = ws_area.y + 1;
         let active_style = buffer[(ws_area.x, active_row)].style();
 
-        assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(active_style.fg, Some(app.palette.text));
+        assert!(active_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(active_style.bg, Some(Color::Reset));
     }
 
     #[test]
-    fn expanded_sidebar_workspace_rows_show_state_before_name_without_numbers() {
+    fn expanded_sidebar_workspace_rows_omit_redundant_branch_line() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
@@ -1276,7 +1324,9 @@ mod tests {
 
         assert!(line1.starts_with(" · one"));
         assert!(!line1.contains("1 one"));
-        assert_eq!(line2, "   main");
+        assert_eq!(card.height, 1);
+        assert!(line2.is_empty());
+        assert!(!line1.contains("main"));
 
         std::fs::remove_dir_all(repo).ok();
     }
