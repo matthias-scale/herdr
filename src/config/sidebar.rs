@@ -6,7 +6,8 @@ use crate::detect::Agent;
 
 const MAX_SIDEBAR_ROWS: usize = 16;
 const MAX_SIDEBAR_TOKENS_PER_ROW: usize = 16;
-const DEFAULT_SIDEBAR_ROW_GAP: u16 = 0;
+const DEFAULT_AGENT_SIDEBAR_ROW_GAP: u16 = 0;
+const DEFAULT_SPACE_SIDEBAR_ROW_GAP: u16 = 1;
 
 fn deserialize_sidebar_rows<'de, D, T>(deserializer: D) -> Result<Vec<Vec<T>>, D::Error>
 where
@@ -398,7 +399,7 @@ impl Default for AgentsSidebarConfig {
                 AgentSidebarToken::StateText,
             ]],
             rows_by_agent: BTreeMap::new(),
-            row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            row_gap: DEFAULT_AGENT_SIDEBAR_ROW_GAP,
         }
     }
 }
@@ -418,7 +419,7 @@ impl Default for SpacesSidebarConfig {
                 SpaceSidebarToken::StateIcon,
                 SpaceSidebarToken::Workspace,
             ]],
-            row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            row_gap: DEFAULT_SPACE_SIDEBAR_ROW_GAP,
         }
     }
 }
@@ -454,7 +455,8 @@ mod tests {
                 SpaceSidebarToken::Workspace,
             ]]
         );
-        assert_eq!(config.spaces.row_gap, 0);
+        // ac3: distinct Space groups get one compact blank row by default.
+        assert_eq!(config.spaces.row_gap, 1);
     }
 
     #[test]

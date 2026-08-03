@@ -1001,12 +1001,12 @@ mod tests {
         app.active = Some(0);
         app.selected = 0;
         app.mode = Mode::Terminal;
-        app.sidebar_max_width = 30;
+        app.sidebar_max_width = 120;
         app.sidebar_width = 999;
 
-        compute_view(&mut app, Rect::new(0, 0, 100, 20));
+        compute_view(&mut app, Rect::new(0, 0, 160, 20));
 
-        assert_eq!(app.view.sidebar_rect.width, 30);
+        assert_eq!(app.view.sidebar_rect.width, 120);
     }
 
     #[test]

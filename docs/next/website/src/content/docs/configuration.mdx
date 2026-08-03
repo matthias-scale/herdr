@@ -260,7 +260,10 @@ The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one wo
 
 `ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but the visible sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query also leaves the ownership tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
-Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`); opening a completed pane clears `done` without moving its tab. Activity age is supplementary only and never replaces an unseen `done` state.
+Each expanded tab shows its persisted title once on one row, even when it owns
+multiple panes. That row rolls up pane state as `working`, `blocked`, or `done`;
+opening a completed tab clears `done` without moving it. Activity age is
+supplementary only and never replaces an unseen `done` state.
 
 ### Status row
 
@@ -286,7 +289,7 @@ The Space root layout remains configurable:
 
 ```toml
 [ui.sidebar.spaces]
-row_gap = 0
+row_gap = 1
 rows = [
   ["state_icon", "workspace"],
 ]
@@ -329,10 +332,10 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls blank terminal rows between Space roots. Legacy Agent and
-Space values remain independently parseable. It defaults to `0`, which packs
-entries together; set it to `1` to restore the previous spacing. Consecutive
-indented worktree children remain packed as one Space group.
+`row_gap` controls blank terminal rows between complete Space groups. Space
+rows default to `1`; set it to `0` for a fully packed list. Tabs within a Space
+and consecutive indented worktree children remain packed as one group. Legacy
+Agent row declarations remain independently parseable and default to `0`.
 
 Legacy per-agent overrides under `rows_by_agent` are also accepted for
 configuration compatibility, but they do not add model or agent subtitle rows:

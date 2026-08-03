@@ -2,7 +2,7 @@ mod tokens;
 
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -22,6 +22,28 @@ const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
+
+/// Selected sidebar titles need stronger foreground contrast without restoring
+/// the old filled-row treatment. On an RGB light surface, darken the theme's
+/// text token by one third; dark and terminal/reset themes keep their authored
+/// high-emphasis foreground.
+pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
+    let Color::Rgb(bg_r, bg_g, bg_b) = palette.panel_bg else {
+        return palette.text;
+    };
+    let perceived_luminance = u32::from(bg_r) * 299 + u32::from(bg_g) * 587 + u32::from(bg_b) * 114;
+    if perceived_luminance < 128_000 {
+        return palette.text;
+    }
+    match palette.text {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            ((u16::from(r) * 2) / 3) as u8,
+            ((u16::from(g) * 2) / 3) as u8,
+            ((u16::from(b) * 2) / 3) as u8,
+        ),
+        color => color,
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AgentPanelEntry {
@@ -616,16 +638,13 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::Workspace { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Agent { .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Agent { .. }) => 0,
-        (
-            SidebarRow::Workspace { indented: true, .. },
-            SidebarRow::Workspace { indented: true, .. },
-        ) => 0,
+        (_, SidebarRow::Workspace { indented: true, .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Agent { .. }) => app.sidebar_agents.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Tab { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
-        (SidebarRow::Agent { .. }, SidebarRow::Tab { .. }) => app.sidebar_agents.row_gap,
-        (SidebarRow::Tab { .. }, SidebarRow::Tab { .. }) => app.sidebar_agents.row_gap,
+        (SidebarRow::Agent { .. }, SidebarRow::Tab { .. }) => 0,
+        (SidebarRow::Tab { .. }, SidebarRow::Tab { .. }) => 0,
     }
 }
 
@@ -1501,7 +1520,9 @@ fn render_workspace_list(
         }
 
         let name_style = if selected || is_active || is_dragged {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(active_sidebar_title_color(p))
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0)
         };
@@ -1732,7 +1753,9 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         });
     let state_icon = state_dot(entry.state, entry.seen, p);
     let style = if active {
-        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(active_sidebar_title_color(p))
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.subtext0)
     };
@@ -1775,7 +1798,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             .saturating_sub(display_width(&activity_field));
         spans.push(Span::raw(" ".repeat(padding)));
         let activity_style = if entry.state == AgentState::Working {
-            Style::default().fg(p.yellow)
+            Style::default().fg(p.blue)
         } else {
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
         };
@@ -1883,7 +1906,7 @@ fn render_agent_card(
                 spans.push(Span::raw(" ".repeat(usize::from(padding))));
             }
             let activity_style = if detail.state == AgentState::Working {
-                Style::default().fg(p.yellow)
+                Style::default().fg(p.blue)
             } else {
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
             };
@@ -2059,7 +2082,28 @@ mod tests {
         detect::Agent,
         workspace::Workspace,
     };
-    use ratatui::{backend::TestBackend, layout::Direction, Terminal};
+    use ratatui::{backend::TestBackend, layout::Direction, style::Color, Terminal};
+
+    #[test]
+    fn active_title_color_darkens_light_rgb_and_preserves_theme_fallbacks() {
+        // ac2: One Light gets the specified one-third darker selected foreground.
+        let one_light = crate::app::state::Palette::one_light();
+        assert_eq!(
+            active_sidebar_title_color(&one_light),
+            Color::Rgb(37, 38, 44)
+        );
+
+        let one_dark = crate::app::state::Palette::one_dark();
+        assert_eq!(active_sidebar_title_color(&one_dark), one_dark.text);
+
+        let terminal = crate::app::state::Palette::terminal();
+        assert_eq!(active_sidebar_title_color(&terminal), terminal.text);
+
+        let mut custom_reset = crate::app::state::Palette::one_light();
+        custom_reset.panel_bg = Color::Reset;
+        custom_reset.text = Color::Rgb(12, 34, 56);
+        assert_eq!(active_sidebar_title_color(&custom_reset), custom_reset.text);
+    }
 
     fn app_with_agents(names: &[&str]) -> AppState {
         let mut app = AppState::test_new();
@@ -2762,9 +2806,113 @@ row_gap = 1
             })
     }
 
+    fn evidence_color_css(color: Color, fallback: &str) -> String {
+        match color {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            Color::Black => "#000000".into(),
+            Color::White => "#ffffff".into(),
+            Color::Red => "#ff0000".into(),
+            Color::Green => "#00ff00".into(),
+            Color::Yellow => "#ffff00".into(),
+            Color::Blue => "#0000ff".into(),
+            Color::Magenta => "#ff00ff".into(),
+            Color::Cyan => "#00ffff".into(),
+            Color::Gray => "#808080".into(),
+            Color::DarkGray => "#404040".into(),
+            _ => fallback.into(),
+        }
+    }
+
+    #[test]
+    fn sidebar_visual_evidence_renders_release_layout() {
+        let mut app = AppState::test_new();
+        app.palette = crate::app::state::Palette::one_light();
+
+        let mut active = Workspace::test_new("Herdr");
+        active.tabs[0].custom_name = Some("Polish sidebar selection".into());
+        let active_root = active.tabs[0].root_pane;
+        active.test_split(Direction::Horizontal);
+        active.test_add_tab(Some("Review lifecycle assertions"));
+
+        let mut queued = Workspace::test_new("Fleet docs");
+        queued.tabs[0].custom_name = Some("Update release notes".into());
+        app.workspaces = vec![active, queued];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        app.sidebar_spaces.row_gap = 1;
+
+        let terminal_id = app.workspaces[0].tabs[0].panes[&active_root]
+            .attached_terminal_id
+            .clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.detected_agent = Some(Agent::Codex);
+        terminal_state.state = AgentState::Working;
+        app.reconcile_sidebar_presentation();
+
+        let width = 60;
+        let height = 12;
+        let area = Rect::new(0, 0, width, height);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let rows = (0..height)
+            .map(|row| row_text(terminal.backend().buffer(), row, width))
+            .collect::<Vec<_>>();
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("working") && row.contains("Polish sidebar selection")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Review lifecycle assertions")));
+        assert!(rows.iter().any(|row| row.contains("Fleet docs")));
+        assert!(
+            rows.iter()
+                .any(|row| row.replace('│', "").trim().is_empty()),
+            "Space groups should have a visual gap: {rows:?}"
+        );
+
+        let Ok(path) = std::env::var("HERDR_SIDEBAR_EVIDENCE_HTML") else {
+            return;
+        };
+        let mut html = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>Herdr sidebar release evidence</title>\
+             <style>body{margin:0;padding:24px;background:#eff1f5;color:#4c4f69;\
+             font-family:\"JetBrains Mono\",ui-monospace,monospace}h1{font-size:18px}\
+             p{max-width:760px}.terminal{display:grid;width:max-content;font-size:14px;\
+             line-height:20px;box-shadow:0 0 0 1px #bcc0cc;background:#eff1f5}.cell{width:1ch;\
+             height:20px;white-space:pre;overflow:visible}</style><h1>Herdr sidebar release layout</h1>\
+             <p>Actual Ratatui test buffer: selected titles, blue Working status, one row per tab,\
+             multi-pane roll-up, and compact spacing between complete Space groups.</p>\
+             <div class=\"terminal\" style=\"grid-template-columns:repeat(60,1ch)\">",
+        );
+        for cell in terminal.backend().buffer().content() {
+            let symbol = cell
+                .symbol()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let weight = if cell.modifier.contains(Modifier::BOLD) {
+                "font-weight:700;"
+            } else {
+                ""
+            };
+            html.push_str(&format!(
+                "<span class=\"cell\" style=\"color:{};background:{};{weight}\">{symbol}</span>",
+                evidence_color_css(cell.fg, "#4c4f69"),
+                evidence_color_css(cell.bg, "#eff1f5"),
+            ));
+        }
+        html.push_str("</div>");
+        std::fs::write(path, html).expect("write sidebar visual evidence");
+    }
+
     #[test]
     fn ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture() {
         let mut app = AppState::test_new();
+        app.palette = crate::app::state::Palette::one_light();
         let mut workspace = Workspace::test_new("Test");
         workspace.tabs[0].custom_name = Some("Summarize recent commits".into());
         let root_pane = workspace.tabs[0].root_pane;
@@ -2818,6 +2966,7 @@ row_gap = 1
     #[test]
     fn default_tab_row_shows_status_and_title_once_without_pane_identity_row() {
         let mut app = crate::app::state::AppState::test_new();
+        app.palette = crate::app::state::Palette::one_light();
         let mut workspace = Workspace::test_new("repo-folder");
         workspace.tabs[0].custom_name = Some("Fix Billing Retry".into());
         let pane_id = workspace.tabs[0].root_pane;
@@ -2855,13 +3004,15 @@ row_gap = 1
 
         let workspace_x = find_symbol_x(buffer, workspace_row, 59, "o");
         let workspace_style = buffer[(workspace_x, workspace_row)].style();
-        assert_eq!(workspace_style.fg, Some(app.palette.text));
+        // ac2: active titles are visibly darker than the prior One Light text.
+        assert_eq!(workspace_style.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
 
         let title_x = find_symbol_x(buffer, tab_row, 59, "F");
         let title_style = buffer[(title_x, tab_row)].style();
+        assert_eq!(title_style.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(title_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(title_style.bg, Some(ratatui::style::Color::Reset));
     }
@@ -2899,6 +3050,14 @@ row_gap = 1
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("working"), "{busy_text:?}");
         assert!(busy_text.ends_with("42s ago"), "{busy_text:?}");
+        // ac7: both the Working label and its live age use activity blue.
+        for token in ["working", "42s ago"] {
+            let token_x = busy_text.find(token).expect("rendered token") as u16;
+            assert_eq!(
+                busy.backend().buffer()[(token_x, tab_row)].style().fg,
+                Some(app.palette.blue)
+            );
+        }
 
         let finished = started + std::time::Duration::from_secs(50);
         app.terminals
@@ -3087,6 +3246,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     #[test]
     fn default_space_workspace_style_tracks_active_state() {
         let mut app = crate::app::state::AppState::test_new();
+        app.palette = crate::app::state::Palette::one_light();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -3101,7 +3261,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let buffer = terminal.backend().buffer();
 
         let active = buffer[(find_symbol_x(buffer, first_row, 25, "o"), first_row)].style();
-        assert_eq!(active.fg, Some(app.palette.text));
+        // ac2: One Light selected titles darken from #383a42 to #25262c.
+        assert_eq!(active.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
         assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
@@ -3929,7 +4090,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!cards[0].indented);
         assert_eq!(cards[1].ws_idx, 1);
         assert!(cards[1].indented);
-        assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height + 1);
+        // ac3: a worktree root and its child remain one packed Space group.
+        assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height);
     }
 
     #[test]
@@ -3947,7 +4109,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let (spacious, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
         assert_eq!(
             spacious[1].rect.y,
-            spacious[0].rect.y + spacious[0].rect.height + 2
+            spacious[0].rect.y + spacious[0].rect.height
         );
         assert_eq!(
             spacious[2].rect.y,
@@ -3958,7 +4120,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spacious[2].rect.y + spacious[2].rect.height + 2
         );
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        assert_eq!(spacious_metrics.viewport_rows, 2);
+        assert_eq!(spacious_metrics.viewport_rows, 3);
         assert_eq!(spacious_metrics.max_offset_from_bottom, 2);
 
         app.sidebar_spaces.row_gap = 0;
@@ -3969,6 +4131,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
         assert_eq!(packed_metrics.viewport_rows, 4);
         assert_eq!(packed_metrics.max_offset_from_bottom, 0);
+    }
+
+    #[test]
+    fn space_row_gap_separates_groups_but_never_tabs_inside_them() {
+        let mut app = AppState::test_new();
+        let mut first = Workspace::test_new("first");
+        first.test_add_tab(Some("first-two"));
+        let mut second = Workspace::test_new("second");
+        second.test_add_tab(Some("second-two"));
+        app.workspaces = vec![first, second];
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.sidebar_spaces.row_gap = 1;
+        app.sidebar_agents.row_gap = 3;
+
+        let area = Rect::new(0, 0, 30, 30);
+        let (spaces, _) = compute_workspace_list_areas(&app, area);
+        let tabs = compute_tab_card_areas(&app, area);
+
+        // ac3: legacy Agent row spacing cannot split tabs inside one Space.
+        assert_eq!(tabs[1].rect.y, tabs[0].rect.y + tabs[0].rect.height);
+        assert_eq!(spaces[1].rect.y, tabs[1].rect.y + tabs[1].rect.height + 1);
+        assert_eq!(tabs[3].rect.y, tabs[2].rect.y + tabs[2].rect.height);
     }
 
     #[test]
