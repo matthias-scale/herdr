@@ -1,0 +1,5 @@
+{
+  "schema": "preview-adapter/v1",
+  "command": ["./scripts/qa-preview-adapter.sh"],
+  "journeys_document": "docs/qa/user-journeys.md"
+}
