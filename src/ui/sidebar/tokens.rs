@@ -173,6 +173,7 @@ mod tests {
             agent_label: Some("pi".into()),
             agent_kind_label: Some("pi".into()),
             agent: Some(crate::detect::Agent::Pi),
+            has_agent: true,
             state: AgentState::Working,
             background_job_count: None,
             seen: true,

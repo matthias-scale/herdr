@@ -1251,6 +1251,7 @@ mod tests {
             agent_label: agent_label.map(str::to_string),
             agent_kind_label: agent_label.map(str::to_string),
             agent: agent_label.and_then(crate::detect::parse_agent_label),
+            has_agent: agent_label.is_some(),
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,

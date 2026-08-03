@@ -32,7 +32,7 @@ pub(crate) fn tab_agent_icon(agent: Option<Agent>) -> Option<&'static str> {
 }
 
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
-    entry.agent.is_some() && (entry.state != AgentState::Idle || !entry.seen)
+    entry.has_agent && (entry.state != AgentState::Idle || !entry.seen)
 }
 
 /// Selected sidebar titles need stronger foreground contrast without restoring
@@ -65,6 +65,10 @@ pub(crate) struct AgentPanelEntry {
     pub agent_label: Option<String>,
     pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
+    /// At least one pane in this row is agent-backed. This stays true for a
+    /// rolled-up tab whose panes have conflicting providers, while `agent`
+    /// becomes `None` so the provider glyph is not misleading.
+    pub has_agent: bool,
     pub state: AgentState,
     pub background_job_count: Option<u16>,
     pub seen: bool,
@@ -190,6 +194,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_label: Some(detail.agent_label),
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
+                        has_agent: detail.agent.is_some(),
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
@@ -388,6 +393,7 @@ fn sidebar_rows_inner(
                             Option<u16>,
                             Option<Agent>,
                             bool,
+                            bool,
                         ),
                     >::new(),
                     |mut states, entry| {
@@ -425,6 +431,7 @@ fn sidebar_rows_inner(
                                         _ => {}
                                     }
                                 }
+                                state.6 |= entry.has_agent;
                             })
                             .or_insert((
                                 candidate.0,
@@ -433,6 +440,7 @@ fn sidebar_rows_inner(
                                 entry.background_job_count,
                                 entry.agent,
                                 false,
+                                entry.has_agent,
                             ));
                         states
                     },
@@ -449,6 +457,7 @@ fn sidebar_rows_inner(
                             background_job_count,
                             agent,
                             mixed_agents,
+                            has_agent,
                         )) = tab_states.get(&tab)
                         {
                             tab_entry.state = *state;
@@ -456,6 +465,7 @@ fn sidebar_rows_inner(
                             tab_entry.activity_at = *activity_at;
                             tab_entry.background_job_count = *background_job_count;
                             tab_entry.agent = (!mixed_agents).then_some(*agent).flatten();
+                            tab_entry.has_agent = *has_agent;
                         }
                         rows.push(SidebarRow::Tab {
                             entry: Box::new(tab_entry),
@@ -4192,6 +4202,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .unwrap();
         assert_eq!(entry.agent, None);
+        assert!(
+            tab_lifecycle_visible(&entry),
+            "mixed provider ambiguity must not hide agent lifecycle"
+        );
     }
 
     #[test]
