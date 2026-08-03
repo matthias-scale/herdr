@@ -1307,7 +1307,7 @@ impl App {
             Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
         };
         let title = normalize_presentation_text(params.title);
-        let work_title = (source == crate::work_title::WORK_TITLE_SOURCE)
+        let requested_work_title = (source == crate::work_title::WORK_TITLE_SOURCE)
             .then(|| title.clone())
             .flatten();
         let display_agent = normalize_presentation_text(params.display_agent);
@@ -1330,6 +1330,10 @@ impl App {
                 "agent_session_id must contain visible text",
             );
         }
+        let work_title_request = source == crate::work_title::WORK_TITLE_SOURCE
+            && agent_label.is_some()
+            && applies_to_source.is_some()
+            && agent_session_id.is_some();
         if agent_session_id.is_some() && (agent_label.is_none() || applies_to_source.is_none()) {
             return encode_error(
                 id,
@@ -1364,6 +1368,7 @@ impl App {
             && !params.clear_title
             && !params.clear_display_agent
             && !params.clear_state_labels
+            && !work_title_request
         {
             return encode_error(
                 id,
@@ -1447,6 +1452,21 @@ impl App {
                 );
             }
         }
+        let work_title = match (
+            work_title_request,
+            agent_label.as_deref(),
+            applies_to_source.as_deref(),
+            agent_session_id.as_deref(),
+        ) {
+            (true, Some(agent), Some(lifecycle_source), Some(session_id)) => terminal
+                .resolve_work_title_for_session(
+                    agent,
+                    lifecycle_source,
+                    session_id,
+                    requested_work_title,
+                ),
+            _ => None,
+        };
         let unchanged_title_only = title.as_ref().is_some_and(|title| {
             terminal
                 .agent_metadata
@@ -3866,6 +3886,12 @@ mod tests {
     #[test]
     fn api_pane_focus_marks_already_focused_done_pane_seen() {
         let mut app = app_with_linked_worktree();
+        app.state.workspaces[0].test_add_tab(Some("later"));
+        let tab_order = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.number)
+            .collect::<Vec<_>>();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.outer_terminal_focus = Some(false);
@@ -3895,6 +3921,16 @@ mod tests {
             panic!("expected pane info response");
         };
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert_eq!(
+            app.state.workspaces[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.number)
+                .collect::<Vec<_>>(),
+            tab_order,
+            "focusing completed work must not reorder tabs"
+        );
     }
 
     #[test]
@@ -4320,6 +4356,11 @@ mod tests {
                 .as_deref(),
             Some("Fix Billing Retry Regression")
         );
+        assert!(
+            !app.state.terminals[&terminal_id]
+                .metadata_report_sequence_is_fresh(crate::work_title::WORK_TITLE_SOURCE, Some(26),),
+            "the terse turn still refreshes guarded metadata sequencing"
+        );
     }
 
     #[test]
@@ -4376,6 +4417,69 @@ mod tests {
         assert_eq!(
             entries[0].primary_tab_label.as_deref(),
             Some("Fix Billing Retry Regression")
+        );
+    }
+
+    #[test]
+    fn terse_later_user_prompt_submit_retains_the_session_initial_title() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:codex",
+            "codex",
+            "fixture-codex-session",
+        );
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id("fixture-codex-session"),
+            Some(1),
+        );
+
+        let first = crate::work_title::request_from_turn_start(
+            crate::work_title::WorkTitleProvider::Codex,
+            Some(&pane_id),
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"fixture-codex-session","prompt":"Fix billing retry regression"}"#,
+            25,
+        )
+        .unwrap();
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("first".into(), first)).unwrap();
+
+        let later = crate::work_title::request_from_turn_start(
+            crate::work_title::WorkTitleProvider::Codex,
+            Some(&pane_id),
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"fixture-codex-session","prompt":"do it"}"#,
+            26,
+        )
+        .unwrap();
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("later".into(), later)).unwrap();
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_metadata[crate::work_title::WORK_TITLE_SOURCE]
+                .title
+                .as_deref(),
+            Some("Fix Billing Retry Regression")
+        );
+        assert_eq!(
+            crate::ui::sidebar_thread_entries(&app.state)
+                .into_iter()
+                .filter(|entry| entry.pane_id == internal_pane_id)
+                .filter_map(|entry| entry.primary_tab_label)
+                .collect::<Vec<_>>(),
+            vec!["Fix Billing Retry Regression"],
+            "the pane child references the one persisted tab title rather than creating another"
         );
     }
 
@@ -4461,6 +4565,100 @@ mod tests {
                 .as_deref(),
             Some("Measure Fleet Token Savings")
         );
+    }
+
+    #[test]
+    fn work_title_initial_briefings_are_session_scoped_and_later_objectives_replace_them() {
+        let (mut app, codex_pane) = app_with_test_workspace();
+        app.state.workspaces.push(Workspace::test_new("claude"));
+        app.state.ensure_test_terminals();
+        let claude_pane = app
+            .public_pane_id(1, app.state.workspaces[1].tabs[0].root_pane)
+            .unwrap();
+        bind_test_agent_session(
+            &mut app,
+            &codex_pane,
+            "herdr:codex",
+            "codex",
+            "codex-session",
+        );
+        bind_test_agent_session(
+            &mut app,
+            &claude_pane,
+            "herdr:claude",
+            "claude",
+            "claude-session",
+        );
+
+        for (id, provider, pane, session, prompt, seq) in [
+            (
+                "codex-first",
+                crate::work_title::WorkTitleProvider::Codex,
+                codex_pane.as_str(),
+                "codex-session",
+                "Review billing retry regression\n\nplease start",
+                40,
+            ),
+            (
+                "claude-first",
+                crate::work_title::WorkTitleProvider::Claude,
+                claude_pane.as_str(),
+                "claude-session",
+                "Audit plugin marketplace safety",
+                40,
+            ),
+            (
+                "codex-terse",
+                crate::work_title::WorkTitleProvider::Codex,
+                codex_pane.as_str(),
+                "codex-session",
+                "please do it now",
+                41,
+            ),
+            (
+                "claude-terse",
+                crate::work_title::WorkTitleProvider::Claude,
+                claude_pane.as_str(),
+                "claude-session",
+                "go ahead",
+                41,
+            ),
+            (
+                "codex-later",
+                crate::work_title::WorkTitleProvider::Codex,
+                codex_pane.as_str(),
+                "codex-session",
+                "Real-time policy management is unrelated. Implement sidebar lifecycle assertions",
+                42,
+            ),
+        ] {
+            let payload = serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": session,
+                "prompt": prompt,
+            })
+            .to_string();
+            let params =
+                crate::work_title::request_from_turn_start(provider, Some(pane), &payload, seq)
+                    .unwrap();
+            let response = app.handle_pane_report_metadata(id.into(), params);
+            let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        }
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Implement Sidebar Lifecycle Assertions")
+        );
+        assert_eq!(
+            app.state.workspaces[1].tabs[0].custom_name.as_deref(),
+            Some("Audit Plugin Marketplace Safety")
+        );
+        assert!(!app.state.workspaces[0].tabs[0]
+            .custom_name
+            .as_deref()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("real-time policy management"));
     }
 
     #[tokio::test]

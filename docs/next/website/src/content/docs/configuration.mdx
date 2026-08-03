@@ -260,7 +260,7 @@ The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one wo
 
 `ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but the visible sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query also leaves the ownership tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
-Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`) and a completed pane stays `done` when it is viewed. Activity age is supplementary only and never replaces `done`.
+Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`); opening a completed pane clears `done` without moving its tab. Activity age is supplementary only and never replaces an unseen `done` state.
 
 ### Status row
 
@@ -277,15 +277,14 @@ The row is enabled by default. For an isolated preview, set `enabled = true` in 
 
 ### Sidebar row layouts
 
-The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
+The visible sidebar is always the Spaces tree. Space roots use
+`ui.sidebar.spaces`; every disclosed tab/window below them uses one fixed line:
+state icon, state text, separator, and its single title. A tab with several
+panes still has one row, and model, agent, and pane subtitles are not rendered.
+
+The Space root layout remains configurable:
 
 ```toml
-[ui.sidebar.agents]
-row_gap = 0
-rows = [
-  ["state_icon", "pane", "state_text"],
-]
-
 [ui.sidebar.spaces]
 row_gap = 0
 rows = [
@@ -293,7 +292,9 @@ rows = [
 ]
 ```
 
-Agent rows accept these built-in tokens:
+Legacy `ui.sidebar.agents` row declarations remain accepted so existing
+configuration does not fail to load, but they do not create a separate Agents
+view or child rows in the visible sidebar. Their accepted tokens are:
 
 - `state_icon` — colored icon for the agent's semantic state.
 - `state_text` — `idle`, `working`, `blocked`, `done`, or `unknown`, including a reported display label when present.
@@ -328,9 +329,13 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls blank terminal rows between Space roots and between pane children. The Agent and Space values remain independent. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+`row_gap` controls blank terminal rows between Space roots. Legacy Agent and
+Space values remain independently parseable. It defaults to `0`, which packs
+entries together; set it to `1` to restore the previous spacing. Consecutive
+indented worktree children remain packed as one Space group.
 
-Override the complete Agent layout for a known agent under `rows_by_agent`:
+Legacy per-agent overrides under `rows_by_agent` are also accepted for
+configuration compatibility, but they do not add model or agent subtitle rows:
 
 ```toml
 [ui.sidebar.agents]

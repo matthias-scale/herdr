@@ -239,6 +239,14 @@ struct RecentAgentProcessExit {
     observed_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkTitleInitialSubject {
+    agent_label: String,
+    lifecycle_source: String,
+    session_id: String,
+    title: String,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -253,6 +261,7 @@ pub struct TerminalState {
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
+    work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     pub terminal_title: Option<String>,
@@ -289,6 +298,7 @@ impl TerminalState {
             fallback_observed_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
+            work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
             terminal_title: None,
@@ -319,6 +329,38 @@ impl TerminalState {
         self.terminal_title
             .as_deref()
             .and_then(super::stripped_terminal_title)
+    }
+
+    pub(crate) fn resolve_work_title_for_session(
+        &mut self,
+        agent_label: &str,
+        lifecycle_source: &str,
+        session_id: &str,
+        latest_title: Option<String>,
+    ) -> Option<String> {
+        let same_session = self
+            .work_title_initial_subject
+            .as_ref()
+            .is_some_and(|initial| {
+                initial.agent_label == agent_label
+                    && initial.lifecycle_source == lifecycle_source
+                    && initial.session_id == session_id
+            });
+        if same_session {
+            return latest_title.or_else(|| {
+                self.work_title_initial_subject
+                    .as_ref()
+                    .map(|initial| initial.title.clone())
+            });
+        }
+        let title = latest_title?;
+        self.work_title_initial_subject = Some(WorkTitleInitialSubject {
+            agent_label: agent_label.to_string(),
+            lifecycle_source: lifecycle_source.to_string(),
+            session_id: session_id.to_string(),
+            title: title.clone(),
+        });
+        Some(title)
     }
 
     pub(crate) fn set_terminal_title(&mut self, title: Option<String>) -> TerminalTitleChange {

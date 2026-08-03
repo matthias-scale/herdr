@@ -54,7 +54,7 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
-pub(crate) use self::sidebar::workspace_drop_indicator_row;
+pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
@@ -322,8 +322,13 @@ fn compute_view_internal(
     } else {
         sidebar::compute_agent_card_areas(app, sidebar_area)
     };
+    let tab_card_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_tab_card_areas(app, sidebar_area)
+    };
     let visible_agent_activity_instants =
-        sidebar::visible_agent_activity_instants_from(app, terminal_runtimes, &agent_card_areas);
+        sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
@@ -1322,7 +1327,8 @@ mod tests {
         assert!(line1.starts_with(" · one"));
         assert!(!line1.contains("1 one"));
         assert_eq!(card.height, 1);
-        assert!(line2.is_empty());
+        assert!(line2.contains("New Thread"));
+        assert!(!line2.contains("main"));
         assert!(!line1.contains("main"));
 
         std::fs::remove_dir_all(repo).ok();

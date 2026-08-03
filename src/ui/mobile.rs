@@ -9,10 +9,10 @@ use ratatui::{
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
-    grouped_child_display_label, mobile_sidebar_rows, mobile_sidebar_rows_from,
-    sidebar_row_belongs_to_workspace, AgentPanelEntry, SidebarRow,
+    agent_panel_status_key, grouped_child_display_label, mobile_sidebar_rows,
+    mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace, AgentPanelEntry, SidebarRow,
 };
-use super::status::state_dot;
+use super::status::{state_dot, state_label, state_label_color};
 use super::text::{display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -40,6 +40,10 @@ pub(crate) enum MobileSwitcherTarget {
     WorkspaceDisclosure(usize),
     NewTab,
     Tab(usize),
+    SidebarTab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     Agent {
         ws_idx: usize,
         tab_idx: usize,
@@ -130,9 +134,17 @@ fn mobile_sidebar_rows_start(app: &AppState, rows: &[SidebarRow]) -> usize {
     start
 }
 
+fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
+    match row {
+        SidebarRow::Tab { .. } => 1,
+        SidebarRow::Workspace { .. } | SidebarRow::Agent { .. } => 2,
+    }
+}
+
 fn mobile_sidebar_block_height(app: &AppState) -> usize {
     let rows = mobile_sidebar_rows(app);
-    mobile_sidebar_rows_start(app, &rows) + rows.len() * 2
+    mobile_sidebar_rows_start(app, &rows)
+        + rows.iter().map(mobile_sidebar_row_height).sum::<usize>()
 }
 
 pub(crate) fn mobile_switcher_workspace_doc_range(
@@ -146,8 +158,12 @@ pub(crate) fn mobile_switcher_workspace_doc_range(
     let pos = rows
         .iter()
         .position(|row| sidebar_row_belongs_to_workspace(row, idx))?;
-    let start = mobile_sidebar_rows_start(app, &rows) + pos * 2;
-    Some(start..start + 2)
+    let start = mobile_sidebar_rows_start(app, &rows)
+        + rows[..pos]
+            .iter()
+            .map(mobile_sidebar_row_height)
+            .sum::<usize>();
+    Some(start..start + mobile_sidebar_row_height(&rows[pos]))
 }
 
 pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
@@ -178,39 +194,40 @@ pub(crate) fn mobile_switcher_target_at(
         return Some(MobileSwitcherTarget::NewWorkspace);
     }
     let mut cursor = mobile_sidebar_rows_start(app, &rows);
-    let sidebar_end = cursor + rows.len() * 2;
-    if doc_row >= cursor && doc_row < sidebar_end {
-        let idx = (doc_row - cursor) / 2;
-        let on_title_line = (doc_row - cursor).is_multiple_of(2);
-        return rows.get(idx).map(|entry| match entry {
-            SidebarRow::Workspace { ws_idx, indented } => {
-                let agent_count =
-                    crate::ui::agent_counts_by_workspace(&crate::ui::sidebar_thread_entries(app))
-                        .get(ws_idx)
-                        .copied()
-                        .unwrap_or(0);
-                let on_disclosure = on_title_line
-                    && mobile_workspace_disclosure_columns(content, agent_count, *indented)
-                        .is_some_and(|columns| columns.contains(&col));
-                if on_disclosure {
-                    MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
-                } else {
-                    MobileSwitcherTarget::Workspace(*ws_idx)
+    for entry in &rows {
+        let row_height = mobile_sidebar_row_height(entry);
+        if doc_row >= cursor && doc_row < cursor + row_height {
+            let on_title_line = doc_row == cursor;
+            return Some(match entry {
+                SidebarRow::Workspace { ws_idx, indented } => {
+                    let agent_count = crate::ui::agent_counts_by_workspace(
+                        &crate::ui::sidebar_thread_entries(app),
+                    )
+                    .get(ws_idx)
+                    .copied()
+                    .unwrap_or(0);
+                    let on_disclosure = on_title_line
+                        && mobile_workspace_disclosure_columns(content, agent_count, *indented)
+                            .is_some_and(|columns| columns.contains(&col));
+                    if on_disclosure {
+                        MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
+                    } else {
+                        MobileSwitcherTarget::Workspace(*ws_idx)
+                    }
                 }
-            }
-            SidebarRow::Agent { entry, .. } => MobileSwitcherTarget::Agent {
-                ws_idx: entry.ws_idx,
-                tab_idx: entry.tab_idx,
-                pane_id: entry.pane_id,
-            },
-            SidebarRow::Tab { entry, .. } => MobileSwitcherTarget::Agent {
-                ws_idx: entry.ws_idx,
-                tab_idx: entry.tab_idx,
-                pane_id: entry.pane_id,
-            },
-        });
+                SidebarRow::Agent { entry, .. } => MobileSwitcherTarget::Agent {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                    pane_id: entry.pane_id,
+                },
+                SidebarRow::Tab { entry, .. } => MobileSwitcherTarget::SidebarTab {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                },
+            });
+        }
+        cursor += row_height;
     }
-    cursor = sidebar_end;
 
     if let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) {
         cursor += 1; // tabs title
@@ -714,18 +731,35 @@ fn render_mobile_switcher_content(
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
+                let state = entry
+                    .state_labels
+                    .get(agent_panel_status_key(entry.state, entry.seen))
+                    .map(String::as_str)
+                    .unwrap_or_else(|| match entry.state {
+                        AgentState::Idle if !entry.seen => "done",
+                        _ => state_label(entry.state, entry.seen),
+                    });
+                let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
+                let fixed_width = indent.len() + 1 + state.len() + " · ".len();
                 let title = Line::from(vec![
                     Span::styled(indent, Style::default().bg(bg)),
-                    Span::styled("▾ ", Style::default().fg(p.accent).bg(bg)),
+                    Span::styled(icon, icon_style.bg(bg)),
+                    Span::styled(
+                        format!(" {state}"),
+                        Style::default()
+                            .fg(state_label_color(entry.state, entry.seen, p))
+                            .bg(bg),
+                    ),
+                    Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
                     Span::styled(
                         truncate_end(
                             entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
-                            content.width.saturating_sub(5) as usize,
+                            usize::from(content.width).saturating_sub(fixed_width),
                         ),
                         mobile_item_title_style(false, active, p).bg(bg),
                     ),
                 ]);
-                render_two_line_item(
+                render_one_line_item(
                     frame,
                     viewport,
                     content,
@@ -733,12 +767,10 @@ fn render_mobile_switcher_content(
                     app.mobile_switcher_scroll,
                     bg,
                     title,
-                    String::new(),
-                    p.overlay0,
                 );
             }
         }
-        doc_y += 2;
+        doc_y += mobile_sidebar_row_height(row);
     }
 
     if let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) {
@@ -1388,7 +1420,7 @@ mod tests {
 
         assert_eq!(agent_panel_entries(&app).len(), 2);
         // Spaces title + new-workspace action precede the workspace, followed
-        // immediately by its two disclosed agent children.
+        // immediately by its two disclosed single-line tab rows.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 0)
                 .expect("workspace row")
@@ -1399,11 +1431,20 @@ mod tests {
         let viewport = mobile_switcher_areas(&app).viewport;
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 2);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
-        let agent_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
-        assert!(matches!(
-            agent_hit,
-            Some(MobileSwitcherTarget::Agent { .. })
-        ));
+        assert_eq!(
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4),
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 0,
+                tab_idx: 0
+            })
+        );
+        assert_eq!(
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5),
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 0,
+                tab_idx: 1
+            })
+        );
     }
 
     #[test]
@@ -1643,6 +1684,70 @@ mod tests {
             .expect("explicit mobile tab row");
 
         assert!(!tab_row.contains("tab 2"), "mobile tab row: {tab_row:?}");
+    }
+
+    #[test]
+    fn ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
+        workspace.tabs[0].custom_name = Some("First task".into());
+        workspace.test_add_tab(Some("Second task"));
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let observed_at = std::time::Instant::now();
+        for terminal in app.terminals.values_mut() {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                observed_at,
+            );
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 18);
+        app.reconcile_sidebar_presentation();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 20),
+                )
+            })
+            .unwrap();
+
+        let rows = (0..20)
+            .map(|y| {
+                (0..40)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let first = rows
+            .iter()
+            .position(|row| row.contains("working") && row.contains("First task"))
+            .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
+        let second = rows
+            .iter()
+            .position(|row| row.contains("working") && row.contains("Second task"))
+            .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
+        assert!(rows[first].find("working").unwrap() < rows[first].find("First task").unwrap());
+        assert!(rows[second].find("working").unwrap() < rows[second].find("Second task").unwrap());
+        assert_eq!(
+            second,
+            first + 1,
+            "tab rows must not reserve subtitle lines"
+        );
+        assert!(!rows[first].contains("codex"));
     }
 
     #[cfg(unix)]

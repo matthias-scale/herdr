@@ -358,6 +358,9 @@ impl App {
                         self.focus_workspace_idx_via_api(ws_idx)
                     }
                     MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
+                    MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
+                        self.focus_workspace_tab_via_api(ws_idx, tab_idx)
+                    }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }

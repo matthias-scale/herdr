@@ -33,6 +33,10 @@ pub(super) enum MouseAction {
     FocusTab {
         tab_idx: usize,
     },
+    FocusSidebarTab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -515,11 +519,11 @@ impl AppState {
                             return Some(MouseAction::FocusWorkspace { ws_idx: idx });
                         }
 
-                        if let Some((ws_idx, _tab_idx, pane_id)) =
+                        if let Some((ws_idx, tab_idx)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
                             self.mode = Mode::Terminal;
-                            return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                            return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
                         }
                         return None;
                     }
@@ -591,10 +595,10 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) = self.tab_target_at(mouse.row) {
+                    if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
                         self.selected = ws_idx;
                         self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
                     }
 
                     if let Some((ws_idx, _tab_idx, pane_id)) =
@@ -1136,6 +1140,10 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::Tab(tab_idx)) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusTab { tab_idx });
+            }
+            Some(crate::ui::MobileSwitcherTarget::SidebarTab { ws_idx, tab_idx }) => {
+                self.close_workspace_picker();
+                return MobileMouseResult::Action(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
@@ -3614,6 +3622,43 @@ mod tests {
         ));
 
         assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        let target_tab = ws.test_add_tab(Some("multi-pane"));
+        ws.active_tab = target_tab;
+        let focused_pane = ws.test_split(Direction::Horizontal);
+        assert_eq!(ws.tabs[target_tab].layout.focused(), focused_pane);
+        ws.active_tab = 0;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            viewport.x + 2,
+            viewport.y + 5,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, target_tab);
+        assert_eq!(
+            app.state.workspaces[0].tabs[target_tab].layout.focused(),
+            focused_pane
+        );
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 

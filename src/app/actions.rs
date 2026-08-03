@@ -1552,24 +1552,29 @@ impl AppState {
         }
     }
 
-    /// Scroll the sidebar so the row representing `pane_id` is visible, falling
-    /// back to its workspace row when the projection renders no agent row.
+    /// Scroll the sidebar so the tab row owning `pane_id` is visible, falling
+    /// back to its workspace row when the projection renders no tab row.
     pub(crate) fn ensure_agent_row_visible(&mut self, ws_idx: usize, pane_id: PaneId) {
         if self.view.layout == ViewLayout::Mobile {
             self.ensure_workspace_visible(ws_idx);
             return;
         }
+        let tab_idx = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.find_tab_index_for_pane(pane_id));
+        let owning_tab_row = |row: &crate::ui::SidebarRow| {
+            matches!(
+                row,
+                crate::ui::SidebarRow::Tab { entry, .. }
+                    if entry.ws_idx == ws_idx && Some(entry.tab_idx) == tab_idx
+            )
+        };
         if self.sidebar_collapsed {
             let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
             let target_row_idx = crate::ui::sidebar_rows(self)
                 .iter()
-                .position(|row| {
-                    matches!(
-                        row,
-                        crate::ui::SidebarRow::Agent { entry, .. }
-                            if entry.ws_idx == ws_idx && entry.pane_id == pane_id
-                    )
-                })
+                .position(owning_tab_row)
                 .or_else(|| crate::ui::sidebar_row_index_for_workspace(self, ws_idx));
             if let Some(target_row_idx) = target_row_idx {
                 self.workspace_scroll = crate::ui::collapsed_sidebar_scroll_for_target(
@@ -1586,13 +1591,7 @@ impl AppState {
         let sidebar_area = self.view.sidebar_rect;
         let target_row_idx = crate::ui::sidebar_rows(self)
             .iter()
-            .position(|row| {
-                matches!(
-                    row,
-                    crate::ui::SidebarRow::Agent { entry, .. }
-                        if entry.ws_idx == ws_idx && entry.pane_id == pane_id
-                )
-            })
+            .position(owning_tab_row)
             .or_else(|| crate::ui::sidebar_row_index_for_workspace(self, ws_idx));
         let Some(target_row_idx) = target_row_idx else {
             return;
@@ -4485,10 +4484,10 @@ mod tests {
 
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        let target = state.workspaces[0].tabs[last_idx].root_pane;
-        let (_, agent_cards) =
-            crate::ui::compute_sidebar_row_areas(&state, state.view.sidebar_rect);
-        assert!(agent_cards.iter().any(|card| card.pane_id == target));
+        let tab_cards = crate::ui::compute_tab_card_areas(&state, state.view.sidebar_rect);
+        assert!(tab_cards
+            .iter()
+            .any(|card| card.ws_idx == 0 && card.tab_idx == last_idx));
         state.assert_invariants_for_test();
     }
 

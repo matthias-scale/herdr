@@ -4884,8 +4884,8 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
-        // The nested pane row reserves indentation; make this test's explicit
-        // wide-sidebar contract large enough for the optional age field.
+        // The space-first tab row shows the latest communication age for the
+        // tab, so redraw at the next visible compact-age boundary.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,

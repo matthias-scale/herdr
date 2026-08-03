@@ -249,10 +249,7 @@ impl AppState {
             })
     }
 
-    pub(super) fn collapsed_agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    pub(super) fn collapsed_agent_detail_target_at(&self, row: u16) -> Option<(usize, usize)> {
         if !self.sidebar_collapsed {
             return None;
         }
@@ -266,13 +263,9 @@ impl AppState {
         crate::ui::sidebar_rows(self)
             .get(row_idx)
             .and_then(|entry| match entry {
-                crate::ui::SidebarRow::Agent { entry, .. } => {
-                    Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
-                }
+                crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. } => None,
-                crate::ui::SidebarRow::Tab { entry, .. } => {
-                    Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
-                }
+                crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
 
@@ -397,14 +390,14 @@ impl AppState {
         })
     }
 
-    pub(super) fn tab_target_at(&self, row: u16) -> Option<(usize, usize, crate::layout::PaneId)> {
+    pub(super) fn tab_target_at(&self, row: u16) -> Option<(usize, usize)> {
         if self.sidebar_collapsed {
             return None;
         }
         crate::ui::compute_tab_card_areas(self, self.view.sidebar_rect)
             .into_iter()
             .find(|card| row >= card.rect.y && row < card.rect.y + card.rect.height)
-            .map(|card| (card.ws_idx, card.tab_idx, card.pane_id))
+            .map(|card| (card.ws_idx, card.tab_idx))
     }
 }
 
@@ -413,7 +406,7 @@ mod tests {
     use std::fs;
 
     use crossterm::event::{MouseButton, MouseEventKind};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Direction, Rect};
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
@@ -587,13 +580,16 @@ mod tests {
     }
 
     #[test]
-    fn clicking_agent_detail_row_switches_to_correct_tab_and_pane() {
+    fn ac4_clicking_tab_row_preserves_that_tabs_focused_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         ws.tabs[0].set_custom_name("main".into());
         let first_pane = ws.tabs[0].root_pane;
         let first_tab = ws.test_add_tab(Some("logs"));
-        let second_pane = ws.tabs[first_tab].root_pane;
+        ws.active_tab = first_tab;
+        let second_pane = ws.test_split(Direction::Horizontal);
+        assert_eq!(ws.tabs[first_tab].layout.focused(), second_pane);
+        ws.active_tab = 0;
         app.state.workspaces = vec![ws];
         app.state.ensure_test_terminals();
         let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
@@ -616,14 +612,9 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.reconcile_sidebar_presentation();
-        app.state.view.agent_card_areas =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
-        let target = app
-            .state
-            .view
-            .agent_card_areas
+        let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
             .iter()
-            .find(|card| card.pane_id == second_pane)
+            .find(|card| card.tab_idx == first_tab)
             .unwrap()
             .rect;
 
@@ -648,26 +639,12 @@ mod tests {
     }
 
     #[test]
-    fn per_agent_row_heights_preserve_card_gaps_and_trailing_mouse_targets() {
+    fn legacy_agent_row_layout_does_not_change_single_line_tab_targets() {
         let mut app = app_for_mouse_test();
         let first = Workspace::test_new("one");
-        let first_pane = first.tabs[0].root_pane;
         let second = Workspace::test_new("two");
-        let second_pane = second.tabs[0].root_pane;
         app.state.workspaces = vec![first, second];
         app.state.ensure_test_terminals();
-        for (ws_idx, pane_id, agent) in
-            [(0, first_pane, Agent::Pi), (1, second_pane, Agent::Claude)]
-        {
-            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
-                .attached_terminal_id
-                .clone();
-            app.state
-                .terminals
-                .get_mut(&terminal_id)
-                .unwrap()
-                .detected_agent = Some(agent);
-        }
         app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
         app.state.sidebar_agents.rows_by_agent.insert(
             "claude".into(),
@@ -678,51 +655,14 @@ mod tests {
         );
         app.state.sidebar_agents.row_gap = 1;
         app.state.agent_panel_sort = AgentPanelSort::Priority;
-        app.state.sidebar_presentation.expanded_workspace_ids = app
-            .state
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.id.clone())
-            .collect();
-        let (_, cards) =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
-        let first_card = cards
-            .iter()
-            .find(|card| card.pane_id == first_pane)
-            .unwrap();
-        let second_card = cards
-            .iter()
-            .find(|card| card.pane_id == second_pane)
-            .unwrap();
+        app.state.reconcile_sidebar_presentation();
 
-        assert_eq!(
-            app.state.agent_detail_target_at(first_card.rect.y),
-            Some((0, 0, first_pane))
-        );
-        assert_eq!(
-            app.state
-                .agent_detail_target_at(first_card.rect.y + first_card.rect.height - 1),
-            Some((0, 0, first_pane))
-        );
-        let trailing_gap_row = first_card.rect.y + first_card.rect.height;
-        if trailing_gap_row < second_card.rect.y {
-            assert_eq!(app.state.agent_detail_target_at(trailing_gap_row), None);
-        }
-        assert_eq!(
-            app.state.agent_detail_target_at(second_card.rect.y),
-            Some((1, 0, second_pane))
-        );
-
-        app.state.sidebar_agents.row_gap = 0;
-        let (_, cards) =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
-        let second_card = cards
-            .iter()
-            .find(|card| card.pane_id == second_pane)
-            .unwrap();
-        assert_eq!(
-            app.state.agent_detail_target_at(second_card.rect.y),
-            Some((1, 0, second_pane))
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(app.state.tab_target_at(cards[0].rect.y), Some((0, 0)));
+        assert_eq!(app.state.tab_target_at(cards[1].rect.y), Some((1, 0)));
+        assert!(
+            crate::ui::compute_agent_card_areas(&app.state, app.state.view.sidebar_rect).is_empty()
         );
     }
 
@@ -760,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_hit_testing_ignores_geometry_cached_for_another_client() {
+    fn tab_hit_testing_ignores_legacy_agent_geometry_cached_for_another_client() {
         let mut app = app_for_mouse_test();
         let first = Workspace::test_new("one");
         let first_pane = first.tabs[0].root_pane;
@@ -785,8 +725,7 @@ mod tests {
             .iter()
             .map(|workspace| workspace.id.clone())
             .collect();
-        let (_, cards) =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
         let first_row = cards[0].rect;
         app.state.view.agent_card_areas = vec![crate::app::state::AgentCardArea {
             ws_idx: 1,
@@ -795,14 +734,11 @@ mod tests {
             rect: first_row,
         }];
 
-        assert_eq!(
-            app.state.agent_detail_target_at(first_row.y),
-            Some((0, 0, first_pane))
-        );
+        assert_eq!(app.state.tab_target_at(first_row.y), Some((0, 0)));
     }
 
     #[test]
-    fn agent_hit_testing_uses_current_hierarchy_after_legacy_filter_change() {
+    fn tab_hit_testing_uses_current_hierarchy_after_legacy_filter_change() {
         let mut app = app_for_mouse_test();
         let first = Workspace::test_new("one");
         let first_pane = first.tabs[0].root_pane;
@@ -842,20 +778,19 @@ mod tests {
             .map(|workspace| workspace.id.clone())
             .collect();
         app.state.workspace_scroll = 10;
-        let (_, cards) =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
         let card = cards
             .first()
-            .expect("expanded hierarchy should expose a visible pane card");
+            .expect("expanded hierarchy should expose a visible tab card");
 
         assert_eq!(
-            app.state.agent_detail_target_at(card.rect.y),
-            Some((card.ws_idx, card.tab_idx, card.pane_id))
+            app.state.tab_target_at(card.rect.y),
+            Some((card.ws_idx, card.tab_idx))
         );
     }
 
     #[test]
-    fn clicking_all_workspaces_agent_row_switches_to_correct_workspace() {
+    fn clicking_all_workspaces_tab_row_switches_to_correct_workspace() {
         let mut app = app_for_mouse_test();
         let first = Workspace::test_new("one");
         let first_pane = first.tabs[0].root_pane;
@@ -885,15 +820,10 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.reconcile_sidebar_presentation();
-        assert!(app.state.toggle_workspace_agent_disclosure(1));
-        app.state.view.agent_card_areas =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
-        let target = app
-            .state
-            .view
-            .agent_card_areas
+        assert!(app.state.workspace_agents_expanded(1));
+        let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
             .iter()
-            .find(|card| card.ws_idx == 1 && card.pane_id == second_pane)
+            .find(|card| card.ws_idx == 1 && card.tab_idx == 0)
             .unwrap()
             .rect;
 
@@ -973,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_scrolled_agent_detail_row_switches_to_correct_tab_and_pane() {
+    fn clicking_scrolled_tab_row_switches_to_correct_tab_and_preserves_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
@@ -1027,14 +957,9 @@ mod tests {
         );
         app.state.reconcile_sidebar_presentation();
         app.state.workspace_scroll = 1;
-        app.state.view.agent_card_areas =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
-        let target = app
-            .state
-            .view
-            .agent_card_areas
+        let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
             .iter()
-            .find(|card| card.pane_id == second_pane)
+            .find(|card| card.tab_idx == second_tab)
             .unwrap()
             .rect;
         app.handle_mouse(mouse(
@@ -1089,8 +1014,8 @@ mod tests {
             .position(|entry| {
                 matches!(
                     entry,
-                    crate::ui::SidebarRow::Agent { entry, .. }
-                        if entry.pane_id == second_pane
+                    crate::ui::SidebarRow::Tab { entry, .. }
+                        if entry.tab_idx == second_tab
                 )
             })
             .unwrap() as u16;
@@ -1603,20 +1528,28 @@ mod tests {
 
         // Status bar occupies row 0; sidebar list starts at y=1.
         assert_eq!(app.state.workspace_drop_target_at_row(0), None);
+        let slots = crate::ui::workspace_drop_slots(
+            &app.state,
+            &app.state.view.workspace_card_areas,
+            app.state.workspace_list_rect(),
+        );
+        let first_slot = slots
+            .iter()
+            .find(|(target, _)| *target == crate::app::state::WorkspaceDropTarget::Before(0))
+            .unwrap()
+            .1;
+        let second_slot = slots
+            .iter()
+            .find(|(target, _)| *target == crate::app::state::WorkspaceDropTarget::Before(1))
+            .unwrap()
+            .1;
+        assert!(second_slot > first_slot);
         assert_eq!(
-            app.state.workspace_drop_target_at_row(1),
+            app.state.workspace_drop_target_at_row(first_slot),
             Some(crate::app::state::WorkspaceDropTarget::Before(0))
         );
         assert_eq!(
-            app.state.workspace_drop_target_at_row(2),
-            Some(crate::app::state::WorkspaceDropTarget::Before(0))
-        );
-        assert_eq!(
-            app.state.workspace_drop_target_at_row(3),
-            Some(crate::app::state::WorkspaceDropTarget::Before(1))
-        );
-        assert_eq!(
-            app.state.workspace_drop_target_at_row(4),
+            app.state.workspace_drop_target_at_row(second_slot),
             Some(crate::app::state::WorkspaceDropTarget::Before(1))
         );
 
