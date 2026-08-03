@@ -4884,8 +4884,8 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
-        // The space-first tab row intentionally omits per-pane activity ages,
-        // so no periodic redraw deadline is needed for this lifecycle state.
+        // The space-first tab row shows the latest communication age for the
+        // tab, so redraw at the next visible compact-age boundary.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,
@@ -4896,9 +4896,12 @@ mod tests {
         );
         app.sync_agent_activity_refresh_deadline(observed);
 
-        assert_eq!(app.agent_activity_refresh_deadline, None);
+        assert_eq!(
+            app.agent_activity_refresh_deadline,
+            Some(started + Duration::from_secs(8))
+        );
         assert!(!app.take_due_agent_activity_refresh(observed));
-        assert!(!app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
+        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
         assert!(app.agent_activity_refresh_deadline.is_none());
     }
 

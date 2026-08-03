@@ -22,14 +22,20 @@ Evidence: `initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_
 The only sidebar projection is Spaces. Each tab/window appears exactly once
 under its owning space, whether it is agentless, inactive, completed, or owns
 multiple panes. Each row is one line with status before its sole title; it has
-no agent/model child row or subtitle. A multi-pane tab rolls up its strongest
-lifecycle state, clicking the row preserves that tab's focused pane, and agent
-navigation scrolls the owning tab row into view. Desktop, compact, and mobile
-presentations share this contract.
+no agent/model child row or subtitle. The selected space and tab use darker,
+bolder title text. Each agent-backed tab ends with a right-aligned elapsed age
+for the latest user/agent communication, truncating the title first when space
+is limited. A multi-pane tab rolls up its strongest lifecycle state and latest
+communication timestamp, clicking the row preserves that tab's focused pane,
+and agent navigation scrolls the owning tab row into view. Desktop, compact,
+and mobile presentations retain the same ownership topology.
 
 Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `ac4_tab_rollup_does_not_let_done_mask_working`,
 `ac4_clicking_tab_row_preserves_that_tabs_focused_pane`,
+`tab_rows_show_working_then_done_lifecycle_text`,
+`multi_pane_tab_age_uses_latest_thread_communication`,
+`default_space_workspace_style_tracks_active_state`,
 `ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows`,
 `ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane`, and
 `review_findings_agent_navigation_reveals_against_final_picker_projection`.

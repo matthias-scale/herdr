@@ -20,6 +20,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
+const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 #[derive(Clone)]
@@ -395,7 +396,10 @@ fn sidebar_rows_inner(
             let depth = if indented { 2 } else { 1 };
             if let Some(entries) = agents_by_workspace.remove(&ws_idx) {
                 let tab_states = entries.iter().fold(
-                    std::collections::HashMap::<usize, (AgentState, bool)>::new(),
+                    std::collections::HashMap::<
+                        usize,
+                        (AgentState, bool, Option<std::time::Instant>),
+                    >::new(),
                     |mut states, entry| {
                         let candidate = (entry.state, entry.seen);
                         states
@@ -404,10 +408,17 @@ fn sidebar_rows_inner(
                                 if tab_lifecycle_priority(candidate.0, candidate.1)
                                     > tab_lifecycle_priority(state.0, state.1)
                                 {
-                                    *state = candidate;
+                                    state.0 = candidate.0;
+                                    state.1 = candidate.1;
                                 }
+                                state.2 = match (state.2, entry.activity_at) {
+                                    (Some(current), Some(candidate)) => {
+                                        Some(current.max(candidate))
+                                    }
+                                    (current, candidate) => current.or(candidate),
+                                };
                             })
-                            .or_insert(candidate);
+                            .or_insert((candidate.0, candidate.1, entry.activity_at));
                         states
                     },
                 );
@@ -416,9 +427,10 @@ fn sidebar_rows_inner(
                     let tab = entry.tab_idx;
                     if current_tab != Some(tab) {
                         let mut tab_entry = entry.clone();
-                        if let Some((state, seen)) = tab_states.get(&tab) {
+                        if let Some((state, seen, activity_at)) = tab_states.get(&tab) {
                             tab_entry.state = *state;
                             tab_entry.seen = *seen;
+                            tab_entry.activity_at = *activity_at;
                         }
                         rows.push(SidebarRow::Tab {
                             entry: Box::new(tab_entry),
@@ -1730,28 +1742,62 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         + 1
         + display_width(state)
         + display_width(" · ");
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(prefix),
-            Span::styled(state_icon.0.to_string(), state_icon.1),
-            Span::styled(
-                format!(" {state}"),
-                Style::default().fg(state_label_color(entry.state, entry.seen, p)),
-            ),
-            Span::styled(" · ", Style::default().fg(p.overlay0)),
-            Span::styled(
-                truncate_end(
-                    entry
-                        .primary_tab_label
-                        .as_deref()
-                        .unwrap_or(DEFAULT_THREAD_TITLE),
-                    usize::from(card.rect.width).saturating_sub(fixed_width),
-                ),
-                style,
-            ),
-        ])),
-        card.rect,
+    let activity_field =
+        tab_activity_age_field(&entry, app.view_observed_at, card.rect, fixed_width);
+    let activity_width = activity_field
+        .as_deref()
+        .map(|label| display_width(label) + 1)
+        .unwrap_or_default();
+    let title = truncate_end(
+        entry
+            .primary_tab_label
+            .as_deref()
+            .unwrap_or(DEFAULT_THREAD_TITLE),
+        usize::from(card.rect.width).saturating_sub(fixed_width + activity_width),
     );
+    let mut spans = vec![
+        Span::raw(prefix),
+        Span::styled(state_icon.0.to_string(), state_icon.1),
+        Span::styled(
+            format!(" {state}"),
+            Style::default().fg(state_label_color(entry.state, entry.seen, p)),
+        ),
+        Span::styled(" · ", Style::default().fg(p.overlay0)),
+        Span::styled(title, style),
+    ];
+    if let Some(activity_field) = activity_field {
+        let used_width = spans
+            .iter()
+            .map(|span| display_width(span.content.as_ref()))
+            .sum::<usize>();
+        let padding = usize::from(card.rect.width)
+            .saturating_sub(used_width)
+            .saturating_sub(display_width(&activity_field));
+        spans.push(Span::raw(" ".repeat(padding)));
+        let activity_style = if entry.state == AgentState::Working {
+            Style::default().fg(p.yellow)
+        } else {
+            Style::default().fg(p.green).add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(activity_field, activity_style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), card.rect);
+}
+
+fn tab_activity_age_field(
+    entry: &AgentPanelEntry,
+    now: std::time::Instant,
+    rect: Rect,
+    fixed_width: usize,
+) -> Option<String> {
+    let activity_at = entry.activity_at?;
+    let label = format!(
+        "{} ago",
+        crate::activity_age::compact_label(Some(activity_at), now)
+    );
+    (usize::from(rect.width)
+        >= fixed_width + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH + 1 + display_width(&label))
+    .then_some(label)
 }
 
 fn render_agent_card(
@@ -1910,28 +1956,39 @@ fn agent_activity_age_fits(
         && candidate_width <= content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH)
 }
 
-pub(crate) fn visible_agent_activity_instants_from(
+pub(crate) fn visible_tab_activity_instants_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    cards: &[crate::app::state::AgentCardArea],
+    cards: &[crate::app::state::TabCardArea],
 ) -> Vec<std::time::Instant> {
     let rows = sidebar_rows_from(app, terminal_runtimes);
     cards
         .iter()
         .filter_map(|card| {
             let (entry, depth) = rows.iter().find_map(|row| match row {
-                SidebarRow::Agent { entry, depth }
-                    if entry.ws_idx == card.ws_idx
-                        && entry.tab_idx == card.tab_idx
-                        && entry.pane_id == card.pane_id =>
+                SidebarRow::Tab { entry, depth }
+                    if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
                 {
                     Some((entry.as_ref(), *depth))
                 }
                 _ => None,
             })?;
-            agent_activity_age_fits(app, entry, card.rect, depth)
-                .then_some(entry.activity_at)
-                .flatten()
+            let state = entry
+                .state_labels
+                .get(agent_panel_status_key(entry.state, entry.seen))
+                .map(String::as_str)
+                .unwrap_or_else(|| match entry.state {
+                    AgentState::Idle if !entry.seen => "done",
+                    _ => state_label(entry.state, entry.seen),
+                });
+            let fixed_width = usize::from(depth) * 3
+                + 1
+                + display_width(state_dot(entry.state, entry.seen, &app.palette).0)
+                + 1
+                + display_width(state)
+                + display_width(" · ");
+            tab_activity_age_field(entry, app.view_observed_at, card.rect, fixed_width)
+                .and(entry.activity_at)
         })
         .collect()
 }
@@ -2833,14 +2890,15 @@ row_gap = 1
             started,
         );
 
-        let area = Rect::new(0, 0, 26, 12);
+        let area = Rect::new(0, 0, 50, 12);
         app.view_observed_at = started + std::time::Duration::from_secs(42);
-        let mut busy = Terminal::new(TestBackend::new(26, 12)).unwrap();
+        let mut busy = Terminal::new(TestBackend::new(50, 12)).unwrap();
         busy.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
-        let busy_text = row_text(busy.backend().buffer(), tab_row, 25);
+        let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("working"), "{busy_text:?}");
+        assert!(busy_text.ends_with("42s ago"), "{busy_text:?}");
 
         let finished = started + std::time::Duration::from_secs(50);
         app.terminals
@@ -2861,11 +2919,62 @@ row_gap = 1
             .unwrap()
             .seen = false;
         app.view_observed_at = finished + std::time::Duration::from_secs(5 * 60);
-        let mut idle = Terminal::new(TestBackend::new(26, 12)).unwrap();
+        let mut idle = Terminal::new(TestBackend::new(50, 12)).unwrap();
         idle.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let idle_text = row_text(idle.backend().buffer(), tab_row, 25);
+        let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
         assert!(idle_text.contains("done"), "{idle_text:?}");
+        assert!(idle_text.ends_with("5m ago"), "{idle_text:?}");
+    }
+
+    #[test]
+    fn multi_pane_tab_age_uses_latest_thread_communication() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        workspace.tabs[0].custom_name = Some("Grouped work".into());
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.reconcile_sidebar_presentation();
+
+        for (pane_id, active_at) in [
+            (first_pane, started),
+            (
+                second_pane,
+                started + std::time::Duration::from_secs(5 * 60),
+            ),
+        ] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state_with_screen_signals_at(
+                    Some(Agent::Codex),
+                    AgentState::Working,
+                    false,
+                    false,
+                    true,
+                    false,
+                    active_at,
+                );
+        }
+
+        app.view_observed_at = started + std::time::Duration::from_secs(10 * 60);
+        let area = Rect::new(0, 0, 50, 12);
+        let mut terminal = Terminal::new(TestBackend::new(50, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = &compute_tab_card_areas(&app, area)[0];
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
+
+        assert!(rendered.ends_with("5m ago"), "{rendered:?}");
+        assert_eq!(compute_tab_card_areas(&app, area).len(), 1);
     }
 
     #[test]
@@ -2909,10 +3018,13 @@ row_gap = 1
             );
         app.status_bar_enabled = false;
         app.mobile_width_threshold = 0;
+        app.sidebar_width = 36;
+        app.sidebar_min_width = 18;
+        app.sidebar_max_width = 36;
         let runtimes = TerminalRuntimeRegistry::new();
 
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert!(app.view.visible_agent_activity_instants.is_empty());
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
 
         app.sidebar_collapsed = true;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));

@@ -1695,6 +1695,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         for terminal in app.terminals.values_mut() {
+            terminal.detected_agent = Some(crate::detect::Agent::Codex);
             terminal.state = AgentState::Working;
         }
         app.active = Some(0);

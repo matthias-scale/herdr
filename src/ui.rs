@@ -322,8 +322,13 @@ fn compute_view_internal(
     } else {
         sidebar::compute_agent_card_areas(app, sidebar_area)
     };
+    let tab_card_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_tab_card_areas(app, sidebar_area)
+    };
     let visible_agent_activity_instants =
-        sidebar::visible_agent_activity_instants_from(app, terminal_runtimes, &agent_card_areas);
+        sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
