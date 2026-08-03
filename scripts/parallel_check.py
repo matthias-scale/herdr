@@ -57,6 +57,7 @@ CHECKS = (
             "scripts.test_package_windows_conpty",
             "scripts.test_pr_gate_workflow",
             "scripts.test_preview",
+            "scripts.test_qa_preview_adapter",
             "scripts.test_vendor_libghostty_vt",
             "scripts.test_vendor_portable_pty",
             "scripts.test_watch_pr_checks",
