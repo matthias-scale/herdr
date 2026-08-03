@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-### Changed
-- Working agent state now uses the blue activity accent in sidebar, navigator, and mobile status views; warning and machine-status colors are unchanged.
-
 ## [0.7.5] - 2026-07-21
 
 ### Breaking Changes

@@ -2806,6 +2806,109 @@ row_gap = 1
             })
     }
 
+    fn evidence_color_css(color: Color, fallback: &str) -> String {
+        match color {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            Color::Black => "#000000".into(),
+            Color::White => "#ffffff".into(),
+            Color::Red => "#ff0000".into(),
+            Color::Green => "#00ff00".into(),
+            Color::Yellow => "#ffff00".into(),
+            Color::Blue => "#0000ff".into(),
+            Color::Magenta => "#ff00ff".into(),
+            Color::Cyan => "#00ffff".into(),
+            Color::Gray => "#808080".into(),
+            Color::DarkGray => "#404040".into(),
+            _ => fallback.into(),
+        }
+    }
+
+    #[test]
+    fn sidebar_visual_evidence_renders_release_layout() {
+        let mut app = AppState::test_new();
+        app.palette = crate::app::state::Palette::one_light();
+
+        let mut active = Workspace::test_new("Herdr");
+        active.tabs[0].custom_name = Some("Polish sidebar selection".into());
+        let active_root = active.tabs[0].root_pane;
+        active.test_split(Direction::Horizontal);
+        active.test_add_tab(Some("Review lifecycle assertions"));
+
+        let mut queued = Workspace::test_new("Fleet docs");
+        queued.tabs[0].custom_name = Some("Update release notes".into());
+        app.workspaces = vec![active, queued];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        app.sidebar_spaces.row_gap = 1;
+
+        let terminal_id = app.workspaces[0].tabs[0].panes[&active_root]
+            .attached_terminal_id
+            .clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.detected_agent = Some(Agent::Codex);
+        terminal_state.state = AgentState::Working;
+        app.reconcile_sidebar_presentation();
+
+        let width = 60;
+        let height = 12;
+        let area = Rect::new(0, 0, width, height);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let rows = (0..height)
+            .map(|row| row_text(terminal.backend().buffer(), row, width))
+            .collect::<Vec<_>>();
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("working") && row.contains("Polish sidebar selection")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Review lifecycle assertions")));
+        assert!(rows.iter().any(|row| row.contains("Fleet docs")));
+        assert!(
+            rows.iter()
+                .any(|row| row.replace('│', "").trim().is_empty()),
+            "Space groups should have a visual gap: {rows:?}"
+        );
+
+        let Ok(path) = std::env::var("HERDR_SIDEBAR_EVIDENCE_HTML") else {
+            return;
+        };
+        let mut html = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>Herdr sidebar release evidence</title>\
+             <style>body{margin:0;padding:24px;background:#eff1f5;color:#4c4f69;\
+             font-family:\"JetBrains Mono\",ui-monospace,monospace}h1{font-size:18px}\
+             p{max-width:760px}.terminal{display:grid;width:max-content;font-size:14px;\
+             line-height:20px;box-shadow:0 0 0 1px #bcc0cc;background:#eff1f5}.cell{width:1ch;\
+             height:20px;white-space:pre;overflow:visible}</style><h1>Herdr sidebar release layout</h1>\
+             <p>Actual Ratatui test buffer: selected titles, blue Working status, one row per tab,\
+             multi-pane roll-up, and compact spacing between complete Space groups.</p>\
+             <div class=\"terminal\" style=\"grid-template-columns:repeat(60,1ch)\">",
+        );
+        for cell in terminal.backend().buffer().content() {
+            let symbol = cell
+                .symbol()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let weight = if cell.modifier.contains(Modifier::BOLD) {
+                "font-weight:700;"
+            } else {
+                ""
+            };
+            html.push_str(&format!(
+                "<span class=\"cell\" style=\"color:{};background:{};{weight}\">{symbol}</span>",
+                evidence_color_css(cell.fg, "#4c4f69"),
+                evidence_color_css(cell.bg, "#eff1f5"),
+            ));
+        }
+        html.push_str("</div>");
+        std::fs::write(path, html).expect("write sidebar visual evidence");
+    }
+
     #[test]
     fn ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture() {
         let mut app = AppState::test_new();
