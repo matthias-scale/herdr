@@ -194,7 +194,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_label: Some(detail.agent_label),
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
-                        has_agent: detail.agent.is_some(),
+                        has_agent: detail.has_agent,
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
@@ -4270,6 +4270,51 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         for lifecycle in ["idle", "done", "working", "blocked", "unknown"] {
             assert!(!rendered.contains(lifecycle), "{rendered:?}");
         }
+    }
+
+    #[test]
+    fn completed_agent_process_exit_retains_done_without_provider_icon() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            true,
+            started + std::time::Duration::from_secs(5),
+        );
+        app.workspaces[0].tabs[0].panes.get_mut(&pane).unwrap().seen = false;
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(entry.agent, None);
+        assert!(entry.has_agent);
+        assert!(tab_lifecycle_visible(&entry));
+        assert_eq!(agent_panel_status_key(entry.state, entry.seen), "done");
     }
 
     #[test]

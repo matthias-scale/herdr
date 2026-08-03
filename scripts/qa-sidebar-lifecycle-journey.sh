@@ -65,6 +65,7 @@ case "$flow" in
             "narrow_tab_rows_reserve_provider_icon_badge_and_activity_age"
             "unsupported_and_agentless_tabs_omit_provider_icons"
             "unseen_agentless_tab_omits_lifecycle_status"
+            "completed_agent_process_exit_retains_done_without_provider_icon"
             "background_jobs_change_does_not_change_lifecycle_or_seen_state"
             "codex_background_job_count_uses_live_footer_only"
             "background_job_count_is_unknown_for_unsupported_agents"

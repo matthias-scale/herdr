@@ -1937,6 +1937,10 @@ impl TerminalState {
             .and_then(crate::detect::parse_agent_label)
     }
 
+    pub(crate) fn has_agent_lifecycle_context(&self) -> bool {
+        self.effective_known_agent().is_some() || self.recent_agent_process_exit.is_some()
+    }
+
     /// Authoritative runtime timestamp behind the sidebar activity-age field.
     ///
     /// Working agents expose the start of their current active interval.
