@@ -65,6 +65,10 @@ pub(crate) struct AgentPanelEntry {
     pub agent_label: Option<String>,
     pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
+    /// Current or most recently exited provider, used only to detect
+    /// ambiguous multi-pane rollups. Rendering still uses `agent` so an exited
+    /// provider never leaves a stale glyph on a single-pane row.
+    pub agent_context: Option<crate::detect::Agent>,
     /// At least one pane in this row is agent-backed. This stays true for a
     /// rolled-up tab whose panes have conflicting providers, while `agent`
     /// becomes `None` so the provider glyph is not misleading.
@@ -194,6 +198,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_label: Some(detail.agent_label),
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
+                        agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         state: detail.state,
                         background_job_count: detail.background_job_count,
@@ -394,6 +399,7 @@ fn sidebar_rows_inner(
                             Option<Agent>,
                             bool,
                             bool,
+                            bool,
                         ),
                     >::new(),
                     |mut states, entry| {
@@ -420,7 +426,7 @@ fn sidebar_rows_inner(
                                     (current, candidate) => current.or(candidate),
                                 };
                                 if !state.5 {
-                                    match (state.4, entry.agent) {
+                                    match (state.4, entry.agent_context) {
                                         (Some(current), Some(candidate))
                                             if current != candidate =>
                                         {
@@ -432,15 +438,17 @@ fn sidebar_rows_inner(
                                     }
                                 }
                                 state.6 |= entry.has_agent;
+                                state.7 |= entry.agent.is_some();
                             })
                             .or_insert((
                                 candidate.0,
                                 candidate.1,
                                 entry.activity_at,
                                 entry.background_job_count,
-                                entry.agent,
+                                entry.agent_context,
                                 false,
                                 entry.has_agent,
+                                entry.agent.is_some(),
                             ));
                         states
                     },
@@ -458,13 +466,17 @@ fn sidebar_rows_inner(
                             agent,
                             mixed_agents,
                             has_agent,
+                            has_current_agent,
                         )) = tab_states.get(&tab)
                         {
                             tab_entry.state = *state;
                             tab_entry.seen = *seen;
                             tab_entry.activity_at = *activity_at;
                             tab_entry.background_job_count = *background_job_count;
-                            tab_entry.agent = (!mixed_agents).then_some(*agent).flatten();
+                            tab_entry.agent = (!mixed_agents && *has_current_agent)
+                                .then_some(*agent)
+                                .flatten();
+                            tab_entry.agent_context = (!mixed_agents).then_some(*agent).flatten();
                             tab_entry.has_agent = *has_agent;
                         }
                         rows.push(SidebarRow::Tab {
@@ -4315,6 +4327,67 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(entry.has_agent);
         assert!(tab_lifecycle_visible(&entry));
         assert_eq!(agent_panel_status_key(entry.state, entry.seen), "done");
+    }
+
+    #[test]
+    fn exited_claude_plus_live_codex_omits_provider_icon() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let exited_pane = workspace.tabs[0].root_pane;
+        let live_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let exited_terminal = app.workspaces[0].tabs[0].panes[&exited_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&exited_terminal).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            true,
+            started + std::time::Duration::from_secs(5),
+        );
+        let live_terminal = app.workspaces[0].tabs[0].panes[&live_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&live_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started + std::time::Duration::from_secs(6),
+            );
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(entry.agent, None);
+        assert!(tab_lifecycle_visible(&entry));
     }
 
     #[test]
