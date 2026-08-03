@@ -885,7 +885,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.reconcile_sidebar_presentation();
-        assert!(app.state.toggle_workspace_agent_disclosure(1));
+        assert!(app.state.workspace_agents_expanded(1));
         app.state.view.agent_card_areas =
             crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
         let target = app
@@ -1603,20 +1603,28 @@ mod tests {
 
         // Status bar occupies row 0; sidebar list starts at y=1.
         assert_eq!(app.state.workspace_drop_target_at_row(0), None);
+        let slots = crate::ui::workspace_drop_slots(
+            &app.state,
+            &app.state.view.workspace_card_areas,
+            app.state.workspace_list_rect(),
+        );
+        let first_slot = slots
+            .iter()
+            .find(|(target, _)| *target == crate::app::state::WorkspaceDropTarget::Before(0))
+            .unwrap()
+            .1;
+        let second_slot = slots
+            .iter()
+            .find(|(target, _)| *target == crate::app::state::WorkspaceDropTarget::Before(1))
+            .unwrap()
+            .1;
+        assert!(second_slot > first_slot);
         assert_eq!(
-            app.state.workspace_drop_target_at_row(1),
+            app.state.workspace_drop_target_at_row(first_slot),
             Some(crate::app::state::WorkspaceDropTarget::Before(0))
         );
         assert_eq!(
-            app.state.workspace_drop_target_at_row(2),
-            Some(crate::app::state::WorkspaceDropTarget::Before(0))
-        );
-        assert_eq!(
-            app.state.workspace_drop_target_at_row(3),
-            Some(crate::app::state::WorkspaceDropTarget::Before(1))
-        );
-        assert_eq!(
-            app.state.workspace_drop_target_at_row(4),
+            app.state.workspace_drop_target_at_row(second_slot),
             Some(crate::app::state::WorkspaceDropTarget::Before(1))
         );
 

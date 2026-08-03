@@ -1702,16 +1702,19 @@ impl AppState {
             .revealed_workspace_id
             .take()
             .filter(|workspace_id| current_ids.contains(workspace_id));
-        if let Some(active_id) = self
-            .active
-            .and_then(|ws_idx| self.workspaces.get(ws_idx))
-            .map(|workspace| workspace.id.clone())
-        {
-            if first_attach || newly_added.contains(&active_id) {
-                self.sidebar_presentation
-                    .expanded_workspace_ids
-                    .insert(active_id);
-            }
+        // A client attaches to the complete session projection, not just the
+        // currently active workspace. Restricting this to the active space
+        // makes inactive, completed and agentless tabs disappear from both
+        // the expanded sidebar and its compact presentation. Disclosure stays
+        // client-local after this initial (or newly-created workspace) setup.
+        if first_attach {
+            self.sidebar_presentation
+                .expanded_workspace_ids
+                .extend(current_ids.iter().cloned());
+        } else {
+            self.sidebar_presentation
+                .expanded_workspace_ids
+                .extend(newly_added);
         }
         self.sidebar_presentation.known_workspace_ids = current_ids;
     }

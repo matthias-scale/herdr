@@ -4380,6 +4380,69 @@ mod tests {
     }
 
     #[test]
+    fn later_user_prompt_submit_refreshes_the_single_tab_title_for_the_same_session() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:codex",
+            "codex",
+            "fixture-codex-session",
+        );
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            crate::agent_resume::AgentSessionRef::id("fixture-codex-session"),
+            Some(1),
+        );
+
+        let first = crate::work_title::request_from_turn_start(
+            crate::work_title::WorkTitleProvider::Codex,
+            Some(&pane_id),
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"fixture-codex-session","prompt":"Fix billing retry regression"}"#,
+            25,
+        )
+        .unwrap();
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("first".into(), first)).unwrap();
+
+        let later = crate::work_title::request_from_turn_start(
+            crate::work_title::WorkTitleProvider::Codex,
+            Some(&pane_id),
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"fixture-codex-session","prompt":"Review auth migration safety"}"#,
+            26,
+        )
+        .unwrap();
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("later".into(), later)).unwrap();
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("Review Auth Migration Safety")
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_metadata[crate::work_title::WORK_TITLE_SOURCE]
+                .title
+                .as_deref(),
+            Some("Review Auth Migration Safety")
+        );
+        assert_eq!(
+            crate::ui::sidebar_thread_entries(&app.state)
+                .into_iter()
+                .filter(|entry| entry.pane_id == internal_pane_id)
+                .filter_map(|entry| entry.primary_tab_label)
+                .collect::<Vec<_>>(),
+            vec!["Review Auth Migration Safety"],
+            "the pane child references the one persisted tab title rather than creating another"
+        );
+    }
+
+    #[test]
     fn guarded_work_titles_are_bound_to_each_agent_and_resume_session() {
         let (mut app, codex_pane) = app_with_test_workspace();
         app.state.workspaces.push(Workspace::test_new("claude"));

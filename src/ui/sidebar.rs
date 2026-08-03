@@ -2031,7 +2031,7 @@ mod tests {
         let app = app_with_agents(&["one", "two"]);
         assert_eq!(
             row_kinds(&app),
-            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1)]
+            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1), ('t', 1), ('a', 1),]
         );
 
         let area = Rect::new(0, 0, 28, 20);
@@ -2061,22 +2061,19 @@ mod tests {
         assert!(app.toggle_workspace_agent_disclosure(1));
         assert_eq!(
             row_kinds(&app),
-            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1), ('t', 1), ('a', 1)]
+            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1)]
         );
         let collapsed_worktrees = app.collapsed_space_keys.clone();
 
         assert!(app.toggle_workspace_agent_disclosure(0));
-        assert_eq!(
-            row_kinds(&app),
-            vec![('w', 0), ('w', 1), ('t', 1), ('a', 1)]
-        );
-        assert!(app.workspace_agents_expanded(1));
+        assert_eq!(row_kinds(&app), vec![('w', 0), ('w', 1)]);
+        assert!(!app.workspace_agents_expanded(1));
         assert_eq!(app.collapsed_space_keys, collapsed_worktrees);
 
         assert!(app.toggle_workspace_agent_disclosure(0));
         assert_eq!(
             row_kinds(&app),
-            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1), ('t', 1), ('a', 1)]
+            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1)]
         );
     }
 
@@ -2338,7 +2335,7 @@ mod tests {
         app.begin_workspace_picker_presentation();
         assert_eq!(
             row_kinds(&app),
-            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1)]
+            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1), ('t', 1), ('a', 1)]
         );
         app.end_workspace_picker_presentation();
         assert!(sidebar_rows(&app)
@@ -2434,7 +2431,105 @@ mod tests {
                     SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                 })
                 .collect::<Vec<_>>(),
-            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1)]
+            vec![('w', 0), ('t', 0), ('a', 0), ('w', 1), ('t', 1), ('a', 1),]
+        );
+    }
+
+    #[test]
+    fn initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_collapsed_views() {
+        let mut app = app_with_agents(&["active", "inactive"]);
+        app.workspaces[0].test_add_tab(Some("active second"));
+        let inactive_split = app.workspaces[1].test_split(Direction::Horizontal);
+        app.workspaces[1].test_add_tab(Some("agentless second"));
+        app.workspaces.push(Workspace::test_new("completed"));
+        app.ensure_test_terminals();
+        let completed_pane = app.workspaces[2].tabs[0].root_pane;
+        let completed_terminal = app.workspaces[2].tabs[0].panes[&completed_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&completed_terminal).unwrap().state = AgentState::Idle;
+        app.workspaces[2].tabs[0]
+            .panes
+            .get_mut(&completed_pane)
+            .unwrap()
+            .seen = false;
+        app.reconcile_sidebar_presentation();
+
+        let rows = sidebar_rows(&app);
+        let tabs = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                SidebarRow::Workspace { .. } | SidebarRow::Agent { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tabs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
+        assert_eq!(
+            rows.iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Agent { entry, .. } if entry.ws_idx == 1 && entry.tab_idx == 0 => {
+                        Some(entry.pane_id)
+                    }
+                    SidebarRow::Workspace { .. }
+                    | SidebarRow::Tab { .. }
+                    | SidebarRow::Agent { .. } => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![app.workspaces[1].tabs[0].root_pane, inactive_split],
+            "multi-pane children retain canonical layout order"
+        );
+        assert!(rows.iter().any(|row| {
+            matches!(
+                row,
+                SidebarRow::Tab { entry, .. } if entry.ws_idx == 1 && entry.tab_idx == 1 && entry.agent.is_none()
+            )
+        }));
+        assert!(rows.iter().any(|row| {
+            matches!(
+                row,
+                SidebarRow::Tab { entry, .. } if entry.ws_idx == 2 && entry.state == AgentState::Idle && !entry.seen
+            )
+        }));
+        let row_identities = |rows: Vec<SidebarRow>| {
+            rows.into_iter()
+                .map(|row| match row {
+                    SidebarRow::Workspace { ws_idx, .. } => ("workspace", ws_idx, None, None),
+                    SidebarRow::Tab { entry, .. } => {
+                        ("tab", entry.ws_idx, Some(entry.tab_idx), None)
+                    }
+                    SidebarRow::Agent { entry, .. } => (
+                        "pane",
+                        entry.ws_idx,
+                        Some(entry.tab_idx),
+                        Some(entry.pane_id),
+                    ),
+                })
+                .collect::<Vec<_>>()
+        };
+        let canonical_order = row_identities(rows.clone());
+
+        assert!(app.focus_pane_in_workspace(2, completed_pane));
+        assert!(app.workspaces[2].tabs[0].panes[&completed_pane].seen);
+        assert_eq!(row_identities(sidebar_rows(&app)), canonical_order);
+
+        app.terminals.get_mut(&completed_terminal).unwrap().state = AgentState::Working;
+        assert_eq!(row_identities(sidebar_rows(&app)), canonical_order);
+        app.terminals.get_mut(&completed_terminal).unwrap().state = AgentState::Idle;
+        app.workspaces[2].tabs[0]
+            .panes
+            .get_mut(&completed_pane)
+            .unwrap()
+            .seen = false;
+        assert_eq!(row_identities(sidebar_rows(&app)), canonical_order);
+
+        app.sidebar_collapsed = true;
+        assert_eq!(
+            sidebar_rows(&app)
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count(),
+            5,
+            "global collapse changes only presentation, never the tab projection"
         );
     }
 
@@ -2499,7 +2594,7 @@ mod tests {
 
         app.active = Some(1);
         app.reconcile_sidebar_presentation();
-        assert!(!app.workspace_agents_expanded(0));
+        assert!(app.workspace_agents_expanded(0));
         assert!(app.workspace_agents_expanded(1));
 
         app.workspaces.remove(1);
