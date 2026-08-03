@@ -822,9 +822,8 @@ fn spawn_basic_detection_task(
             let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
             if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
                 let background_agent = (!process_exited).then_some(agent).flatten();
-                let background_content = terminal
-                    .recent_unwrapped_text_snapshot(BACKGROUND_JOB_DETECTION_ROWS)
-                    .text;
+                let background_content =
+                    terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS);
                 publish_background_jobs_if_changed(
                     &state_events,
                     pane_id,
@@ -2319,9 +2318,8 @@ impl PaneRuntime {
                     let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
                     if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
                         let background_agent = (!process_exited).then_some(agent).flatten();
-                        let background_content = terminal
-                            .recent_unwrapped_text_snapshot(BACKGROUND_JOB_DETECTION_ROWS)
-                            .text;
+                        let background_content =
+                            terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS);
                         publish_background_jobs_if_changed(
                             &state_events,
                             pane_id,

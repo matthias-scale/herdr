@@ -405,6 +405,10 @@ impl PaneTerminal {
         self.ghostty.recent_unwrapped_text_snapshot(lines)
     }
 
+    pub(crate) fn background_detection_text(&self, lines: usize) -> String {
+        self.ghostty.background_detection_text(lines)
+    }
+
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
         self.ghostty.recent_unwrapped_ansi(lines)
     }
@@ -1776,6 +1780,14 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub(crate) fn background_detection_text(&self, lines: usize) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_background_detection_text(&core, lines).ok())
+            .unwrap_or_default()
+    }
+
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
         self.recent_unwrapped_ansi_snapshot(lines).text
     }
@@ -2427,6 +2439,21 @@ fn ghostty_recent_text_unwrapped_for_terminal(
         (cols.saturating_sub(1), end as u32),
         false,
     )
+}
+
+fn ghostty_background_detection_text(
+    core: &GhosttyPaneCore,
+    lines: usize,
+) -> Result<String, crate::ghostty::Error> {
+    let Some((start, end, cols)) = ghostty_recent_read_range(&core.terminal, lines)? else {
+        return Ok(String::new());
+    };
+    let rows = core.terminal.screen_text_rows_range(start, end + 1)?;
+    let retained =
+        RetainedTextBuffer::new_search(cols, rows, u32::try_from(start).unwrap_or(u32::MAX));
+    Ok(lines_to_text(
+        retained.lines.into_iter().map(|line| line.text).collect(),
+    ))
 }
 
 fn ghostty_recent_ansi_for_terminal(
@@ -3597,7 +3624,7 @@ mod tests {
     fn host_terminal_theme_restore_probe_skips_when_no_transient_override() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
-        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let core = pane.core.lock().unwrap();
 
         assert!(!should_probe_host_terminal_theme_restore(&core));
@@ -4415,16 +4442,23 @@ mod tests {
         let footer = "4 background terminals running · /ps to view · /stop to close";
         let mut terminal = crate::ghostty::Terminal::new(1, 3, 100).unwrap();
         terminal.write(footer.as_bytes());
-        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
 
         assert!(!pane.detection_text().contains("4 background"));
-        let background_content = pane.recent_unwrapped_text(512);
+        let background_content = pane.background_detection_text(512);
         assert_eq!(
             crate::detect::background_job_count(
                 Some(crate::detect::Agent::Codex),
                 &background_content
             ),
             Some(4)
+        );
+
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\r\n", &tx);
+        let stale_content = pane.background_detection_text(512);
+        assert_eq!(
+            crate::detect::background_job_count(Some(crate::detect::Agent::Codex), &stale_content),
+            Some(0)
         );
     }
 

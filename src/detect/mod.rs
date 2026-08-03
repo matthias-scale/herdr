@@ -162,6 +162,13 @@ pub fn background_job_count(agent: Option<Agent>, screen: &str) -> Option<u16> {
         .into_iter()
         .rev()
         .collect::<String>();
+    // Terminal extraction keeps one final record separator. Any additional
+    // trailing newline represents a blank live row after the footer, so the
+    // retained footer is no longer the current provider status.
+    let without_record_separator = recent.strip_suffix('\n').unwrap_or(&recent);
+    if without_record_separator.ends_with('\n') {
+        return Some(0);
+    }
     let compact = recent
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -209,6 +216,13 @@ mod background_job_tests {
             background_job_count(
                 Some(Agent::Codex),
                 "4 background terminals running · /ps to view · /stop to close\n› next prompt\n"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            background_job_count(
+                Some(Agent::Codex),
+                "4 background terminals running · /ps to view · /stop to close\n\n"
             ),
             Some(0)
         );
