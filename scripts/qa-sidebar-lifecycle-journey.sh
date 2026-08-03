@@ -39,6 +39,14 @@ case "$flow" in
     sidebar-all-tab-retention)
         filters=("initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_collapsed_views")
         ;;
+    space-first-single-line-sidebar)
+        filters=(
+            "ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture"
+            "ac4_tab_rollup_does_not_let_done_mask_working"
+            "ac4_clicking_tab_row_preserves_that_tabs_focused_pane"
+            "review_findings_agent_navigation_reveals_against_final_picker_projection"
+        )
+        ;;
     same-session-title-replacement)
         filters=(
             "terse_later_user_prompt_submit_retains_the_session_initial_title"
@@ -62,10 +70,21 @@ esac
 
 artifact_dir="$(mkdir -p "$artifact_dir" && cd "$artifact_dir" && pwd -P)"
 log_path="$artifact_dir/${flow}.log"
+zig_bin=""
+if command -v mise >/dev/null 2>&1; then
+    zig_root="$(mise where zig@0.15.2 2>/dev/null || true)"
+    if [[ -x "$zig_root/zig" ]]; then
+        zig_bin="$zig_root/zig"
+    fi
+fi
 for filter in "${filters[@]}"; do
     if ! (
         cd "$repo_root"
-        CARGO_TARGET_DIR="$artifact_dir/cargo-target" just test-one "$filter"
+        if [[ -n "$zig_bin" ]]; then
+            ZIG="$zig_bin" CARGO_TARGET_DIR="$artifact_dir/cargo-target" just test-one "$filter"
+        else
+            CARGO_TARGET_DIR="$artifact_dir/cargo-target" just test-one "$filter"
+        fi
     ) >>"$log_path" 2>&1; then
         echo "qa-sidebar-lifecycle-journey: assertion failed for $flow" >&2
         exit 1

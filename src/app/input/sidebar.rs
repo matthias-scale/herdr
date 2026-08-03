@@ -249,10 +249,7 @@ impl AppState {
             })
     }
 
-    pub(super) fn collapsed_agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    pub(super) fn collapsed_agent_detail_target_at(&self, row: u16) -> Option<(usize, usize)> {
         if !self.sidebar_collapsed {
             return None;
         }
@@ -266,13 +263,9 @@ impl AppState {
         crate::ui::sidebar_rows(self)
             .get(row_idx)
             .and_then(|entry| match entry {
-                crate::ui::SidebarRow::Agent { entry, .. } => {
-                    Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
-                }
+                crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. } => None,
-                crate::ui::SidebarRow::Tab { entry, .. } => {
-                    Some((entry.ws_idx, entry.tab_idx, entry.pane_id))
-                }
+                crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
 
@@ -397,14 +390,14 @@ impl AppState {
         })
     }
 
-    pub(super) fn tab_target_at(&self, row: u16) -> Option<(usize, usize, crate::layout::PaneId)> {
+    pub(super) fn tab_target_at(&self, row: u16) -> Option<(usize, usize)> {
         if self.sidebar_collapsed {
             return None;
         }
         crate::ui::compute_tab_card_areas(self, self.view.sidebar_rect)
             .into_iter()
             .find(|card| row >= card.rect.y && row < card.rect.y + card.rect.height)
-            .map(|card| (card.ws_idx, card.tab_idx, card.pane_id))
+            .map(|card| (card.ws_idx, card.tab_idx))
     }
 }
 
@@ -413,7 +406,7 @@ mod tests {
     use std::fs;
 
     use crossterm::event::{MouseButton, MouseEventKind};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Direction, Rect};
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
@@ -587,13 +580,16 @@ mod tests {
     }
 
     #[test]
-    fn clicking_agent_detail_row_switches_to_correct_tab_and_pane() {
+    fn ac4_clicking_tab_row_preserves_that_tabs_focused_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         ws.tabs[0].set_custom_name("main".into());
         let first_pane = ws.tabs[0].root_pane;
         let first_tab = ws.test_add_tab(Some("logs"));
-        let second_pane = ws.tabs[first_tab].root_pane;
+        ws.active_tab = first_tab;
+        let second_pane = ws.test_split(Direction::Horizontal);
+        assert_eq!(ws.tabs[first_tab].layout.focused(), second_pane);
+        ws.active_tab = 0;
         app.state.workspaces = vec![ws];
         app.state.ensure_test_terminals();
         let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
@@ -616,14 +612,9 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.reconcile_sidebar_presentation();
-        app.state.view.agent_card_areas =
-            crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect).1;
-        let target = app
-            .state
-            .view
-            .agent_card_areas
+        let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
             .iter()
-            .find(|card| card.pane_id == second_pane)
+            .find(|card| card.tab_idx == first_tab)
             .unwrap()
             .rect;
 
@@ -1089,8 +1080,8 @@ mod tests {
             .position(|entry| {
                 matches!(
                     entry,
-                    crate::ui::SidebarRow::Agent { entry, .. }
-                        if entry.pane_id == second_pane
+                    crate::ui::SidebarRow::Tab { entry, .. }
+                        if entry.tab_idx == second_tab
                 )
             })
             .unwrap() as u16;

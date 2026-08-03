@@ -477,6 +477,13 @@ impl App {
         self.runtime_tab_focus("tui.tab.focus", tab_id);
     }
 
+    pub(crate) fn focus_workspace_tab_via_api(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return;
+        };
+        self.runtime_tab_focus("tui.sidebar.tab.focus", tab_id);
+    }
+
     /// Windows are Herdr tabs. Canonical workspace/vector/tab order is used so
     /// agent lifecycle or cwd changes cannot affect global navigation.
     fn focus_relative_window(&mut self, forward: bool) {
@@ -2051,14 +2058,13 @@ mod tests {
         app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
 
         assert!(app.state.sidebar_shows_spaces_tree());
-        let target_pane = app.state.workspaces[1].tabs[0].root_pane;
         let target_row = crate::ui::sidebar_rows(&app.state)
             .iter()
             .position(|row| {
                 matches!(
                     row,
-                    crate::ui::SidebarRow::Agent { entry, .. }
-                        if entry.ws_idx == 1 && entry.pane_id == target_pane
+                    crate::ui::SidebarRow::Tab { entry, .. }
+                        if entry.ws_idx == 1 && entry.tab_idx == 0
                 )
             })
             .unwrap();

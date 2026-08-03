@@ -33,6 +33,10 @@ pub(super) enum MouseAction {
     FocusTab {
         tab_idx: usize,
     },
+    FocusSidebarTab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -515,11 +519,11 @@ impl AppState {
                             return Some(MouseAction::FocusWorkspace { ws_idx: idx });
                         }
 
-                        if let Some((ws_idx, _tab_idx, pane_id)) =
+                        if let Some((ws_idx, tab_idx)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
                             self.mode = Mode::Terminal;
-                            return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                            return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
                         }
                         return None;
                     }
@@ -591,10 +595,10 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) = self.tab_target_at(mouse.row) {
+                    if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
                         self.selected = ws_idx;
                         self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
                     }
 
                     if let Some((ws_idx, _tab_idx, pane_id)) =

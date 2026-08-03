@@ -57,6 +57,7 @@ class QaPreviewAdapterTests(unittest.TestCase):
             [flow["id"] for flow in card["required_flows"]],
             [
                 "sidebar-all-tab-retention",
+                "space-first-single-line-sidebar",
                 "same-session-title-replacement",
                 "reopen-clears-done-without-reorder",
                 "working-latches-until-genuine-completion",

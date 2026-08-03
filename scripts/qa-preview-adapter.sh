@@ -69,6 +69,13 @@ flows = [
         ["src/ui/sidebar.rs", "src/app/state.rs"],
     ),
     (
+        "space-first-single-line-sidebar",
+        "Spaces show one status-first line per tab or window",
+        "Render agent, agentless, completed, inactive, and multi-pane tabs, then click and navigate between their rows.",
+        "Every tab has one stable row under its space; status precedes its sole title, model and pane subtitles are absent, and tab focus is preserved.",
+        ["src/ui/sidebar.rs", "src/app/actions.rs", "src/app/input"],
+    ),
+    (
         "same-session-title-replacement",
         "Later prompts replace the one title for the same session",
         "Submit a later UserPromptSubmit for an existing agent session.",

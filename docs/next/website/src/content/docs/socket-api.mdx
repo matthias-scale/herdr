@@ -373,7 +373,8 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 `agent.view.set` installs one transient declarative compatibility projection.
 The projection is reevaluated whenever agent facts or current UI context
 change and controls indexed Agent focus order. The visible desktop, collapsed,
-and mobile sidebar remains the canonical Spaces → tab → pane ownership tree;
+and mobile sidebar remains the canonical Spaces → tab/window tree; panes roll
+up into their owning tab's single row;
 the projection does not filter or reorder its rows or mouse targets.
 Configured next/previous Agent actions likewise use the canonical unfiltered
 workspace, tab, and pane order. The projection does not change `agent.list`,
