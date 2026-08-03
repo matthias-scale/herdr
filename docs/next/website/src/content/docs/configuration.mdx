@@ -260,7 +260,7 @@ The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one wo
 
 `ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but the visible sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query also leaves the ownership tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
-Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`) and a completed pane stays `done` when it is viewed. Activity age is supplementary only and never replaces `done`.
+Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`); opening a completed pane clears `done` without moving its tab. Activity age is supplementary only and never replaces an unseen `done` state.
 
 ### Status row
 

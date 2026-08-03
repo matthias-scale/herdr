@@ -3866,6 +3866,12 @@ mod tests {
     #[test]
     fn api_pane_focus_marks_already_focused_done_pane_seen() {
         let mut app = app_with_linked_worktree();
+        app.state.workspaces[0].test_add_tab(Some("later"));
+        let tab_order = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.number)
+            .collect::<Vec<_>>();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.outer_terminal_focus = Some(false);
@@ -3895,6 +3901,16 @@ mod tests {
             panic!("expected pane info response");
         };
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert_eq!(
+            app.state.workspaces[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.number)
+                .collect::<Vec<_>>(),
+            tab_order,
+            "focusing completed work must not reorder tabs"
+        );
     }
 
     #[test]
