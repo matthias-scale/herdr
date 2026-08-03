@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
     Frame,
@@ -1194,12 +1194,7 @@ fn agent_summary_line(app: &AppState, p: &Palette, max_width: u16) -> Line<'stat
         // Only the leading (most urgent) segment keeps its state color; the
         // rest stay dim so the urgent count is the loud thing.
         let style = if idx == 0 {
-            let color = match tone {
-                SummaryTone::Blocked => p.red,
-                SummaryTone::Done => p.blue,
-                SummaryTone::Working => p.yellow,
-                SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
-            };
+            let color = summary_tone_color(tone, p);
             let style = Style::default().fg(color).bg(p.panel_bg);
             if tone == SummaryTone::Muted {
                 style
@@ -1219,6 +1214,14 @@ fn agent_summary_line(app: &AppState, p: &Palette, max_width: u16) -> Line<'stat
         ));
     }
     Line::from(spans)
+}
+
+fn summary_tone_color(tone: SummaryTone, p: &Palette) -> Color {
+    match tone {
+        SummaryTone::Blocked => p.red,
+        SummaryTone::Done | SummaryTone::Working => p.blue,
+        SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
+    }
 }
 
 fn mobile_toast_title(toast: &ToastNotification) -> String {
@@ -1338,6 +1341,15 @@ mod tests {
             vec!["◉ 2 blocked", "● 1 done", "2 working", "1 idle"]
         );
         assert_eq!(segments[0].1, SummaryTone::Blocked);
+    }
+
+    #[test]
+    fn working_summary_uses_blue_activity_accent() {
+        let palette = Palette::catppuccin();
+        assert_eq!(
+            summary_tone_color(SummaryTone::Working, &palette),
+            palette.blue
+        );
     }
 
     #[test]

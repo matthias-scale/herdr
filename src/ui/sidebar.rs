@@ -1798,7 +1798,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             .saturating_sub(display_width(&activity_field));
         spans.push(Span::raw(" ".repeat(padding)));
         let activity_style = if entry.state == AgentState::Working {
-            Style::default().fg(p.yellow)
+            Style::default().fg(p.blue)
         } else {
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
         };
@@ -1906,7 +1906,7 @@ fn render_agent_card(
                 spans.push(Span::raw(" ".repeat(usize::from(padding))));
             }
             let activity_style = if detail.state == AgentState::Working {
-                Style::default().fg(p.yellow)
+                Style::default().fg(p.blue)
             } else {
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
             };
@@ -2947,6 +2947,14 @@ row_gap = 1
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("working"), "{busy_text:?}");
         assert!(busy_text.ends_with("42s ago"), "{busy_text:?}");
+        // ac7: both the Working label and its live age use activity blue.
+        for token in ["working", "42s ago"] {
+            let token_x = busy_text.find(token).expect("rendered token") as u16;
+            assert_eq!(
+                busy.backend().buffer()[(token_x, tab_row)].style().fg,
+                Some(app.palette.blue)
+            );
+        }
 
         let finished = started + std::time::Duration::from_secs(50);
         app.terminals

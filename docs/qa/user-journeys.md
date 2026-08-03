@@ -22,7 +22,9 @@ Evidence: `initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_
 The only sidebar projection is Spaces. Each tab/window appears exactly once
 under its owning space, whether it is agentless, inactive, completed, or owns
 multiple panes. Each row is one line with status before its sole title; it has
-no agent/model child row or subtitle. The selected space and tab use darker,
+no agent/model child row or subtitle. Working status and its live age use the
+blue activity accent, while warning and machine-status colors are unchanged.
+The selected space and tab use darker,
 bolder title text. Each agent-backed tab ends with a right-aligned elapsed age
 for the latest user/agent communication, truncating the title first when space
 is limited. A multi-pane tab rolls up its strongest lifecycle state and latest
@@ -33,6 +35,8 @@ worktree children remain adjacent. Desktop, compact, and mobile presentations
 retain the same ownership topology.
 
 Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
+`state_dots_and_labels_use_semantic_workspace_colors`,
+`working_summary_uses_blue_activity_accent`,
 `ac4_tab_rollup_does_not_let_done_mask_working`,
 `ac4_clicking_tab_row_preserves_that_tabs_focused_pane`,
 `tab_rows_show_working_then_done_lifecycle_text`,

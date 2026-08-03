@@ -378,7 +378,7 @@ pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &
 pub(super) fn state_dot(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
     match (state, seen) {
         (AgentState::Blocked, _) => ("●", Style::default().fg(p.red)),
-        (AgentState::Working, _) => ("●", Style::default().fg(p.yellow)),
+        (AgentState::Working, _) => ("●", Style::default().fg(p.blue)),
         (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
         (AgentState::Idle, true) => ("○", Style::default().fg(p.green)),
         (AgentState::Unknown, _) => ("·", Style::default().fg(p.overlay0)),
@@ -398,7 +398,7 @@ pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
 pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> Color {
     match (state, seen) {
         (AgentState::Blocked, _) => p.red,
-        (AgentState::Working, _) => p.yellow,
+        (AgentState::Working, _) => p.blue,
         (AgentState::Idle, false) => p.teal,
         (AgentState::Idle, true) => p.green,
         (AgentState::Unknown, _) => p.overlay0,
@@ -427,11 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn state_dots_use_aligned_static_workspace_marks() {
+    fn state_dots_and_labels_use_semantic_workspace_colors() {
         let palette = Palette::catppuccin();
         for (state, seen, symbol, color) in [
             (AgentState::Blocked, true, "●", palette.red),
-            (AgentState::Working, true, "●", palette.yellow),
+            // ac7: active work uses the blue activity accent, not warning yellow.
+            (AgentState::Working, true, "●", palette.blue),
             (AgentState::Idle, false, "●", palette.teal),
             (AgentState::Idle, true, "○", palette.green),
             (AgentState::Unknown, true, "·", palette.overlay0),
@@ -439,6 +440,7 @@ mod tests {
             let (actual_symbol, style) = state_dot(state, seen, &palette);
             assert_eq!(actual_symbol, symbol);
             assert_eq!(style.fg, Some(color));
+            assert_eq!(state_label_color(state, seen, &palette), color);
         }
     }
 

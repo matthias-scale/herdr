@@ -46,6 +46,8 @@ case "$flow" in
             "ac4_clicking_tab_row_preserves_that_tabs_focused_pane"
             "tab_rows_show_working_then_done_lifecycle_text"
             "multi_pane_tab_age_uses_latest_thread_communication"
+            "state_dots_and_labels_use_semantic_workspace_colors"
+            "working_summary_uses_blue_activity_accent"
             "active_title_color_darkens_light_rgb_and_preserves_theme_fallbacks"
             "default_space_workspace_style_tracks_active_state"
             "defaults_show_only_thread_titles_and_space_names"

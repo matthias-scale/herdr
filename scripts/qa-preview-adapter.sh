@@ -72,7 +72,7 @@ flows = [
         "space-first-single-line-sidebar",
         "Spaces show one status-first line per tab or window with compact group spacing",
         "Render agent, agentless, completed, inactive, and multi-pane tabs, then select, click, and navigate between their rows and Space groups.",
-        "Every tab has one stable row under its space; status precedes its sole title, selected titles darken, complete Space groups have one blank row between them while tabs and worktree children stay packed, latest communication age is right-aligned, model and pane subtitles are absent, and tab focus is preserved.",
+        "Every tab has one stable row under its space; status precedes its sole title, working status and live age use blue, selected titles darken, complete Space groups have one blank row between them while tabs and worktree children stay packed, latest communication age is right-aligned, model and pane subtitles are absent, and tab focus is preserved.",
         ["src/ui/sidebar.rs", "src/activity_age.rs", "src/app/actions.rs", "src/app/input"],
     ),
     (
