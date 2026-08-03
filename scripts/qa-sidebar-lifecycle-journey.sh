@@ -60,7 +60,10 @@ esac
 artifact_dir="$(mkdir -p "$artifact_dir" && cd "$artifact_dir" && pwd -P)"
 log_path="$artifact_dir/${flow}.log"
 for filter in "${filters[@]}"; do
-    if ! (cd "$repo_root" && just test-one "$filter") >>"$log_path" 2>&1; then
+    if ! (
+        cd "$repo_root"
+        CARGO_TARGET_DIR="$artifact_dir/cargo-target" just test-one "$filter"
+    ) >>"$log_path" 2>&1; then
         echo "qa-sidebar-lifecycle-journey: assertion failed for $flow" >&2
         exit 1
     fi

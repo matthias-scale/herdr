@@ -4414,7 +4414,7 @@ mod tests {
         let later = crate::work_title::request_from_turn_start(
             crate::work_title::WorkTitleProvider::Codex,
             Some(&pane_id),
-            r#"{"hook_event_name":"UserPromptSubmit","session_id":"fixture-codex-session","prompt":"Review auth migration safety"}"#,
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"fixture-codex-session","prompt":"do it"}"#,
             26,
         )
         .unwrap();
@@ -4423,13 +4423,13 @@ mod tests {
 
         assert_eq!(
             app.state.workspaces[0].tabs[0].custom_name.as_deref(),
-            Some("Review Auth Migration Safety")
+            Some("Do It")
         );
         assert_eq!(
             app.state.terminals[&terminal_id].agent_metadata[crate::work_title::WORK_TITLE_SOURCE]
                 .title
                 .as_deref(),
-            Some("Review Auth Migration Safety")
+            Some("Do It")
         );
         assert_eq!(
             crate::ui::sidebar_thread_entries(&app.state)
@@ -4437,7 +4437,7 @@ mod tests {
                 .filter(|entry| entry.pane_id == internal_pane_id)
                 .filter_map(|entry| entry.primary_tab_label)
                 .collect::<Vec<_>>(),
-            vec!["Review Auth Migration Safety"],
+            vec!["Do It"],
             "the pane child references the one persisted tab title rather than creating another"
         );
     }

@@ -98,18 +98,17 @@ pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
     let sanitized = sanitize_prompt(prompt);
     let relevant = relevant_objective_clause(&sanitized);
     let raw_words = objective_words(relevant);
-    let words: Vec<String> = raw_words
+    let filtered_words: Vec<String> = raw_words
         .iter()
         .filter(|word| !is_stopword(word))
         .take(WORK_TITLE_MAX_WORDS)
         .cloned()
         .collect();
-
-    // A terse continuation ("do it", "go ahead") should retain the current
-    // title. Returning no update is safer than manufacturing a stale generic.
-    if words.is_empty() {
-        return None;
-    }
+    let words = if filtered_words.is_empty() {
+        raw_words
+    } else {
+        filtered_words
+    };
     let mut title_words = Vec::new();
     for word in words.into_iter().take(WORK_TITLE_MAX_WORDS) {
         let word = title_case_word(&word);
@@ -395,8 +394,11 @@ mod tests {
     }
 
     #[test]
-    fn terse_continuation_retains_the_existing_title_by_skipping_a_write() {
-        assert_eq!(calculate_work_title("please do it now"), None);
+    fn terse_continuation_still_produces_a_replacement_title() {
+        assert_eq!(
+            calculate_work_title("please do it now").as_deref(),
+            Some("Please Do It Now")
+        );
     }
 
     #[test]

@@ -137,6 +137,7 @@ class QaPreviewAdapterTests(unittest.TestCase):
         artifact = Path(payload["artifacts"][0]["path"])
         self.assertTrue(artifact.is_file())
         self.assertTrue(artifact.is_relative_to(artifact_root.resolve()))
+        self.assertTrue((artifact_root / "cargo-target").is_dir())
         self.assertNotIn("token", artifact.read_text(encoding="utf-8").lower())
 
         failed = subprocess.run(
