@@ -97,16 +97,7 @@ pub(crate) fn request_from_turn_start(
 
 pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
     let sanitized = sanitize_prompt(prompt);
-    let final_paragraph = latest_non_empty_paragraph(&sanitized);
-    let relevant = relevant_objective_clause(&final_paragraph);
-    let raw_words = objective_words(relevant);
-    let filtered_words: Vec<String> = raw_words
-        .iter()
-        .filter(|word| !is_stopword(word))
-        .take(WORK_TITLE_MAX_WORDS)
-        .cloned()
-        .collect();
-    let words = filtered_words;
+    let words = meaningful_objective_words(&sanitized)?;
     let mut title_words = Vec::new();
     for word in words.into_iter().take(WORK_TITLE_MAX_WORDS) {
         let word = title_case_word(&word);
@@ -143,7 +134,7 @@ fn sanitize_prompt(prompt: &str) -> String {
         .collect()
 }
 
-fn latest_non_empty_paragraph(prompt: &str) -> String {
+fn meaningful_objective_words(prompt: &str) -> Option<Vec<String>> {
     let mut paragraphs = Vec::new();
     let mut current = Vec::new();
     for line in prompt.lines() {
@@ -160,12 +151,41 @@ fn latest_non_empty_paragraph(prompt: &str) -> String {
     if !current.is_empty() {
         paragraphs.push(current.join(" "));
     }
-    paragraphs.pop().unwrap_or_default()
+    paragraphs.into_iter().rev().find_map(|paragraph| {
+        let relevant = relevant_objective_clause(&paragraph);
+        let words: Vec<String> = objective_words(relevant)
+            .into_iter()
+            .filter(|word| !is_stopword(word))
+            .take(WORK_TITLE_MAX_WORDS)
+            .collect();
+        (!words.is_empty()).then_some(words)
+    })
 }
 
 fn relevant_objective_clause(prompt: &str) -> &str {
     let lower = prompt.to_ascii_lowercase();
     let mut offset = 0;
+    let mut sentence_start = 0;
+    for (index, character) in lower.char_indices() {
+        if !matches!(character, '.' | '!' | '?' | ';') {
+            continue;
+        }
+        let sentence = &lower[sentence_start..index];
+        let dismissed = [
+            " is unrelated",
+            " are unrelated",
+            " not the task",
+            " not the objective",
+            " not requested",
+        ]
+        .iter()
+        .any(|marker| sentence.contains(marker));
+        let candidate = index + character.len_utf8();
+        if dismissed && objective_words(&prompt[candidate..]).len() >= 2 {
+            offset = candidate;
+        }
+        sentence_start = candidate;
+    }
     for marker in [" instead ", " actually ", " just ", " only "] {
         if let Some(index) = lower.rfind(marker) {
             let candidate = index + marker.len();
@@ -250,10 +270,13 @@ fn is_stopword(word: &str) -> bool {
             | "at"
             | "be"
             | "been"
+            | "begin"
             | "by"
             | "can"
+            | "carry"
             | "claude"
             | "codex"
+            | "continue"
             | "could"
             | "do"
             | "does"
@@ -290,6 +313,7 @@ fn is_stopword(word: &str) -> bool {
             | "research"
             | "scope"
             | "should"
+            | "start"
             | "that"
             | "thanks"
             | "the"
@@ -434,6 +458,26 @@ mod tests {
             .unwrap()
             .to_ascii_lowercase()
             .contains("real-time policy management"));
+    }
+
+    #[test]
+    fn initial_briefing_ignores_a_trailing_meta_paragraph() {
+        assert_eq!(
+            calculate_work_title("Implement sidebar lifecycle assertions\n\nplease start")
+                .as_deref(),
+            Some("Implement Sidebar Lifecycle Assertions")
+        );
+    }
+
+    #[test]
+    fn dismissed_objective_in_the_same_paragraph_is_not_selected() {
+        assert_eq!(
+            calculate_work_title(
+                "Real-time policy management is unrelated. Implement sidebar lifecycle assertions"
+            )
+            .as_deref(),
+            Some("Implement Sidebar Lifecycle Assertions")
+        );
     }
 
     #[test]

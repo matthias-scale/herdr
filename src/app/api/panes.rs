@@ -4596,7 +4596,7 @@ mod tests {
                 crate::work_title::WorkTitleProvider::Codex,
                 codex_pane.as_str(),
                 "codex-session",
-                "Review billing retry regression",
+                "Review billing retry regression\n\nplease start",
                 40,
             ),
             (
@@ -4628,7 +4628,7 @@ mod tests {
                 crate::work_title::WorkTitleProvider::Codex,
                 codex_pane.as_str(),
                 "codex-session",
-                "Real-time policy management is unrelated.\n\nImplement sidebar lifecycle assertions",
+                "Real-time policy management is unrelated. Implement sidebar lifecycle assertions",
                 42,
             ),
         ] {
