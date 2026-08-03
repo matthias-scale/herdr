@@ -2642,7 +2642,7 @@ navigate_pane_right = "ctrl+l"
         );
 
         assert_eq!(state.selected, 1);
-        assert_eq!(state.mobile_switcher_scroll, 1);
+        assert_eq!(state.mobile_switcher_scroll, 0);
     }
 
     #[test]

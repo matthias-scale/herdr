@@ -274,23 +274,6 @@ pub(crate) fn workspace_parent_group_state(
     })
 }
 
-pub(crate) fn grouped_child_display_label(
-    label: &str,
-    branch: Option<&str>,
-    has_custom_name: bool,
-) -> String {
-    if has_custom_name {
-        return label.to_string();
-    }
-    let Some(branch) = branch else {
-        return label.to_string();
-    };
-    branch
-        .strip_prefix("worktree/")
-        .unwrap_or(branch)
-        .to_string()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
     Workspace { ws_idx: usize, indented: bool },
@@ -447,7 +430,7 @@ fn sidebar_rows_inner(
     rows
 }
 
-fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
+pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
     let Some((key, _)) = workspace_parent_group_state(app, root_idx) else {
         return vec![root_idx];
     };
@@ -3871,23 +3854,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn grouped_child_label_keeps_custom_workspace_name() {
-        assert_eq!(
-            grouped_child_display_label("renamed issue", Some("worktree/issue-137"), true),
-            "renamed issue"
-        );
-    }
-
-    #[test]
-    fn grouped_child_label_uses_short_branch_for_auto_named_workspace() {
-        assert_eq!(
-            grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
-            "issue-137"
-        );
-    }
-
-    #[test]
-    fn workspace_list_truncates_cjk_branch_without_panic() {
+    fn workspace_list_omits_cjk_branch_subtitle_without_panic() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("repo");
         ws.cached_git_branch = Some("feature/中文-分支-644".into());
@@ -3909,6 +3876,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 render_workspace_list(&app, &runtimes, frame, Rect::new(0, 0, 15, 6), false)
             })
             .expect("workspace list should render");
+        let rendered = row_text(terminal.backend().buffer(), 1, 15);
+        assert!(!rendered.contains("中文"), "{rendered:?}");
     }
 
     fn workspace_with_worktree_space(

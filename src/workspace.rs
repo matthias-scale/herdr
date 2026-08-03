@@ -1394,6 +1394,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
     }

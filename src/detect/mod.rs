@@ -149,7 +149,7 @@ pub fn background_job_count(agent: Option<Agent>, screen: &str) -> Option<u16> {
     static CODEX_BACKGROUND_JOBS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let regex = CODEX_BACKGROUND_JOBS.get_or_init(|| {
         regex::Regex::new(
-            r"(?s)([1-9][0-9]*) background terminals? running\s*·\s*/ps to view\s*·\s*/stop to close",
+            r"(?s)([1-9][0-9]*)\s+background\s+terminals?\s+running\s*·\s*/ps\s+to\s+view\s*·\s*/stop\s+to\s+close",
         )
         .expect("bundled Codex background-job regex must compile")
     });
@@ -157,7 +157,7 @@ pub fn background_job_count(agent: Option<Agent>, screen: &str) -> Option<u16> {
         .lines()
         .rev()
         .filter(|line| !line.trim().is_empty())
-        .take(4)
+        .take(12)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -189,6 +189,13 @@ mod background_job_tests {
                 "• Working · 2 background terminals running\n  · /ps to view · /stop to close\n"
             ),
             Some(2)
+        );
+        assert_eq!(
+            background_job_count(
+                Some(Agent::Codex),
+                "• Working\n  · 4 background\n  terminals running\n  · /ps to\n  view\n  · /stop to\n  close\n"
+            ),
+            Some(4)
         );
         assert_eq!(
             background_job_count(Some(Agent::Codex), "› next prompt\n"),
