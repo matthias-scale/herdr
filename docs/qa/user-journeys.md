@@ -19,10 +19,11 @@ Evidence: `initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_
 
 ## same-session-title-replacement
 
-A later `UserPromptSubmit` from the same agent session selects its final
-non-empty paragraph for one fresh persisted title. A terse/meta continuation
-retains that session's initial briefing subject instead of manufacturing a
-generic label. It does not append a subtitle or duplicate title.
+A later `UserPromptSubmit` from the same agent session selects its latest
+meaningful final paragraph for one fresh persisted title. A terse/meta
+continuation retains that session's initial briefing subject instead of
+manufacturing a generic label. It does not append a subtitle or duplicate
+title.
 
 Evidence: `terse_later_user_prompt_submit_retains_the_session_initial_title`
 and `work_title_initial_briefings_are_session_scoped_and_later_objectives_replace_them`.

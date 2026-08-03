@@ -4638,13 +4638,9 @@ mod tests {
                 "prompt": prompt,
             })
             .to_string();
-            let params = crate::work_title::request_from_turn_start(
-                provider,
-                Some(pane),
-                &payload,
-                seq,
-            )
-            .unwrap();
+            let params =
+                crate::work_title::request_from_turn_start(provider, Some(pane), &payload, seq)
+                    .unwrap();
             let response = app.handle_pane_report_metadata(id.into(), params);
             let _: SuccessResponse = serde_json::from_str(&response).unwrap();
         }
