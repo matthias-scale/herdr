@@ -1191,19 +1191,9 @@ fn agent_summary_line(app: &AppState, p: &Palette, max_width: u16) -> Line<'stat
             ));
             used += 3;
         }
-        // Only the leading (most urgent) segment keeps its state color; the
-        // rest stay dim so the urgent count is the loud thing.
-        let style = if idx == 0 {
-            let color = summary_tone_color(tone, p);
-            let style = Style::default().fg(color).bg(p.panel_bg);
-            if tone == SummaryTone::Muted {
-                style
-            } else {
-                style.add_modifier(Modifier::BOLD)
-            }
-        } else {
-            Style::default().fg(p.overlay1).bg(p.panel_bg)
-        };
+        // The leading (most urgent) segment is bold. Working retains its blue
+        // activity accent even when a higher-priority segment precedes it.
+        let style = summary_tone_style(tone, p, idx == 0);
         used += text.chars().count();
         spans.push(Span::styled(text, style));
     }
@@ -1221,6 +1211,20 @@ fn summary_tone_color(tone: SummaryTone, p: &Palette) -> Color {
         SummaryTone::Blocked => p.red,
         SummaryTone::Done | SummaryTone::Working => p.blue,
         SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
+    }
+}
+
+fn summary_tone_style(tone: SummaryTone, p: &Palette, leading: bool) -> Style {
+    let color = if leading || tone == SummaryTone::Working {
+        summary_tone_color(tone, p)
+    } else {
+        p.overlay1
+    };
+    let style = Style::default().fg(color).bg(p.panel_bg);
+    if leading && tone != SummaryTone::Muted {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
     }
 }
 
@@ -1349,6 +1353,15 @@ mod tests {
         assert_eq!(
             summary_tone_color(SummaryTone::Working, &palette),
             palette.blue
+        );
+        // ac7: Working stays blue behind a higher-priority leading segment.
+        assert_eq!(
+            summary_tone_style(SummaryTone::Working, &palette, false).fg,
+            Some(palette.blue)
+        );
+        assert_eq!(
+            summary_tone_style(SummaryTone::Done, &palette, false).fg,
+            Some(palette.overlay1)
         );
     }
 
