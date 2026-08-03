@@ -1694,9 +1694,17 @@ mod tests {
         workspace.test_add_tab(Some("Second task"));
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
+        let observed_at = std::time::Instant::now();
         for terminal in app.terminals.values_mut() {
-            terminal.detected_agent = Some(crate::detect::Agent::Codex);
-            terminal.state = AgentState::Working;
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                observed_at,
+            );
         }
         app.active = Some(0);
         app.selected = 0;
@@ -1726,12 +1734,12 @@ mod tests {
             .collect::<Vec<_>>();
         let first = rows
             .iter()
-            .position(|row| row.contains("First task"))
-            .unwrap();
+            .position(|row| row.contains("working") && row.contains("First task"))
+            .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
         let second = rows
             .iter()
-            .position(|row| row.contains("Second task"))
-            .unwrap();
+            .position(|row| row.contains("working") && row.contains("Second task"))
+            .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
         assert!(rows[first].find("working").unwrap() < rows[first].find("First task").unwrap());
         assert!(rows[second].find("working").unwrap() < rows[second].find("Second task").unwrap());
         assert_eq!(
