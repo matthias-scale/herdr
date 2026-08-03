@@ -1,0 +1,9 @@
+{
+  "schema": "acceptance-verifiers/v1",
+  "verifiers": [
+    {
+      "id": "herdr-check-ubuntu",
+      "check_name": "check (ubuntu-latest)"
+    }
+  ]
+}
