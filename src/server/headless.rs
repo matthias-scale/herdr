@@ -5982,6 +5982,85 @@ next_tab = ""
     }
 
     #[test]
+    fn headless_activity_clock_streams_a_new_frame_at_the_age_boundary() {
+        let mut server = test_headless_server();
+        server.app.state.status_bar_enabled = false;
+        server.app.state.mobile_width_threshold = 0;
+        server.app.state.sidebar_width = 42;
+        server.app.state.sidebar_min_width = 18;
+        server.app.state.sidebar_max_width = 120;
+        let mut workspace = crate::workspace::Workspace::test_new("clock-space");
+        workspace.tabs[0].custom_name = Some("Clock task".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let started = Instant::now();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+
+        let (writer, _control_rx, render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 100,
+            rows: 20,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        server.render_and_stream();
+        let first = read_server_frame(
+            render_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial clock frame"),
+        );
+        let first_text = frame_text(&first);
+        assert!(first_text.contains("0s ago"), "{first_text:?}");
+
+        let deadline = server
+            .app
+            .agent_activity_refresh_deadline
+            .expect("visible clock should schedule its next boundary");
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .saturating_add(Duration::from_millis(20)),
+        );
+        assert!(server.handle_scheduled_tasks_headless(Instant::now(), false));
+        server.render_and_stream();
+
+        let second = read_server_frame(
+            render_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("advanced clock frame"),
+        );
+        let second_text = frame_text(&second);
+        assert!(second_text.contains("1s ago"), "{second_text:?}");
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn attached_app_client_starts_status_metric_sampling_after_first_render() {
         let mut server = test_headless_server();
         server.app.status_metric_refresh_enabled = true;

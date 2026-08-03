@@ -24,15 +24,10 @@ const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 /// Selected sidebar titles need stronger foreground contrast without restoring
-/// the old filled-row treatment. On an RGB light surface, darken the theme's
-/// text token by one third; dark and terminal/reset themes keep their authored
-/// high-emphasis foreground.
+/// the old filled-row treatment. Darken RGB text tokens by one third and pair
+/// them with bold weight; terminal/reset themes keep their authored foreground.
 pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
-    let Color::Rgb(bg_r, bg_g, bg_b) = palette.panel_bg else {
-        return palette.text;
-    };
-    let perceived_luminance = u32::from(bg_r) * 299 + u32::from(bg_g) * 587 + u32::from(bg_b) * 114;
-    if perceived_luminance < 128_000 {
+    if palette.panel_bg == Color::Reset {
         return palette.text;
     }
     match palette.text {
@@ -1743,15 +1738,18 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         _ => None,
     });
     let Some((entry, depth)) = entry else { return };
-    let state = entry
-        .state_labels
-        .get(agent_panel_status_key(entry.state, entry.seen))
-        .map(String::as_str)
-        .unwrap_or_else(|| match entry.state {
-            AgentState::Idle if !entry.seen => "done",
-            _ => state_label(entry.state, entry.seen),
-        });
-    let state_icon = state_dot(entry.state, entry.seen, p);
+    let show_status = entry.state != AgentState::Idle || !entry.seen;
+    let state = show_status.then(|| {
+        entry
+            .state_labels
+            .get(agent_panel_status_key(entry.state, entry.seen))
+            .map(String::as_str)
+            .unwrap_or_else(|| match entry.state {
+                AgentState::Idle if !entry.seen => "done",
+                _ => state_label(entry.state, entry.seen),
+            })
+    });
+    let state_icon = show_status.then(|| state_dot(entry.state, entry.seen, p));
     let style = if active {
         Style::default()
             .fg(active_sidebar_title_color(p))
@@ -1760,11 +1758,13 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.subtext0)
     };
     let prefix = " ".repeat(usize::from(depth) * 3 + 1);
-    let fixed_width = display_width(&prefix)
-        + display_width(state_icon.0)
-        + 1
-        + display_width(state)
-        + display_width(" · ");
+    let status_width = state
+        .zip(state_icon.as_ref())
+        .map(|(state, icon)| {
+            display_width(icon.0) + 1 + display_width(state) + display_width(" · ")
+        })
+        .unwrap_or_default();
+    let fixed_width = display_width(&prefix) + status_width;
     let activity_field =
         tab_activity_age_field(&entry, app.view_observed_at, card.rect, fixed_width);
     let activity_width = activity_field
@@ -1778,16 +1778,18 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             .unwrap_or(DEFAULT_THREAD_TITLE),
         usize::from(card.rect.width).saturating_sub(fixed_width + activity_width),
     );
-    let mut spans = vec![
-        Span::raw(prefix),
-        Span::styled(state_icon.0.to_string(), state_icon.1),
-        Span::styled(
-            format!(" {state}"),
-            Style::default().fg(state_label_color(entry.state, entry.seen, p)),
-        ),
-        Span::styled(" · ", Style::default().fg(p.overlay0)),
-        Span::styled(title, style),
-    ];
+    let mut spans = vec![Span::raw(prefix)];
+    if let (Some(state), Some(state_icon)) = (state, state_icon) {
+        spans.extend([
+            Span::styled(state_icon.0.to_string(), state_icon.1),
+            Span::styled(
+                format!(" {state}"),
+                Style::default().fg(state_label_color(entry.state, entry.seen, p)),
+            ),
+            Span::styled(" · ", Style::default().fg(p.overlay0)),
+        ]);
+    }
+    spans.push(Span::styled(title, style));
     if let Some(activity_field) = activity_field {
         let used_width = spans
             .iter()
@@ -1996,20 +1998,24 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            let state = entry
-                .state_labels
-                .get(agent_panel_status_key(entry.state, entry.seen))
-                .map(String::as_str)
-                .unwrap_or_else(|| match entry.state {
-                    AgentState::Idle if !entry.seen => "done",
-                    _ => state_label(entry.state, entry.seen),
-                });
-            let fixed_width = usize::from(depth) * 3
-                + 1
-                + display_width(state_dot(entry.state, entry.seen, &app.palette).0)
-                + 1
-                + display_width(state)
-                + display_width(" · ");
+            let show_status = entry.state != AgentState::Idle || !entry.seen;
+            let status_width = if show_status {
+                let state = entry
+                    .state_labels
+                    .get(agent_panel_status_key(entry.state, entry.seen))
+                    .map(String::as_str)
+                    .unwrap_or_else(|| match entry.state {
+                        AgentState::Idle if !entry.seen => "done",
+                        _ => state_label(entry.state, entry.seen),
+                    });
+                display_width(state_dot(entry.state, entry.seen, &app.palette).0)
+                    + 1
+                    + display_width(state)
+                    + display_width(" · ")
+            } else {
+                0
+            };
+            let fixed_width = usize::from(depth) * 3 + 1 + status_width;
             tab_activity_age_field(entry, app.view_observed_at, card.rect, fixed_width)
                 .and(entry.activity_at)
         })
@@ -2085,8 +2091,10 @@ mod tests {
     use ratatui::{backend::TestBackend, layout::Direction, style::Color, Terminal};
 
     #[test]
-    fn active_title_color_darkens_light_rgb_and_preserves_theme_fallbacks() {
-        // ac2: One Light gets the specified one-third darker selected foreground.
+    fn active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks() {
+        // ac3: selected titles are one-third darker than the authored text
+        // token in both shipped One themes. Bold supplies the emphasis while
+        // the foreground direction remains consistent across machines.
         let one_light = crate::app::state::Palette::one_light();
         assert_eq!(
             active_sidebar_title_color(&one_light),
@@ -2094,7 +2102,10 @@ mod tests {
         );
 
         let one_dark = crate::app::state::Palette::one_dark();
-        assert_eq!(active_sidebar_title_color(&one_dark), one_dark.text);
+        assert_eq!(
+            active_sidebar_title_color(&one_dark),
+            Color::Rgb(114, 118, 127)
+        );
 
         let terminal = crate::app::state::Palette::terminal();
         assert_eq!(active_sidebar_title_color(&terminal), terminal.text);
@@ -3084,6 +3095,67 @@ row_gap = 1
         let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
         assert!(idle_text.contains("done"), "{idle_text:?}");
         assert!(idle_text.ends_with("5m ago"), "{idle_text:?}");
+    }
+
+    #[test]
+    fn seen_idle_tab_omits_status_while_retaining_title_and_clock() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        workspace.tabs[0].custom_name = Some("Review release".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.reconcile_sidebar_presentation();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        let finished = started + std::time::Duration::from_secs(5);
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Idle,
+                false,
+                true,
+                false,
+                false,
+                finished,
+            );
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = true;
+        app.view_observed_at = finished + std::time::Duration::from_secs(65);
+
+        let area = Rect::new(0, 0, 50, 12);
+        let mut terminal = Terminal::new(TestBackend::new(50, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
+
+        assert!(rendered.contains("Review release"), "{rendered:?}");
+        assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+        assert!(!rendered.contains("idle"), "{rendered:?}");
+        assert!(!rendered.contains("done"), "{rendered:?}");
+        assert!(!rendered.contains(" · Review release"), "{rendered:?}");
     }
 
     #[test]

@@ -45,21 +45,26 @@ case "$flow" in
             "ac4_tab_rollup_does_not_let_done_mask_working"
             "ac4_clicking_tab_row_preserves_that_tabs_focused_pane"
             "tab_rows_show_working_then_done_lifecycle_text"
+            "seen_idle_tab_omits_status_while_retaining_title_and_clock"
             "multi_pane_tab_age_uses_latest_thread_communication"
+            "headless_activity_clock_streams_a_new_frame_at_the_age_boundary"
             "state_dots_and_labels_use_semantic_workspace_colors"
             "working_summary_uses_blue_activity_accent"
-            "active_title_color_darkens_light_rgb_and_preserves_theme_fallbacks"
+            "active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks"
             "default_space_workspace_style_tracks_active_state"
             "defaults_show_only_thread_titles_and_space_names"
             "space_row_gap_preserves_compact_worktree_children"
             "space_row_gap_separates_groups_but_never_tabs_inside_them"
             "ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows"
+            "seen_idle_mobile_tab_omits_status_segment"
             "ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane"
             "review_findings_agent_navigation_reveals_against_final_picker_projection"
         )
         ;;
     same-session-title-replacement)
         filters=(
+            "title_hooks_prefer_the_owning_binary_over_stale_path"
+            "turn_start_fixture_reaches_guarded_herdr_title"
             "terse_later_user_prompt_submit_retains_the_session_initial_title"
             "work_title_initial_briefings_are_session_scoped_and_later_objectives_replace_them"
         )
