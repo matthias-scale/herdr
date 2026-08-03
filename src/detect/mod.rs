@@ -148,25 +148,28 @@ pub fn background_job_count(agent: Option<Agent>, screen: &str) -> Option<u16> {
 
     static CODEX_BACKGROUND_JOBS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let regex = CODEX_BACKGROUND_JOBS.get_or_init(|| {
-        regex::Regex::new(
-            r"(?s)([1-9][0-9]*)\s+background\s+terminals?\s+running\s*·\s*/ps\s+to\s+view\s*·\s*/stop\s+to\s+close",
-        )
-        .expect("bundled Codex background-job regex must compile")
+        regex::Regex::new(r"([1-9][0-9]*)backgroundterminals?running·/pstoview·/stoptoclose")
+            .expect("bundled Codex background-job regex must compile")
     });
+    // Bound work by the footer's text size rather than its rendered row count.
+    // Soft wrapping can turn the fixed footer into arbitrarily many rows on a
+    // narrow pane, while its actual character length remains small.
     let recent = screen
-        .lines()
+        .chars()
         .rev()
-        .filter(|line| !line.trim().is_empty())
-        .take(12)
+        .take(512)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<String>();
+    let compact = recent
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
 
     Some(
         regex
-            .captures(&recent)
+            .captures(&compact)
             .and_then(|captures| captures.get(1))
             .and_then(|count| count.as_str().parse::<u16>().ok())
             .unwrap_or(0),
@@ -190,11 +193,12 @@ mod background_job_tests {
             ),
             Some(2)
         );
+        let width_one_footer = "4 background terminals running · /ps to view · /stop to close"
+            .chars()
+            .flat_map(|character| [character, '\n'])
+            .collect::<String>();
         assert_eq!(
-            background_job_count(
-                Some(Agent::Codex),
-                "• Working\n  · 4 background\n  terminals running\n  · /ps to\n  view\n  · /stop to\n  close\n"
-            ),
+            background_job_count(Some(Agent::Codex), &width_one_footer),
             Some(4)
         );
         assert_eq!(

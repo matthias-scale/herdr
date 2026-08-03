@@ -96,8 +96,12 @@ esac
 
 artifact_dir="$(mkdir -p "$artifact_dir" && cd "$artifact_dir" && pwd -P)"
 log_path="$artifact_dir/${flow}.log"
-zig_bin=""
-if command -v mise >/dev/null 2>&1; then
+zig_bin="${ZIG:-}"
+if [[ -n "$zig_bin" && ! -x "$zig_bin" ]]; then
+    echo "qa-sidebar-lifecycle-journey: ZIG is not executable: $zig_bin" >&2
+    exit 66
+fi
+if [[ -z "$zig_bin" ]] && command -v mise >/dev/null 2>&1; then
     zig_root="$(mise where zig@0.15.2 2>/dev/null || true)"
     if [[ -x "$zig_root/zig" ]]; then
         zig_bin="$zig_root/zig"
