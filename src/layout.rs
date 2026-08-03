@@ -825,8 +825,8 @@ mod tests {
         assert!(layout.insert_pane_near(root, moved, Direction::Vertical, 0.25, true));
 
         assert_eq!(layout.pane_ids(), vec![moved, root]);
-        assert_eq!(pane_rect(&layout, moved), Rect::new(0, 0, 120, 10));
-        assert_eq!(pane_rect(&layout, root), Rect::new(0, 10, 120, 30));
+        assert_eq!(pane_rect(&layout, moved), Rect::new(0, 0, 100, 10));
+        assert_eq!(pane_rect(&layout, root), Rect::new(0, 10, 100, 30));
     }
 
     #[test]

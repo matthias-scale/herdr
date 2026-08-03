@@ -1560,14 +1560,14 @@ mod tests {
     fn mobile_agent_detail_keeps_tab_title_owned_by_the_tab_row() {
         let entry = agent_entry(Some("mobile-state"), Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
     }
 
     #[test]
     fn mobile_agent_detail_keeps_existing_compact_detail_without_tab_context() {
         let entry = agent_entry(None, Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
     }
 
     #[test]

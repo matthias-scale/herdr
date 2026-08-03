@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_status_bar_renders_folder_branch_device_and_metrics_segments() {
+    fn desktop_status_bar_renders_only_branch_device_and_metrics_segments() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
@@ -1131,10 +1131,7 @@ mod tests {
             row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
             "status bar missing resource metrics: {row0:?}"
         );
-        assert!(
-            row0.contains("/repo"),
-            "status bar missing focused folder: {row0:?}"
-        );
+        assert!(!row0.contains("/repo"), "{row0:?}");
         assert!(!row0.contains("Herdr v"), "{row0:?}");
         assert!(!row0.contains("testuser"), "{row0:?}");
         for hidden_identity in ["session:", "workspace:", "tab:", "pane:"] {
