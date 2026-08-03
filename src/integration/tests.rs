@@ -889,7 +889,7 @@ fn install_claude_writes_hook_and_updates_settings() {
     fs::create_dir_all(&claude_dir).unwrap();
     fs::write(
         claude_dir.join("settings.json"),
-        r#"{"permissions":{"allow":["Read"]},"hooks":{}}"#,
+        r#"{"permissions":{"allow":["Read"]},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo keep-title-hook"}]}]}}"#,
     )
     .unwrap();
     std::env::set_var("HOME", &home);
@@ -904,13 +904,28 @@ fn install_claude_writes_hook_and_updates_settings() {
         claude_dir.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME)
     );
     assert_eq!(hook_content, CLAUDE_HOOK_ASSET);
+    assert!(hook_content.contains("herdr_bin=\"${HERDR_BIN_PATH:-herdr}\""));
+    assert!(hook_content.contains("agent turn-title --provider claude"));
     assert!(settings["permissions"]["allow"].is_array());
     assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "*");
     assert!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
         .contains(" session"));
-    assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+    assert!(settings["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .any(|hook| hook["command"]
+            .as_str()
+            .is_some_and(|command| command.contains(" title"))));
+    assert!(settings["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .any(|hook| hook["command"] == "echo keep-title-hook"));
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
@@ -962,7 +977,13 @@ fn install_claude_is_idempotent_for_hook_entries() {
         settings["hooks"]["SessionStart"].as_array().unwrap().len(),
         1
     );
-    assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
@@ -1044,7 +1065,13 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
         settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
         "echo keep-session-end"
     );
-    assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+    assert!(settings["hooks"]["UserPromptSubmit"][0]["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hook| hook["command"]
+            .as_str()
+            .is_some_and(|command| command.contains(" title"))));
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("Stop").is_none());
 
@@ -1075,7 +1102,7 @@ fn claude_v1_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(1));
-    assert_eq!(claude.expected_version, 7);
+    assert_eq!(claude.expected_version, CLAUDE_INTEGRATION_VERSION);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1105,7 +1132,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 7);
+    assert_eq!(claude.expected_version, CLAUDE_INTEGRATION_VERSION);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1238,7 +1265,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 7);
+    assert_eq!(codex.expected_version, CODEX_INTEGRATION_VERSION);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1253,6 +1280,11 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
     let codex_dir = home.join(".codex");
     fs::create_dir_all(&codex_dir).unwrap();
     fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.4\"\n").unwrap();
+    fs::write(
+        codex_dir.join("hooks.json"),
+        r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo keep-title-hook"}]}]}}"#,
+    )
+    .unwrap();
     std::env::set_var("HOME", &home);
 
     let installed = install_codex().unwrap();
@@ -1265,11 +1297,26 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
     assert_eq!(installed.hooks_path, codex_dir.join("hooks.json"));
     assert_eq!(installed.config_path, codex_dir.join("config.toml"));
     assert_eq!(hook_content, CODEX_HOOK_ASSET);
+    assert!(hook_content.contains("herdr_bin=\"${HERDR_BIN_PATH:-herdr}\""));
+    assert!(hook_content.contains("agent turn-title --provider codex"));
     assert!(hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
         .contains(" session"));
-    assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+    assert!(hooks["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .any(|hook| hook["command"]
+            .as_str()
+            .is_some_and(|command| command.contains(" title"))));
+    assert!(hooks["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .any(|hook| hook["command"] == "echo keep-title-hook"));
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"].get("Stop").is_none());
@@ -1323,7 +1370,10 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
 
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
-    assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+    assert_eq!(
+        hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+        1
+    );
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"].get("Stop").is_none());
@@ -2697,6 +2747,7 @@ fn bundled_integration_assets_report_session_refs() {
     );
     assert!(!CLAUDE_HOOK_ASSET.contains("\"state\": action"));
     assert!(!CLAUDE_HOOK_ASSET.contains("pane.release_agent"));
+    assert!(CLAUDE_HOOK_ASSET.contains("HERDR_BIN_PATH"));
     assert!(
         CODEX_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE")
             || CODEX_HOOK_ASSET.contains("In.ReadToEnd")
@@ -2710,6 +2761,7 @@ fn bundled_integration_assets_report_session_refs() {
             || CODEX_HOOK_ASSET.contains("--session-start-source")
     );
     assert!(CODEX_HOOK_ASSET.contains("CODEX_THREAD_ID"));
+    assert!(CODEX_HOOK_ASSET.contains("HERDR_BIN_PATH"));
     assert!(
         CODEX_HOOK_ASSET.contains("pane.report_agent_session")
             || CODEX_HOOK_ASSET.contains("report-agent-session")
@@ -2780,6 +2832,77 @@ fn bundled_integration_assets_report_session_refs() {
     assert!(GROK_HOOK_ASSET.contains("herdr:grok"));
     assert!(!GROK_HOOK_ASSET.contains("\"state\":"));
     assert!(!GROK_HOOK_ASSET.contains("pane.release_agent"));
+}
+
+#[test]
+#[cfg(unix)]
+fn title_hooks_prefer_the_owning_binary_over_stale_path() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    for provider in ["claude", "codex"] {
+        let base = unique_base();
+        let stale_bin_dir = base.join("stale-bin");
+        fs::create_dir_all(&stale_bin_dir).unwrap();
+        let exact_bin = base.join("owning-herdr");
+        let exact_record = base.join("exact-record");
+        let stale_record = base.join("stale-record");
+        fs::write(
+            &exact_bin,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HERDR_TEST_EXACT_RECORD\"\ncat >> \"$HERDR_TEST_EXACT_RECORD\"\n",
+        )
+        .unwrap();
+        fs::write(
+            stale_bin_dir.join("herdr"),
+            "#!/bin/sh\nprintf stale > \"$HERDR_TEST_STALE_RECORD\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&exact_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(
+            stale_bin_dir.join("herdr"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "src/integration/assets/{provider}/herdr-agent-state.sh"
+        ));
+        let path = format!(
+            "{}:{}",
+            stale_bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = Command::new("bash")
+            .arg(hook_path)
+            .arg("title")
+            .env("PATH", path)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_SOCKET_PATH", base.join("unused.sock"))
+            .env("HERDR_PANE_ID", "p_preview")
+            .env("HERDR_BIN_PATH", &exact_bin)
+            .env("HERDR_TEST_EXACT_RECORD", &exact_record)
+            .env("HERDR_TEST_STALE_RECORD", &stale_record)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                br#"{"hook_event_name":"UserPromptSubmit","session_id":"preview","prompt":"write a poem"}"#,
+            )
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let exact = fs::read_to_string(&exact_record).unwrap();
+        assert!(exact.starts_with(&format!("agent turn-title --provider {provider}\n")));
+        assert!(exact.contains("\"prompt\":\"write a poem\""));
+        assert!(!stale_record.exists());
+
+        let _ = fs::remove_dir_all(base);
+    }
 }
 
 #[test]

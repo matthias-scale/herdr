@@ -126,6 +126,8 @@ focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
 ```
 
 默认键位以前缀为主，因此 Herdr 不会抢占 shell、编辑器、tmux 或终端应用的输入。在[配置参考](/docs/config-reference/)中搜索 `keys.` 可查看每个动作及其默认绑定。应用内帮助面板可通过 `prefix+?` 打开，其中会显示当前生效的绑定。
@@ -250,13 +252,17 @@ yellow = "#f9e2af"
 
 ## UI 与侧边栏
 
-侧边栏是 Herdr 的主仪表盘。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、Agent 面板排序、鼠标行为、窗格边框和其他显示设置。
+侧边栏是 Herdr 的主仪表盘。默认的 `spaces` 顺序是一棵工作区→标签页→窗格的归属树。所有标签页和窗格都按布局顺序显示，包括未检测到智能体的标签页。关联 worktree 和窗格的展开状态相互独立，紧凑视图和移动视图也保留同一棵树。选中状态通过前景色和粗体显示，不使用强背景色。
+
+`ui.agent_panel_sort = "priority"` 仍会为了兼容性和旧版编号 Agent 投影而被接受,但可见侧边栏始终保持标准的工作区、标签页和窗格顺序。生命周期变化不会重排这些归属行。临时的 `agent.view.set` 查询也不会改变归属树;其兼容行为见[智能体视图查询](/zh-cn/docs/socket-api/#智能体视图查询)。在[配置参考](/docs/config-reference/)中搜索 `ui.`,可查看尺寸、折叠模式、鼠标行为、窗格边框和其他显示设置。
+
+每个展开的标签页只显示一次已保存的标题，然后在其下显示窗格行。窗格状态始终明确显示为 `working`、`blocked` 或 `done`；已完成的窗格在查看后仍保持 `done`。活动时长只是补充信息，不会取代 `done`。
 
 ### 状态行
 
-桌面布局会在标签栏上方显示一条右对齐的全宽状态行。紧凑信息顺序为：当前聚焦文件夹、Git 分支、设备名称、CPU、内存。左侧保持空白。在桌面宽度下，带有 `CPU` 和 `MEM` 字样的片段会显示，分别使用百分比和 GiB 作为单位；样本不可用时会显示 `CPU --%` 或 `MEM --/-- GiB`。该行不会显示或采样网络信息或用户名，也不会显示 Herdr 版本、电池、日期或时间。随着终端变窄，可选片段会按以下顺序消失：文件夹、Git 分支、设备名称。
+桌面布局会在标签栏上方显示一条右对齐的全宽状态行。唯一可见的字段依次为 Git 分支、设备名、CPU、内存；左侧始终留空。桌面宽度下，`CPU` 和 `MEM` 片段始终可见。指标分别使用百分比和 GiB；样本不可用时显示 `CPU --%` 或 `MEM --/-- GiB`。状态行不显示文件夹、Herdr 版本、会话、工作区、标签页或窗格标识、网络信息、用户名、电池、日期或时间。终端变窄时，分支和设备名依次消失。
 
-采样器会立即启动，每两秒刷新一次，同时最多只允许一个样本正在采集；失败后会在下一个间隔重试。达到四秒的旧样本会被丢弃并显示不可用值。CPU 和内存指标只来自原生 API 或本地 proc 文件。
+采样器会在首次出现可渲染的状态行时启动，每两秒刷新一次，同时最多只允许一个样本正在采集；失败后会在下一个间隔重试。达到四秒的旧样本会被丢弃并显示不可用值。CPU 和内存指标只来自原生 API 或本地 proc 文件。
 
 ```toml
 [ui.status_bar]
@@ -273,15 +279,13 @@ enabled = false
 [ui.sidebar.agents]
 row_gap = 0
 rows = [
-  ["state_icon", "workspace", "tab"],
-  ["agent"],
+  ["state_icon", "pane", "state_text"],
 ]
 
 [ui.sidebar.spaces]
 row_gap = 0
 rows = [
   ["state_icon", "workspace"],
-  ["branch", "git_status"],
 ]
 ```
 
@@ -320,7 +324,7 @@ rows = [
 
 `fg` 只接受严格的 `#RGB` 或 `#RRGGBB`，`bold` 和 `dim` 接受布尔值。省略字段会保留上下文样式；显式 `false` 会移除对应修饰。样式只作用于当前出现位置。为 `git_status` 设置 `fg` 后，ahead 和 behind 会使用同一种颜色，而不是默认的绿色和红色。token 样式不会改变分隔符或行背景。
 
-`row_gap` 分别控制 Agent 和 Space 面板中条目之间的空白终端行数。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
+`row_gap` 控制 Space 根条目之间以及窗格子条目之间的空白终端行数。Agent 和 Space 的取值仍然互相独立。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
 
 在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
 
@@ -363,7 +367,7 @@ herdr pane report-metadata <pane_id> \
 
 元数据上报方只提供值；样式由本地侧边栏配置控制。有关限制、清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
 
-侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。
+侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图会以紧凑方式渲染同一棵归属与展开树。
 
 ## 通知
 

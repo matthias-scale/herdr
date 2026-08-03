@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -20,12 +20,12 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: folder · branch · device · CPU · memory. The row
-/// before the first surviving segment is intentionally blank.
+/// Contents, left to right: branch · device · CPU · memory. The row before the
+/// first surviving segment is intentionally blank.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
-/// first surviving segment. On narrow widths, folder, branch, then device elide
-/// in that order; CPU and memory remain required.
+/// first surviving segment. On narrow widths, branch then device elide in that
+/// order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -44,6 +44,9 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         .as_ref()
         .map(|snapshot| &snapshot.metrics)
         .unwrap_or(&unavailable);
+    if usize::from(area.width) < minimum_required_status_width(app) {
+        return;
+    }
     let segments = fitted_segments(status_segments(app, metrics, p), area.width as usize);
 
     let used = segment_width(&segments);
@@ -92,24 +95,12 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
         segments.remove(index);
     }
 
-    // Only pathological widths narrower than the required CPU/MEM pair need
-    // truncation after all optional context has been removed.
-    for index in 0..segments.len() {
-        let total_width = segment_width(&segments);
-        shrink_segment_for_overflow(&mut segments[index], total_width, width);
-    }
-
     debug_assert!(segment_width(&segments) <= width);
     segments
 }
 
-fn shrink_segment_for_overflow(segment: &mut Segment, total_width: usize, width: usize) {
-    let overflow = total_width.saturating_sub(width);
-    if overflow == 0 {
-        return;
-    }
-    let current_width = display_width(&segment.text);
-    segment.text = truncate_end(&segment.text, current_width.saturating_sub(overflow));
+pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
+    1 + display_width(" CPU 100% ") + display_width(" MEM 9999.9/9999.9 GiB ")
 }
 
 fn status_segments(
@@ -119,17 +110,7 @@ fn status_segments(
 ) -> Vec<Segment> {
     let mut out = Vec::new();
 
-    let (_, _, _, cwd, branch) = focused_identity(app);
-
-    if let Some(cwd) = cwd {
-        let display = shorten_path(&cwd, app.status_home_dir.as_deref(), 32);
-        out.push(Segment {
-            text: format!("  {display} "),
-            style: Style::default().fg(p.mauve),
-            preserve_bg: false,
-            elide_rank: Some(1),
-        });
-    }
+    let (_, branch) = focused_context(app);
 
     if let Some(branch) = branch {
         let branch = shorten_branch(&branch, 20);
@@ -137,7 +118,7 @@ fn status_segments(
             text: format!("  {branch} "),
             style: Style::default().fg(p.yellow),
             preserve_bg: false,
-            elide_rank: Some(2),
+            elide_rank: Some(1),
         });
     }
 
@@ -145,22 +126,31 @@ fn status_segments(
         text: format!(" {} ", metrics.hostname),
         style: Style::default().fg(p.green),
         preserve_bg: false,
-        elide_rank: Some(3),
+        elide_rank: Some(2),
     });
 
     out.push(Segment {
         text: metrics
             .cpu_percent
-            .map(|cpu| format!(" CPU {cpu}% "))
-            .unwrap_or_else(|| " CPU --% ".into()),
+            .filter(|cpu| *cpu <= 100)
+            .map(|cpu| format!(" CPU {cpu:>3}% "))
+            .unwrap_or_else(|| " CPU  --% ".into()),
         style: Style::default().fg(p.red),
         preserve_bg: false,
         elide_rank: None,
     });
 
     let memory = match (metrics.mem_used_gib, metrics.mem_total_gib) {
-        (Some(used), Some(total)) => format!(" MEM {used:.1}/{total:.1} GiB "),
-        _ => " MEM --/-- GiB ".into(),
+        (Some(used), Some(total))
+            if used.is_finite()
+                && total.is_finite()
+                && used >= 0.0
+                && total >= used
+                && total <= 9_999.9 =>
+        {
+            format!(" MEM {used:>6.1}/{total:>6.1} GiB ")
+        }
+        _ => " MEM     --/    -- GiB ".into(),
     };
     out.push(Segment {
         text: memory,
@@ -171,28 +161,13 @@ fn status_segments(
     out
 }
 
-pub(crate) fn focused_identity(
-    app: &AppState,
-) -> (String, String, String, Option<PathBuf>, Option<String>) {
+pub(crate) fn focused_context(app: &AppState) -> (Option<PathBuf>, Option<String>) {
     let Some(ws_idx) = app.active else {
-        return ("1".into(), "1".into(), "1".into(), None, None);
+        return (None, None);
     };
     let Some(ws) = app.workspaces.get(ws_idx) else {
-        return ("1".into(), "1".into(), "1".into(), None, None);
+        return (None, None);
     };
-    let ws_label = crate::workspace::public_workspace_number(&ws.id)
-        .unwrap_or(ws_idx + 1)
-        .to_string();
-    let tab_idx = ws.active_tab_index();
-    let tab_label = ws
-        .public_tab_number(tab_idx)
-        .unwrap_or(tab_idx + 1)
-        .to_string();
-    let pane_label = ws
-        .focused_pane_id()
-        .and_then(|id| ws.public_pane_number(id))
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "1".into());
     // Runtime-resolved focused cwd, projected by the same code path that
     // resolves the Git refresh target, so the cwd and branch segments always
     // describe the same directory. Falls back to workspace identity until the
@@ -210,73 +185,7 @@ pub(crate) fn focused_identity(
     } else {
         None
     };
-    (ws_label, tab_label, pane_label, cwd, branch)
-}
-
-/// Both separators are accepted everywhere: Windows paths use `\`, and a
-/// Windows session attached to a Unix server still renders `/` paths.
-const PATH_SEPARATORS: [char; 2] = ['/', '\\'];
-
-fn shorten_path(path: &Path, home: Option<&Path>, max_width: usize) -> String {
-    let raw = path.to_string_lossy();
-    let display = if let Some(home) = home {
-        if let Ok(rest) = path.strip_prefix(home) {
-            // Powerline `pwd` collapses $HOME to `~` (keeping the slash as `~/…`).
-            let suffix = rest.to_string_lossy();
-            if suffix.is_empty() {
-                "~".into()
-            } else {
-                format!("~/{}", suffix.trim_start_matches(['/', '\\']))
-            }
-        } else {
-            raw.into_owned()
-        }
-    } else {
-        raw.into_owned()
-    };
-    if display_width(&display) <= max_width {
-        return display;
-    }
-    // Left-truncate like powerline: keep the trailing path, prefix with `…/`.
-    left_truncate_path(&display, max_width)
-}
-
-fn left_truncate_path(display: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    // Never shorter than the final path component if possible.
-    let file = display.rsplit(PATH_SEPARATORS).next().unwrap_or(display);
-    let file_w = display_width(file);
-    if file_w >= max_width {
-        return truncate_end(file, max_width);
-    }
-    let ellipsis = "…/";
-    let ellipsis_w = display_width(ellipsis);
-    if ellipsis_w + file_w >= max_width {
-        return truncate_end(file, max_width);
-    }
-    let budget = max_width.saturating_sub(ellipsis_w);
-    // Take a suffix of `display` that fits in budget, then force a clean `…/rest`.
-    let mut width = 0usize;
-    let mut start = display.len();
-    for (idx, ch) in display.char_indices().rev() {
-        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_w > budget {
-            break;
-        }
-        width += ch_w;
-        start = idx;
-    }
-    let mut suffix = &display[start..];
-    // Drop a partial leading component so we always start on a path boundary when possible.
-    if let Some(separator) = suffix.find(PATH_SEPARATORS) {
-        suffix = &suffix[separator + 1..];
-    }
-    if suffix.is_empty() {
-        suffix = file;
-    }
-    format!("{ellipsis}{suffix}")
+    (cwd, branch)
 }
 
 fn shorten_branch(branch: &str, max_width: usize) -> String {
@@ -598,41 +507,138 @@ mod tests {
     }
 
     #[test]
-    fn shorten_path_uses_tilde_for_home() {
-        // AC4: cwd parity uses immutable state captured before rendering.
-        let home = "/tmp/herdr-status-home-fixture";
-        let path = PathBuf::from(format!("{home}/Code/personal/home"));
-        let display = shorten_path(&path, Some(Path::new(home)), 80);
-        assert!(
-            display.starts_with("~/") || display.starts_with("~\\"),
-            "expected tilde-shortened path, got {display}"
-        );
-        assert!(display.contains("Code"));
-    }
-
-    #[test]
     fn required_metrics_survive_optional_segment_elision() {
-        // CPU/MEM are required while optional right-side context elides by rank.
+        // CPU/MEM are required while branch and device elide by rank.
         let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from("/very/long/focused/folder"));
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some("feature/very-long-branch".into());
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
-        let segments = status_segments(&app, &metrics, &app.palette);
-        let required_width = segments
-            .iter()
-            .filter(|segment| segment.elide_rank.is_none())
-            .map(|segment| display_width(&segment.text))
-            .sum();
-        let segments = fitted_segments(segments, required_width);
+        let width = minimum_required_status_width(&app);
+        let segments = fitted_segments(status_segments(&app, &metrics, &app.palette), width);
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("MEM 8.0/16.0 GiB"));
-        assert!(rendered.contains("CPU 12%"));
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"));
+        assert!(rendered.contains("CPU  12%"));
         assert!(!rendered.contains("feature/very-long"));
-        assert!(!rendered.contains("testhost"));
+    }
+
+    #[test]
+    fn review_findings_narrow_desktop_keeps_required_metrics() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 0;
+        let required = minimum_required_status_width(&app) as u16;
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required - 1, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Mobile);
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Desktop);
+        let mut terminal = Terminal::new(TestBackend::new(required, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, required, 1)))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
+    }
+
+    #[test]
+    fn review_findings_status_width_is_independent_of_metric_snapshot() {
+        let mut app = AppState::test_new();
+        let unavailable_width = minimum_required_status_width(&app);
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: StatusMetrics {
+                cpu_percent: Some(100),
+                mem_used_gib: Some(17_179_869_184.0),
+                mem_total_gib: Some(17_179_869_184.0),
+                hostname: "host-with-a-long-device-name".into(),
+            },
+            sampled_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(minimum_required_status_width(&app), unavailable_width);
+        let required = fitted_segments(
+            status_segments(
+                &app,
+                &app.status_metrics.as_ref().unwrap().metrics,
+                &app.palette,
+            ),
+            unavailable_width,
+        );
+        assert!(segment_width(&required) <= unavailable_width);
+    }
+
+    #[test]
+    fn narrow_desktop_never_truncates_required_metrics() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 0;
+        let required = minimum_required_status_width(&app) as u16;
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: StatusMetrics {
+                cpu_percent: Some(100),
+                mem_used_gib: Some(9_999.9),
+                mem_total_gib: Some(9_999.9),
+                hostname: "wide-metrics".into(),
+            },
+            sampled_at: std::time::Instant::now(),
+        });
+        assert_eq!(
+            minimum_required_status_width(&app) as u16,
+            required,
+            "live samples must not move the desktop/mobile breakpoint"
+        );
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required - 1, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Mobile);
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, required, 5),
+        );
+        assert_eq!(app.view.layout, crate::app::state::ViewLayout::Desktop);
+        let mut terminal = Terminal::new(TestBackend::new(required, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, required, 1)))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("CPU 100%"), "{rendered}");
+        assert!(rendered.contains("MEM 9999.9/9999.9 GiB"), "{rendered}");
+        assert!(
+            rendered.starts_with(' '),
+            "left side must stay blank: {rendered:?}"
+        );
     }
 
     fn assert_long_context_fits_status_row(cwd: &str, branch: &str) {
@@ -640,6 +646,8 @@ mod tests {
 
         const WIDTH: usize = crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD as usize;
         let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from(cwd));
         app.status_git_cwd = app.status_focused_cwd.clone();
         app.status_git_branch = Some(branch.into());
@@ -659,8 +667,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
-        assert!(rendered.contains("CPU 12%"), "{rendered}");
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
+        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(!rendered.contains("Herdr v"), "{rendered}");
     }
 
     #[test]
@@ -701,7 +710,7 @@ mod tests {
         app.status_git_cwd = Some(PathBuf::from("/repo/nested"));
         app.status_git_branch = Some("nested-branch".into());
 
-        let (_, _, _, cwd, branch) = focused_identity(&app);
+        let (cwd, branch) = focused_context(&app);
 
         assert_eq!(cwd, Some(PathBuf::from("/repo/nested")));
         assert_eq!(branch.as_deref(), Some("nested-branch"));
@@ -744,7 +753,7 @@ mod tests {
 
         assert!(app.focus_pane_in_workspace(0, nested));
         assert!(app.sync_status_focused_cwd(&runtimes));
-        let (_, _, _, cwd, branch) = focused_identity(&app);
+        let (cwd, branch) = focused_context(&app);
 
         assert_eq!(app.status_focused_cwd, Some(nested_cwd.clone()));
         assert_eq!(cwd, Some(nested_cwd));
@@ -761,7 +770,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
 
-        let (_, _, _, cwd, branch) = focused_identity(&app);
+        let (cwd, branch) = focused_context(&app);
 
         assert_eq!(cwd, Some(PathBuf::from("/repo")));
         assert_eq!(branch.as_deref(), Some("workspace-root"));
@@ -776,8 +785,41 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("MEM --/-- GiB"));
-        assert!(rendered.contains("CPU --%"));
+        assert!(rendered.contains("MEM     --/    -- GiB"));
+        assert!(rendered.contains("CPU  --%"));
+    }
+
+    #[test]
+    fn status_metrics_outside_bounded_display_contract_use_fallbacks() {
+        let app = AppState::test_new();
+        let baseline = status_segments(
+            &app,
+            &StatusMetrics {
+                cpu_percent: Some(12),
+                mem_used_gib: Some(8.0),
+                mem_total_gib: Some(16.0),
+                hostname: "testhost".into(),
+            },
+            &app.palette,
+        );
+        let metrics = StatusMetrics {
+            cpu_percent: Some(101),
+            mem_used_gib: Some(10_000.0),
+            mem_total_gib: Some(10_000.0),
+            hostname: "testhost".into(),
+        };
+        let rendered = status_segments(&app, &metrics, &app.palette)
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("CPU  --%"), "{rendered}");
+        assert!(rendered.contains("MEM     --/    -- GiB"), "{rendered}");
+        let fallback = status_segments(&app, &metrics, &app.palette);
+        assert_eq!(
+            segment_width(&baseline),
+            segment_width(&fallback),
+            "metric values and fallbacks must not shift or re-elide the row"
+        );
     }
 
     #[test]
@@ -800,32 +842,37 @@ mod tests {
     }
 
     #[test]
-    fn status_elision_drops_folder_branch_then_device() {
+    fn status_elision_drops_branch_then_device() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
         app.status_focused_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_git_cwd = app.status_focused_cwd.clone();
-        app.status_git_branch = Some("feat/status".into());
-        app.status_home_dir = Some(PathBuf::from("/home/test"));
+        app.status_git_branch = Some("feature/native-status".into());
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let full = status_segments(&app, &metrics, &app.palette);
 
-        let folder_width = display_width(&full[0].text);
-        let without_folder = fitted_segments(
-            status_segments(&app, &metrics, &app.palette),
-            segment_width(&full) - folder_width,
+        assert_eq!(
+            full.iter()
+                .filter_map(|segment| segment.elide_rank)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
-        let rendered = without_folder
+
+        let without_branch = fitted_segments(
+            status_segments(&app, &metrics, &app.palette),
+            segment_width(&full) - display_width(&full[0].text),
+        );
+        let rendered = without_branch
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(!rendered.contains("~/work/status"), "{rendered}");
-        assert!(rendered.contains("feat/status"), "{rendered}");
+        assert!(!rendered.contains("feature/native-stat"), "{rendered}");
         assert!(rendered.contains("testhost"), "{rendered}");
 
-        let optional_width = full[..3]
+        let optional_width = full
             .iter()
+            .filter(|segment| segment.elide_rank.is_some())
             .map(|segment| display_width(&segment.text))
             .sum::<usize>();
         let required = fitted_segments(
@@ -836,40 +883,39 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(!rendered.contains("~/work/status"), "{rendered}");
-        assert!(!rendered.contains("feat/status"), "{rendered}");
+        assert!(!rendered.contains("feature/native-status"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
-        assert!(rendered.contains("CPU 12%"), "{rendered}");
-        assert!(rendered.contains("MEM 8.0/16.0 GiB"), "{rendered}");
+        assert!(!rendered.contains("Herdr v"), "{rendered}");
+        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
     }
 
     #[test]
-    fn status_content_order_theme_and_removed_segments_match_contract() {
+    fn status_content_order_theme_and_omitted_segments_match_contract() {
         let mut app = AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("status");
         workspace.identity_cwd = PathBuf::from("/home/test/work/status");
-        workspace.cached_git_branch = Some("feat/status".into());
+        workspace.cached_git_branch = Some("feature/native-status".into());
         workspace.test_add_tab(Some("logs"));
         workspace.switch_tab(1);
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_focused_cwd = app.status_git_cwd.clone();
-        app.status_git_branch = Some("feat/status".into());
-        app.status_home_dir = Some(PathBuf::from("/home/test"));
+        app.status_git_branch = Some("feature/native-status".into());
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let segments = status_segments(&app, &metrics, &app.palette);
+        assert_eq!(segments.len(), 4, "all visible status context fields");
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         let ordered = [
-            "~/work/status",
-            "feat/status",
+            "feature/native-stat",
             "testhost",
-            "CPU 12%",
-            "MEM 8.0/16.0 GiB",
+            "CPU  12%",
+            "MEM    8.0/  16.0 GiB",
         ];
         let mut previous = 0;
         for value in ordered {
@@ -887,6 +933,10 @@ mod tests {
             "↓",
             "↑",
             "session:",
+            "workspace:",
+            "tab:",
+            "pane:",
+            "~/work/status",
             "Herdr v",
             "88%",
             "2026-01-02",
@@ -897,16 +947,7 @@ mod tests {
         assert_eq!(
             segments
                 .iter()
-                .find(|segment| segment.text.contains("~/work/status"))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.mauve)
-        );
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains("feat/status"))
+                .find(|segment| segment.text.contains("feature/native-stat"))
                 .unwrap()
                 .style
                 .fg,

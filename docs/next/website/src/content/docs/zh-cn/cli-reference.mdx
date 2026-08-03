@@ -156,6 +156,15 @@ herdr tab close <tab_id>
 
 创建工作区、标签页和拆分窗格默认不改变焦点。`--focus` 选择新布局;`--no-focus` 显式表达默认行为。不指定 `--cwd` 时,新终端遵循 `terminal.new_cwd` 设置,默认跟随来源窗格或工作区。每个 `--env KEY=VALUE` 在新的根 shell 中添加或替换一个环境变量。
 
+## 窗口
+
+```bash
+herdr window next
+herdr window previous
+```
+
+在全局导航中,窗口就是标签页。这些命令按规范的工作区、标签页顺序聚焦所有工作区中的下一个或上一个标签页,包括没有智能体的标签页,并在两端循环。
+
 ## 窗格
 
 ```bash
@@ -170,10 +179,10 @@ herdr pane focus --direction left|right|up|down [--pane ID|--current]
 herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
-herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
-herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
+herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
 herdr pane close <pane_id>
@@ -291,7 +300,7 @@ start 只有在预期智能体占用同一终端并可接受交互输入后才�
 
 `agent prompt` 遵循当前的 bracketed paste 模式，即使智能体处于 working 也会原子地提交文本和编码后的 Enter。使用 `--wait` 时，从非 working 状态发送的提示必须在五秒内产生可观察的生命周期变化，否则 Herdr 返回 `agent_prompt_stalled`；调用方超时不超过五秒时，仍返回普通的 `timeout` 错误。观察到活动后，它会等待请求的稳定状态。它不会跟踪单独的轮次。如果智能体已经处于 working，当前轮次的完成可能满足等待。`--until` 用于缩小匹配状态，不带 `--wait` 时会被拒绝。独立的 `agent wait` 在当前状态匹配时立即返回。两者默认匹配 `idle`、`done` 或 `blocked`；需要 `unknown` 时请明确使用 `--until unknown`。
 
-`idle` 表示智能体在等待输入,且其标签页已在聚焦的 Herdr 界面中显示。`done` 是相同的底层 idle 状态,用于未查看的后台工作完成后。聚焦该标签页或用 `pane focus` / `agent focus` 指向它会标记为已查看;仅通过 CLI 读取不会改变它。`blocked` 表示 Herdr 识别到审批或提问界面。`unknown` 表示智能体存在但无法可靠分类,不代表工作成功。
+`idle` 表示智能体在等待输入,且其窗格已在聚焦的 Herdr 界面中打开。`done` 是相同的底层 idle 状态,用于未查看的后台工作完成后。打开该智能体的窗格或用 `pane focus` / `agent focus` 指向它会标记为已查看;在同一标签页中打开其他窗格或仅通过 CLI 读取都不会改变它。`blocked` 表示 Herdr 识别到审批或提问界面。`unknown` 表示智能体存在但无法可靠分类,不代表工作成功。
 
 `agent send-keys` 发送 `enter`、`up`、`esc`、`ctrl+c` 等逻辑按键。Herdr 会在写入任何字节前验证所有按键。`agent read` 读取解析出的终端流,`agent rename` 为已检测到的智能体命名。
 
@@ -409,7 +418,7 @@ herdr plugin log list [--plugin ID] [--limit N]
 托管终端窗格:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction left|right|up|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```

@@ -95,9 +95,17 @@ previous_tab = ["prefix+p", "ctrl+alt+["]
 next_tab = ["prefix+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
+next_window = "prefix+shift+n" # optional, cycles tabs across spaces
+previous_window = "prefix+shift+p" # optional, cycles tabs across spaces
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
 ```
+
+The four split directions have collision-free defaults: `prefix+v` is right, `prefix+shift+v` is left, `prefix+minus` is down, and `prefix+shift+minus` is up. The legacy `split_vertical` and `split_horizontal` names remain right and down. `next_window` and `previous_window` remain optional; they cycle every tab in canonical workspace/tab order, including tabs without agents.
+
+The same global cycle is available without a keybinding: `herdr window next` and `herdr window previous`. Both use the existing tab list/focus API and wrap at either end.
 
 A few `ctrl+alt` chords are taken elsewhere. Avoid these:
 

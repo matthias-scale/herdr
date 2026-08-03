@@ -156,6 +156,15 @@ herdr tab close <tab_id>
 
 ワークスペースとタブの作成、およびペインの分割は、デフォルトではフォーカスを変えません。`--focus` は新しいレイアウトを選択し、`--no-focus` はデフォルトを明示します。`--cwd` がない場合、新しいターミナルは `terminal.new_cwd` の設定に従い、デフォルトでは元のペインまたはワークスペースを引き継ぎます。各 `--env KEY=VALUE` は新しいルートシェルの環境変数を追加または置換します。
 
+## ウィンドウ
+
+```bash
+herdr window next
+herdr window previous
+```
+
+グローバルナビゲーションでは、ウィンドウはタブを表します。これらのコマンドは、エージェントのないタブも含め、すべてのワークスペースのタブを正規のワークスペース・タブ順で前後にフォーカスし、両端でラップします。
+
 ## ペイン
 
 ```bash
@@ -170,10 +179,10 @@ herdr pane focus --direction left|right|up|down [--pane ID|--current]
 herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
-herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
-herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
+herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
 herdr pane close <pane_id>
@@ -291,7 +300,7 @@ start は、期待したエージェントが同じターミナルを所有し�
 
 `agent prompt` は現在の bracketed paste モードを尊重し、working 中でもテキストとエンコード済み Enter をアトミックに送信します。`--wait` を使う場合、non-working 状態から送信したプロンプトは 5 秒以内に観測可能なライフサイクル変化を起こす必要があり、変化がなければ Herdr は `agent_prompt_stalled` を返します。呼び出し側のタイムアウトが 5 秒以下なら、通常の `timeout` エラーを維持します。活動を観測した後、要求された安定状態を待ちます。個々のターンは追跡しません。すでに working の場合、進行中ターンの完了が待機を満たすことがあります。`--until` は一致状態を絞り込み、`--wait` なしでは拒否されます。単独の `agent wait` は現在の状態が一致すれば即座に返ります。どちらもデフォルトは `idle`、`done`、`blocked` です。
 
-`idle` は入力待ちで、そのタブがフォーカス中の Herdr UI ですでに表示済みの状態です。`done` は同じ基礎的な idle 状態ですが、表示していないバックグラウンド作業が完了したときに使われます。そのタブをフォーカスするか `pane focus` / `agent focus` で対象にすると表示済みになりますが、CLI で読み取るだけでは変わりません。`blocked` は承認または質問 UI を Herdr が認識した状態です。`unknown` はエージェントが存在するものの確実に分類できない状態で、作業の成功を意味しません。
+`idle` は入力待ちで、そのペインがフォーカス中の Herdr UI ですでに開かれた状態です。`done` は同じ基礎的な idle 状態ですが、表示していないバックグラウンド作業が完了したときに使われます。そのエージェントのペインを開くか `pane focus` / `agent focus` で対象にすると表示済みになりますが、同じタブ内の別のペインを開いたり、CLI で読み取ったりするだけでは変わりません。`blocked` は承認または質問 UI を Herdr が認識した状態です。`unknown` はエージェントが存在するものの確実に分類できない状態で、作業の成功を意味しません。
 
 `agent send-keys` は `enter`、`up`、`esc`、`ctrl+c` などの論理キーを送ります。Herdr は 1 バイトも書き込む前に全キーを検証します。`agent read` は解決されたターミナルストリームを読み、`agent rename` は検出済みエージェントに名前を付けます。
 
@@ -409,7 +418,7 @@ herdr plugin log list [--plugin ID] [--limit N]
 管理されたターミナルペイン:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction left|right|up|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```

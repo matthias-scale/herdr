@@ -2,15 +2,23 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=7
+# HERDR_INTEGRATION_VERSION=8
 
 param([string]$Action = "")
 
-if ($Action -ne "session") { exit 0 }
+if ($Action -ne "session" -and $Action -ne "title") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
 $inputText = [Console]::In.ReadToEnd()
+if ($Action -eq "title") {
+    try {
+        $herdrBin = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+        $inputText | & $herdrBin agent turn-title --provider claude 2>$null | Out-Null
+    } catch {
+    }
+    exit 0
+}
 try {
     $payload = if ([string]::IsNullOrWhiteSpace($inputText)) { $null } else { $inputText | ConvertFrom-Json }
 } catch {

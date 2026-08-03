@@ -16,6 +16,78 @@ fn run_codex_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
     )
 }
 
+fn run_turn_title_cli(
+    provider: &str,
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Vec<serde_json::Value> {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] == "ping" {
+                write_fake_pong(
+                    &mut stream,
+                    &request,
+                    "fixture-compatible",
+                    CURRENT_PROTOCOL,
+                );
+            } else {
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({"id": request["id"], "result": {"type": "ok"}})
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+            requests.push(request);
+        }
+        requests
+    });
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(["agent", "turn-title", "--provider", provider])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PANE_ID", "p_fixture")
+        .env_remove("CODEX_THREAD_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(hook_input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "turn-title failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+
+    let requests = server.join().unwrap();
+    cleanup_test_base(&base);
+    requests
+}
+
 fn run_copilot_hook(hook_input: &str) -> Option<serde_json::Value> {
     run_shell_hook(
         "src/integration/assets/copilot/herdr-agent-state.sh",
@@ -187,6 +259,46 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
         &[("CODEX_THREAD_ID", "parent-session")],
     )
     .is_none());
+}
+
+#[test]
+fn claude_and_codex_turn_title_fixtures_reach_guarded_metadata() {
+    for (provider, fixture, expected_session, expected_source, expected_title, envs) in [
+        (
+            "claude",
+            include_str!("../fixtures/work-titles/claude-user-prompt-submit.json"),
+            "fixture-claude-session",
+            "herdr:claude",
+            "Review Auth Migration Safety",
+            Vec::new(),
+        ),
+        (
+            "codex",
+            include_str!("../fixtures/work-titles/codex-user-prompt-submit.json"),
+            "fixture-codex-session",
+            "herdr:codex",
+            "Fix Billing Retry Regression",
+            vec![("CODEX_THREAD_ID", "fixture-codex-session")],
+        ),
+        (
+            "codex",
+            include_str!("../fixtures/work-titles/codex-short-user-prompt-submit.json"),
+            "fixture-codex-short-session",
+            "herdr:codex",
+            "Write Poem",
+            vec![("CODEX_THREAD_ID", "fixture-codex-short-session")],
+        ),
+    ] {
+        let requests = run_turn_title_cli(provider, fixture, &envs);
+        assert_eq!(requests[0]["method"], "ping");
+        assert_eq!(requests[1]["method"], "pane.report_agent_session");
+        assert_eq!(requests[1]["params"]["agent_session_id"], expected_session);
+        assert_eq!(requests[2]["method"], "pane.report_metadata");
+        assert_eq!(requests[2]["params"]["agent_session_id"], expected_session);
+        assert_eq!(requests[2]["params"]["applies_to_source"], expected_source);
+        assert_eq!(requests[2]["params"]["title"], expected_title);
+        assert_eq!(requests[1]["params"]["seq"], requests[2]["params"]["seq"]);
+    }
 }
 
 #[test]

@@ -382,6 +382,10 @@ pub struct KeysConfig {
     pub previous_tab: BindingConfig,
     /// Select the next tab. Default: "prefix+n".
     pub next_tab: BindingConfig,
+    /// Focus the previous window (tab) across all spaces. Unset by default.
+    pub previous_window: BindingConfig,
+    /// Focus the next window (tab) across all spaces. Unset by default.
+    pub next_window: BindingConfig,
     /// Switch to tab 1-9. Default: "prefix+1..9".
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
@@ -420,6 +424,10 @@ pub struct KeysConfig {
     pub split_vertical: BindingConfig,
     /// Split pane horizontally (stacked). Default: "prefix+minus"
     pub split_horizontal: BindingConfig,
+    /// Split pane to the left. Default: "prefix+shift+v".
+    pub split_left: BindingConfig,
+    /// Split pane upward. Default: "prefix+shift+minus".
+    pub split_up: BindingConfig,
     /// Close the focused pane. Default: "prefix+x"
     pub close_pane: BindingConfig,
     /// Toggle zoom for the focused pane. Default: "prefix+z"
@@ -502,6 +510,10 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    previous_window: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_window: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     switch_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     switch_workspace: Option<BindingConfig>,
@@ -539,6 +551,10 @@ pub(crate) struct KeysConfigOverlay {
     split_vertical: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     split_horizontal: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split_left: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split_up: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     close_pane: Option<BindingConfig>,
     #[serde(alias = "fullscreen", skip_serializing_if = "Option::is_none")]
@@ -600,6 +616,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(rename_tab);
         apply_field!(previous_tab);
         apply_field!(next_tab);
+        apply_field!(previous_window);
+        apply_field!(next_window);
         apply_field!(switch_tab);
         apply_field!(switch_workspace);
         apply_field!(close_tab);
@@ -619,6 +637,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(last_pane);
         apply_field!(split_vertical);
         apply_field!(split_horizontal);
+        apply_field!(split_left);
+        apply_field!(split_up);
         apply_field!(close_pane);
         apply_field!(zoom);
         apply_field!(resize_mode);
@@ -698,6 +718,8 @@ impl KeysConfig {
         copy_effective_action_field!(rename_tab, keybinds.rename_tab);
         copy_effective_action_field!(previous_tab, keybinds.previous_tab);
         copy_effective_action_field!(next_tab, keybinds.next_tab);
+        copy_effective_action_field!(previous_window, keybinds.previous_window);
+        copy_effective_action_field!(next_window, keybinds.next_window);
         copy_effective_indexed_field!(switch_tab, keybinds.switch_tab);
         copy_effective_indexed_field!(switch_workspace, keybinds.switch_workspace);
         copy_effective_action_field!(close_tab, keybinds.close_tab);
@@ -717,6 +739,8 @@ impl KeysConfig {
         copy_effective_action_field!(last_pane, keybinds.last_pane);
         copy_effective_action_field!(split_vertical, keybinds.split_vertical);
         copy_effective_action_field!(split_horizontal, keybinds.split_horizontal);
+        copy_effective_action_field!(split_left, keybinds.split_left);
+        copy_effective_action_field!(split_up, keybinds.split_up);
         copy_effective_action_field!(close_pane, keybinds.close_pane);
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
@@ -827,7 +851,8 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Full-width top status row.
     pub status_bar: StatusBarConfig,
-    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
+    /// Legacy indexed-Agent projection ordering. The visible sidebar remains canonical.
+    /// Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,
@@ -969,6 +994,8 @@ impl Default for KeysConfig {
             rename_tab: BindingConfig::one("prefix+shift+t"),
             previous_tab: BindingConfig::one("prefix+p"),
             next_tab: BindingConfig::one("prefix+n"),
+            previous_window: BindingConfig::empty(),
+            next_window: BindingConfig::empty(),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
@@ -988,6 +1015,8 @@ impl Default for KeysConfig {
             last_pane: BindingConfig::empty(),
             split_vertical: BindingConfig::one("prefix+v"),
             split_horizontal: BindingConfig::one("prefix+minus"),
+            split_left: BindingConfig::one("prefix+shift+v"),
+            split_up: BindingConfig::one("prefix+shift+minus"),
             close_pane: BindingConfig::one("prefix+x"),
             zoom: BindingConfig::one("prefix+z"),
             resize_mode: BindingConfig::one("prefix+r"),
@@ -1127,6 +1156,27 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn four_way_split_defaults_are_collision_safe_and_legacy_names_keep_edges() {
+        let keys = Config::default().keys;
+        assert_eq!(keys.split_vertical, BindingConfig::one("prefix+v"));
+        assert_eq!(keys.split_left, BindingConfig::one("prefix+shift+v"));
+        assert_eq!(keys.split_horizontal, BindingConfig::one("prefix+minus"));
+        assert_eq!(keys.split_up, BindingConfig::one("prefix+shift+minus"));
+        let all = [
+            "prefix+v",
+            "prefix+shift+v",
+            "prefix+minus",
+            "prefix+shift+minus",
+        ];
+        assert_eq!(
+            all.into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+    }
 
     #[test]
     fn update_config_defaults_and_parses() {

@@ -54,6 +54,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
     io::stdout().flush()
 }
 
+mod activity_age;
 mod agent_resume;
 mod api;
 mod app;
@@ -99,6 +100,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod work_title;
 mod workspace;
 mod worktree;
 

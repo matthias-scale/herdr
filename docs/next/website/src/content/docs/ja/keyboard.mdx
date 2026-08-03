@@ -95,9 +95,17 @@ previous_tab = ["prefix+p", "ctrl+alt+["]
 next_tab = ["prefix+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
+next_window = "prefix+shift+n" # 任意。Space をまたいでタブを循環
+previous_window = "prefix+shift+p" # 任意。Space をまたいでタブを循環
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
 ```
+
+4 方向の分割には衝突しないデフォルトがあります。`prefix+v` は右、`prefix+shift+v` は左、`prefix+minus` は下、`prefix+shift+minus` は上です。従来の `split_vertical` と `split_horizontal` は引き続き右と下を表します。`next_window` と `previous_window` は任意で、エージェントのないタブも含め、正規のワークスペース・タブ順ですべてのタブを循環します。
+
+キーバインドなしでも、`herdr window next` と `herdr window previous` で同じグローバル循環を使えます。どちらも両端でラップします。
 
 いくつかの `ctrl+alt` コードは他で使われています。これらは避けてください:
 

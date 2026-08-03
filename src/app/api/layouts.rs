@@ -293,13 +293,16 @@ impl App {
             }),
             Node::Split {
                 direction,
+                leading,
                 ratio,
                 first,
                 second,
             } => Some(LayoutNode::Split {
-                direction: match direction {
-                    Direction::Horizontal => SplitDirection::Right,
-                    Direction::Vertical => SplitDirection::Down,
+                direction: match (direction, leading) {
+                    (Direction::Horizontal, false) => SplitDirection::Right,
+                    (Direction::Horizontal, true) => SplitDirection::Left,
+                    (Direction::Vertical, false) => SplitDirection::Down,
+                    (Direction::Vertical, true) => SplitDirection::Up,
                 },
                 ratio: *ratio,
                 first: Box::new(self.layout_node_description(ws_idx, tab_idx, first)?),
@@ -371,16 +374,17 @@ impl App {
                 first,
                 second,
             } => {
-                let second_leaf = first_layout_leaf(second);
-                let new_pane = self.layout_split_pane(
-                    ws_idx,
-                    pane_id,
-                    direction.clone(),
-                    *ratio,
-                    second_leaf,
-                )?;
-                self.apply_layout_node_to_pane(ws_idx, pane_id, first)?;
-                self.apply_layout_node_to_pane(ws_idx, new_pane, second)
+                let leading = matches!(direction, SplitDirection::Left | SplitDirection::Up);
+                let new_leaf = first_layout_leaf(if leading { first } else { second });
+                let new_pane =
+                    self.layout_split_pane(ws_idx, pane_id, direction.clone(), *ratio, new_leaf)?;
+                if leading {
+                    self.apply_layout_node_to_pane(ws_idx, new_pane, first)?;
+                    self.apply_layout_node_to_pane(ws_idx, pane_id, second)
+                } else {
+                    self.apply_layout_node_to_pane(ws_idx, pane_id, first)?;
+                    self.apply_layout_node_to_pane(ws_idx, new_pane, second)
+                }
             }
         }
     }
@@ -404,9 +408,10 @@ impl App {
             .or_else(|| self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id));
         let extra_env = super::env::normalize_launch_env(pane.env.clone())
             .map_err(|(_, message)| message.to_string())?;
+        let before = matches!(direction, SplitDirection::Left | SplitDirection::Up);
         let direction = match direction {
-            SplitDirection::Right => Direction::Horizontal,
-            SplitDirection::Down => Direction::Vertical,
+            SplitDirection::Left | SplitDirection::Right => Direction::Horizontal,
+            SplitDirection::Up | SplitDirection::Down => Direction::Vertical,
         };
         let command = layout_command(pane)?;
         let result = {
@@ -414,10 +419,11 @@ impl App {
                 return Err("workspace not found".into());
             };
             if let Some(argv) = command.as_deref() {
-                ws.split_pane_argv_command_with_ratio(
+                ws.split_pane_argv_command_with_ratio_and_placement(
                     target_pane_id,
                     direction,
                     ratio,
+                    before,
                     rows,
                     cols,
                     cwd,
@@ -428,10 +434,11 @@ impl App {
                     false,
                 )
             } else {
-                ws.split_pane_with_ratio(
+                ws.split_pane_with_ratio_and_placement(
                     target_pane_id,
                     direction,
                     ratio,
+                    before,
                     rows,
                     cols,
                     cwd,
@@ -791,6 +798,88 @@ mod tests {
                 if layout.tab_id == app.public_tab_id(0, 0).unwrap()
                     && layout.panes.len() == 2
         ));
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn layout_apply_restores_nested_leading_splits_in_order() {
+        let mut app = app_with_workspace();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let requested = LayoutNode::Split {
+            direction: SplitDirection::Left,
+            ratio: 0.4,
+            first: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Up,
+                ratio: 0.3,
+                first: Box::new(LayoutNode::Pane {
+                    pane: LayoutPane {
+                        label: Some("above".into()),
+                        ..Default::default()
+                    },
+                }),
+                second: Box::new(LayoutNode::Pane {
+                    pane: LayoutPane {
+                        label: Some("below".into()),
+                        ..Default::default()
+                    },
+                }),
+            }),
+            second: Box::new(LayoutNode::Pane {
+                pane: LayoutPane {
+                    label: Some("right".into()),
+                    ..Default::default()
+                },
+            }),
+        };
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: Some(tab_id),
+                tab_label: None,
+                focus: true,
+                root: requested.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutApply { layout } = success.result else {
+            panic!("expected layout apply response");
+        };
+        let LayoutNode::Split {
+            direction: SplitDirection::Left,
+            ratio,
+            first,
+            second,
+        } = layout.root
+        else {
+            panic!("expected leading horizontal root split");
+        };
+        assert!((ratio - 0.4).abs() < f32::EPSILON);
+        let LayoutNode::Split {
+            direction: SplitDirection::Up,
+            ratio,
+            first: above,
+            second: below,
+        } = *first
+        else {
+            panic!("expected leading vertical first child");
+        };
+        assert!((ratio - 0.3).abs() < f32::EPSILON);
+        let LayoutNode::Pane { pane: above } = *above else {
+            panic!("expected above pane");
+        };
+        let LayoutNode::Pane { pane: below } = *below else {
+            panic!("expected below pane");
+        };
+        let LayoutNode::Pane { pane: right } = *second else {
+            panic!("expected right pane");
+        };
+        assert_eq!(above.label.as_deref(), Some("above"));
+        assert_eq!(below.label.as_deref(), Some("below"));
+        assert_eq!(right.label.as_deref(), Some("right"));
+        assert!(!layout.focused_pane_id.is_empty());
         shutdown_test_runtimes(&mut app);
     }
 

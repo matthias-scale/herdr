@@ -1024,7 +1024,9 @@
         },
         "SplitDirection": {
           "enum": [
+            "left",
             "right",
+            "up",
             "down"
           ],
           "type": "string"
@@ -2866,6 +2868,12 @@
                 "null"
               ]
             },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "applies_to_source": {
               "type": [
                 "string",
@@ -3628,7 +3636,9 @@
         },
         "SplitDirection": {
           "enum": [
+            "left",
             "right",
+            "up",
             "down"
           ],
           "type": "string"
@@ -9741,7 +9751,9 @@
         },
         "SplitDirection": {
           "enum": [
+            "left",
             "right",
+            "up",
             "down"
           ],
           "type": "string"

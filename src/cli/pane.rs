@@ -606,7 +606,7 @@ fn parse_pane_split_args(
 
     let Some(direction) = direction else {
         return Err(
-            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
+            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
                 .into(),
         );
     };
@@ -791,7 +791,7 @@ fn parse_pane_move_args(args: &[String]) -> Result<PaneMoveParams, String> {
 }
 
 fn pane_move_usage() -> String {
-    "usage: herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]"
+    "usage: herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]"
         .into()
 }
 
@@ -864,10 +864,12 @@ fn parse_pane_swap_args(args: &[String]) -> Result<PaneSwapParams, String> {
 
 fn parse_split_direction(value: &str) -> Result<SplitDirection, String> {
     match value {
+        "left" => Ok(SplitDirection::Left),
         "right" => Ok(SplitDirection::Right),
+        "up" => Ok(SplitDirection::Up),
         "down" => Ok(SplitDirection::Down),
         _ => Err(format!(
-            "invalid split direction: {value} (expected right or down)"
+            "invalid split direction: {value} (expected left, right, up, or down)"
         )),
     }
 }
@@ -1293,7 +1295,7 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
 
 fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+        eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--agent-session-id ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
         return Ok(2);
     };
 
@@ -1301,6 +1303,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let mut source = None;
     let mut agent = None;
     let mut applies_to_source = None;
+    let mut agent_session_id = None;
     let mut title = None;
     let mut display_agent = None;
     let mut state_labels = std::collections::HashMap::new();
@@ -1336,6 +1339,14 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
                     return Ok(2);
                 };
                 applies_to_source = Some(value.clone());
+                index += 2;
+            }
+            "--agent-session-id" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --agent-session-id");
+                    return Ok(2);
+                };
+                agent_session_id = Some(value.clone());
                 index += 2;
             }
             "--title" => {
@@ -1470,6 +1481,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         source,
         agent,
         applies_to_source,
+        agent_session_id,
         title,
         display_agent,
         state_labels,
@@ -1536,6 +1548,19 @@ mod tests {
         assert_eq!(params.target_pane_id, Some("issue-1".into()));
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
         assert_eq!(params.ratio, Some(0.333));
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_all_physical_directions() {
+        for (raw, expected) in [
+            ("left", crate::api::schema::SplitDirection::Left),
+            ("right", crate::api::schema::SplitDirection::Right),
+            ("up", crate::api::schema::SplitDirection::Up),
+            ("down", crate::api::schema::SplitDirection::Down),
+        ] {
+            let params = parse_pane_split_args(&args(&["--direction", raw]), None).unwrap();
+            assert_eq!(params.direction, expected);
+        }
     }
 
     #[test]

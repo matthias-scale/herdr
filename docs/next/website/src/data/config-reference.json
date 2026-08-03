@@ -341,13 +341,13 @@
           "key": "keys.previous_agent",
           "type": "keybinding",
           "default": "unset",
-          "description": "Focus the previous agent shown in the agent panel. Unset by default."
+          "description": "Focus the previous detected agent in canonical workspace, tab, and pane order, wrapping at both ends and ignoring sidebar ordering, filtering, and disclosure. Unset by default."
         },
         {
           "key": "keys.next_agent",
           "type": "keybinding",
           "default": "unset",
-          "description": "Focus the next agent shown in the agent panel. Unset by default."
+          "description": "Focus the next detected agent in canonical workspace, tab, and pane order, wrapping at both ends and ignoring sidebar ordering, filtering, and disclosure. Unset by default."
         },
         {
           "key": "keys.focus_agent",
@@ -488,6 +488,18 @@
           "description": "Focus the last focused pane across workspaces and tabs. Unset by default."
         },
         {
+          "key": "keys.previous_window",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Focus the previous tab across all workspaces in canonical order. Unset by default."
+        },
+        {
+          "key": "keys.next_window",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Focus the next tab across all workspaces in canonical order. Unset by default."
+        },
+        {
           "key": "keys.split_vertical",
           "type": "keybinding",
           "default": "\"prefix+v\"",
@@ -498,6 +510,18 @@
           "type": "keybinding",
           "default": "\"prefix+minus\"",
           "description": "Split pane horizontally (stacked)."
+        },
+        {
+          "key": "keys.split_left",
+          "type": "keybinding",
+          "default": "\"prefix+shift+v\"",
+          "description": "Split the focused pane and place the new pane to its left."
+        },
+        {
+          "key": "keys.split_up",
+          "type": "keybinding",
+          "default": "\"prefix+shift+minus\"",
+          "description": "Split the focused pane and place the new pane above it."
         },
         {
           "key": "keys.close_pane",
@@ -680,7 +704,7 @@
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
-          "description": "Agent sidebar ordering. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
+          "description": "Legacy indexed-Agent projection ordering. The visible sidebar remains in canonical workspace, tab, and pane order. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
           "values": [
             "spaces",
             "priority"
@@ -695,7 +719,7 @@
         {
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
-          "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
+          "default": "[[\"state_icon\", \"pane\", \"state_text\"]]",
           "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {
@@ -713,7 +737,7 @@
         {
           "key": "ui.sidebar.spaces.rows",
           "type": "list of token rows",
-          "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
+          "default": "[[\"state_icon\", \"workspace\"]]",
           "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {

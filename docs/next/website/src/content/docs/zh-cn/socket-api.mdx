@@ -172,7 +172,7 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 {"id":"req_export","method":"layout.export","params":{"tab_id":"w1:t1"}}
 ```
 
-响应包含 `workspace_id`、`tab_id`、`zoomed`、`focused_pane_id` 和 `root`。`root` 是由 `pane` 和 `split` 节点组成的 BSP 树。窗格节点可以包含 `pane_id`、`label`、`cwd` 和 argv `command`。分割节点使用 `direction` (`right` 或 `down`)、`ratio`、`first` 和 `second`。
+响应包含 `workspace_id`、`tab_id`、`zoomed`、`focused_pane_id` 和 `root`。`root` 是由 `pane` 和 `split` 节点组成的 BSP 树。窗格节点可以包含 `pane_id`、`label`、`cwd` 和 argv `command`。分割节点使用 `direction` (`left`、`right`、`up` 或 `down`)、`ratio`、`first` 和 `second`。
 
 `layout.apply` 从声明式的树创建一个新标签页。提供 `tab_id` 时,Herdr 先创建替代标签页,再关闭旧标签页。它会恢复结构、标签、cwd、env 和可选的 argv 命令;不会保留活跃的 PTY、回滚内容或运行中的进程。
 
@@ -301,13 +301,14 @@ Worktree 命令也发出生命周期事件。`worktree.create` 发出 `workspace
 
 ## 智能体视图查询
 
-`agent.view.set` 为内置 Agents 视图设置一个临时的声明式投影。智能体信息或当前
-UI 上下文变化时,该投影会重新求值。它控制展开和折叠的侧边栏、移动端 Agents
-列表、鼠标目标、编号聚焦以及上一个/下一个智能体的导航顺序。它不会改变
-`agent.list`、通知、检测或全局待处理计数。
+`agent.view.set` 设置一个临时的声明式兼容投影。智能体信息或当前 UI 上下文变化时,
+该投影会重新求值,并控制编号 Agent 聚焦顺序。可见的桌面、折叠和移动侧边栏仍是
+规范的 Spaces → 标签页 → 窗格归属树;该投影不会过滤或重排其中的行或鼠标目标。
+配置的上一个/下一个智能体操作同样使用未过滤的工作区、标签页和窗格规范顺序。
+该投影不会改变 `agent.list`、通知、检测或全局待处理计数。
 
-下面的示例显示当前呈现的 Space 中的智能体,以及其他位置需要处理的智能体,
-然后按待处理优先级和最近状态转换排序:
+下面的示例定义一个编号聚焦投影,其中包含当前呈现的 Space 中的智能体以及其他位置
+需要处理的智能体,并按待处理优先级和最近状态转换排序:
 
 ```json
 {

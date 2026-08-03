@@ -323,12 +323,27 @@ impl AppState {
             workspace_id: ws.id.clone(),
             pane_id,
         };
+        if let Some(pane) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            .and_then(|tab| tab.panes.get_mut(&pane_id))
+        {
+            pane.seen = true;
+        }
         if previous.as_ref() == Some(&target) {
             return false;
         }
 
         if self.copy_mode.is_some() {
             self.clear_copy_mode_selection();
+        }
+        if let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        {
+            tab.layout.focus_pane(pane_id);
         }
         self.switch_workspace_tab(ws_idx, tab_idx);
         if let Some(tab) = self
@@ -1108,6 +1123,11 @@ impl AppState {
             .is_some_and(|tab_idx| tab_idx == self.workspaces[ws_idx].active_tab)
     }
 
+    pub(crate) fn pane_is_active(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        self.pane_is_in_active_tab(ws_idx, pane_id)
+            && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
+    }
+
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             let previous_focus = self.current_pane_focus_target();
@@ -1180,59 +1200,52 @@ impl AppState {
             return;
         }
 
-        let entries = crate::ui::workspace_list_entries(self);
-        let Some(target_entry_idx) = entries.iter().position(|entry| {
-            matches!(
-                entry,
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx
-            )
-        }) else {
+        self.ensure_workspace_visible_in_sidebar(idx, self.view.sidebar_rect);
+    }
+
+    pub(crate) fn ensure_workspace_visible_in_sidebar(
+        &mut self,
+        idx: usize,
+        sidebar_area: ratatui::layout::Rect,
+    ) {
+        // `workspace_scroll` indexes the unified sidebar row list, so the target
+        // must be resolved in that space and not in the workspace-only list.
+        let Some(target_row_idx) = crate::ui::sidebar_row_index_for_workspace(self, idx) else {
             return;
         };
 
-        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
-            self,
-            self.view.sidebar_rect,
-            self.workspace_scroll,
-        );
-        let mut cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-        if cards.iter().any(|card| card.ws_idx == idx) {
-            return;
-        }
-
-        if target_entry_idx < self.workspace_scroll {
-            self.workspace_scroll = target_entry_idx;
-            return;
-        }
-
-        while !cards.iter().any(|card| card.ws_idx == idx) {
-            let previous_scroll = self.workspace_scroll;
-            self.workspace_scroll = self.workspace_scroll.saturating_add(1);
-            if self.workspace_scroll == previous_scroll {
-                break;
-            }
-            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
-                self,
-                self.view.sidebar_rect,
-                self.workspace_scroll,
-            );
-            if self.workspace_scroll == previous_scroll {
-                break;
-            }
-            cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-            if cards.is_empty() {
-                break;
-            }
-        }
+        let scroll =
+            crate::ui::normalized_workspace_scroll(self, sidebar_area, self.workspace_scroll);
+        self.workspace_scroll =
+            crate::ui::sidebar_row_scroll_for_target(self, sidebar_area, scroll, target_row_idx);
     }
 
-    fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
+    /// Active workspace this attach has not scrolled into view yet, if any.
+    ///
+    /// Focus can change outside the per-client sidebar presentation swap — the
+    /// JSON API and CLI both route through server-global state — so each attach
+    /// resolves the reveal itself while its own presentation is swapped in.
+    pub(crate) fn take_pending_workspace_reveal(&mut self) -> Option<usize> {
+        let active_id = self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|workspace| workspace.id.clone());
+        if self.sidebar_presentation.revealed_workspace_id == active_id {
+            return None;
+        }
+        self.sidebar_presentation.revealed_workspace_id = active_id;
+        self.active
+    }
+
+    pub(crate) fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
         let viewport = crate::ui::mobile_switcher_areas(self).viewport;
         if viewport.height == 0 {
             return;
         }
 
-        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
+        let Some(row_range) = crate::ui::mobile_switcher_workspace_doc_range(self, idx) else {
+            return;
+        };
         let visible_start = self.mobile_switcher_scroll;
         let visible_end = visible_start.saturating_add(viewport.height as usize);
         if row_range.start < visible_start {
@@ -1264,26 +1277,31 @@ impl AppState {
         }
     }
 
-    pub(crate) fn mark_active_tab_seen(&mut self) -> bool {
+    pub(crate) fn mark_active_pane_seen(&mut self) -> bool {
         let Some(ws_idx) = self.active else {
             return false;
         };
-        let Some(tab) = self
+        let Some(pane_id) = self
             .workspaces
-            .get_mut(ws_idx)
-            .and_then(crate::workspace::Workspace::active_tab_mut)
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
         else {
             return false;
         };
-
-        let mut changed = false;
-        for pane in tab.panes.values_mut() {
-            if !pane.seen {
-                pane.seen = true;
-                changed = true;
-            }
+        let Some(pane) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(crate::workspace::Workspace::active_tab_mut)
+            .and_then(|tab| tab.panes.get_mut(&pane_id))
+        else {
+            return false;
+        };
+        if pane.seen {
+            false
+        } else {
+            pane.seen = true;
+            true
         }
-        changed
     }
 
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
@@ -1514,12 +1532,12 @@ impl AppState {
 
         if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
         {
-            self.ensure_agent_panel_entry_visible(idx);
+            self.ensure_agent_row_visible(ws_idx, pane_id);
             return true;
         }
 
         if self.focus_pane_in_workspace(ws_idx, pane_id) {
-            self.ensure_agent_panel_entry_visible(idx);
+            self.ensure_agent_row_visible(ws_idx, pane_id);
             return true;
         }
         false
@@ -1527,43 +1545,64 @@ impl AppState {
 
     #[cfg(test)]
     fn cycle_agent_entry(&mut self, forward: bool) {
-        let entries = crate::ui::agent_panel_entries(self);
-        if entries.is_empty() {
-            return;
+        if let Some((_idx, target)) = crate::ui::relative_agent_navigation_entry(self, forward) {
+            let (ws_idx, pane_id) = (target.ws_idx, target.pane_id);
+            self.focus_pane_in_workspace(ws_idx, pane_id);
+            self.ensure_agent_row_visible(ws_idx, pane_id);
         }
-
-        let focused = self
-            .active
-            .and_then(|idx| self.workspaces.get(idx))
-            .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id));
-        let target_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % entries.len(),
-            (Some(0), false) => entries.len() - 1,
-            (Some(idx), false) => idx - 1,
-            (None, true) => 0,
-            (None, false) => entries.len() - 1,
-        };
-
-        self.focus_agent_entry(target_idx);
     }
 
-    pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
+    /// Scroll the sidebar so the row representing `pane_id` is visible, falling
+    /// back to its workspace row when the projection renders no agent row.
+    pub(crate) fn ensure_agent_row_visible(&mut self, ws_idx: usize, pane_id: PaneId) {
+        if self.view.layout == ViewLayout::Mobile {
+            self.ensure_workspace_visible(ws_idx);
+            return;
+        }
         if self.sidebar_collapsed {
+            let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+            let target_row_idx = crate::ui::sidebar_rows(self)
+                .iter()
+                .position(|row| {
+                    matches!(
+                        row,
+                        crate::ui::SidebarRow::Agent { entry, .. }
+                            if entry.ws_idx == ws_idx && entry.pane_id == pane_id
+                    )
+                })
+                .or_else(|| crate::ui::sidebar_row_index_for_workspace(self, ws_idx));
+            if let Some(target_row_idx) = target_row_idx {
+                self.workspace_scroll = crate::ui::collapsed_sidebar_scroll_for_target(
+                    self,
+                    ws_area,
+                    self.workspace_scroll,
+                    target_row_idx,
+                );
+                let _ = self.take_pending_workspace_reveal();
+            }
             return;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
-        self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
-            self,
-            detail_area,
-            self.agent_panel_scroll,
-            idx,
-        );
+        let sidebar_area = self.view.sidebar_rect;
+        let target_row_idx = crate::ui::sidebar_rows(self)
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    crate::ui::SidebarRow::Agent { entry, .. }
+                        if entry.ws_idx == ws_idx && entry.pane_id == pane_id
+                )
+            })
+            .or_else(|| crate::ui::sidebar_row_index_for_workspace(self, ws_idx));
+        let Some(target_row_idx) = target_row_idx else {
+            return;
+        };
+
+        let scroll =
+            crate::ui::normalized_workspace_scroll(self, sidebar_area, self.workspace_scroll);
+        self.workspace_scroll =
+            crate::ui::sidebar_row_scroll_for_target(self, sidebar_area, scroll, target_row_idx);
+        let _ = self.take_pending_workspace_reveal();
     }
 
     pub(crate) fn terminal_ids_for_workspace(
@@ -1723,9 +1762,11 @@ impl AppState {
                 self.selected = self.workspaces.len() - 1;
             }
             self.active = Some(self.selected);
-            self.workspace_scroll = self
-                .workspace_scroll
-                .min(self.workspaces.len().saturating_sub(1));
+            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                self,
+                self.view.sidebar_rect,
+                self.workspace_scroll,
+            );
             self.ensure_workspace_visible(self.selected);
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -3127,7 +3168,7 @@ impl AppState {
         pane_id: PaneId,
         change: &EffectiveStateChange,
     ) -> Option<bool> {
-        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let is_active_tab = self.pane_is_active(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
         let pane = self.workspaces[ws_idx]
@@ -3157,7 +3198,7 @@ impl AppState {
     ) -> Option<AgentNotificationDelivery> {
         self.pending_agent_notifications.remove(&pane_id);
 
-        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let is_active_tab = self.pane_is_active(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
 
@@ -3244,7 +3285,7 @@ impl AppState {
             return None;
         }
 
-        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let is_active_tab = self.pane_is_active(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
         let sound = sound_for_toast_kind(kind, suppress_active_tab_notifications)
@@ -3419,9 +3460,11 @@ impl AppState {
                 if self.selected >= self.workspaces.len() {
                     self.selected = self.workspaces.len() - 1;
                 }
-                self.workspace_scroll = self
-                    .workspace_scroll
-                    .min(self.workspaces.len().saturating_sub(1));
+                self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                    self,
+                    self.view.sidebar_rect,
+                    self.workspace_scroll,
+                );
                 self.ensure_workspace_visible(self.selected);
             }
         } else {
@@ -4359,7 +4402,7 @@ mod tests {
     }
 
     #[test]
-    fn next_agent_cycles_priority_sorted_agent_panel_entries() {
+    fn next_agent_ignores_priority_sort_and_uses_canonical_order() {
         let mut first = Workspace::test_new("one");
         let first_root = first.tabs[0].root_pane;
         let first_second = first.test_split(Direction::Horizontal);
@@ -4377,9 +4420,16 @@ mod tests {
         set_agent_state(&mut state, 0, 0, first_root, AgentState::Idle);
         set_agent_state(&mut state, 0, 0, first_second, AgentState::Working);
         set_agent_state(&mut state, 1, 0, second_root, AgentState::Blocked);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0].pane_id,
+            second_root
+        );
 
         state.next_agent();
 
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_second));
+        state.next_agent();
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_root));
         state.assert_invariants_for_test();
@@ -4411,7 +4461,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_agent_keeps_wrapped_target_visible_in_agent_panel() {
+    fn previous_agent_wrap_reveals_target_agent_row() {
         let mut workspace = Workspace::test_new("one");
         let root = workspace.tabs[0].root_pane;
         for idx in 1..8 {
@@ -4435,7 +4485,10 @@ mod tests {
 
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
-        assert!(state.agent_panel_scroll > 0);
+        let target = state.workspaces[0].tabs[last_idx].root_pane;
+        let (_, agent_cards) =
+            crate::ui::compute_sidebar_row_areas(&state, state.view.sidebar_rect);
+        assert!(agent_cards.iter().any(|card| card.pane_id == target));
         state.assert_invariants_for_test();
     }
 
@@ -4954,7 +5007,7 @@ mod tests {
     }
 
     #[test]
-    fn active_tab_completion_marks_pane_seen() {
+    fn focused_pane_completion_marks_pane_seen() {
         let mut state = app_with_workspaces(&["active"]);
         state.active = Some(0);
         state.outer_terminal_focus = Some(true);
@@ -4982,6 +5035,43 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Idle);
         let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
         assert!(pane.seen);
+    }
+
+    #[test]
+    fn review_fix_hidden_pane_completion_remains_unseen_until_opened() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(true);
+        let hidden_pane_id = state.workspaces[0].test_split(Direction::Horizontal);
+        let root_pane_id = state.workspaces[0].tabs[0].root_pane;
+        let hidden_terminal_id = state.workspaces[0].panes[&hidden_pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.insert(
+            hidden_terminal_id.clone(),
+            crate::terminal::TerminalState::new(hidden_terminal_id.clone(), "/tmp".into()),
+        );
+        state.terminals.get_mut(&hidden_terminal_id).unwrap().state = AgentState::Working;
+        state.workspaces[0]
+            .panes
+            .get_mut(&hidden_pane_id)
+            .unwrap()
+            .seen = false;
+        state.workspaces[0].tabs[0].layout.focus_pane(root_pane_id);
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: hidden_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert!(!state.workspaces[0].panes[&hidden_pane_id].seen);
+        state.focus_pane_in_workspace(0, hidden_pane_id);
+        assert!(state.workspaces[0].panes[&hidden_pane_id].seen);
     }
 
     #[test]

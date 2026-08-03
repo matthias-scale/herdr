@@ -210,7 +210,7 @@ export the tab containing that pane.
 The response includes `workspace_id`, `tab_id`, `zoomed`, `focused_pane_id`, and
 `root`. `root` is a BSP tree of `pane` and `split` nodes. Pane nodes can include
 `pane_id`, `label`, `cwd`, and argv `command`. Split nodes use
-`direction` (`right` or `down`), `ratio`, `first`, and `second`.
+`direction` (`left`, `right`, `up`, or `down`), `ratio`, `first`, and `second`.
 
 `layout.apply` creates a fresh tab from a declarative tree. If `tab_id` is
 provided, Herdr creates the replacement tab first and then closes the old tab.
@@ -370,14 +370,18 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 ## Agent view queries
 
-`agent.view.set` installs one transient declarative projection for the built-in
-Agents view. The projection is reevaluated whenever agent facts or current UI
-context change. It controls the expanded and collapsed sidebar, mobile Agents
-list, mouse targets, indexed focus, and next/previous Agent navigation. It does
-not change `agent.list`, notifications, detection, or global attention counts.
+`agent.view.set` installs one transient declarative compatibility projection.
+The projection is reevaluated whenever agent facts or current UI context
+change and controls indexed Agent focus order. The visible desktop, collapsed,
+and mobile sidebar remains the canonical Spaces → tab → pane ownership tree;
+the projection does not filter or reorder its rows or mouse targets.
+Configured next/previous Agent actions likewise use the canonical unfiltered
+workspace, tab, and pane order. The projection does not change `agent.list`,
+notifications, detection, or global attention counts.
 
-Show agents in the currently presented Space or agents needing attention
-elsewhere, then order by attention and most recent state transition:
+Define an indexed-focus projection containing agents in the currently
+presented Space or agents needing attention elsewhere, ordered by attention
+and most recent state transition:
 
 ```json
 {

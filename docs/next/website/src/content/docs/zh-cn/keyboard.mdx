@@ -95,9 +95,17 @@ previous_tab = ["prefix+p", "ctrl+alt+["]
 next_tab = ["prefix+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
+next_window = "prefix+shift+n" # 可选,跨 Space 循环标签页
+previous_window = "prefix+shift+p" # 可选,跨 Space 循环标签页
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
 ```
+
+四个分割方向都有互不冲突的默认绑定:`prefix+v` 向右,`prefix+shift+v` 向左,`prefix+minus` 向下,`prefix+shift+minus` 向上。旧名称 `split_vertical` 和 `split_horizontal` 仍分别表示向右和向下。`next_window` 和 `previous_window` 保持可选;它们按规范的工作区、标签页顺序循环所有标签页,包括没有智能体的标签页。
+
+无需键位绑定也可使用相同的全局循环:`herdr window next` 和 `herdr window previous`。两者都会在两端循环。
 
 少数 `ctrl+alt` 组合键已被其他地方占用。请避开这些:
 

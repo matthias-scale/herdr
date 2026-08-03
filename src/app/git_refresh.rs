@@ -256,6 +256,12 @@ mod tests {
     use super::*;
     use crate::workspace::Workspace;
 
+    fn config_with_sidebar_branch() -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Branch]];
+        config
+    }
+
     #[test]
     fn git_refresh_deduplicates_workspaces_with_same_cache_key() {
         let repo =
@@ -305,7 +311,7 @@ mod tests {
 
     #[test]
     fn git_refresh_item_collection_does_not_discover_uncached_cwd() {
-        let mut app = test_app(&crate::config::Config::default());
+        let mut app = test_app(&config_with_sidebar_branch());
         let cwd = std::env::temp_dir().join(format!("herdr-uncached-cwd-{}", std::process::id()));
         let mut ws = Workspace::test_new("test");
         ws.identity_cwd = cwd.clone();
@@ -321,7 +327,7 @@ mod tests {
 
     #[test]
     fn git_refresh_item_collection_reuses_matching_cached_key() {
-        let mut app = test_app(&crate::config::Config::default());
+        let mut app = test_app(&config_with_sidebar_branch());
         let cwd = PathBuf::from("/repo/deep/nested");
         let cache_key = PathBuf::from("/repo");
         let mut ws = Workspace::test_new("test");
@@ -339,7 +345,7 @@ mod tests {
 
     #[test]
     fn periodic_repo_discovery_ignores_cached_key_hints() {
-        let mut app = test_app(&crate::config::Config::default());
+        let mut app = test_app(&config_with_sidebar_branch());
         let cwd = PathBuf::from("/repo/deep/nested");
         let mut ws = Workspace::test_new("test");
         ws.identity_cwd = cwd.clone();
@@ -372,7 +378,7 @@ mod tests {
             assert!(output.status.success(), "{output:?}");
         }
 
-        let mut app = test_app(&crate::config::Config::default());
+        let mut app = test_app(&config_with_sidebar_branch());
         let mut ws = Workspace::test_new("test");
         ws.identity_cwd = outer.clone();
         ws.cached_identity_cwd = outer.clone();

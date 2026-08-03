@@ -74,6 +74,9 @@ pub enum Node {
     Pane(PaneId),
     Split {
         direction: Direction,
+        /// Whether this split was requested as the leading physical direction
+        /// (left/up), rather than the legacy trailing right/down direction.
+        leading: bool,
         ratio: f32,
         first: Box<Node>,
         second: Box<Node>,
@@ -123,16 +126,39 @@ impl TileLayout {
     }
 
     /// Split the focused pane. Returns the new pane's id.
+    #[allow(dead_code)] // Compatibility wrapper for direct layout callers.
     pub fn split_focused(&mut self, direction: Direction) -> PaneId {
         self.split_focused_with_ratio(direction, 0.5)
     }
 
+    /// Split with the new pane on the leading edge (left/up) when `before`.
+    pub fn split_focused_with_placement(&mut self, direction: Direction, before: bool) -> PaneId {
+        self.split_focused_with_ratio_and_placement(direction, 0.5, before)
+    }
+
     /// Split the focused pane with a custom first-child ratio.
+    #[allow(dead_code)] // Compatibility wrapper for direct layout callers.
     pub fn split_focused_with_ratio(&mut self, direction: Direction, ratio: f32) -> PaneId {
+        self.split_focused_with_ratio_and_placement(direction, ratio, false)
+    }
+
+    pub fn split_focused_with_ratio_and_placement(
+        &mut self,
+        direction: Direction,
+        ratio: f32,
+        before: bool,
+    ) -> PaneId {
         let new_id = PaneId::alloc();
         let placeholder = PaneId::from_raw(0);
         let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
-        self.root = split_at(old, self.focus, direction, new_id, valid_split_ratio(ratio));
+        self.root = split_at(
+            old,
+            self.focus,
+            direction,
+            new_id,
+            valid_split_ratio(ratio),
+            before,
+        );
         self.focus = new_id;
         new_id
     }
@@ -145,6 +171,7 @@ impl TileLayout {
         moved: PaneId,
         direction: Direction,
         ratio: f32,
+        before: bool,
     ) -> bool {
         if target == moved {
             return false;
@@ -156,7 +183,14 @@ impl TileLayout {
 
         let placeholder = PaneId::from_raw(0);
         let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
-        self.root = split_at(old, target, direction, moved, valid_split_ratio(ratio));
+        self.root = split_at(
+            old,
+            target,
+            direction,
+            moved,
+            valid_split_ratio(ratio),
+            before,
+        );
         self.focus = moved;
         true
     }
@@ -428,6 +462,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
             ratio,
             first,
             second,
+            ..
         } => {
             let (a, b) = split_rect(area, *direction, *ratio);
             collect_panes(first, a, focus, result);
@@ -442,6 +477,7 @@ fn collect_splits(node: &Node, area: Rect, path: Vec<bool>, result: &mut Vec<Spl
         ratio,
         first,
         second,
+        ..
     } = node
     {
         let (a, b) = split_rect(area, *direction, *ratio);
@@ -523,25 +559,43 @@ fn split_at(
     direction: Direction,
     new_id: PaneId,
     split_ratio: f32,
+    before: bool,
 ) -> Node {
     match node {
         Node::Pane(id) if id == target => Node::Split {
             direction,
+            leading: before,
             ratio: split_ratio,
-            first: Box::new(Node::Pane(id)),
-            second: Box::new(Node::Pane(new_id)),
+            first: Box::new(Node::Pane(if before { new_id } else { id })),
+            second: Box::new(Node::Pane(if before { id } else { new_id })),
         },
         Node::Pane(_) => node,
         Node::Split {
             direction: d,
+            leading,
             ratio,
             first,
             second,
         } => Node::Split {
             direction: d,
+            leading,
             ratio,
-            first: Box::new(split_at(*first, target, direction, new_id, split_ratio)),
-            second: Box::new(split_at(*second, target, direction, new_id, split_ratio)),
+            first: Box::new(split_at(
+                *first,
+                target,
+                direction,
+                new_id,
+                split_ratio,
+                before,
+            )),
+            second: Box::new(split_at(
+                *second,
+                target,
+                direction,
+                new_id,
+                split_ratio,
+                before,
+            )),
         },
     }
 }
@@ -560,6 +614,7 @@ fn remove_pane(node: Node, target: PaneId) -> Option<Node> {
         Node::Pane(_) => Some(node),
         Node::Split {
             direction,
+            leading,
             ratio,
             first,
             second,
@@ -568,6 +623,7 @@ fn remove_pane(node: Node, target: PaneId) -> Option<Node> {
             (Some(f), None) => Some(f),
             (Some(f), Some(s)) => Some(Node::Split {
                 direction,
+                leading,
                 ratio,
                 first: Box::new(f),
                 second: Box::new(s),
@@ -651,14 +707,17 @@ mod tests {
         TileLayout::from_saved(
             Node::Split {
                 direction: Direction::Horizontal,
+                leading: false,
                 ratio: 0.3,
                 first: Box::new(Node::Pane(pane(1))),
                 second: Box::new(Node::Split {
                     direction: Direction::Vertical,
+                    leading: false,
                     ratio: 0.6,
                     first: Box::new(Node::Pane(pane(2))),
                     second: Box::new(Node::Split {
                         direction: Direction::Horizontal,
+                        leading: false,
                         ratio: 0.4,
                         first: Box::new(Node::Pane(pane(3))),
                         second: Box::new(Node::Pane(pane(4))),
@@ -693,6 +752,7 @@ mod tests {
                     ratio,
                     first,
                     second,
+                    ..
                 } => {
                     out.push((*direction, *ratio));
                     collect(first, out);
@@ -746,7 +806,7 @@ mod tests {
         let (mut layout, root) = TileLayout::new();
         let moved = pane(99);
 
-        assert!(layout.insert_pane_near(root, moved, Direction::Horizontal, 0.25));
+        assert!(layout.insert_pane_near(root, moved, Direction::Horizontal, 0.25, false));
 
         assert_eq!(layout.pane_count(), 2);
         assert_eq!(layout.pane_ids(), vec![root, moved]);
@@ -755,6 +815,18 @@ mod tests {
         assert_eq!(splits, vec![(Direction::Horizontal, 0.25)]);
         assert_eq!(pane_rect(&layout, root), Rect::new(0, 0, 25, 40));
         assert_eq!(pane_rect(&layout, moved), Rect::new(25, 0, 75, 40));
+    }
+
+    #[test]
+    fn insert_existing_pane_near_target_honors_leading_placement() {
+        let (mut layout, root) = TileLayout::new();
+        let moved = pane(99);
+
+        assert!(layout.insert_pane_near(root, moved, Direction::Vertical, 0.25, true));
+
+        assert_eq!(layout.pane_ids(), vec![moved, root]);
+        assert_eq!(pane_rect(&layout, moved), Rect::new(0, 0, 100, 10));
+        assert_eq!(pane_rect(&layout, root), Rect::new(0, 10, 100, 30));
     }
 
     #[test]
@@ -768,6 +840,27 @@ mod tests {
         assert_eq!(splits.len(), 1);
         assert_eq!(splits[0].0, Direction::Horizontal);
         assert!((splits[0].1 - 0.333).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn leading_placement_inserts_before_target_and_keeps_new_focus_in_nested_layouts() {
+        let (mut layout, root) = TileLayout::new();
+        let right = layout.split_focused_with_placement(Direction::Horizontal, false);
+        layout.focus_pane(right);
+        let left_of_right = layout.split_focused_with_placement(Direction::Horizontal, true);
+        assert_eq!(layout.pane_ids(), vec![root, left_of_right, right]);
+        assert_eq!(layout.focused(), left_of_right);
+        assert!(pane_rect(&layout, left_of_right).x < pane_rect(&layout, right).x);
+
+        layout.focus_pane(right);
+        let above_right =
+            layout.split_focused_with_ratio_and_placement(Direction::Vertical, 0.25, true);
+        assert_eq!(layout.focused(), above_right);
+        assert!(pane_rect(&layout, above_right).y < pane_rect(&layout, right).y);
+        assert!(split_snapshot(&layout)
+            .iter()
+            .any(|(direction, ratio)| *direction == Direction::Vertical
+                && (*ratio - 0.25).abs() < f32::EPSILON));
     }
 
     #[test]
@@ -837,9 +930,11 @@ mod tests {
         let mut layout = TileLayout::from_saved(
             Node::Split {
                 direction: Direction::Horizontal,
+                leading: false,
                 ratio: 0.6,
                 first: Box::new(Node::Split {
                     direction: Direction::Vertical,
+                    leading: false,
                     ratio: 0.5,
                     first: Box::new(Node::Pane(pane(1))),
                     second: Box::new(Node::Pane(pane(2))),
@@ -866,9 +961,11 @@ mod tests {
         let mut layout = TileLayout::from_saved(
             Node::Split {
                 direction: Direction::Vertical,
+                leading: false,
                 ratio: 0.6,
                 first: Box::new(Node::Split {
                     direction: Direction::Horizontal,
+                    leading: false,
                     ratio: 0.5,
                     first: Box::new(Node::Pane(pane(1))),
                     second: Box::new(Node::Pane(pane(2))),
@@ -895,15 +992,18 @@ mod tests {
         let mut layout = TileLayout::from_saved(
             Node::Split {
                 direction: Direction::Vertical,
+                leading: false,
                 ratio: 0.5,
                 first: Box::new(Node::Split {
                     direction: Direction::Horizontal,
+                    leading: false,
                     ratio: 0.5,
                     first: Box::new(Node::Pane(pane(1))),
                     second: Box::new(Node::Pane(pane(2))),
                 }),
                 second: Box::new(Node::Split {
                     direction: Direction::Horizontal,
+                    leading: false,
                     ratio: 0.5,
                     first: Box::new(Node::Pane(pane(3))),
                     second: Box::new(Node::Pane(pane(4))),
