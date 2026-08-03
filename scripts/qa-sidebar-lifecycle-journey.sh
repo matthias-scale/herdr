@@ -40,7 +40,10 @@ case "$flow" in
         filters=("initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_collapsed_views")
         ;;
     same-session-title-replacement)
-        filters=("later_user_prompt_submit_refreshes_the_single_tab_title_for_the_same_session")
+        filters=(
+            "terse_later_user_prompt_submit_retains_the_session_initial_title"
+            "work_title_initial_briefings_are_session_scoped_and_later_objectives_replace_them"
+        )
         ;;
     reopen-clears-done-without-reorder)
         filters=(

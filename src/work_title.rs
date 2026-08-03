@@ -74,7 +74,8 @@ pub(crate) fn request_from_turn_start(
         .session_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())?;
-    let title = calculate_work_title(input.prompt.as_deref()?)?;
+    let prompt = input.prompt.as_deref()?;
+    let title = calculate_work_title(prompt);
 
     Some(PaneReportMetadataParams {
         pane_id: pane_id.to_string(),
@@ -82,7 +83,7 @@ pub(crate) fn request_from_turn_start(
         agent: Some(provider.agent().to_string()),
         applies_to_source: Some(provider.lifecycle_source().to_string()),
         agent_session_id: Some(session_id),
-        title: Some(title),
+        title,
         display_agent: None,
         state_labels: std::collections::HashMap::new(),
         tokens: std::collections::HashMap::new(),
@@ -96,7 +97,8 @@ pub(crate) fn request_from_turn_start(
 
 pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
     let sanitized = sanitize_prompt(prompt);
-    let relevant = relevant_objective_clause(&sanitized);
+    let final_paragraph = latest_non_empty_paragraph(&sanitized);
+    let relevant = relevant_objective_clause(&final_paragraph);
     let raw_words = objective_words(relevant);
     let filtered_words: Vec<String> = raw_words
         .iter()
@@ -104,11 +106,7 @@ pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
         .take(WORK_TITLE_MAX_WORDS)
         .cloned()
         .collect();
-    let words = if filtered_words.is_empty() {
-        raw_words
-    } else {
-        filtered_words
-    };
+    let words = filtered_words;
     let mut title_words = Vec::new();
     for word in words.into_iter().take(WORK_TITLE_MAX_WORDS) {
         let word = title_case_word(&word);
@@ -134,13 +132,35 @@ fn sanitize_prompt(prompt: &str) -> String {
     without_secrets
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character == '\n' {
+                character
+            } else if character.is_control() {
                 ' '
             } else {
                 character
             }
         })
         .collect()
+}
+
+fn latest_non_empty_paragraph(prompt: &str) -> String {
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+    for line in prompt.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join(" "));
+                current.clear();
+            }
+        } else {
+            current.push(line);
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join(" "));
+    }
+    paragraphs.pop().unwrap_or_default()
 }
 
 fn relevant_objective_clause(prompt: &str) -> &str {
@@ -241,6 +261,7 @@ fn is_stopword(word: &str) -> bool {
             | "from"
             | "get"
             | "go"
+            | "ahead"
             | "her"
             | "here"
             | "him"
@@ -258,16 +279,19 @@ fn is_stopword(word: &str) -> bool {
             | "my"
             | "need"
             | "now"
+            | "ok"
             | "of"
             | "on"
             | "onto"
             | "or"
             | "our"
             | "please"
+            | "proceed"
             | "research"
             | "scope"
             | "should"
             | "that"
+            | "thanks"
             | "the"
             | "their"
             | "them"
@@ -394,11 +418,22 @@ mod tests {
     }
 
     #[test]
-    fn terse_continuation_still_produces_a_replacement_title() {
+    fn terse_continuation_has_no_standalone_title() {
+        assert_eq!(calculate_work_title("please do it now"), None);
+    }
+
+    #[test]
+    fn latest_non_empty_paragraph_owns_the_title_subject() {
+        let prompt = "Real-time policy management is not the task.\n\n\
+            Implement briefing-derived tab titles for every window.";
         assert_eq!(
-            calculate_work_title("please do it now").as_deref(),
-            Some("Please Do It Now")
+            calculate_work_title(prompt).as_deref(),
+            Some("Implement Briefing-derived Tab Titles Every")
         );
+        assert!(!calculate_work_title(prompt)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("real-time policy management"));
     }
 
     #[test]
