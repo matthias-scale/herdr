@@ -731,34 +731,43 @@ fn render_mobile_switcher_content(
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let state = entry
-                    .state_labels
-                    .get(agent_panel_status_key(entry.state, entry.seen))
-                    .map(String::as_str)
-                    .unwrap_or_else(|| match entry.state {
-                        AgentState::Idle if !entry.seen => "done",
-                        _ => state_label(entry.state, entry.seen),
-                    });
-                let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
-                let fixed_width = indent.len() + 1 + state.len() + " · ".len();
-                let title = Line::from(vec![
-                    Span::styled(indent, Style::default().bg(bg)),
-                    Span::styled(icon, icon_style.bg(bg)),
-                    Span::styled(
-                        format!(" {state}"),
-                        Style::default()
-                            .fg(state_label_color(entry.state, entry.seen, p))
-                            .bg(bg),
-                    ),
-                    Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
-                    Span::styled(
-                        truncate_end(
-                            entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
-                            usize::from(content.width).saturating_sub(fixed_width),
+                let show_status = entry.state != AgentState::Idle || !entry.seen;
+                let state = show_status.then(|| {
+                    entry
+                        .state_labels
+                        .get(agent_panel_status_key(entry.state, entry.seen))
+                        .map(String::as_str)
+                        .unwrap_or_else(|| match entry.state {
+                            AgentState::Idle if !entry.seen => "done",
+                            _ => state_label(entry.state, entry.seen),
+                        })
+                });
+                let status_width = state
+                    .map(|state| 1 + state.len() + " · ".len())
+                    .unwrap_or_default();
+                let fixed_width = indent.len() + status_width;
+                let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
+                if let Some(state) = state {
+                    let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
+                    spans.extend([
+                        Span::styled(icon, icon_style.bg(bg)),
+                        Span::styled(
+                            format!(" {state}"),
+                            Style::default()
+                                .fg(state_label_color(entry.state, entry.seen, p))
+                                .bg(bg),
                         ),
-                        mobile_item_title_style(false, active, p).bg(bg),
+                        Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
+                    ]);
+                }
+                spans.push(Span::styled(
+                    truncate_end(
+                        entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
+                        usize::from(content.width).saturating_sub(fixed_width),
                     ),
-                ]);
+                    mobile_item_title_style(false, active, p).bg(bg),
+                ));
+                let title = Line::from(spans);
                 render_one_line_item(
                     frame,
                     viewport,
@@ -1655,7 +1664,10 @@ mod tests {
 
         assert_eq!(inactive.fg, Some(palette.subtext0));
         assert!(!inactive.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(selected.fg, Some(palette.text));
+        assert_eq!(
+            selected.fg,
+            Some(crate::ui::sidebar::active_sidebar_title_color(&palette))
+        );
         assert!(selected.add_modifier.contains(Modifier::BOLD));
         assert_eq!(mobile_item_bg(true, false, &palette), palette.panel_bg);
     }
@@ -1775,6 +1787,82 @@ mod tests {
             "tab rows must not reserve subtitle lines"
         );
         assert!(!rows[first].contains("codex"));
+    }
+
+    #[test]
+    fn seen_idle_mobile_tab_omits_status_segment() {
+        let started = std::time::Instant::now();
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("one");
+        workspace.tabs[0].custom_name = Some("Review release".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 10);
+        app.reconcile_sidebar_presentation();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Idle,
+                false,
+                true,
+                false,
+                false,
+                started + std::time::Duration::from_secs(1),
+            );
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = true;
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 12),
+                )
+            })
+            .unwrap();
+        let rows = (0..12)
+            .map(|y| {
+                (0..40)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let row = rows
+            .iter()
+            .find(|row| row.contains("Review release"))
+            .unwrap_or_else(|| panic!("missing title row: {rows:?}"));
+
+        assert!(!row.contains("idle"), "{row:?}");
+        assert!(!row.contains("done"), "{row:?}");
+        assert!(!row.contains(" · Review release"), "{row:?}");
     }
 
     #[cfg(unix)]

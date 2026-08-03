@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(
             frame_digest(&frame),
             // Explicit mobile workspace → tab → pane projection.
-            "906195a959c14120e5f2d1256eed9c414b0ac828ecb99bf0b4382440bfd739ab"
+            "d2702de5fef8a24380417633de1bc1323e7b6b4c09aa08d46c170e4af8315456"
         );
     }
 }

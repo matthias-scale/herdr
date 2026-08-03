@@ -72,15 +72,15 @@ flows = [
         "space-first-single-line-sidebar",
         "Spaces show one status-first line per tab or window with compact group spacing",
         "Render agent, agentless, completed, inactive, and multi-pane tabs, then select, click, and navigate between their rows and Space groups.",
-        "Every tab has one stable row under its space; status precedes its sole title, working status and live age use blue, selected titles darken, complete Space groups have one blank row between them while tabs and worktree children stay packed, latest communication age is right-aligned, model and pane subtitles are absent, and tab focus is preserved.",
-        ["src/ui/sidebar.rs", "src/activity_age.rs", "src/app/actions.rs", "src/app/input"],
+        "Every tab has one stable row under its space; working and unread done status precede its sole title, seen idle status is omitted, the headless clock streams a new frame at the next age boundary, working status and live age use blue, selected titles darken and become bold in One Dark and One Light, complete Space groups have one blank row between them while tabs and worktree children stay packed, latest communication age is right-aligned, model and pane subtitles are absent, and tab focus is preserved.",
+        ["src/ui/sidebar.rs", "src/ui/mobile.rs", "src/activity_age.rs", "src/server/headless.rs", "src/app/actions.rs", "src/app/input"],
     ),
     (
         "same-session-title-replacement",
         "Later prompts replace the one title for the same session",
         "Submit a later UserPromptSubmit for an existing agent session.",
         "The persisted tab title is replaced once, with no subtitle or duplicate title.",
-        ["src/app/api/panes.rs", "src/app/state.rs"],
+        ["src/integration/assets/claude/herdr-agent-state.sh", "src/integration/assets/codex/herdr-agent-state.sh", "src/integration/tests.rs", "src/app/api/panes.rs", "src/app/state.rs"],
     ),
     (
         "reopen-clears-done-without-reorder",
