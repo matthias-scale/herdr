@@ -14,7 +14,7 @@ use super::status::{state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
-use crate::detect::AgentState;
+use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
@@ -22,6 +22,14 @@ const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
+
+pub(crate) fn tab_agent_icon(agent: Option<Agent>) -> Option<&'static str> {
+    match agent {
+        Some(Agent::Codex) => Some("⌘"),
+        Some(Agent::Claude) => Some("✦"),
+        _ => None,
+    }
+}
 
 /// Selected sidebar titles need stronger foreground contrast without restoring
 /// the old filled-row treatment. Darken RGB text tokens by one third and pair
@@ -369,7 +377,14 @@ fn sidebar_rows_inner(
                 let tab_states = entries.iter().fold(
                     std::collections::HashMap::<
                         usize,
-                        (AgentState, bool, Option<std::time::Instant>, Option<u16>),
+                        (
+                            AgentState,
+                            bool,
+                            Option<std::time::Instant>,
+                            Option<u16>,
+                            Option<Agent>,
+                            bool,
+                        ),
                     >::new(),
                     |mut states, entry| {
                         let candidate = (entry.state, entry.seen);
@@ -394,12 +409,26 @@ fn sidebar_rows_inner(
                                     }
                                     (current, candidate) => current.or(candidate),
                                 };
+                                if !state.5 {
+                                    match (state.4, entry.agent) {
+                                        (Some(current), Some(candidate))
+                                            if current != candidate =>
+                                        {
+                                            state.4 = None;
+                                            state.5 = true;
+                                        }
+                                        (None, Some(candidate)) => state.4 = Some(candidate),
+                                        _ => {}
+                                    }
+                                }
                             })
                             .or_insert((
                                 candidate.0,
                                 candidate.1,
                                 entry.activity_at,
                                 entry.background_job_count,
+                                entry.agent,
+                                false,
                             ));
                         states
                     },
@@ -409,13 +438,20 @@ fn sidebar_rows_inner(
                     let tab = entry.tab_idx;
                     if current_tab != Some(tab) {
                         let mut tab_entry = entry.clone();
-                        if let Some((state, seen, activity_at, background_job_count)) =
-                            tab_states.get(&tab)
+                        if let Some((
+                            state,
+                            seen,
+                            activity_at,
+                            background_job_count,
+                            agent,
+                            mixed_agents,
+                        )) = tab_states.get(&tab)
                         {
                             tab_entry.state = *state;
                             tab_entry.seen = *seen;
                             tab_entry.activity_at = *activity_at;
                             tab_entry.background_job_count = *background_job_count;
+                            tab_entry.agent = (!mixed_agents).then_some(*agent).flatten();
                         }
                         rows.push(SidebarRow::Tab {
                             entry: Box::new(tab_entry),
@@ -1625,11 +1661,17 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         .background_job_count
         .filter(|count| *count > 0)
         .map(|count| format!("  {count} >_"));
+    let agent_icon_field = tab_agent_icon(entry.agent).map(|icon| format!("  {icon}"));
+    let agent_icon_width = agent_icon_field
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
     let background_job_width = background_job_field
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
-    let fixed_width = display_width(&prefix) + status_width + background_job_width;
+    let fixed_width =
+        display_width(&prefix) + status_width + agent_icon_width + background_job_width;
     let activity_field =
         tab_activity_age_field(&entry, app.view_observed_at, card.rect, fixed_width);
     let activity_width = activity_field
@@ -1655,6 +1697,12 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         ]);
     }
     spans.push(Span::styled(title, style));
+    if let Some(agent_icon_field) = agent_icon_field {
+        spans.push(Span::styled(
+            agent_icon_field,
+            Style::default().fg(p.overlay1),
+        ));
+    }
     if let Some(background_job_field) = background_job_field {
         spans.push(Span::styled(
             background_job_field,
@@ -4057,6 +4105,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&terminal_id)
             .unwrap()
             .background_job_count = Some(2);
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
         app.reconcile_sidebar_presentation();
 
         let area = Rect::new(0, 0, 60, 10);
@@ -4068,9 +4117,119 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
 
         assert!(
-            rendered.contains("Use Repository Instructions  2 >_"),
+            rendered.contains("Use Repository Instructions  ⌘  2 >_"),
             "{rendered:?}"
         );
+    }
+
+    #[test]
+    fn tab_provider_icons_distinguish_codex_and_claude_after_title() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Codex task".into());
+        let codex_pane = app.workspaces[0].tabs[0].root_pane;
+        let codex_terminal = app.workspaces[0].tabs[0].panes[&codex_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&codex_terminal)
+            .unwrap()
+            .detected_agent = Some(Agent::Codex);
+        let claude_tab = app.workspaces[0].test_add_tab(Some("Claude task"));
+        app.ensure_test_terminals();
+        let claude_pane = app.workspaces[0].tabs[claude_tab].root_pane;
+        let claude_terminal = app.workspaces[0].tabs[claude_tab].panes[&claude_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&claude_terminal)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 34, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered.iter().any(|row| row.contains("Codex task  ⌘")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|row| row.contains("Claude task  ✦")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_provider_tab_omits_provider_icon() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Mixed task".into());
+        let second = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.ensure_test_terminals();
+        let first = app.workspaces[0].tabs[0].root_pane;
+        for (pane, agent) in [(first, Agent::Codex), (second, Agent::Claude)] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(agent);
+        }
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(entry.agent, None);
+    }
+
+    #[test]
+    fn narrow_tab_rows_reserve_provider_icon_badge_and_activity_age() {
+        let started = std::time::Instant::now();
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Investigate release regression".into());
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal_state.background_job_count = Some(2);
+        app.view_observed_at = started + std::time::Duration::from_secs(65);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 38, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
+
+        assert!(rendered.contains("⌘  2 >_"), "{rendered:?}");
+        assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+    }
+
+    #[test]
+    fn unsupported_and_agentless_tabs_omit_provider_icons() {
+        assert_eq!(tab_agent_icon(Some(Agent::Pi)), None);
+        assert_eq!(tab_agent_icon(Some(Agent::Gemini)), None);
+        assert_eq!(tab_agent_icon(None), None);
     }
 
     #[test]
