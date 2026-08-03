@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Expanded Space groups now have one compact blank row between them by default, while tabs and indented worktree children remain packed; selected Space and tab titles also use stronger foreground emphasis on light themes.
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
 - Desktop sessions now show a theme-derived, right-aligned native status row containing the Git branch, device name, CPU, and memory. The left side stays blank; the row does not collect or display network details or usernames, and it does not show the focused folder, Herdr version, battery, date, or time. Set `ui.status_bar.enabled = false` to hide the row and stop its background sampling.
 - The sidebar is now one stable Spaces → tab/window tree, including agentless tabs. Every tab renders as one status-first title row even when it owns multiple panes; the selected Space/tab uses darker bold text and agent-backed rows end with the latest communication age. Priority configuration remains compatible but cannot reorder identity rows, and completed tabs stay `done` until opened.

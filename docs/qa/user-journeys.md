@@ -27,15 +27,21 @@ bolder title text. Each agent-backed tab ends with a right-aligned elapsed age
 for the latest user/agent communication, truncating the title first when space
 is limited. A multi-pane tab rolls up its strongest lifecycle state and latest
 communication timestamp, clicking the row preserves that tab's focused pane,
-and agent navigation scrolls the owning tab row into view. Desktop, compact,
-and mobile presentations retain the same ownership topology.
+and agent navigation scrolls the owning tab row into view. Complete Space groups
+have one compact blank row between them by default, while tabs and indented
+worktree children remain adjacent. Desktop, compact, and mobile presentations
+retain the same ownership topology.
 
 Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `ac4_tab_rollup_does_not_let_done_mask_working`,
 `ac4_clicking_tab_row_preserves_that_tabs_focused_pane`,
 `tab_rows_show_working_then_done_lifecycle_text`,
 `multi_pane_tab_age_uses_latest_thread_communication`,
+`active_title_color_darkens_light_rgb_and_preserves_theme_fallbacks`,
 `default_space_workspace_style_tracks_active_state`,
+`defaults_show_only_thread_titles_and_space_names`,
+`space_row_gap_preserves_compact_worktree_children`,
+`space_row_gap_separates_groups_but_never_tabs_inside_them`,
 `ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows`,
 `ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane`, and
 `review_findings_agent_navigation_reveals_against_final_picker_projection`.

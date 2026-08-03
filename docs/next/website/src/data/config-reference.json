@@ -731,8 +731,8 @@
         {
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
-          "default": "0",
-          "description": "Blank terminal rows between expanded Space sidebar entries. Set to 1 to restore the previous spacing. Consecutive indented worktree children remain packed as one group."
+          "default": "1",
+          "description": "Blank terminal rows between complete expanded Space groups. Set to 0 for a fully packed list. Tabs and consecutive indented worktree children remain packed within their group."
         },
         {
           "key": "ui.sidebar.spaces.rows",

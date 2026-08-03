@@ -989,7 +989,9 @@ fn mobile_item_bg(_selected: bool, _active: bool, p: &Palette) -> ratatui::style
 
 fn mobile_item_title_style(selected: bool, active: bool, p: &Palette) -> Style {
     if selected || active {
-        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(super::sidebar::active_sidebar_title_color(p))
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.subtext0)
     }
