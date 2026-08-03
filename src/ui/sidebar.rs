@@ -2759,7 +2759,7 @@ row_gap = 1
     }
 
     #[test]
-    fn default_tab_row_shows_the_title_once_and_pane_row_shows_pane_identity() {
+    fn default_tab_row_shows_status_and_title_once_without_pane_identity_row() {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = Workspace::test_new("repo-folder");
         workspace.tabs[0].custom_name = Some("Fix Billing Retry".into());
@@ -2784,22 +2784,17 @@ row_gap = 1
         let (workspace_cards, agent_cards) = compute_sidebar_row_areas(&app, area);
         let tab_cards = compute_tab_card_areas(&app, area);
         let workspace_row = workspace_cards[0].rect.y;
-        let agent_row = agent_cards[0].rect.y;
         let tab_row = tab_cards[0].rect.y;
 
         let first = row_text(buffer, workspace_row, 59);
         let tab_window = row_text(buffer, tab_row, 59);
-        let agent_window = row_text(buffer, agent_row, 59);
         assert!(first.contains("repo-folder"));
         assert!(tab_window.contains("Fix Billing Retry"), "{tab_window:?}");
-        assert!(!agent_window.contains("repo-folder"), "{agent_window:?}");
-        assert!(agent_window.contains("pi"), "{agent_window:?}");
-        assert!(
-            !agent_window.contains("Fix Billing Retry"),
-            "{agent_window:?}"
-        );
+        assert_eq!(tab_window.matches("Fix Billing Retry").count(), 1);
+        assert!(!tab_window.contains("pi"), "{tab_window:?}");
         assert!(!first.contains("working"));
-        assert!(agent_window.contains("working"));
+        assert!(tab_window.contains("working"));
+        assert!(agent_cards.is_empty());
 
         let workspace_x = find_symbol_x(buffer, workspace_row, 59, "o");
         let workspace_style = buffer[(workspace_x, workspace_row)].style();
@@ -2808,18 +2803,14 @@ row_gap = 1
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
 
-        let agent_x = find_symbol_x(buffer, agent_row, 59, "p");
-        let agent_style = buffer[(agent_x, agent_row)].style();
-        // The agent-kind token stays intentionally secondary; focus emphasis
-        // belongs to the pane identity, not a repeated agent label.
-        assert_eq!(agent_style.fg, Some(app.palette.overlay0));
-        assert!(agent_style.add_modifier.contains(Modifier::DIM));
-        assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(agent_style.bg, Some(ratatui::style::Color::Reset));
+        let title_x = find_symbol_x(buffer, tab_row, 59, "F");
+        let title_style = buffer[(title_x, tab_row)].style();
+        assert!(title_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(title_style.bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
-    fn agent_rows_show_busy_duration_and_idle_last_active_age_in_fixed_column() {
+    fn tab_rows_show_working_then_done_lifecycle_text() {
         let started = std::time::Instant::now();
         let mut app = AppState::test_new();
         let workspace = Workspace::test_new("one");
@@ -2847,8 +2838,8 @@ row_gap = 1
         let mut busy = Terminal::new(TestBackend::new(26, 12)).unwrap();
         busy.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let agent_row = compute_agent_card_areas(&app, area)[0].rect.y;
-        let busy_text = row_text(busy.backend().buffer(), agent_row, 25);
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let busy_text = row_text(busy.backend().buffer(), tab_row, 25);
         assert!(busy_text.contains("working"), "{busy_text:?}");
 
         let finished = started + std::time::Duration::from_secs(50);
@@ -2864,16 +2855,21 @@ row_gap = 1
                 false,
                 finished,
             );
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
         app.view_observed_at = finished + std::time::Duration::from_secs(5 * 60);
         let mut idle = Terminal::new(TestBackend::new(26, 12)).unwrap();
         idle.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let idle_text = row_text(idle.backend().buffer(), agent_row, 25);
+        let idle_text = row_text(idle.backend().buffer(), tab_row, 25);
         assert!(idle_text.contains("done"), "{idle_text:?}");
     }
 
     #[test]
-    fn narrow_agent_rows_elide_activity_age_before_window_context() {
+    fn narrow_tab_rows_keep_status_before_truncated_title() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("one".into());
         let area = Rect::new(0, 0, 12, 12);
@@ -2881,7 +2877,7 @@ row_gap = 1
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let card = &compute_agent_card_areas(&app, area)[0];
+        let card = &compute_tab_card_areas(&app, area)[0];
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, 11);
 
         assert!(
@@ -2943,7 +2939,7 @@ row_gap = 1
     }
 
     #[test]
-    fn occurrence_false_removes_default_workspace_bold_and_agent_dim() {
+    fn legacy_agent_styles_do_not_add_visible_agent_child_rows() {
         let config: crate::config::Config = toml::from_str(
             r##"
 [ui.sidebar.agents]
@@ -2969,14 +2965,11 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let agent_row = compute_agent_card_areas(&app, area)[0].rect.y;
-        let workspace = buffer[(find_symbol_x(buffer, agent_row, 25, "o"), agent_row)].style();
-        let agent = buffer[(find_symbol_x(buffer, agent_row, 25, "p"), agent_row)].style();
-
-        assert_eq!(workspace.fg, Some(app.palette.text));
-        assert!(!workspace.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(agent.fg, Some(app.palette.overlay0));
-        assert!(!agent.add_modifier.contains(Modifier::DIM));
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(buffer, tab_row, 25);
+        assert!(rendered.contains("New Thread"), "{rendered:?}");
+        assert!(!rendered.contains("pi"), "{rendered:?}");
+        assert!(compute_agent_card_areas(&app, area).is_empty());
     }
 
     #[test]
@@ -3189,16 +3182,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::config::AgentSidebarToken::TerminalTitleStripped,
         ]];
 
-        let area = Rect::new(0, 0, 10, 12);
-        let mut renderer = Terminal::new(TestBackend::new(10, 12)).unwrap();
-        renderer
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
-            .unwrap();
-        let agent_row = compute_agent_card_areas(&app, area)[0].rect.y;
-        let rendered = row_text(renderer.backend().buffer(), agent_row, 9);
-
-        assert!(!rendered.contains('⠋'));
-        assert!(!rendered.contains('⠋'));
+        assert!(compute_agent_card_areas(&app, Rect::new(0, 0, 10, 12)).is_empty());
 
         let spans = resolved_token_spans(
             &[ResolvedToken::unstyled(ResolvedTokenKind::TerminalTitle(
@@ -3220,7 +3204,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn variable_agent_heights_pack_the_bottom_and_reveal_targets() {
+    fn legacy_agent_heights_do_not_change_single_line_tab_scroll_geometry() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![
             Workspace::test_new("one"),
@@ -3267,7 +3251,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
         assert!(metrics.max_offset_from_bottom >= 1);
-        assert!(sidebar_row_scroll_for_target(&app, area, 0, 2) >= 1);
+        let rows = sidebar_rows(&app);
+        let target = rows.len() - 1;
+        assert!(sidebar_row_scroll_for_target(&app, area, 0, target) >= 1);
+        assert!(compute_tab_card_areas(&app, area)
+            .iter()
+            .all(|card| card.rect.height == 1));
     }
 
     #[test]

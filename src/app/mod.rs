@@ -4884,8 +4884,8 @@ mod tests {
             );
 
         let observed = started + Duration::from_secs(7);
-        // The nested pane row reserves indentation; make this test's explicit
-        // wide-sidebar contract large enough for the optional age field.
+        // The space-first tab row intentionally omits per-pane activity ages,
+        // so no periodic redraw deadline is needed for this lifecycle state.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,
@@ -4896,12 +4896,9 @@ mod tests {
         );
         app.sync_agent_activity_refresh_deadline(observed);
 
-        assert_eq!(
-            app.agent_activity_refresh_deadline,
-            Some(started + Duration::from_secs(8))
-        );
+        assert_eq!(app.agent_activity_refresh_deadline, None);
         assert!(!app.take_due_agent_activity_refresh(observed));
-        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
+        assert!(!app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
         assert!(app.agent_activity_refresh_deadline.is_none());
     }
 

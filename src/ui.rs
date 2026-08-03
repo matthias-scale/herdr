@@ -54,7 +54,7 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
-pub(crate) use self::sidebar::workspace_drop_indicator_row;
+pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;

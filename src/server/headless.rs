@@ -4969,7 +4969,14 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("task"), "rendered frame: {rendered:?}");
+        assert!(
+            rendered.contains("New Thread"),
+            "rendered frame: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("⠋ task"),
+            "terminal titles must not create a sidebar subtitle: {rendered:?}"
+        );
 
         server
             .app

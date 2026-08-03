@@ -44,6 +44,8 @@ case "$flow" in
             "ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture"
             "ac4_tab_rollup_does_not_let_done_mask_working"
             "ac4_clicking_tab_row_preserves_that_tabs_focused_pane"
+            "ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows"
+            "ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane"
             "review_findings_agent_navigation_reveals_against_final_picker_projection"
         )
         ;;

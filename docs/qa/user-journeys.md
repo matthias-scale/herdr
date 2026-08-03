@@ -24,11 +24,14 @@ under its owning space, whether it is agentless, inactive, completed, or owns
 multiple panes. Each row is one line with status before its sole title; it has
 no agent/model child row or subtitle. A multi-pane tab rolls up its strongest
 lifecycle state, clicking the row preserves that tab's focused pane, and agent
-navigation scrolls the owning tab row into view.
+navigation scrolls the owning tab row into view. Desktop, compact, and mobile
+presentations share this contract.
 
 Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `ac4_tab_rollup_does_not_let_done_mask_working`,
-`ac4_clicking_tab_row_preserves_that_tabs_focused_pane`, and
+`ac4_clicking_tab_row_preserves_that_tabs_focused_pane`,
+`ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows`,
+`ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane`, and
 `review_findings_agent_navigation_reveals_against_final_picker_projection`.
 
 ## same-session-title-replacement
