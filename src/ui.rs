@@ -86,10 +86,10 @@ pub(crate) use self::{
         relative_agent_navigation_entry, sidebar_header_new_space_rect,
         sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_group_chevron_rect,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
+        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry, SidebarRow,
+        WorkspaceListEntry,
     },
 };
 
@@ -1324,7 +1324,7 @@ mod tests {
         let line1 = buffer_row_text(buffer, card, card.y);
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        assert!(line1.starts_with(" · one"));
+        assert!(line1.starts_with(" ▾ one (1)"), "{line1:?}");
         assert!(!line1.contains("1 one"));
         assert_eq!(card.height, 1);
         assert!(line2.contains("New Thread"));

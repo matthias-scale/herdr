@@ -569,23 +569,6 @@ impl AppState {
                         self.toggle_workspace_agent_disclosure(card.ws_idx);
                         return None;
                     }
-                    if let Some(card) = cards.iter().find(|card| {
-                        let chevron = crate::ui::workspace_group_chevron_rect(card);
-                        mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
-                    }) {
-                        if let Some((key, collapsed)) =
-                            crate::ui::workspace_parent_group_state(self, card.ws_idx)
-                        {
-                            if collapsed {
-                                self.collapsed_space_keys.remove(&key);
-                            } else {
-                                self.collapsed_space_keys.insert(key);
-                            }
-                            self.mark_session_dirty();
-                            return None;
-                        }
-                    }
-
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,

@@ -70,10 +70,10 @@ flows = [
     ),
     (
         "space-first-single-line-sidebar",
-        "Spaces show one status-first line per tab or window with compact group spacing",
-        "Render agent, agentless, completed, inactive, and multi-pane tabs, then select, click, and navigate between their rows and Space groups.",
-        "Every tab has one stable row under its space; working and unread done status precede its sole title, seen idle status is omitted, the headless clock streams a new frame at the next age boundary, working status and live age use blue, selected titles darken and become bold in One Dark and One Light, complete Space groups have one blank row between them while tabs and worktree children stay packed, latest communication age is right-aligned, model and pane subtitles are absent, and tab focus is preserved.",
-        ["src/ui/sidebar.rs", "src/ui/mobile.rs", "src/activity_age.rs", "src/server/headless.rs", "src/app/actions.rs", "src/app/input"],
+        "Repository Spaces show direct status-first window rows and background terminal counts",
+        "Render linked worktrees plus agent, agentless, completed, inactive, and multi-pane tabs, then select, click, and navigate between their rows and Space groups.",
+        "Each repository/worktree group has one Space row with disclosure, title, and direct window count; every tab has one stable direct row; linked worktrees add no intermediate row; working and unread done status precede the sole title; seen idle status is omitted; a nonzero provider-reported background-terminal count renders as N >_ after the title without changing lifecycle or ordering; the headless clock streams a new frame at the next age boundary; working status and live age use blue; selected titles darken and become bold in One Dark and One Light; complete Space groups have one blank row between them; latest communication age is right-aligned; model, pane, and branch subtitles are absent; and tab focus is preserved.",
+        ["src/ui/sidebar.rs", "src/ui/mobile.rs", "src/activity_age.rs", "src/server/headless.rs", "src/detect/mod.rs", "src/pane.rs", "src/app/actions.rs", "src/app/input"],
     ),
     (
         "same-session-title-replacement",

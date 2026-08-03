@@ -1296,6 +1296,7 @@ mod tests {
             agent_kind_label: agent_label.map(str::to_string),
             agent: agent_label.and_then(crate::detect::parse_agent_label),
             state: AgentState::Idle,
+            background_job_count: None,
             seen: true,
             last_agent_state_change_seq: None,
             activity_at: None,
@@ -1579,17 +1580,18 @@ mod tests {
         ];
         app.active = Some(0);
         app.selected = 0;
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
 
-        // Grouped order pulls the worktree (idx 2) up under its parent (idx 0),
-        // ahead of the unrelated "other" workspace (idx 1): rows are main,
-        // feature, other.
+        // Linked worktrees no longer create an intermediate Space row. Their
+        // windows remain direct children of the root Space.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 2)
-                .expect("workspace row")
+                .expect("linked worktree window row")
                 .start,
-            4
+            5
         );
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 1)
@@ -1599,21 +1601,31 @@ mod tests {
         );
 
         let viewport = mobile_switcher_areas(&app).viewport;
-        // The second space row on screen is the worktree, not workspaces[1].
-        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
-        assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5);
+        assert_eq!(
+            hit,
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 2,
+                tab_idx: 0
+            })
+        );
 
-        // Mobile ignores collapse: even with the space folded on desktop, the
-        // worktree child still renders in the same position.
+        // Legacy worktree-group collapse does not restore an intermediate row.
         app.collapsed_space_keys.insert("repo-key".to_string());
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 2)
-                .expect("workspace row")
+                .expect("linked worktree window row")
                 .start,
-            4
+            5
         );
-        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
-        assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5);
+        assert!(matches!(
+            hit,
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 2,
+                tab_idx: 0
+            })
+        ));
     }
 
     #[test]

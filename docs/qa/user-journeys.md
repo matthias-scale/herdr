@@ -19,22 +19,27 @@ Evidence: `initial_sidebar_projection_keeps_every_workspace_tab_in_expanded_and_
 
 ## space-first-single-line-sidebar
 
-The only sidebar projection is Spaces. Each tab/window appears exactly once
-under its owning space, whether it is agentless, inactive, completed, or owns
-multiple panes. Each row is one line with status before its sole title; it has
-no agent/model child row or subtitle. Working status and its live age use the
+The only sidebar projection is Spaces. A repository and its linked worktrees
+render as one Space row, with disclosure immediately before the title and the
+direct window count immediately after it. Each tab/window appears exactly once
+directly under that Space, whether it is agentless, inactive, completed, or
+owns multiple panes; linked worktrees never add intermediate rows. Each window
+row is one line with status before its sole title; it has no agent/model child
+row or subtitle. A nonzero provider-reported background-terminal count appears
+as `N >_` immediately after the title, sums across panes in that tab, and never
+changes lifecycle state or ordering. Working status and its live age use the
 blue activity accent; unread completed work shows done, and opening that tab
-removes the status instead of replacing it with idle. Warning and machine-status
-colors are unchanged.
+removes the status instead of replacing it with idle. Warning and
+machine-status colors are unchanged.
 The selected space and tab use darker,
 bolder title text. Each agent-backed tab ends with a right-aligned elapsed age
 for the latest user/agent communication, truncating the title first when space
 is limited. A multi-pane tab rolls up its strongest lifecycle state and latest
 communication timestamp, clicking the row preserves that tab's focused pane,
 and agent navigation scrolls the owning tab row into view. Complete Space groups
-have one compact blank row between them by default, while tabs and indented
-worktree children remain adjacent. Desktop, compact, and mobile presentations
-retain the same ownership topology.
+have one compact blank row between them by default, while direct tab/window rows
+remain adjacent. Desktop, compact, and mobile presentations retain the same
+ownership topology.
 
 Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `state_dots_and_labels_use_semantic_workspace_colors`,
@@ -48,7 +53,17 @@ Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks`,
 `default_space_workspace_style_tracks_active_state`,
 `defaults_show_only_thread_titles_and_space_names`,
-`space_row_gap_preserves_compact_worktree_children`,
+`desktop_worktree_group_renders_one_space_row`,
+`active_linked_window_darkens_its_root_space_title`,
+`linked_worktrees_render_as_one_space_with_direct_window_rows`,
+`desktop_worktree_group_has_no_intermediate_connector_rows`,
+`final_space_row_ignores_legacy_custom_token_rows`,
+`tab_background_jobs_sum_across_panes_without_adding_rows`,
+`tab_background_job_badge_renders_immediately_after_title`,
+`background_jobs_change_does_not_change_lifecycle_or_seen_state`,
+`codex_background_job_count_uses_live_footer_only`,
+`background_job_count_is_unknown_for_unsupported_agents`,
+`space_row_gap_separates_flattened_groups`,
 `space_row_gap_separates_groups_but_never_tabs_inside_them`,
 `ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows`,
 `seen_idle_mobile_tab_omits_status_segment`,

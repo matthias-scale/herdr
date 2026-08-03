@@ -138,6 +138,77 @@ pub fn agent_label(agent: Agent) -> &'static str {
     }
 }
 
+/// Agent-reported background work owned by the current thread. This is a
+/// presentation fact, not lifecycle authority: callers must never derive
+/// Working/Idle/Blocked from it.
+pub fn background_job_count(agent: Option<Agent>, screen: &str) -> Option<u16> {
+    if agent != Some(Agent::Codex) {
+        return None;
+    }
+
+    static CODEX_BACKGROUND_JOBS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let regex = CODEX_BACKGROUND_JOBS.get_or_init(|| {
+        regex::Regex::new(
+            r"(?s)([1-9][0-9]*) background terminals? running\s*·\s*/ps to view\s*·\s*/stop to close",
+        )
+        .expect("bundled Codex background-job regex must compile")
+    });
+    let recent = screen
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Some(
+        regex
+            .captures(&recent)
+            .and_then(|captures| captures.get(1))
+            .and_then(|count| count.as_str().parse::<u16>().ok())
+            .unwrap_or(0),
+    )
+}
+
+#[cfg(test)]
+mod background_job_tests {
+    use super::{background_job_count, Agent};
+
+    #[test]
+    fn codex_background_job_count_uses_live_footer_only() {
+        let screen = "old transcript: 9 background terminals running\n\n\
+                      • Working (10s • esc to interrupt) · 3 background terminals running · /ps to view · /stop to close\n";
+
+        assert_eq!(background_job_count(Some(Agent::Codex), screen), Some(3));
+        assert_eq!(
+            background_job_count(
+                Some(Agent::Codex),
+                "• Working · 2 background terminals running\n  · /ps to view · /stop to close\n"
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            background_job_count(Some(Agent::Codex), "› next prompt\n"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn background_job_count_is_unknown_for_unsupported_agents() {
+        assert_eq!(
+            background_job_count(Some(Agent::Claude), "2 background terminals running"),
+            None
+        );
+        assert_eq!(
+            background_job_count(None, "2 background terminals running"),
+            None
+        );
+    }
+}
+
 pub fn interactive_agent_executable(agent: Agent) -> &'static str {
     match agent {
         Agent::Pi => "pi",

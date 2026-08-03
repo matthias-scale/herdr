@@ -732,13 +732,13 @@
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
           "default": "1",
-          "description": "Blank terminal rows between complete expanded Space groups. Set to 0 for a fully packed list. Tabs and consecutive indented worktree children remain packed within their group."
+          "description": "Blank terminal rows between complete expanded Space groups. Set to 0 for a fully packed list. Direct tab/window rows remain packed within their group."
         },
         {
           "key": "ui.sidebar.spaces.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\"]]",
-          "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
+          "description": "Legacy Space-row layout accepted for compatibility. The visible Space projection always renders disclosure, title, and direct window count on one line; declarations are still limited to 16 rows and 16 tokens per row."
         },
         {
           "key": "ui.accent",

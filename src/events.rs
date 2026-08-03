@@ -70,6 +70,8 @@ pub enum AppEvent {
         process_exited: bool,
         observed_at: Instant,
     },
+    /// Agent-reported background jobs changed independently of lifecycle.
+    BackgroundJobsChanged { pane_id: PaneId, count: Option<u16> },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
         pane_id: PaneId,

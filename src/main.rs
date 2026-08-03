@@ -334,12 +334,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.sidebar.agents.rows_by_agent]
 # claude = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["agent"]]
 
-# Expanded space rows. Built-ins are state_icon, state_text, workspace, branch, and git_status.
-# Custom values reported through workspace metadata use a $name token, for example $jj_status.
-# Inline token styles accept strict #RGB/#RRGGBB foregrounds plus bold and dim booleans.
+# Space rows use a fixed one-line disclosure, title, and direct window count.
 # [ui.sidebar.spaces]
-# Blank rows between complete space groups. Indented worktree children stay packed.
+# Blank rows between complete space groups. Direct tab/window rows stay packed.
 # row_gap = 1
+# Legacy row declarations remain accepted for configuration compatibility but are not rendered.
 # rows = [["state_icon", "workspace"], ["branch", "git_status"]]
 
 # Accent color for highlights, borders, and navigation UI.
