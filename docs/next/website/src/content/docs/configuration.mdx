@@ -258,7 +258,7 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one workspace tree: each workspace keeps its roll-up row, every tab is shown even when it has no detected agent, and each tab exposes panes in layout order. Linked-worktree and agent disclosure are independent. Compact and mobile navigation preserve the same ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
 
-`ui.agent_panel_sort = "priority"` remains accepted for compatibility and attention summaries, but the final sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query likewise keeps the ownership projection. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
+`ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but the visible sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query also leaves the ownership tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
 Each expanded tab shows its persisted title once, followed by pane rows. Pane state remains explicit (`working`, `blocked`, or `done`) and a completed pane stays `done` when it is viewed. Activity age is supplementary only and never replaces `done`.
 
@@ -328,7 +328,7 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls blank terminal rows between Space roots and between Agent children or flat Agent entries. The Agent and Space values remain independent. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+`row_gap` controls blank terminal rows between Space roots and between pane children. The Agent and Space values remain independent. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 

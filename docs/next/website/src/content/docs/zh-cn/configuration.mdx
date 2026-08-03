@@ -126,6 +126,8 @@ focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
+split_left = "prefix+shift+v"
+split_up = "prefix+shift+minus"
 ```
 
 默认键位以前缀为主，因此 Herdr 不会抢占 shell、编辑器、tmux 或终端应用的输入。在[配置参考](/docs/config-reference/)中搜索 `keys.` 可查看每个动作及其默认绑定。应用内帮助面板可通过 `prefix+?` 打开，其中会显示当前生效的绑定。
@@ -252,7 +254,7 @@ yellow = "#f9e2af"
 
 侧边栏是 Herdr 的主仪表盘。默认的 `spaces` 顺序是一棵工作区→标签页→窗格的归属树。所有标签页和窗格都按布局顺序显示，包括未检测到智能体的标签页。关联 worktree 和窗格的展开状态相互独立，紧凑视图和移动视图也保留同一棵树。选中状态通过前景色和粗体显示，不使用强背景色。
 
-`ui.agent_panel_sort = "priority"` 仍会为了兼容性和注意力摘要而被接受，但最终侧边栏始终保持标准的工作区、标签页和窗格顺序。生命周期变化不会重排这些归属行，临时的 `agent.view.set` 查询也会保留归属投影。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、鼠标行为、窗格边框和其他显示设置。
+`ui.agent_panel_sort = "priority"` 仍会为了兼容性和旧版编号 Agent 投影而被接受,但可见侧边栏始终保持标准的工作区、标签页和窗格顺序。生命周期变化不会重排这些归属行。临时的 `agent.view.set` 查询也不会改变归属树;其兼容行为见[智能体视图查询](/zh-cn/docs/socket-api/#智能体视图查询)。在[配置参考](/docs/config-reference/)中搜索 `ui.`,可查看尺寸、折叠模式、鼠标行为、窗格边框和其他显示设置。
 
 每个展开的标签页只显示一次已保存的标题，然后在其下显示窗格行。窗格状态始终明确显示为 `working`、`blocked` 或 `done`；已完成的窗格在查看后仍保持 `done`。活动时长只是补充信息，不会取代 `done`。
 
@@ -322,7 +324,7 @@ rows = [
 
 `fg` 只接受严格的 `#RGB` 或 `#RRGGBB`，`bold` 和 `dim` 接受布尔值。省略字段会保留上下文样式；显式 `false` 会移除对应修饰。样式只作用于当前出现位置。为 `git_status` 设置 `fg` 后，ahead 和 behind 会使用同一种颜色，而不是默认的绿色和红色。token 样式不会改变分隔符或行背景。
 
-`row_gap` 控制 Space 根条目之间，以及 Agent 子条目或扁平 Agent 条目之间的空白终端行数。Agent 和 Space 的取值仍然互相独立。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
+`row_gap` 控制 Space 根条目之间以及窗格子条目之间的空白终端行数。Agent 和 Space 的取值仍然互相独立。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
 
 在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
 

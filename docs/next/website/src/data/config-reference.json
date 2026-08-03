@@ -704,7 +704,7 @@
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
-          "description": "Agent sidebar ordering. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
+          "description": "Legacy indexed-Agent projection ordering. The visible sidebar remains in canonical workspace, tab, and pane order. Saved values are \"spaces\" or \"priority\"; \"workspaces\" is accepted as an alias for \"spaces\".",
           "values": [
             "spaces",
             "priority"

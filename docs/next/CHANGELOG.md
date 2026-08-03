@@ -4,7 +4,7 @@
 
 ### Changed
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
-- Desktop sessions now show a theme-derived, right-aligned native status row containing the focused folder and Git branch, device name, CPU, and memory. The left side stays blank; the row does not collect or display network details or usernames, and it does not show the Herdr version, battery, date, or time. Set `ui.status_bar.enabled = false` to hide the row and stop its background sampling.
+- Desktop sessions now show a theme-derived, right-aligned native status row containing the Git branch, device name, CPU, and memory. The left side stays blank; the row does not collect or display network details or usernames, and it does not show the focused folder, Herdr version, battery, date, or time. Set `ui.status_bar.enabled = false` to hide the row and stop its background sampling.
 - The sidebar now keeps a stable Spaces → tab → pane hierarchy, including agentless tabs. Priority configuration remains compatible but cannot reorder identity rows; completed panes stay `done`, and each tab title is rendered once.
 - User prompt hooks for Claude Code and Codex recalculate a sanitized, session-guarded title through the pane-owning Herdr binary without an additional model call.
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.

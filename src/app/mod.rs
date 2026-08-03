@@ -44,18 +44,6 @@ const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(500);
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 
-fn status_home_dir() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    const KEYS: &[&str] = &["USERPROFILE", "HOME"];
-    #[cfg(not(windows))]
-    const KEYS: &[&str] = &["HOME"];
-
-    KEYS.iter()
-        .filter_map(std::env::var_os)
-        .find(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-}
-
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute, terminal,
@@ -546,9 +534,6 @@ impl App {
         let mut state = AppState {
             view_observed_at: Instant::now(),
             status_metrics: None,
-            // Retained for compatibility with persisted/default status state;
-            // the current top-row projection intentionally elides folder text.
-            status_home_dir: status_home_dir(),
             status_git_cwd: None,
             status_git_branch: None,
             status_focused_cwd: None,

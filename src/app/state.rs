@@ -1455,7 +1455,6 @@ pub struct AppState {
     pub(crate) view_observed_at: Instant,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
-    pub(crate) status_home_dir: Option<std::path::PathBuf>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
     pub(crate) status_git_branch: Option<String>,
     /// Runtime-resolved cwd of the focused pane, projected from the same
@@ -1558,7 +1557,7 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
-    /// Transient session-wide projection override for the built-in Agents view.
+    /// Transient session-wide compatibility projection for indexed Agent focus.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
@@ -1725,7 +1724,7 @@ impl AppState {
 
     pub(crate) fn sidebar_shows_spaces_tree(&self) -> bool {
         // The final sidebar is always a stable ownership projection. Priority
-        // remains available for attention summaries, but may not reorder rows.
+        // remains available for indexed Agent focus, but may not reorder rows.
         true
     }
 
@@ -1984,7 +1983,6 @@ impl AppState {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),
             }),
-            status_home_dir: Some(std::path::PathBuf::from("/home/test")),
             status_git_cwd: None,
             status_git_branch: None,
             status_focused_cwd: None,

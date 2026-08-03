@@ -851,7 +851,8 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Full-width top status row.
     pub status_bar: StatusBarConfig,
-    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
+    /// Legacy indexed-Agent projection ordering. The visible sidebar remains canonical.
+    /// Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,

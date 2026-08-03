@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn mobile_item_titles_distinguish_selection_without_background_weight() {
-        let palette = Palette::default();
+        let palette = Palette::catppuccin();
         let inactive = mobile_item_title_style(false, false, &palette);
         let selected = mobile_item_title_style(true, false, &palette);
 
