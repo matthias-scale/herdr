@@ -70,6 +70,21 @@ class QaPreviewAdapterTests(unittest.TestCase):
                 ["./scripts/qa-sidebar-lifecycle-journey.sh", "--flow", flow["id"]],
             )
 
+    def test_declared_command_uses_its_process_working_directory(self) -> None:
+        result = subprocess.run(
+            [
+                str(ADAPTER), "--pr", "13", "--head", self.head,
+                "--mode", "qa", "--format", "json",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        card = json.loads(result.stdout)
+        self.assertEqual(card["head_sha"], self.head)
+
     def test_adapter_rejects_invalid_arguments_and_checkout_binding(self) -> None:
         short_head = self.adapter(
             "--repo-dir", str(ROOT), "--pr", "13", "--head", self.head[:12],

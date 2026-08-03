@@ -2,14 +2,14 @@
 # Emit a terminal-only QA card for the checked-out Herdr revision.
 set -euo pipefail
 
-repo_dir=""
+repo_dir="${QA_REPO_DIR:-$PWD}"
 pr=""
 head=""
 mode=""
 format=""
 
 usage() {
-    echo "usage: qa-preview-adapter.sh --repo-dir <path> --pr <number> --head <full-sha> --mode <qa|card> --format json" >&2
+    echo "usage: qa-preview-adapter.sh [--repo-dir <path>] --pr <number> --head <full-sha> --mode <qa|card> --format json" >&2
 }
 
 require_value() {
