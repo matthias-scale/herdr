@@ -31,6 +31,10 @@ pub(crate) fn tab_agent_icon(agent: Option<Agent>) -> Option<&'static str> {
     }
 }
 
+pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
+    entry.agent.is_some() && (entry.state != AgentState::Idle || !entry.seen)
+}
+
 /// Selected sidebar titles need stronger foreground contrast without restoring
 /// the old filled-row treatment. Darken RGB text tokens by one third and pair
 /// them with bold weight; terminal/reset themes keep their authored foreground.
@@ -1631,7 +1635,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         _ => None,
     });
     let Some((entry, depth)) = entry else { return };
-    let show_status = entry.state != AgentState::Idle || !entry.seen;
+    let show_status = tab_lifecycle_visible(&entry);
     let state = show_status.then(|| {
         entry
             .state_labels
@@ -4230,6 +4234,28 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(tab_agent_icon(Some(Agent::Pi)), None);
         assert_eq!(tab_agent_icon(Some(Agent::Gemini)), None);
         assert_eq!(tab_agent_icon(None), None);
+    }
+
+    #[test]
+    fn unseen_agentless_tab_omits_lifecycle_status() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].test_add_tab(Some("Agentless window"));
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 50, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .find(|row| row.contains("Agentless window"))
+            .expect("agentless tab row");
+
+        for lifecycle in ["idle", "done", "working", "blocked", "unknown"] {
+            assert!(!rendered.contains(lifecycle), "{rendered:?}");
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     agent_panel_status_key, mobile_sidebar_rows, mobile_sidebar_rows_from,
     sidebar_row_belongs_to_workspace, sidebar_space_member_indices, tab_agent_icon,
-    AgentPanelEntry, SidebarRow,
+    tab_lifecycle_visible, AgentPanelEntry, SidebarRow,
 };
 use super::status::{state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
@@ -661,7 +661,7 @@ fn render_mobile_switcher_content(
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let show_status = entry.state != AgentState::Idle || !entry.seen;
+                let show_status = tab_lifecycle_visible(entry);
                 let state = show_status.then(|| {
                     entry
                         .state_labels
@@ -1862,6 +1862,54 @@ mod tests {
         assert!(!row.contains("idle"), "{row:?}");
         assert!(!row.contains("done"), "{row:?}");
         assert!(!row.contains(" · Review release"), "{row:?}");
+    }
+
+    #[test]
+    fn unseen_agentless_mobile_tab_omits_lifecycle_status() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("one");
+        workspace.tabs[0].custom_name = Some("Agent task".into());
+        workspace.test_add_tab(Some("Agentless window"));
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let first_pane = app.workspaces[0].tabs[0].root_pane;
+        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 10);
+        app.reconcile_sidebar_presentation();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 12),
+                )
+            })
+            .unwrap();
+        let rendered = (0..12)
+            .map(|y| {
+                (0..40)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("Agentless window"))
+            .expect("agentless mobile tab row");
+
+        for lifecycle in ["idle", "done", "working", "blocked", "unknown"] {
+            assert!(!rendered.contains(lifecycle), "{rendered:?}");
+        }
     }
 
     #[cfg(unix)]

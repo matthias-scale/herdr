@@ -64,6 +64,7 @@ case "$flow" in
             "mixed_provider_tab_omits_provider_icon"
             "narrow_tab_rows_reserve_provider_icon_badge_and_activity_age"
             "unsupported_and_agentless_tabs_omit_provider_icons"
+            "unseen_agentless_tab_omits_lifecycle_status"
             "background_jobs_change_does_not_change_lifecycle_or_seen_state"
             "codex_background_job_count_uses_live_footer_only"
             "background_job_count_is_unknown_for_unsupported_agents"
@@ -71,6 +72,7 @@ case "$flow" in
             "space_row_gap_separates_groups_but_never_tabs_inside_them"
             "ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows"
             "seen_idle_mobile_tab_omits_status_segment"
+            "unseen_agentless_mobile_tab_omits_lifecycle_status"
             "ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane"
             "review_findings_agent_navigation_reveals_against_final_picker_projection"
         )

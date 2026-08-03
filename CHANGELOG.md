@@ -5,6 +5,9 @@
 ### Added
 - Sidebar window rows now identify Codex (`⌘`) and Claude (`✦`) immediately after the title, before any background-shell count.
 
+### Fixed
+- Agentless sidebar windows no longer show a misleading lifecycle status.
+
 ## [0.7.5] - 2026-07-21
 
 ### Breaking Changes
