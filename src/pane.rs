@@ -56,6 +56,7 @@ pub use self::{
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
+const BACKGROUND_JOB_DETECTION_ROWS: usize = 512;
 const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
 
@@ -821,11 +822,14 @@ fn spawn_basic_detection_task(
             let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
             if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
                 let background_agent = (!process_exited).then_some(agent).flatten();
+                let background_content = terminal
+                    .recent_unwrapped_text_snapshot(BACKGROUND_JOB_DETECTION_ROWS)
+                    .text;
                 publish_background_jobs_if_changed(
                     &state_events,
                     pane_id,
                     background_agent,
-                    &terminal.detection_text(),
+                    &background_content,
                     &mut last_background_job_count,
                 )
                 .await;
@@ -2315,11 +2319,14 @@ impl PaneRuntime {
                     let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
                     if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
                         let background_agent = (!process_exited).then_some(agent).flatten();
+                        let background_content = terminal
+                            .recent_unwrapped_text_snapshot(BACKGROUND_JOB_DETECTION_ROWS)
+                            .text;
                         publish_background_jobs_if_changed(
                             &state_events,
                             pane_id,
                             background_agent,
-                            &terminal.detection_text(),
+                            &background_content,
                             &mut last_background_job_count,
                         )
                         .await;

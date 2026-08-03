@@ -4410,6 +4410,25 @@ mod tests {
     }
 
     #[test]
+    fn background_job_probe_retains_a_footer_taller_than_the_viewport() {
+        let (tx, _rx) = mpsc::channel(4);
+        let footer = "4 background terminals running · /ps to view · /stop to close";
+        let mut terminal = crate::ghostty::Terminal::new(1, 3, 100).unwrap();
+        terminal.write(footer.as_bytes());
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert!(!pane.detection_text().contains("4 background"));
+        let background_content = pane.recent_unwrapped_text(512);
+        assert_eq!(
+            crate::detect::background_job_count(
+                Some(crate::detect::Agent::Codex),
+                &background_content
+            ),
+            Some(4)
+        );
+    }
+
+    #[test]
     fn recent_snapshots_report_omitted_rendered_rows() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(20, 3, 100).unwrap();
