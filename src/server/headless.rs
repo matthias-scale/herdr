@@ -4932,6 +4932,7 @@ mod tests {
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
         server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.sidebar_width = 30;
         server.app.state.sidebar_agents.rows = vec![vec![
             crate::config::AgentSidebarToken::TerminalTitleStripped,
         ]];
