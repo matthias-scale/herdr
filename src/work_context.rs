@@ -129,6 +129,10 @@ impl PaneWorkContextState {
         &self.effective
     }
 
+    pub(crate) fn persisted(&self) -> &PaneWorkContext {
+        &self.manual
+    }
+
     pub fn apply_manual_patch(&mut self, patch: PaneWorkContextPatch) -> Result<bool, String> {
         if patch.is_empty() {
             return Err("missing work-context field to set or clear".into());

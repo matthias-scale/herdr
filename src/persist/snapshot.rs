@@ -343,7 +343,7 @@ fn capture_tab(
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
         let work_context = terminal
-            .map(|terminal| terminal.effective_work_context().clone())
+            .map(|terminal| terminal.persisted_work_context().clone())
             .unwrap_or_default();
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn ac3_snapshot_serialization_round_trips_effective_work_context() {
+    fn ac3_snapshot_serialization_round_trips_only_manual_work_context() {
         let mut state = state_with_workspaces(&["context"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].tabs[0].panes[&root]
@@ -664,11 +664,30 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .replace_hook_work_context(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-9".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/9".into()],
+                work_title: Some("Transient hook context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.terminals[&terminal_id]
+                .effective_work_context()
+                .ticket_ids,
+            vec!["MAT-5", "SCA-9"]
+        );
 
         let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
         let restored = parse_snapshot(&json).unwrap();
         let context = &restored.workspaces[0].tabs[0].panes[&root.raw()].work_context;
         assert_eq!(context.ticket_ids, vec!["MAT-5"]);
+        assert!(context.pr_urls.is_empty());
         assert_eq!(context.work_title.as_deref(), Some("Persist context"));
     }
 

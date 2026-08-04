@@ -1586,9 +1586,6 @@ impl App {
                 ttl,
             });
         }
-        if hook_context_changed {
-            self.schedule_session_save();
-        }
         if token_changed {
             self.sync_agent_metadata_deadline();
         }
