@@ -26,8 +26,14 @@ pub(crate) fn curl_command() -> Command {
 /// `deadline` is reached.
 ///
 /// On Unix the child is spawned as the leader of its own process group so expiry can
-/// signal every descendant, not just the direct child. On Windows the child is assigned to a
-/// private Job Object configured to terminate its descendants when deadline cleanup runs.
+/// signal every descendant, not just the direct child. On Windows the child is best-effort
+/// assigned to a private Job Object configured to terminate its descendants when deadline
+/// cleanup runs; job setup failure degrades to direct-child-only cleanup. The child is spawned
+/// before job assignment without `CREATE_SUSPENDED`, so a descendant created in that window is
+/// not job-contained: Windows containment is best-effort whole-tree containment. On successful
+/// return, dropping the Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates any
+/// still-live associated descendants. That scoping is intentional for the current read-only
+/// Git callers.
 pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Output> {
     if Instant::now() >= deadline {
         return Err(io::Error::new(
@@ -126,23 +132,23 @@ struct ProcessTree {
     #[cfg(unix)]
     pgid: libc::pid_t,
     #[cfg(windows)]
-    job: crate::platform::ProcessJobObject,
+    job: Option<crate::platform::ProcessJobObject>,
 }
 
 impl ProcessTree {
     fn for_child(child: &std::process::Child) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            return Ok(Self {
+            Ok(Self {
                 pgid: child.id() as libc::pid_t,
-            });
+            })
         }
 
         #[cfg(windows)]
         {
-            return Ok(Self {
-                job: crate::platform::ProcessJobObject::for_child(child)?,
-            });
+            Ok(Self {
+                job: crate::platform::ProcessJobObject::for_child(child).ok(),
+            })
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -164,17 +170,27 @@ impl ProcessTree {
             let group_error = io::Error::last_os_error();
             // The group may already be empty (for example after a successful child
             // wait); fall back to the direct child so unrelated errors still surface.
-            return match child.kill() {
+            match child.kill() {
                 Ok(()) => Ok(()),
                 Err(_) if group_error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
                 Err(kill_error) => Err(kill_error),
-            };
+            }
         }
 
         #[cfg(windows)]
         {
-            let _ = child;
-            self.job.terminate()
+            if let Some(job) = &self.job {
+                if job.terminate().is_ok() {
+                    return Ok(());
+                }
+            }
+            match child.kill() {
+                Ok(()) => Ok(()),
+                Err(kill_error) => match child.try_wait()? {
+                    Some(_) => Ok(()),
+                    None => Err(kill_error),
+                },
+            }
         }
 
         #[cfg(not(any(unix, windows)))]
