@@ -427,6 +427,8 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::OpenWorkUrl => self.open_focused_work_url(),
+            NavigateAction::CopyWorkUrl => self.copy_focused_work_url(),
             NavigateAction::Detach => {
                 super::modal::request_detach(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -442,6 +444,46 @@ impl App {
     pub(crate) fn focus_workspace_idx_via_api(&mut self, ws_idx: usize) {
         let workspace_id = self.public_workspace_id(ws_idx);
         self.runtime_workspace_focus("tui.workspace.focus", workspace_id);
+    }
+
+    fn show_work_link_notice(&mut self, message: &str) {
+        self.state.copy_feedback = Some(crate::app::state::CopyFeedback {
+            message: message.to_string(),
+        });
+        self.copy_feedback_deadline =
+            Some(std::time::Instant::now() + super::super::COPY_FEEDBACK_DURATION);
+    }
+
+    fn open_focused_work_url(&mut self) {
+        let Some(url) = focused_work_url(&self.state) else {
+            self.show_work_link_notice("focused pane has no work link");
+            leave_navigate_mode(&mut self.state);
+            return;
+        };
+        if let Err(error) = crate::platform::open_url(&url) {
+            tracing::warn!(%error, %url, "failed to open focused pane work link");
+            self.show_work_link_notice("could not open work link");
+        }
+        leave_navigate_mode(&mut self.state);
+    }
+
+    fn copy_focused_work_url(&mut self) {
+        let Some(url) = focused_work_url(&self.state) else {
+            self.show_work_link_notice("focused pane has no work link");
+            leave_navigate_mode(&mut self.state);
+            return;
+        };
+        if self
+            .event_tx
+            .try_send(crate::events::AppEvent::ClipboardWrite {
+                content: url.into_bytes(),
+            })
+            .is_err()
+        {
+            tracing::warn!("failed to queue focused pane work link clipboard event");
+            self.show_work_link_notice("could not copy work link");
+        }
+        leave_navigate_mode(&mut self.state);
     }
 
     pub(crate) fn close_workspace_idx_via_api(&mut self, ws_idx: usize) {
@@ -1406,6 +1448,8 @@ pub(crate) enum NavigateAction {
     Settings,
     ReloadConfig,
     OpenNotificationTarget,
+    OpenWorkUrl,
+    CopyWorkUrl,
     Detach,
     OpenNavigator,
 }
@@ -1554,6 +1598,8 @@ fn non_indexed_action_for_key(
             &kb.open_notification_target,
             NavigateAction::OpenNotificationTarget,
         ),
+        (&kb.open_work_url, NavigateAction::OpenWorkUrl),
+        (&kb.copy_work_url, NavigateAction::CopyWorkUrl),
         (&kb.detach, NavigateAction::Detach),
         (&kb.goto, NavigateAction::OpenNavigator),
     ] {
@@ -1840,6 +1886,9 @@ pub(super) fn execute_navigate_action_in_context(
                 leave_navigate_mode(state);
             }
         }
+        NavigateAction::OpenWorkUrl | NavigateAction::CopyWorkUrl => {
+            leave_navigate_mode(state);
+        }
         NavigateAction::Detach => {
             super::modal::request_detach(state);
             leave_navigate_mode(state);
@@ -1856,6 +1905,19 @@ fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<u
         ActionContext::Navigate => state.selected,
     };
     (idx < state.workspaces.len()).then_some(idx)
+}
+
+fn focused_work_url(state: &AppState) -> Option<String> {
+    let workspace = state
+        .active
+        .and_then(|ws_idx| state.workspaces.get(ws_idx))?;
+    let pane_id = workspace.focused_pane_id()?;
+    let terminal_id = workspace.terminal_id(pane_id)?;
+    state
+        .terminals
+        .get(terminal_id)?
+        .effective_work_context()
+        .primary_action_url()
 }
 
 fn workspace_can_start_worktree_action(
@@ -2000,6 +2062,96 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[test]
+    fn ac4_default_work_link_keybindings_map_to_distinct_prefix_actions() {
+        let state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('u'), KeyModifiers::empty()),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::OpenWorkUrl)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('U'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::CopyWorkUrl)
+        );
+    }
+
+    #[test]
+    fn ac4_work_link_resolver_and_clipboard_use_only_active_focused_pane() {
+        let mut app = app_with_test_workspaces(&["active", "selected"]);
+        app.state.selected = 1;
+        let focused = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(focused);
+
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let selected = app.state.workspaces[1].tabs[0].root_pane;
+        for (ws_idx, pane, ticket, pr) in [
+            (
+                0,
+                root,
+                None,
+                Some("https://github.com/ogulcancelik/herdr/pull/1"),
+            ),
+            (
+                0,
+                focused,
+                Some("SCA-42"),
+                Some("https://github.com/ogulcancelik/herdr/pull/4"),
+            ),
+            (1, selected, Some("SCA-999"), None),
+        ] {
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane)
+                .cloned()
+                .unwrap();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    ticket_ids: ticket.map(|ticket| vec![ticket.into()]),
+                    pr_urls: pr.map(|pr| vec![pr.into()]),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        assert_eq!(
+            focused_work_url(&app.state).as_deref(),
+            Some("https://linear.app/scalable/issue/SCA-42")
+        );
+        app.execute_tui_navigate_action(NavigateAction::CopyWorkUrl, ActionContext::Prefix);
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"https://linear.app/scalable/issue/SCA-42")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn ac4_missing_work_context_is_a_nonfatal_notice_without_clipboard_event() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        app.execute_tui_navigate_action(NavigateAction::CopyWorkUrl, ActionContext::Prefix);
+
+        assert!(app.event_rx.try_recv().is_err());
+        assert_eq!(
+            app.state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("focused pane has no work link")
+        );
     }
 
     #[test]

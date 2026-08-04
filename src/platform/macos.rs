@@ -764,14 +764,36 @@ pub fn read_clipboard_text() -> Option<String> {
     }
 }
 
-pub fn open_url(url: &str) -> std::io::Result<()> {
-    Command::new("open")
+fn open_url_command(url: &str) -> Command {
+    let mut command = Command::new("open");
+    command
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    command
+}
+
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    open_url_command(url).spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    use super::*;
+
+    #[test]
+    fn ac5_open_url_uses_macos_open_with_url_as_one_argv_value() {
+        let command = open_url_command("https://linear.app/scalable/issue/SCA-42");
+        assert_eq!(command.get_program(), "open");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new(
+                "https://linear.app/scalable/issue/SCA-42"
+            )]
+        );
+    }
 }
 
 pub fn read_clipboard_image() -> Option<ClipboardImage> {

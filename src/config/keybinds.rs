@@ -319,6 +319,8 @@ pub struct Keybinds {
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
+    pub open_work_url: ActionKeybinds,
+    pub copy_work_url: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -485,6 +487,8 @@ impl Config {
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
+            open_work_url: empty_action!(),
+            copy_work_url: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -615,6 +619,8 @@ impl Config {
                 open_notification_target,
                 source
             );
+            apply_action!(keybinds.open_work_url, open_work_url, source);
+            apply_action!(keybinds.copy_work_url, copy_work_url, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -1601,6 +1607,40 @@ next_tab = "prefix+n"
                 KeyModifiers::empty()
             ))]
         );
+    }
+
+    #[test]
+    fn ac4_work_link_defaults_and_collision_validation_are_registered() {
+        let defaults = Config::default().keybinds();
+        assert!(defaults
+            .open_work_url
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('u'),
+                KeyModifiers::empty(),
+            )));
+        assert!(defaults
+            .copy_work_url
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('U'),
+                KeyModifiers::SHIFT,
+            )));
+
+        let config: Config = toml::from_str(
+            r#"
+            [keys]
+            open_work_url = "prefix+u"
+            copy_work_url = "prefix+u"
+            "#,
+        )
+        .unwrap();
+        let loaded = config.validated_keybinds();
+        assert!(!loaded.3.open_work_url.bindings.is_empty());
+        assert!(loaded.3.copy_work_url.bindings.is_empty());
+        assert!(loaded
+            .2
+            .iter()
+            .any(|diagnostic| diagnostic.contains("copy_work_url")
+                && diagnostic.contains("disabled")));
     }
 
     #[test]

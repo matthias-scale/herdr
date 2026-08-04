@@ -78,6 +78,8 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
                 keybind_label(&kb.open_notification_target),
                 "open notification target",
             ),
+            help_entry(keybind_label(&kb.open_work_url), "open work link"),
+            help_entry(keybind_label(&kb.copy_work_url), "copy work link"),
         ],
     ));
 
