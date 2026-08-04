@@ -226,6 +226,13 @@ async fn publish_background_jobs_if_changed(
     }
 }
 
+fn background_detection_text_if_supported(
+    agent: Option<Agent>,
+    read: impl FnOnce() -> String,
+) -> Option<String> {
+    (agent == Some(Agent::Codex)).then(read)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPublishUpdate {
     state: AgentState,
@@ -822,13 +829,15 @@ fn spawn_basic_detection_task(
             let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
             if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
                 let background_agent = (!process_exited).then_some(agent).flatten();
-                let background_content =
-                    terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS);
+                let background_content = background_detection_text_if_supported(
+                    background_agent,
+                    || terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS),
+                );
                 publish_background_jobs_if_changed(
                     &state_events,
                     pane_id,
                     background_agent,
-                    &background_content,
+                    background_content.as_deref().unwrap_or_default(),
                     &mut last_background_job_count,
                 )
                 .await;
@@ -2318,13 +2327,15 @@ impl PaneRuntime {
                     let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
                     if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
                         let background_agent = (!process_exited).then_some(agent).flatten();
-                        let background_content =
-                            terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS);
+                        let background_content = background_detection_text_if_supported(
+                            background_agent,
+                            || terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS),
+                        );
                         publish_background_jobs_if_changed(
                             &state_events,
                             pane_id,
                             background_agent,
-                            &background_content,
+                            background_content.as_deref().unwrap_or_default(),
                             &mut last_background_job_count,
                         )
                         .await;
@@ -4260,5 +4271,19 @@ mod tests {
                 count: None,
             }) if event_pane == pane_id
         ));
+    }
+
+    #[test]
+    fn background_detection_text_is_not_read_for_unsupported_agents() {
+        assert_eq!(
+            background_detection_text_if_supported(Some(Agent::Claude), || {
+                panic!("unsupported agent snapshot was read")
+            }),
+            None
+        );
+        assert_eq!(
+            background_detection_text_if_supported(Some(Agent::Codex), || "footer".to_owned()),
+            Some("footer".to_owned())
+        );
     }
 }
