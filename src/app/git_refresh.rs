@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::{App, GIT_REMOTE_STATUS_REFRESH_INTERVAL, GIT_REPO_DISCOVERY_REFRESH_INTERVAL};
+use super::{
+    App, GitRefreshInFlight, GIT_REFRESH_TIMEOUT, GIT_REMOTE_STATUS_REFRESH_INTERVAL,
+    GIT_REPO_DISCOVERY_REFRESH_INTERVAL,
+};
 use crate::events::AppEvent;
 use crate::workspace::{GitStatusCacheEntry, GitStatusRefreshDemand, WorkspaceGitStatus};
 
@@ -36,7 +39,25 @@ struct WorkspaceGitRefreshOutput {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn test_begin_git_refresh(&mut self, generation: u64) {
+        let started_at = Instant::now();
+        self.last_git_refresh_generation = generation;
+        self.git_refresh_in_flight = Some(GitRefreshInFlight {
+            generation,
+            started_at,
+            deadline: started_at + GIT_REFRESH_TIMEOUT,
+        });
+    }
+
     pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {
+        if self
+            .git_refresh_in_flight
+            .is_some_and(|refresh| now >= refresh.deadline)
+        {
+            self.invalidate_expired_git_refresh(now);
+        }
+
         let Some(deadline) = self.git_refresh_deadline() else {
             return;
         };
@@ -61,7 +82,14 @@ impl App {
             return;
         }
 
-        self.git_refresh_in_flight = true;
+        self.last_git_refresh_generation = self.last_git_refresh_generation.wrapping_add(1);
+        let generation = self.last_git_refresh_generation;
+        let deadline = now + GIT_REFRESH_TIMEOUT;
+        self.git_refresh_in_flight = Some(GitRefreshInFlight {
+            generation,
+            started_at: now,
+            deadline,
+        });
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
         self.git_identity_refresh_requested = false;
@@ -69,8 +97,9 @@ impl App {
             self.last_git_repo_discovery_refresh = now;
         }
         std::thread::spawn(move || {
-            let output = refresh_workspace_git_statuses(workspaces, &cache);
+            let output = refresh_workspace_git_statuses(workspaces, &cache, deadline);
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
+                generation,
                 results: output.results,
                 cache_updates: output.cache_updates,
             });
@@ -85,7 +114,7 @@ impl App {
     pub(crate) fn mark_git_status_refresh_due(&mut self, now: Instant) {
         self.git_status_cache
             .retain(|_, entry| entry.fingerprint.is_some());
-        if self.git_refresh_in_flight {
+        if self.git_refresh_in_flight.is_some() {
             self.git_refresh_due_after_in_flight = true;
             return;
         }
@@ -96,10 +125,28 @@ impl App {
     }
 
     pub(crate) fn git_refresh_deadline(&self) -> Option<Instant> {
-        (!self.git_refresh_in_flight
-            && !self.state.workspaces.is_empty()
+        if let Some(refresh) = self.git_refresh_in_flight {
+            return Some(refresh.deadline);
+        }
+
+        (!self.state.workspaces.is_empty()
             && (self.git_identity_refresh_requested || !self.git_refresh_demand().is_empty()))
         .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+    }
+
+    fn invalidate_expired_git_refresh(&mut self, now: Instant) {
+        let Some(refresh) = self.git_refresh_in_flight.take() else {
+            return;
+        };
+        tracing::warn!(
+            generation = refresh.generation,
+            elapsed_ms = now
+                .saturating_duration_since(refresh.started_at)
+                .as_millis(),
+            "git status refresh exceeded its deadline; scheduling retry"
+        );
+        self.git_refresh_due_after_in_flight = false;
+        self.mark_git_status_refresh_due(now);
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
@@ -222,6 +269,7 @@ fn deduplicate_git_refresh_items(
 fn refresh_workspace_git_statuses(
     items: Vec<WorkspaceGitRefreshItem>,
     cache: &HashMap<PathBuf, GitStatusCacheEntry>,
+    deadline: Instant,
 ) -> WorkspaceGitRefreshOutput {
     let mut results = Vec::new();
     let mut cache_updates = Vec::new();
@@ -231,6 +279,7 @@ fn refresh_workspace_git_statuses(
             &job.cache_key,
             job.cached.as_ref(),
             job.demand,
+            deadline,
         );
         if let Some(cache_entry) = cache_entry {
             cache_updates.push((job.cache_key.clone(), cache_entry));
@@ -293,6 +342,7 @@ mod tests {
                 },
             ],
             &HashMap::new(),
+            Instant::now() + GIT_REFRESH_TIMEOUT,
         );
 
         assert_eq!(output.cache_updates.len(), 1);
@@ -404,7 +454,11 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item.resolved_identity_cwd == nested));
-        let output = refresh_workspace_git_statuses(items, &HashMap::new());
+        let output = refresh_workspace_git_statuses(
+            items,
+            &HashMap::new(),
+            Instant::now() + GIT_REFRESH_TIMEOUT,
+        );
 
         assert!(app
             .state
@@ -435,7 +489,7 @@ mod tests {
 
         assert!(app.git_refresh_deadline().is_some());
         app.start_git_status_refresh_if_due(now);
-        assert!(app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_some());
         assert!(!app.git_identity_refresh_requested);
     }
 
@@ -451,7 +505,7 @@ mod tests {
 
         app.start_git_status_refresh_if_due(now);
 
-        assert!(app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_some());
     }
 
     #[test]
@@ -643,6 +697,7 @@ mod tests {
             &cwd,
             None,
             GitStatusRefreshDemand::ALL,
+            Instant::now() + GIT_REFRESH_TIMEOUT,
         );
         app.git_status_cache
             .insert(cwd.clone(), entry.expect("non-Git cache entry"));
@@ -657,17 +712,18 @@ mod tests {
     fn git_refresh_due_request_survives_in_flight_refresh() {
         let mut app = test_app(&crate::config::Config::default());
         let now = Instant::now();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
         app.mark_git_status_refresh_due(now);
         assert!(app.git_refresh_due_after_in_flight);
 
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });
 
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
         assert!(!app.git_refresh_due_after_in_flight);
         assert_eq!(app.git_refresh_deadline(), None);
 
@@ -676,6 +732,31 @@ mod tests {
             .git_refresh_deadline()
             .expect("refresh should be due once a workspace exists");
         assert!(deadline <= Instant::now());
+    }
+
+    // ac1: an expired refresh is invalidated, retried, and keeps the last good branch visible.
+    #[test]
+    fn expired_git_refresh_retries_without_clearing_cached_branch() {
+        let mut app = test_app(&crate::config::Config::default());
+        let mut workspace = Workspace::test_new("test");
+        workspace.cached_git_branch = Some("last-good".into());
+        app.state.workspaces.push(workspace);
+        app.state.active = Some(0);
+        app.test_begin_git_refresh(41);
+        let now = Instant::now();
+        app.git_refresh_in_flight.as_mut().unwrap().deadline =
+            now - std::time::Duration::from_millis(1);
+
+        app.start_git_status_refresh_if_due(now);
+
+        assert_eq!(
+            app.git_refresh_in_flight.map(|refresh| refresh.generation),
+            Some(42)
+        );
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("last-good")
+        );
     }
 
     fn test_app(config: &crate::config::Config) -> super::super::App {

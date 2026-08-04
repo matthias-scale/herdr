@@ -3029,6 +3029,7 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::GitStatusRefreshed {
+                generation: _,
                 results,
                 cache_updates,
             } => {

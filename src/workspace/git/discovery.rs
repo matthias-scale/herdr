@@ -1,4 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSpaceMetadata {
@@ -121,7 +126,7 @@ pub fn git_branch(cwd: &Path) -> Option<String> {
     let git_dir = git_dir_for_repo_root(&repo_root)?;
     let git_common_dir = git_common_dir_for_git_dir(&git_dir);
     if git_ref_storage_is_reftable(&git_common_dir) {
-        return git_symbolic_head_short(&repo_root);
+        return git_symbolic_head_short(&repo_root, Instant::now() + GIT_COMMAND_TIMEOUT);
     }
 
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -156,16 +161,24 @@ fn path_is_git_dir_layout(path: &Path) -> bool {
     path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
 }
 
-pub(super) fn git_symbolic_head_full(repo_root: &Path) -> Option<String> {
-    git_trimmed_stdout(repo_root, &["symbolic-ref", "--quiet", "HEAD"])
+pub(super) fn git_symbolic_head_full(repo_root: &Path, deadline: Instant) -> Option<String> {
+    git_trimmed_stdout(repo_root, &["symbolic-ref", "--quiet", "HEAD"], deadline)
 }
 
-fn git_symbolic_head_short(repo_root: &Path) -> Option<String> {
-    git_trimmed_stdout(repo_root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+fn git_symbolic_head_short(repo_root: &Path, deadline: Instant) -> Option<String> {
+    git_trimmed_stdout(
+        repo_root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        deadline,
+    )
 }
 
-pub(super) fn git_rev_parse_verify(repo_root: &Path, revision: &str) -> Option<String> {
-    git_trimmed_stdout(repo_root, &["rev-parse", "--verify", revision])
+pub(super) fn git_rev_parse_verify(
+    repo_root: &Path,
+    revision: &str,
+    deadline: Instant,
+) -> Option<String> {
+    git_trimmed_stdout(repo_root, &["rev-parse", "--verify", revision], deadline)
 }
 
 pub(super) fn git_ref_storage_is_reftable(git_common_dir: &Path) -> bool {
@@ -225,13 +238,10 @@ fn strip_git_config_comment(value: &str) -> &str {
     value
 }
 
-fn git_trimmed_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
-    let output = crate::noninteractive_process::command("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(args)
-        .output()
-        .ok()?;
+fn git_trimmed_stdout(repo_root: &Path, args: &[&str], deadline: Instant) -> Option<String> {
+    let mut command = crate::noninteractive_process::command("git");
+    command.arg("-C").arg(repo_root).args(args);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -496,10 +506,11 @@ mod tests {
         run_git(&root, &["config", "user.name", "Herdr Test"]);
         run_git(&root, &["commit", "--allow-empty", "-m", "initial"]);
 
-        let head_oid = git_rev_parse_verify(&root, "HEAD").unwrap();
+        let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+        let head_oid = git_rev_parse_verify(&root, "HEAD", deadline).unwrap();
 
         assert_eq!(
-            git_rev_parse_verify(&root, "refs/heads/main").as_deref(),
+            git_rev_parse_verify(&root, "refs/heads/main", deadline).as_deref(),
             Some(head_oid.as_str())
         );
 

@@ -6162,7 +6162,7 @@ next_tab = ""
     #[test]
     fn unchanged_git_refresh_does_not_request_headless_render() {
         let mut server = test_headless_server();
-        server.app.git_refresh_in_flight = true;
+        server.app.test_begin_git_refresh(1);
         let mut workspace = crate::workspace::Workspace::test_new("one");
         let workspace_id = workspace.id.clone();
         let cwd = workspace.identity_cwd.clone();
@@ -6172,6 +6172,7 @@ next_tab = ""
         server.app.state.workspaces.push(workspace);
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: cwd.clone(),
@@ -6186,18 +6187,20 @@ next_tab = ""
         });
 
         assert!(!changed);
-        assert!(!server.app.git_refresh_in_flight);
+        assert!(server.app.git_refresh_in_flight.is_none());
     }
 
     #[test]
     fn changed_git_refresh_requests_headless_render() {
         let mut server = test_headless_server();
+        server.app.test_begin_git_refresh(1);
         let workspace = crate::workspace::Workspace::test_new("one");
         let workspace_id = workspace.id.clone();
         let cwd = workspace.identity_cwd.clone();
         server.app.state.workspaces.push(workspace);
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: cwd.clone(),
