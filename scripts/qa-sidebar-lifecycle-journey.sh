@@ -83,7 +83,7 @@ case "$flow" in
         ;;
     same-session-title-replacement)
         filters=(
-            "title_hooks_prefer_the_owning_binary_over_stale_path"
+            "ac1_ac7_title_hooks_forward_the_full_fixture_to_the_owning_binary"
             "turn_start_fixture_reaches_guarded_herdr_title"
             "terse_later_user_prompt_submit_retains_the_session_initial_title"
             "work_title_initial_briefings_are_session_scoped_and_later_objectives_replace_them"
