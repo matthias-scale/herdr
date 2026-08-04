@@ -360,6 +360,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::path::Path;
+    #[cfg(not(unix))]
+    use std::path::Path;
     #[cfg(unix)]
     use std::time::Duration;
 
