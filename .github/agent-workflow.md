@@ -22,12 +22,14 @@ Load the following guardrails only when the named surface is in scope.
 ## Sidebar and activity changes
 
 - Preserve the fork's row contract unless the brief explicitly changes it:
-  one row per pane/window, state before one title, provider suffix after it, no
-  subtitle or idle label, and selection conveyed by darker/bolder foreground.
+  one row per tab/window with pane activity aggregated, state before one title,
+  no subtitle or idle label, and selection conveyed by darker/bolder foreground.
+  Show a provider suffix after the title only when the row has one unambiguous
+  supported provider; do not invent one for mixed, agentless, or exited rows.
 - Before the repository-wide pass, run focused tests at the supported 18-column
   minimum and a normal width for both desktop and mobile renderers. Preserve,
-  in order: state indicator, a readable title fragment, and provider suffix;
-  age and background-process details yield first.
+  in order: state indicator, a readable title fragment, and any present
+  provider suffix; age and background-process details yield first.
 - Cover the full observed lifecycle, not only static rows: new user input,
   blue working, process exit, green unread done, reopening clears done,
   background-shell changes, and minute-boundary age refresh. A mobile age label
@@ -52,6 +54,9 @@ Load the following guardrails only when the named surface is in scope.
 
 ## Live handoff verification
 
+- Prove that replacement occurred: capture the old server PID and executable,
+  require the old process to exit, and verify the new server identity before
+  judging preservation.
 - Snapshot before and after, then compare stable invariants: workspace/tab/pane
   shape, pane IDs, shell PID, foreground PGID and process identity, command,
   cwd, focus IDs, and server protocol/compatibility/restart state.
