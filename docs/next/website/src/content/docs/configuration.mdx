@@ -350,8 +350,9 @@ after the title: Claude uses `· cc`, Codex uses `· cx`, and Pi uses `· pi`.
 Agentless, unsupported, mixed-provider, and exited-agent rows omit the suffix.
 When Codex explicitly reports background terminals, a nonzero count appears
 after that suffix as `N >_`. The count is summed across panes owned by that tab,
-omitted when zero or unsupported, and never changes the window's lifecycle
-status or its position. The latest communication age remains right-aligned.
+omitted when zero or unsupported, cleared when Codex exits, and never changes
+the window's lifecycle status or its position. The latest communication age
+remains right-aligned.
 
 Legacy per-agent overrides under `rows_by_agent` are also accepted for
 configuration compatibility, but they do not add model or agent subtitle rows:

@@ -30,7 +30,8 @@ Single-provider Claude, Codex, and Pi rows append `· cc`, `· cx`, or `· pi`
 after the title. Mixed-provider, unsupported, agentless, and exited-agent rows
 omit that suffix. A nonzero Codex-reported background-terminal count appears as
 `N >_` after the suffix, sums across panes in that tab, and never changes
-lifecycle state or ordering. Working status and its live age use the
+lifecycle state or ordering. The count clears when Codex exits, even if the
+screen content does not change. Working status and its live age use the
 blue activity accent; unread completed work shows done, and opening that tab
 removes the status instead of replacing it with idle. Warning and
 machine-status colors are unchanged.
@@ -64,6 +65,7 @@ Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `tab_background_jobs_sum_across_panes_without_adding_rows`,
 `tab_background_job_badge_renders_immediately_after_title`,
 `background_jobs_change_does_not_change_lifecycle_or_seen_state`,
+`background_scan_runs_when_the_agent_process_exits_without_new_content`,
 `codex_background_job_count_uses_live_footer_only`,
 `background_job_count_is_unknown_for_unsupported_agents`,
 `tab_provider_suffixes_distinguish_codex_and_claude_after_title`,
