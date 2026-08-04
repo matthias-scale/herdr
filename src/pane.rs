@@ -233,6 +233,16 @@ fn background_detection_text_if_supported(
     (agent == Some(Agent::Codex)).then(read)
 }
 
+fn background_scan_needed(
+    agent_changed: bool,
+    scan_seq: u64,
+    last_scan_seq: Option<u64>,
+    process_exited: bool,
+    last_process_exited: Option<bool>,
+) -> bool {
+    agent_changed || last_scan_seq != Some(scan_seq) || last_process_exited != Some(process_exited)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPublishUpdate {
     state: AgentState,
@@ -674,6 +684,7 @@ fn spawn_basic_detection_task(
         let mut pending_idle = PendingIdleConfirmation::default();
         let mut last_background_job_count = None;
         let mut last_background_scan_seq = None;
+        let mut last_background_process_exited = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -704,6 +715,7 @@ fn spawn_basic_detection_task(
                     pending_idle.clear();
                     last_background_job_count = None;
                     last_background_scan_seq = None;
+                    last_background_process_exited = None;
                 }
             }
 
@@ -827,7 +839,13 @@ fn spawn_basic_detection_task(
                 && !foreground_shell_exit_reported;
 
             let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
-            if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
+            if background_scan_needed(
+                agent_changed,
+                background_scan_seq,
+                last_background_scan_seq,
+                process_exited,
+                last_background_process_exited,
+            ) {
                 let background_agent = (!process_exited).then_some(agent).flatten();
                 let background_content =
                     background_detection_text_if_supported(background_agent, || {
@@ -842,6 +860,7 @@ fn spawn_basic_detection_task(
                 )
                 .await;
                 last_background_scan_seq = Some(background_scan_seq);
+                last_background_process_exited = Some(process_exited);
             }
 
             if lifecycle_authority_active && !process_exited {
@@ -2124,6 +2143,7 @@ impl PaneRuntime {
                 let mut pending_idle = PendingIdleConfirmation::default();
                 let mut last_background_job_count = None;
                 let mut last_background_scan_seq = None;
+                let mut last_background_process_exited = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2164,6 +2184,7 @@ impl PaneRuntime {
                             pending_idle.clear();
                             last_background_job_count = None;
                             last_background_scan_seq = None;
+                            last_background_process_exited = None;
                         }
                     }
 
@@ -2325,7 +2346,13 @@ impl PaneRuntime {
                         && !foreground_shell_exit_reported;
 
                     let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
-                    if agent_changed || last_background_scan_seq != Some(background_scan_seq) {
+                    if background_scan_needed(
+                        agent_changed,
+                        background_scan_seq,
+                        last_background_scan_seq,
+                        process_exited,
+                        last_background_process_exited,
+                    ) {
                         let background_agent = (!process_exited).then_some(agent).flatten();
                         let background_content =
                             background_detection_text_if_supported(background_agent, || {
@@ -2340,6 +2367,7 @@ impl PaneRuntime {
                         )
                         .await;
                         last_background_scan_seq = Some(background_scan_seq);
+                        last_background_process_exited = Some(process_exited);
                     }
 
                     if lifecycle_authority_active && !process_exited {
@@ -4285,5 +4313,11 @@ mod tests {
             background_detection_text_if_supported(Some(Agent::Codex), || "footer".to_owned()),
             Some("footer".to_owned())
         );
+    }
+
+    #[test]
+    fn background_scan_runs_when_the_agent_process_exits_without_new_content() {
+        assert!(background_scan_needed(false, 7, Some(7), true, Some(false)));
+        assert!(!background_scan_needed(false, 7, Some(7), true, Some(true)));
     }
 }
