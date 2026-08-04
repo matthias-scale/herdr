@@ -463,6 +463,16 @@ fn pane_detail(
     }
     if let Some(terminal_id) = tab.terminal_id(pane_id) {
         if let Some(terminal) = app.terminals.get(terminal_id) {
+            let context = terminal.effective_work_context();
+            if !context.ticket_ids.is_empty() {
+                parts.push(format!("ticket: {}", context.ticket_ids.join(", ")));
+            }
+            for pr_url in &context.pr_urls {
+                parts.push(format!("PR: {pr_url}"));
+            }
+            if let Some(branch) = &context.branch {
+                parts.push(format!("branch: {branch}"));
+            }
             let presentation = terminal.effective_presentation();
             if let Some(title) = presentation.title {
                 parts.push(title);
@@ -639,5 +649,34 @@ mod tests {
         let rows = multi_tab_rows();
         assert!(!has_following_sibling_at_depth(&rows, 5, 1));
         assert!(!has_following_sibling_at_depth(&rows, 5, 2));
+    }
+
+    #[test]
+    fn ac3_pane_detail_lists_work_context_before_provider() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.agent_name = Some("Claude".into());
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["SCA-42".into()]),
+                pr_urls: Some(vec!["https://github.com/ogulcancelik/herdr/pull/4".into()]),
+                branch: Some("feat/work-context-ui".into()),
+                work_title: Some("repair login".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let detail = pane_detail(&app, &TerminalRuntimeRegistry::new(), 0, 0, pane);
+        let ticket = detail.find("ticket: SCA-42").unwrap();
+        let pr = detail
+            .find("PR: https://github.com/ogulcancelik/herdr/pull/4")
+            .unwrap();
+        let branch = detail.find("branch: feat/work-context-ui").unwrap();
+        let provider = detail.find("Claude").unwrap();
+        assert!(ticket < pr && pr < branch && branch < provider, "{detail}");
     }
 }

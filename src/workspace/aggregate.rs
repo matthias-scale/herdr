@@ -62,6 +62,7 @@ impl Tab {
                     pane_label: terminal
                         .manual_label
                         .clone()
+                        .or_else(|| terminal.effective_work_context().work_title.clone())
                         .or_else(|| terminal.effective_display_agent())
                         .or_else(|| terminal.agent_name.clone())
                         .or(agent_kind_label.clone())
@@ -296,5 +297,36 @@ mod tests {
         assert_eq!(details[1].pane_id, second);
         assert_eq!(details[0].pane_label.as_deref(), Some("Pane 1"));
         assert_eq!(details[1].pane_label.as_deref(), Some("Pane 2"));
+    }
+
+    #[test]
+    fn ac2_pane_details_prefer_manual_label_then_durable_work_title() {
+        let ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, pane);
+        terminal.agent_name = Some("Claude".into());
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                work_title: Some("repair login".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        terminals.insert(terminal.id.clone(), terminal);
+
+        assert_eq!(
+            ws.pane_details(&terminals)[0].pane_label.as_deref(),
+            Some("repair login")
+        );
+
+        terminals
+            .values_mut()
+            .next()
+            .unwrap()
+            .set_manual_label("manual pane".into());
+        assert_eq!(
+            ws.pane_details(&terminals)[0].pane_label.as_deref(),
+            Some("manual pane")
+        );
     }
 }
