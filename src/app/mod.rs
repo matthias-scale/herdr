@@ -4864,6 +4864,21 @@ mod tests {
     }
 
     #[test]
+    fn ac1_5_explicit_save_schedule_records_dirty_revision() {
+        let mut app = test_app();
+        app.no_session = false;
+        let previous_revision = app.state.session_dirty_revision;
+
+        app.schedule_session_save();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(
+            app.state.session_dirty_revision,
+            previous_revision.wrapping_add(1)
+        );
+    }
+
+    #[test]
     fn ac1_5_dirty_mutation_does_not_disturb_retry_deadline() {
         let mut app = test_app();
         app.no_session = false;
@@ -4871,9 +4886,13 @@ mod tests {
         app.session_save_retry_deadline = Some(retry_deadline);
         app.session_save_deadline = Some(retry_deadline);
 
-        app.state.mark_session_dirty();
-        app.sync_session_save_schedule();
+        let previous_revision = app.state.session_dirty_revision;
+        app.schedule_session_save();
 
+        assert_eq!(
+            app.state.session_dirty_revision,
+            previous_revision.wrapping_add(1)
+        );
         assert_eq!(app.session_save_retry_deadline, Some(retry_deadline));
         assert_eq!(app.session_save_deadline, Some(retry_deadline));
     }
