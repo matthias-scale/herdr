@@ -98,6 +98,7 @@ pub(crate) struct TerminalTitleChange {
 pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
+    pub hook_work_context_changed: bool,
     pub agent_released: bool,
 }
 
@@ -346,6 +347,30 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn replace_hook_work_context(
+        &mut self,
+        context: crate::work_context::PaneWorkContext,
+    ) -> Result<bool, String> {
+        let changed = self.work_context.replace_hook_turn(context)?;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(changed)
+    }
+
+    /// The hook tier is persisted for restore fidelity, but any accepted
+    /// mutation that tears down or replaces the session identity that authorized guarded
+    /// work-title reports must also drop the hook tier, so stale ticket/PR refs
+    /// never outlive their session. Manual, git, and restored-fallback tiers are
+    /// untouched.
+    fn clear_hook_work_context(&mut self) -> bool {
+        let changed = self.work_context.clear_hook_turn();
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        changed
+    }
+
     pub(crate) fn restore_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,
@@ -548,6 +573,7 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                hook_work_context_changed: false,
                 agent_released: false,
             };
         }
@@ -567,6 +593,7 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                hook_work_context_changed: false,
                 agent_released: false,
             };
         }
@@ -767,6 +794,13 @@ impl TerminalState {
         if agent_released {
             self.clear_agent_name();
         }
+        let current_session = self.current_session_identity_for_persistence();
+        let hook_work_context_changed =
+            if (process_exited && !newer_custom_authority) || previous_session != current_session {
+                self.clear_hook_work_context()
+            } else {
+                false
+            };
         TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -775,8 +809,8 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session
-                != self.current_session_identity_for_persistence(),
+            session_ref_changed: previous_session != current_session,
+            hook_work_context_changed,
             agent_released,
         }
     }
@@ -925,6 +959,11 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let hook_work_context_changed = if previous_session != current_session {
+            self.clear_hook_work_context()
+        } else {
+            false
+        };
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -934,6 +973,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            hook_work_context_changed,
             agent_released: false,
         })
     }
@@ -1655,6 +1695,11 @@ impl TerminalState {
             if process_present {
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
                 let current_session = self.current_session_identity_for_persistence();
+                let hook_work_context_changed = if previous_session != current_session {
+                    self.clear_hook_work_context()
+                } else {
+                    false
+                };
                 return Some(TerminalStateMutation {
                     effective_state_change: self.recompute_effective_state(
                         previous_agent_label,
@@ -1664,6 +1709,7 @@ impl TerminalState {
                         now,
                     ),
                     session_ref_changed: previous_session != current_session,
+                    hook_work_context_changed,
                     agent_released: false,
                 });
             }
@@ -1755,6 +1801,11 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let hook_work_context_changed = if previous_session != current_session {
+            self.clear_hook_work_context()
+        } else {
+            false
+        };
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1764,6 +1815,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            hook_work_context_changed,
             agent_released: false,
         })
     }
@@ -1872,6 +1924,7 @@ impl TerminalState {
         );
         self.hook_authority = None;
         self.persisted_agent_session = None;
+        let hook_work_context_changed = self.clear_hook_work_context();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1881,6 +1934,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            hook_work_context_changed,
             agent_released: false,
         })
     }
@@ -1937,6 +1991,7 @@ impl TerminalState {
             self.persisted_agent_session = None;
         }
         let current_session = self.current_session_identity_for_persistence();
+        let hook_work_context_changed = self.clear_hook_work_context();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1946,6 +2001,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            hook_work_context_changed,
             agent_released: !process_owns_agent,
         })
     }
@@ -2246,7 +2302,8 @@ impl TerminalState {
         self.managed_agent = None;
     }
 
-    pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
+    pub fn clear_agent_runtime_identity_after_respawn(&mut self) -> bool {
+        let hook_work_context_changed = self.clear_hook_work_context();
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
@@ -2267,6 +2324,7 @@ impl TerminalState {
         self.recent_agent_process_exit = None;
         self.pending_agent_resume_plan = None;
         self.clear_agent_name();
+        hook_work_context_changed
     }
 
     pub fn is_agent_terminal(&self) -> bool {

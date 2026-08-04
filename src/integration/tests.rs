@@ -2836,7 +2836,7 @@ fn bundled_integration_assets_report_session_refs() {
 
 #[test]
 #[cfg(unix)]
-fn title_hooks_prefer_the_owning_binary_over_stale_path() {
+fn ac1_ac7_title_hooks_forward_the_full_fixture_to_the_owning_binary() {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
@@ -2886,19 +2886,26 @@ fn title_hooks_prefer_the_owning_binary_over_stale_path() {
             .stdin(Stdio::piped())
             .spawn()
             .unwrap();
+        let fixture = match provider {
+            "claude" => include_str!(
+                "../../tests/fixtures/work-titles/claude-work-context-user-prompt-submit.json"
+            ),
+            "codex" => include_str!(
+                "../../tests/fixtures/work-titles/codex-work-context-user-prompt-submit.json"
+            ),
+            _ => unreachable!(),
+        };
         child
             .stdin
             .take()
             .unwrap()
-            .write_all(
-                br#"{"hook_event_name":"UserPromptSubmit","session_id":"preview","prompt":"write a poem"}"#,
-            )
+            .write_all(fixture.as_bytes())
             .unwrap();
         assert!(child.wait().unwrap().success());
 
         let exact = fs::read_to_string(&exact_record).unwrap();
         assert!(exact.starts_with(&format!("agent turn-title --provider {provider}\n")));
-        assert!(exact.contains("\"prompt\":\"write a poem\""));
+        assert!(exact.contains(fixture));
         assert!(!stale_record.exists());
 
         let _ = fs::remove_dir_all(base);

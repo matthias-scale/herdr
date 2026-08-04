@@ -16,7 +16,7 @@ pub struct PaneWorkContext {
 }
 
 impl PaneWorkContext {
-    fn normalized(self) -> Result<Self, String> {
+    pub(crate) fn normalized(self) -> Result<Self, String> {
         Ok(Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
@@ -226,6 +226,17 @@ impl PaneWorkContextState {
         Ok(true)
     }
 
+    /// Drops the hook tier when the agent session that authorized it ends or
+    /// is replaced; manual, git, and restored-fallback tiers are preserved.
+    pub fn clear_hook_turn(&mut self) -> bool {
+        if self.hook_turn == PaneWorkContext::default() {
+            return false;
+        }
+        self.hook_turn = PaneWorkContext::default();
+        self.recompute();
+        true
+    }
+
     #[allow(dead_code)]
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
@@ -335,6 +346,52 @@ pub fn extract_ticket_ids(text: &str) -> Vec<String> {
         }
     }
     tickets
+}
+
+pub fn extract_pr_urls(text: &str) -> Vec<String> {
+    const PREFIX: &str = "https://github.com/";
+
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    for (start, _) in text.match_indices(PREFIX) {
+        if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
+            continue;
+        }
+        let candidate = text[start..]
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        let Ok(url) = normalize_pr_url(candidate) else {
+            continue;
+        };
+        if seen.insert(url.clone()) {
+            urls.push(url);
+        }
+    }
+    urls
+}
+
+pub(crate) fn hook_turn_context(
+    work_title: Option<String>,
+    branch: Option<&str>,
+    prompt_context: PaneWorkContext,
+) -> Result<PaneWorkContext, String> {
+    let prompt_context = prompt_context.normalized()?;
+    let mut ticket_ids = Vec::new();
+    if let Some(title) = work_title.as_deref() {
+        ticket_ids.extend(extract_ticket_ids(title));
+    }
+    if let Some(branch) = branch {
+        ticket_ids.extend(extract_ticket_ids(branch));
+    }
+    ticket_ids.extend(prompt_context.ticket_ids);
+
+    Ok(PaneWorkContext {
+        ticket_ids: normalize_ticket_ids(ticket_ids)?,
+        pr_urls: prompt_context.pr_urls,
+        branch: None,
+        work_title,
+    })
 }
 
 fn normalize_ticket_id(ticket: &str) -> Result<String, String> {
@@ -708,6 +765,46 @@ mod tests {
             restored.effective().branch.as_deref(),
             Some("pinned-branch")
         );
+    }
+
+    #[test]
+    fn ac1_hook_clear_preserves_manual_git_and_restored_fallback_tiers() {
+        let mut state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    work_title: Some("Pinned title".into()),
+                    ..PaneWorkContext::default()
+                },
+                hook_turn: PaneWorkContext {
+                    ticket_ids: vec!["MAT-1".into()],
+                    work_title: Some("Hook title".into()),
+                    ..PaneWorkContext::default()
+                },
+                git_observation: PaneWorkContext {
+                    branch: Some("git-branch".into()),
+                    ..PaneWorkContext::default()
+                },
+                restored_fallback: PaneWorkContext {
+                    pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                    ..PaneWorkContext::default()
+                },
+            }),
+        )
+        .unwrap();
+
+        assert!(state.clear_hook_turn());
+        assert!(state.effective().ticket_ids.is_empty());
+        assert_eq!(state.effective().branch.as_deref(), Some("git-branch"));
+        assert_eq!(
+            state.effective().work_title.as_deref(),
+            Some("Pinned title")
+        );
+        assert_eq!(
+            state.effective().pr_urls,
+            vec!["https://github.com/o/r/pull/2"]
+        );
+        assert!(!state.clear_hook_turn());
     }
 
     #[test]

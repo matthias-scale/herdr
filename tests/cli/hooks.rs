@@ -302,6 +302,37 @@ fn claude_and_codex_turn_title_fixtures_reach_guarded_metadata() {
 }
 
 #[test]
+fn ac1_ac2_ac3_turn_hooks_forward_derived_work_context_without_asset_changes() {
+    for (provider, fixture, envs, tickets, pr_url) in [
+        (
+            "claude",
+            include_str!("../fixtures/work-titles/claude-work-context-user-prompt-submit.json"),
+            Vec::new(),
+            vec!["SCA-42"],
+            "https://github.com/scalable-so/herdr/pull/17",
+        ),
+        (
+            "codex",
+            include_str!("../fixtures/work-titles/codex-work-context-user-prompt-submit.json"),
+            vec![("CODEX_THREAD_ID", "fixture-codex-context-session")],
+            vec!["MAT-7", "SCA-9"],
+            "https://github.com/scalable-so/herdr/pull/21",
+        ),
+    ] {
+        let requests = run_turn_title_cli(provider, fixture, &envs);
+        assert_eq!(requests[2]["method"], "pane.report_metadata");
+        assert_eq!(
+            requests[2]["params"]["work_context"]["ticket_ids"],
+            serde_json::json!(tickets)
+        );
+        assert_eq!(
+            requests[2]["params"]["work_context"]["pr_urls"],
+            serde_json::json!([pr_url])
+        );
+    }
+}
+
+#[test]
 fn copilot_hook_reports_session_id_from_stdin() {
     let request = run_copilot_hook(
         r#"{"hook_event_name":"SessionStart","session_id":"copilot-session","source":"resume"}"#,

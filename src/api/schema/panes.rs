@@ -363,6 +363,8 @@ pub struct PaneReportMetadataParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_context: Option<crate::work_context::PaneWorkContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,

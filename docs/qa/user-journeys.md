@@ -90,7 +90,7 @@ continuation retains that session's initial briefing subject instead of
 manufacturing a generic label. It does not append a subtitle or duplicate
 title.
 
-Evidence: `title_hooks_prefer_the_owning_binary_over_stale_path`,
+Evidence: `ac1_ac7_title_hooks_forward_the_full_fixture_to_the_owning_binary`,
 `turn_start_fixture_reaches_guarded_herdr_title`,
 `terse_later_user_prompt_submit_retains_the_session_initial_title`, and
 `work_title_initial_briefings_are_session_scoped_and_later_objectives_replace_them`.

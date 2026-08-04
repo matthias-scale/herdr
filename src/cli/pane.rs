@@ -1597,6 +1597,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
         applies_to_source,
         agent_session_id,
         title,
+        work_context: None,
         display_agent,
         state_labels,
         tokens,
