@@ -138,6 +138,7 @@ pub struct App {
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
+    pub(crate) session_save_scheduled_revision: Option<u64>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
     pub(crate) session_save_failures: u32,
     pub(crate) session_save_retry_deadline: Option<Instant>,
@@ -788,6 +789,7 @@ impl App {
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
+            session_save_scheduled_revision: None,
             session_save_thread: None,
             session_save_failures: 0,
             session_save_retry_deadline: None,
@@ -4838,12 +4840,42 @@ mod tests {
     fn session_dirty_flag_schedules_debounced_save() {
         let mut app = test_app();
         app.no_session = false;
-        app.state.session_dirty = true;
+        app.state.mark_session_dirty();
 
         app.sync_session_save_schedule();
 
         assert!(app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn ac1_5_second_dirty_mutation_resets_debounce_deadline() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+        let first_deadline = app.session_save_deadline.expect("first deadline");
+
+        std::thread::sleep(Duration::from_millis(2));
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+
+        assert!(app.session_save_deadline.expect("second deadline") > first_deadline);
+    }
+
+    #[test]
+    fn ac1_5_dirty_mutation_does_not_disturb_retry_deadline() {
+        let mut app = test_app();
+        app.no_session = false;
+        let retry_deadline = Instant::now() + Duration::from_secs(3);
+        app.session_save_retry_deadline = Some(retry_deadline);
+        app.session_save_deadline = Some(retry_deadline);
+
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+
+        assert_eq!(app.session_save_retry_deadline, Some(retry_deadline));
+        assert_eq!(app.session_save_deadline, Some(retry_deadline));
     }
 
     #[test]

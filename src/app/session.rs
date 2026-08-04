@@ -21,8 +21,9 @@ pub(crate) struct SessionSaveResult {
 
 impl App {
     pub(super) fn schedule_session_save(&mut self) {
-        if !self.no_session && self.session_save_deadline.is_none() {
+        if !self.no_session && self.session_save_retry_deadline.is_none() {
             self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
+            self.session_save_scheduled_revision = Some(self.state.session_dirty_revision);
         }
     }
 
@@ -34,7 +35,8 @@ impl App {
         }
         if self.state.session_dirty
             && self.session_save_thread.is_none()
-            && self.session_save_deadline.is_none()
+            && (self.session_save_deadline.is_none()
+                || self.session_save_scheduled_revision != Some(self.state.session_dirty_revision))
         {
             self.schedule_session_save();
         }
@@ -112,6 +114,7 @@ impl App {
     pub(crate) fn start_background_session_save(&mut self) {
         if self.no_session {
             self.session_save_deadline = None;
+            self.session_save_scheduled_revision = None;
             self.session_save_retry_deadline = None;
             return;
         }
@@ -135,6 +138,7 @@ impl App {
 
         let job = self.capture_session_save_job();
         let revision = self.state.session_dirty_revision;
+        self.session_save_scheduled_revision = Some(revision);
         self.session_save_retry_deadline = None;
         self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_COMPLETION_POLL);
         match std::thread::Builder::new()
@@ -163,6 +167,7 @@ impl App {
 
         if self.no_session {
             self.session_save_deadline = None;
+            self.session_save_scheduled_revision = None;
             self.session_save_retry_deadline = None;
             return;
         }
