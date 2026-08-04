@@ -326,6 +326,36 @@
           "description": "Focus the currently visible notification target."
         },
         {
+          "key": "keys.open_work_url",
+          "type": "keybinding",
+          "default": "\"prefix+u\"",
+          "description": "Open the focused pane's ticket or pull request."
+        },
+        {
+          "key": "keys.copy_work_url",
+          "type": "keybinding",
+          "default": "\"prefix+shift+u\"",
+          "description": "Copy the focused pane's ticket or pull request URL."
+        },
+        {
+          "key": "keys.copy_work_ticket",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+u\"",
+          "description": "Copy the focused pane's bare ticket ID."
+        },
+        {
+          "key": "keys.copy_work_pr",
+          "type": "keybinding",
+          "default": "\"prefix+alt+u\"",
+          "description": "Copy the focused pane's pull request URL."
+        },
+        {
+          "key": "keys.copy_work_preview",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+shift+u\"",
+          "description": "Copy the focused pane's first preview URL."
+        },
+        {
           "key": "keys.previous_workspace",
           "type": "keybinding",
           "default": "unset",

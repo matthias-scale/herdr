@@ -429,6 +429,9 @@ impl App {
             }
             NavigateAction::OpenWorkUrl => self.open_focused_work_url(),
             NavigateAction::CopyWorkUrl => self.copy_focused_work_url(),
+            NavigateAction::CopyWorkTicket => self.copy_focused_work_ticket(),
+            NavigateAction::CopyWorkPr => self.copy_focused_work_pr(),
+            NavigateAction::CopyWorkPreview => self.copy_focused_work_preview(),
             NavigateAction::Detach => {
                 super::modal::request_detach(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -468,20 +471,60 @@ impl App {
     }
 
     fn copy_focused_work_url(&mut self) {
-        let Some(url) = focused_work_url(&self.state) else {
-            self.show_work_link_notice("focused pane has no work link");
+        self.copy_focused_work_value(
+            focused_work_url(&self.state),
+            "focused pane has no work link",
+            "could not copy work link",
+        );
+    }
+
+    fn copy_focused_work_ticket(&mut self) {
+        self.copy_focused_work_value(
+            focused_work_context(&self.state)
+                .and_then(|context| context.primary_ticket().map(str::to_string)),
+            "focused pane has no work ticket",
+            "could not copy work ticket",
+        );
+    }
+
+    fn copy_focused_work_pr(&mut self) {
+        self.copy_focused_work_value(
+            focused_work_context(&self.state)
+                .and_then(|context| context.primary_pr().map(str::to_string)),
+            "focused pane has no pull request",
+            "could not copy pull request",
+        );
+    }
+
+    fn copy_focused_work_preview(&mut self) {
+        self.copy_focused_work_value(
+            focused_work_context(&self.state)
+                .and_then(|context| context.preview_urls.first().cloned()),
+            "focused pane has no preview URL",
+            "could not copy preview URL",
+        );
+    }
+
+    fn copy_focused_work_value(
+        &mut self,
+        value: Option<String>,
+        missing_notice: &str,
+        failure_notice: &str,
+    ) {
+        let Some(value) = value else {
+            self.show_work_link_notice(missing_notice);
             leave_navigate_mode(&mut self.state);
             return;
         };
         if self
             .event_tx
             .try_send(crate::events::AppEvent::ClipboardWrite {
-                content: url.into_bytes(),
+                content: value.into_bytes(),
             })
             .is_err()
         {
-            tracing::warn!("failed to queue focused pane work link clipboard event");
-            self.show_work_link_notice("could not copy work link");
+            tracing::warn!("failed to queue focused pane work-context clipboard event");
+            self.show_work_link_notice(failure_notice);
         }
         leave_navigate_mode(&mut self.state);
     }
@@ -1450,6 +1493,9 @@ pub(crate) enum NavigateAction {
     OpenNotificationTarget,
     OpenWorkUrl,
     CopyWorkUrl,
+    CopyWorkTicket,
+    CopyWorkPr,
+    CopyWorkPreview,
     Detach,
     OpenNavigator,
 }
@@ -1600,6 +1646,9 @@ fn non_indexed_action_for_key(
         ),
         (&kb.open_work_url, NavigateAction::OpenWorkUrl),
         (&kb.copy_work_url, NavigateAction::CopyWorkUrl),
+        (&kb.copy_work_ticket, NavigateAction::CopyWorkTicket),
+        (&kb.copy_work_pr, NavigateAction::CopyWorkPr),
+        (&kb.copy_work_preview, NavigateAction::CopyWorkPreview),
         (&kb.detach, NavigateAction::Detach),
         (&kb.goto, NavigateAction::OpenNavigator),
     ] {
@@ -1886,7 +1935,11 @@ pub(super) fn execute_navigate_action_in_context(
                 leave_navigate_mode(state);
             }
         }
-        NavigateAction::OpenWorkUrl | NavigateAction::CopyWorkUrl => {
+        NavigateAction::OpenWorkUrl
+        | NavigateAction::CopyWorkUrl
+        | NavigateAction::CopyWorkTicket
+        | NavigateAction::CopyWorkPr
+        | NavigateAction::CopyWorkPreview => {
             leave_navigate_mode(state);
         }
         NavigateAction::Detach => {
@@ -1908,16 +1961,16 @@ fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<u
 }
 
 fn focused_work_url(state: &AppState) -> Option<String> {
+    focused_work_context(state)?.primary_action_url()
+}
+
+fn focused_work_context(state: &AppState) -> Option<&crate::work_context::PaneWorkContext> {
     let workspace = state
         .active
         .and_then(|ws_idx| state.workspaces.get(ws_idx))?;
     let pane_id = workspace.focused_pane_id()?;
     let terminal_id = workspace.terminal_id(pane_id)?;
-    state
-        .terminals
-        .get(terminal_id)?
-        .effective_work_context()
-        .primary_action_url()
+    Some(state.terminals.get(terminal_id)?.effective_work_context())
 }
 
 fn workspace_can_start_worktree_action(
@@ -2083,6 +2136,33 @@ mod tests {
             ),
             Some(NavigateAction::CopyWorkUrl)
         );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::CopyWorkTicket)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('u'), KeyModifiers::ALT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::CopyWorkPr)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::CopyWorkPreview)
+        );
     }
 
     #[test]
@@ -2152,6 +2232,79 @@ mod tests {
                 .map(|feedback| feedback.message.as_str()),
             Some("focused pane has no work link")
         );
+    }
+
+    #[test]
+    fn ac25_granular_work_copy_actions_use_effective_focused_context() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["mat-231".into()]),
+                pr_urls: Some(vec!["https://github.com/o/r/pull/231".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        terminal
+            .replace_hook_work_context(crate::work_context::PaneWorkContext {
+                preview_urls: vec!["https://preview-231.vercel.app".into()],
+                ..Default::default()
+            })
+            .unwrap();
+
+        for (action, expected) in [
+            (NavigateAction::CopyWorkTicket, b"MAT-231".as_slice()),
+            (
+                NavigateAction::CopyWorkPr,
+                b"https://github.com/o/r/pull/231".as_slice(),
+            ),
+            (
+                NavigateAction::CopyWorkPreview,
+                b"https://preview-231.vercel.app".as_slice(),
+            ),
+        ] {
+            app.execute_tui_navigate_action(action, ActionContext::Prefix);
+            match app.event_rx.try_recv().expect("clipboard event") {
+                crate::events::AppEvent::ClipboardWrite { content } => {
+                    assert_eq!(content, expected)
+                }
+                event => panic!("unexpected event: {event:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ac25_granular_work_copy_actions_are_safe_noops_when_missing() {
+        for (action, notice) in [
+            (
+                NavigateAction::CopyWorkTicket,
+                "focused pane has no work ticket",
+            ),
+            (
+                NavigateAction::CopyWorkPr,
+                "focused pane has no pull request",
+            ),
+            (
+                NavigateAction::CopyWorkPreview,
+                "focused pane has no preview URL",
+            ),
+        ] {
+            let mut app = app_with_test_workspaces(&["one"]);
+            app.execute_tui_navigate_action(action, ActionContext::Prefix);
+            assert!(app.event_rx.try_recv().is_err());
+            assert_eq!(
+                app.state
+                    .copy_feedback
+                    .as_ref()
+                    .map(|feedback| feedback.message.as_str()),
+                Some(notice)
+            );
+        }
     }
 
     #[test]

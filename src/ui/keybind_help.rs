@@ -80,6 +80,9 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             ),
             help_entry(keybind_label(&kb.open_work_url), "open work link"),
             help_entry(keybind_label(&kb.copy_work_url), "copy work link"),
+            help_entry(keybind_label(&kb.copy_work_ticket), "copy work ticket"),
+            help_entry(keybind_label(&kb.copy_work_pr), "copy work pull request"),
+            help_entry(keybind_label(&kb.copy_work_preview), "copy work preview"),
         ],
     ));
 

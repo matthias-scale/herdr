@@ -171,6 +171,7 @@ Clients can treat `offset_from_bottom == 0` as at-bottom state.
 {
   "ticket_ids": ["MAT-123"],
   "pr_urls": ["https://github.com/owner/repo/pull/42"],
+  "preview_urls": ["https://herdr-preview.vercel.app"],
   "branch": "feat/work-context",
   "work_title": "Add pane work context"
 }
@@ -195,9 +196,11 @@ must be HTTPS GitHub `/pull/<positive-number>` URLs.
 }
 ```
 
-Valid fields for `clear_fields` are `ticket_ids`, `pr_urls`, `branch`, and
-`work_title`. Successful mutations emit `pane.updated` with the new effective
-context.
+Preview URLs are derived only from guarded agent turn hooks and must be HTTPS
+root URLs for a single `<subdomain>.vercel.app` host. Manual context updates and
+Git observations do not create preview URLs. Valid fields for `clear_fields`
+are `ticket_ids`, `pr_urls`, `branch`, and `work_title`. Successful mutations
+emit `pane.updated` with the new effective context.
 
 ### Experimental pane graphics
 

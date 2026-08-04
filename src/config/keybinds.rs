@@ -321,6 +321,9 @@ pub struct Keybinds {
     pub open_notification_target: ActionKeybinds,
     pub open_work_url: ActionKeybinds,
     pub copy_work_url: ActionKeybinds,
+    pub copy_work_ticket: ActionKeybinds,
+    pub copy_work_pr: ActionKeybinds,
+    pub copy_work_preview: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -489,6 +492,9 @@ impl Config {
             open_notification_target: empty_action!(),
             open_work_url: empty_action!(),
             copy_work_url: empty_action!(),
+            copy_work_ticket: empty_action!(),
+            copy_work_pr: empty_action!(),
+            copy_work_preview: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -621,6 +627,9 @@ impl Config {
             );
             apply_action!(keybinds.open_work_url, open_work_url, source);
             apply_action!(keybinds.copy_work_url, copy_work_url, source);
+            apply_action!(keybinds.copy_work_ticket, copy_work_ticket, source);
+            apply_action!(keybinds.copy_work_pr, copy_work_pr, source);
+            apply_action!(keybinds.copy_work_preview, copy_work_preview, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -1624,12 +1633,31 @@ next_tab = "prefix+n"
                 KeyCode::Char('U'),
                 KeyModifiers::SHIFT,
             )));
+        assert!(defaults
+            .copy_work_ticket
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+            )));
+        assert!(defaults
+            .copy_work_pr
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('u'),
+                KeyModifiers::ALT,
+            )));
+        assert!(defaults
+            .copy_work_preview
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )));
 
         let config: Config = toml::from_str(
             r#"
             [keys]
             open_work_url = "prefix+u"
             copy_work_url = "prefix+u"
+            copy_work_ticket = "prefix+u"
             "#,
         )
         .unwrap();
@@ -1640,6 +1668,11 @@ next_tab = "prefix+n"
             .2
             .iter()
             .any(|diagnostic| diagnostic.contains("copy_work_url")
+                && diagnostic.contains("disabled")));
+        assert!(loaded
+            .2
+            .iter()
+            .any(|diagnostic| diagnostic.contains("copy_work_ticket")
                 && diagnostic.contains("disabled")));
     }
 

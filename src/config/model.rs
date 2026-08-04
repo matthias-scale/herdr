@@ -366,6 +366,12 @@ pub struct KeysConfig {
     pub open_work_url: BindingConfig,
     /// Copy the focused pane's ticket or pull request URL. Default: "prefix+shift+u".
     pub copy_work_url: BindingConfig,
+    /// Copy the focused pane's bare ticket ID. Default: "prefix+ctrl+u".
+    pub copy_work_ticket: BindingConfig,
+    /// Copy the focused pane's pull request URL. Default: "prefix+alt+u".
+    pub copy_work_pr: BindingConfig,
+    /// Copy the focused pane's first preview URL. Default: "prefix+ctrl+shift+u".
+    pub copy_work_preview: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -498,6 +504,12 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_work_url: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    copy_work_ticket: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_work_pr: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_work_preview: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     previous_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_workspace: Option<BindingConfig>,
@@ -616,6 +628,9 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(open_notification_target);
         apply_field!(open_work_url);
         apply_field!(copy_work_url);
+        apply_field!(copy_work_ticket);
+        apply_field!(copy_work_pr);
+        apply_field!(copy_work_preview);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -720,6 +735,9 @@ impl KeysConfig {
         copy_effective_action_field!(open_notification_target, keybinds.open_notification_target);
         copy_effective_action_field!(open_work_url, keybinds.open_work_url);
         copy_effective_action_field!(copy_work_url, keybinds.copy_work_url);
+        copy_effective_action_field!(copy_work_ticket, keybinds.copy_work_ticket);
+        copy_effective_action_field!(copy_work_pr, keybinds.copy_work_pr);
+        copy_effective_action_field!(copy_work_preview, keybinds.copy_work_preview);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -998,6 +1016,9 @@ impl Default for KeysConfig {
             open_notification_target: BindingConfig::one("prefix+o"),
             open_work_url: BindingConfig::one("prefix+u"),
             copy_work_url: BindingConfig::one("prefix+shift+u"),
+            copy_work_ticket: BindingConfig::one("prefix+ctrl+u"),
+            copy_work_pr: BindingConfig::one("prefix+alt+u"),
+            copy_work_preview: BindingConfig::one("prefix+ctrl+shift+u"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
