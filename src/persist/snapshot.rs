@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -17,6 +17,9 @@ pub struct SessionSnapshot {
     /// Format version — used to detect incompatible changes.
     #[serde(default)]
     pub version: u32,
+    /// Commit generation shared with the matching history snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub workspaces: Vec<WorkspaceSnapshot>,
     pub active: Option<usize>,
     pub selected: usize,
@@ -33,6 +36,9 @@ pub struct SessionHistorySnapshot {
     /// Format version follows the matching session snapshot version.
     #[serde(default)]
     pub version: u32,
+    /// Commit generation shared with the matching topology snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub workspaces: Vec<WorkspaceHistorySnapshot>,
 }
 
@@ -97,6 +103,13 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    /// Flat effective projection, kept for readers of older formats.
+    #[serde(default)]
+    pub work_context: crate::work_context::PaneWorkContext,
+    /// Per-tier provenance (manual/hook/git/restored). When absent (legacy
+    /// snapshots), the flat `work_context` restores as a replaceable fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_context_tiers: Option<crate::work_context::PaneWorkContextTiers>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +132,9 @@ pub struct PaneAgentSessionSnapshot {
 
 #[derive(Serialize, Deserialize)]
 pub struct PaneHistorySnapshot {
+    /// Stable public pane identity; absent in legacy v3 history files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
     pub ansi: String,
     pub lines: usize,
 }
@@ -175,6 +191,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     version: u32,
     #[serde(default)]
+    generation: Option<String>,
+    #[serde(default)]
     workspaces: Vec<serde_json::Value>,
     #[serde(default)]
     active: Option<usize>,
@@ -191,6 +209,7 @@ struct RawSessionSnapshot {
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
     Ok(SessionSnapshot {
         version: raw.version,
+        generation: raw.generation,
         workspaces: raw
             .workspaces
             .into_iter()
@@ -266,6 +285,7 @@ pub fn capture(
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
+        generation: None,
         workspaces: workspaces
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
@@ -340,6 +360,10 @@ fn capture_tab(
             })
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
+        let work_context = terminal
+            .map(|terminal| terminal.effective_work_context().clone())
+            .unwrap_or_default();
+        let work_context_tiers = terminal.map(|terminal| terminal.work_context.snapshot_tiers());
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -365,6 +389,8 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                work_context,
+                work_context_tiers,
                 label,
                 agent_name,
                 managed_agent_kind,
@@ -390,6 +416,7 @@ pub fn capture_history(
 ) -> SessionHistorySnapshot {
     SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
+        generation: None,
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceHistorySnapshot {
@@ -397,7 +424,7 @@ pub fn capture_history(
                     .tabs
                     .iter()
                     .map(|tab| TabHistorySnapshot {
-                        panes: capture_tab_history(tab, terminal_runtimes),
+                        panes: capture_tab_history(workspace, tab, terminal_runtimes),
                     })
                     .collect(),
             })
@@ -406,12 +433,16 @@ pub fn capture_history(
 }
 
 fn capture_tab_history(
+    workspace: &Workspace,
     tab: &crate::workspace::Tab,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> HashMap<u32, PaneHistorySnapshot> {
     let mut panes = HashMap::new();
     for (id, pane) in &tab.panes {
-        if let Some(history) = capture_pane_history(Some(pane), terminal_runtimes) {
+        let pane_id = workspace
+            .public_pane_number(*id)
+            .map(|number| crate::workspace::public_pane_id_for_number(&workspace.id, number));
+        if let Some(history) = capture_pane_history(Some(pane), pane_id, terminal_runtimes) {
             panes.insert(id.raw(), history);
         }
     }
@@ -420,13 +451,18 @@ fn capture_tab_history(
 
 fn capture_pane_history(
     pane: Option<&crate::pane::PaneState>,
+    pane_id: Option<String>,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<PaneHistorySnapshot> {
     let ansi = terminal_runtimes
         .get(&pane?.attached_terminal_id)?
         .snapshot_history()?;
     let lines = ansi.lines().count();
-    Some(PaneHistorySnapshot { ansi, lines })
+    Some(PaneHistorySnapshot {
+        pane_id,
+        ansi,
+        lines,
+    })
 }
 
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
@@ -603,6 +639,7 @@ mod tests {
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![],
             active: None,
             selected: 0,
@@ -616,6 +653,290 @@ mod tests {
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
         assert_eq!(restored.sidebar_section_split, Some(0.5));
+    }
+
+    #[test]
+    fn ac3_legacy_v3_snapshot_without_work_context_loads_empty() {
+        let raw = r#"{
+            "version": 3,
+            "workspaces": [{
+                "id": "workspace",
+                "identity_cwd": "/tmp",
+                "tabs": [{
+                    "layout": {"Pane": 0},
+                    "panes": {"0": {"cwd": "/tmp"}},
+                    "zoomed": false
+                }]
+            }],
+            "selected": 0
+        }"#;
+        let restored = parse_snapshot(raw).expect("legacy v3 snapshot should load");
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&0].work_context,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(restored.version, 3);
+    }
+
+    #[test]
+    fn ac3_snapshot_serialization_round_trips_effective_work_context() {
+        let mut state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-5".into()]),
+                work_title: Some("Persist context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+        let context = &restored.workspaces[0].tabs[0].panes[&root.raw()].work_context;
+        assert_eq!(context.ticket_ids, vec!["MAT-5"]);
+        assert_eq!(context.work_title.as_deref(), Some("Persist context"));
+    }
+
+    #[test]
+    fn ac3_restored_hook_and_git_values_are_replaced_by_new_observations() {
+        // Seed hook-only and git-only tiers, capture, serialize, parse, restore
+        // into a fresh terminal, then apply NEW observations: they must win.
+        let mut state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-1".into()],
+                work_title: Some("Old hook title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        terminal
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("old-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+        let saved = &parsed.workspaces[0].tabs[0].panes[&root.raw()];
+        let tiers = saved
+            .work_context_tiers
+            .as_ref()
+            .expect("current snapshots preserve source tiers");
+        assert_eq!(
+            tiers.manual,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(tiers.hook_turn.ticket_ids, vec!["MAT-1".to_string()]);
+        assert_eq!(
+            tiers.hook_turn.work_title.as_deref(),
+            Some("Old hook title")
+        );
+        assert_eq!(tiers.git_observation.branch.as_deref(), Some("old-branch"));
+        assert_eq!(
+            tiers.restored_fallback,
+            crate::work_context::PaneWorkContext::default()
+        );
+
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+        assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-1"]);
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("old-branch")
+        );
+
+        restored
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-2".into()],
+                work_title: Some("New hook title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        restored
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("new-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-2"]);
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("New hook title")
+        );
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("new-branch")
+        );
+    }
+
+    #[test]
+    fn ac3_restored_manual_values_survive_and_win_over_new_observations() {
+        let mut state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                branch: Some("pinned-branch".into()),
+                work_title: Some("Pinned title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+        let saved = &parsed.workspaces[0].tabs[0].panes[&root.raw()];
+        let tiers = saved
+            .work_context_tiers
+            .as_ref()
+            .expect("current snapshots preserve source tiers");
+        assert_eq!(tiers.manual.branch.as_deref(), Some("pinned-branch"));
+        assert_eq!(tiers.manual.work_title.as_deref(), Some("Pinned title"));
+        assert_eq!(
+            tiers.hook_turn,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(
+            tiers.git_observation,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(
+            tiers.restored_fallback,
+            crate::work_context::PaneWorkContext::default()
+        );
+
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+        restored
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                work_title: Some("Hook title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        restored
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("git-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("Pinned title")
+        );
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("pinned-branch")
+        );
+    }
+
+    #[test]
+    fn ac3_legacy_flat_work_context_restores_as_replaceable_fallback() {
+        // A pre-tier snapshot carries only the flat field; it must load intact
+        // and never behave like a manual pin after restore.
+        let raw = r#"{
+            "version": 3,
+            "workspaces": [{
+                "id": "workspace",
+                "identity_cwd": "/tmp",
+                "tabs": [{
+                    "layout": {"Pane": 0},
+                    "panes": {"0": {
+                        "cwd": "/tmp",
+                        "work_context": {
+                            "ticket_ids": ["MAT-1"],
+                            "branch": "old-branch",
+                            "work_title": "Old title"
+                        }
+                    }},
+                    "zoomed": false
+                }]
+            }],
+            "selected": 0
+        }"#;
+        let parsed = parse_snapshot(raw).expect("legacy flat snapshot should load");
+        let saved = &parsed.workspaces[0].tabs[0].panes[&0];
+        assert!(saved.work_context_tiers.is_none());
+
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("old-branch")
+        );
+
+        restored
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("new-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(restored.effective_work_context().ticket_ids.is_empty());
+        assert!(restored.effective_work_context().pr_urls.is_empty());
+        assert!(restored.effective_work_context().work_title.is_none());
+        restored
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-9".into()],
+                work_title: Some("New title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("new-branch")
+        );
+        assert_eq!(restored.effective_work_context().ticket_ids, vec!["SCA-9"]);
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("New title")
+        );
     }
 
     #[test]
@@ -649,6 +970,8 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
+                work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -660,6 +983,8 @@ mod tests {
             1,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
+                work_context: Default::default(),
+                work_context_tiers: None,
                 label: Some("website".into()),
                 agent_name: None,
                 managed_agent_kind: None,
@@ -669,6 +994,7 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1056,6 +1382,12 @@ mod tests {
         let history_snapshot = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
         let history = &history_snapshot.workspaces[0].tabs[0].panes[&root.raw()];
 
+        // ac3: history carries the stable identity used to reject raw-ID reuse.
+        let expected_pane_id = crate::workspace::public_pane_id_for_number(
+            &state.workspaces[0].id,
+            state.workspaces[0].public_pane_number(root).unwrap(),
+        );
+        assert_eq!(history.pane_id.as_deref(), Some(expected_pane_id.as_str()));
         assert!(history.ansi.contains("alpha"));
         assert!(history.ansi.contains("gamma"));
         assert!(history.lines >= 3);
@@ -1209,6 +1541,8 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+                work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -1222,6 +1556,8 @@ mod tests {
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
+                work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -1232,6 +1568,7 @@ mod tests {
 
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),

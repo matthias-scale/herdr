@@ -219,6 +219,91 @@ fn pane_report_metadata_rejects_blank_source_before_socket_request() {
 }
 
 #[test]
+fn ac1_pane_work_context_set_sends_one_atomic_patch() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        stream
+            .write_all(br#"{"id":"cli:pane:work_context:set","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "work-context",
+            "set",
+            "1-1",
+            "--ticket",
+            "mat-7",
+            "--ticket",
+            "SCA-2",
+            "--pr",
+            "https://github.com/o/r/pull/9",
+            "--title",
+            "Context model",
+            "--clear",
+            "branch",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(request["method"], "pane.work_context.set");
+    assert_eq!(request["params"]["pane_id"], "1-1");
+    assert_eq!(
+        request["params"]["ticket_ids"],
+        serde_json::json!(["mat-7", "SCA-2"])
+    );
+    assert_eq!(
+        request["params"]["pr_urls"],
+        serde_json::json!(["https://github.com/o/r/pull/9"])
+    );
+    assert_eq!(request["params"]["work_title"], "Context model");
+    assert_eq!(
+        request["params"]["clear_fields"],
+        serde_json::json!(["branch"])
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn ac4_pane_work_context_get_uses_pane_get_and_surfaces_server_errors() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        stream
+            .write_all(br#"{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"pane not found"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(&socket_path, &["pane", "work-context", "get", "1-9"]);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&run.stderr).contains("pane_not_found"));
+    let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(request["method"], "pane.get");
+    assert_eq!(request["params"]["pane_id"], "1-9");
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn pane_report_metadata_rejects_blank_applies_to_source_before_socket_request() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();

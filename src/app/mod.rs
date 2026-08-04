@@ -149,7 +149,10 @@ pub struct App {
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
-    pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) session_save_scheduled_revision: Option<u64>,
+    pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
+    pub(crate) session_save_failures: u32,
+    pub(crate) session_save_retry_deadline: Option<Instant>,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
@@ -717,6 +720,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -799,7 +803,10 @@ impl App {
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
+            session_save_scheduled_revision: None,
             session_save_thread: None,
+            session_save_failures: 0,
+            session_save_retry_deadline: None,
             detached_custom_command_children: Vec::new(),
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
@@ -4935,12 +4942,61 @@ mod tests {
     fn session_dirty_flag_schedules_debounced_save() {
         let mut app = test_app();
         app.no_session = false;
-        app.state.session_dirty = true;
+        app.state.mark_session_dirty();
 
         app.sync_session_save_schedule();
 
-        assert!(!app.state.session_dirty);
+        assert!(app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn ac1_5_second_dirty_mutation_resets_debounce_deadline() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+        let first_deadline = app.session_save_deadline.expect("first deadline");
+
+        std::thread::sleep(Duration::from_millis(2));
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+
+        assert!(app.session_save_deadline.expect("second deadline") > first_deadline);
+    }
+
+    #[test]
+    fn ac1_5_explicit_save_schedule_records_dirty_revision() {
+        let mut app = test_app();
+        app.no_session = false;
+        let previous_revision = app.state.session_dirty_revision;
+
+        app.schedule_session_save();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(
+            app.state.session_dirty_revision,
+            previous_revision.wrapping_add(1)
+        );
+    }
+
+    #[test]
+    fn ac1_5_dirty_mutation_does_not_disturb_retry_deadline() {
+        let mut app = test_app();
+        app.no_session = false;
+        let retry_deadline = Instant::now() + Duration::from_secs(3);
+        app.session_save_retry_deadline = Some(retry_deadline);
+        app.session_save_deadline = Some(retry_deadline);
+
+        let previous_revision = app.state.session_dirty_revision;
+        app.schedule_session_save();
+
+        assert_eq!(
+            app.state.session_dirty_revision,
+            previous_revision.wrapping_add(1)
+        );
+        assert_eq!(app.session_save_retry_deadline, Some(retry_deadline));
+        assert_eq!(app.session_save_deadline, Some(retry_deadline));
     }
 
     #[test]
@@ -5089,12 +5145,13 @@ mod tests {
         app.no_session = false;
         app.state.workspaces = vec![Workspace::test_new("autosave")];
         app.state.ensure_test_terminals();
+        app.state.session_dirty = true;
         app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));
 
         app.handle_scheduled_tasks(Instant::now(), false);
 
         assert!(app.session_save_thread.is_some());
-        assert!(app.session_save_deadline.is_none());
+        assert!(app.session_save_deadline.is_some());
         app.save_session_now();
         assert!(crate::session::data_dir().join("session.json").exists());
 
@@ -5109,6 +5166,10 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         app.session_save_thread = Some(std::thread::spawn(move || {
             let _ = release_rx.recv();
+            session::SessionSaveResult {
+                revision: 0,
+                result: Ok(()),
+            }
         }));
 
         app.start_background_session_save();
@@ -5122,6 +5183,95 @@ mod tests {
     }
 
     #[test]
+    fn ac1_applied_save_failure_keeps_dirty_and_preserves_retry_through_sync() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 7;
+        app.apply_session_save_result(session::SessionSaveResult {
+            revision: 7,
+            result: Err(std::io::Error::other("injected save failure")),
+        });
+        let retry_deadline = app.session_save_deadline.expect("retry deadline");
+
+        app.sync_session_save_schedule();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 1);
+        assert_eq!(app.session_save_deadline, Some(retry_deadline));
+    }
+
+    #[test]
+    fn ac1_4_real_persist_failure_is_reaped_and_schedules_bounded_retry() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("failed-background-session-save");
+        std::fs::write(&config_home, b"not a directory").unwrap();
+        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let original_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("failed-autosave")];
+        app.state.ensure_test_terminals();
+        app.state.mark_session_dirty();
+        let save_started = Instant::now();
+
+        app.start_background_session_save();
+        let writer_spawned = app.session_save_thread.is_some();
+        while app
+            .session_save_thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            std::thread::yield_now();
+        }
+        app.sync_session_save_schedule();
+        let reaped_at = Instant::now();
+        let retry_deadline = app.session_save_retry_deadline;
+
+        match original_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match original_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        std::fs::remove_file(config_home).unwrap();
+
+        assert!(writer_spawned);
+        assert!(app.session_save_thread.is_none());
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 1);
+        assert_eq!(app.session_save_deadline, retry_deadline);
+        assert!(retry_deadline.is_some_and(|deadline| {
+            deadline >= save_started + Duration::from_millis(250)
+                && deadline <= reaped_at + Duration::from_millis(250)
+        }));
+    }
+
+    #[test]
+    fn ac1_success_does_not_clear_mutation_made_during_save_and_resets_backoff() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 11;
+        app.session_save_failures = 4;
+
+        app.apply_session_save_result(session::SessionSaveResult {
+            revision: 10,
+            result: Ok(()),
+        });
+        app.sync_session_save_schedule();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 0);
+        assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
     fn final_session_save_joins_background_writer_before_returning() {
         let mut app = test_app();
         app.no_session = true;
@@ -5130,6 +5280,10 @@ mod tests {
         app.session_save_thread = Some(std::thread::spawn(move || {
             let _ = release_rx.recv();
             done_tx.send(()).unwrap();
+            session::SessionSaveResult {
+                revision: 0,
+                result: Ok(()),
+            }
         }));
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));

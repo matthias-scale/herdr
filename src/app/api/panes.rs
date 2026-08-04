@@ -10,8 +10,8 @@ use crate::api::schema::{
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
-    PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneSwapReason, PaneSwapResult, PaneTarget, PaneWorkContextSetParams, PaneZoomMode,
+    PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1171,6 +1171,43 @@ impl App {
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
 
+    pub(super) fn handle_pane_work_context_set(
+        &mut self,
+        id: String,
+        params: PaneWorkContextSetParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let mutation = self
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .ok_or_else(|| "pane terminal not found".to_string())
+            .and_then(|terminal| terminal.apply_manual_work_context_patch(params.patch));
+        let changed = match mutation {
+            Ok(changed) => changed,
+            Err(message) => return encode_error(id, "invalid_work_context", message),
+        };
+        if changed {
+            self.state.mark_session_dirty();
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
     pub(super) fn handle_pane_read(&mut self, id: String, params: PaneReadParams) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
@@ -2032,6 +2069,101 @@ mod tests {
         (app, public_pane_id)
     }
 
+    #[test]
+    fn ac4_work_context_patch_is_atomic_exposed_and_emits_once_per_mutation() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&internal_pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Codex);
+
+        let response = app.handle_pane_work_context_set(
+            "set".into(),
+            PaneWorkContextSetParams {
+                pane_id: pane_id.clone(),
+                patch: crate::work_context::PaneWorkContextPatch {
+                    ticket_ids: Some(vec!["mat-7".into(), "SCA-2".into()]),
+                    pr_urls: Some(vec!["https://github.com/o/r/pull/09".into()]),
+                    branch: Some("feat/context".into()),
+                    work_title: Some("Context model".into()),
+                    clear_fields: Vec::new(),
+                },
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert_eq!(pane.work_context.ticket_ids, vec!["MAT-7", "SCA-2"]);
+        assert_eq!(
+            pane.work_context.pr_urls,
+            vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(pane.work_context.branch.as_deref(), Some("feat/context"));
+        assert_eq!(
+            pane.work_context.work_title.as_deref(),
+            Some("Context model")
+        );
+        assert_eq!(app.collect_agent_infos()[0].work_context, pane.work_context);
+        assert_eq!(pane_updated_events(&app), 1);
+        let (_, event) = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .find(|(_, event)| event.event == EventKind::PaneUpdated)
+            .expect("pane.updated event");
+        let crate::api::schema::EventData::PaneUpdated { pane: updated_pane } = event.data else {
+            panic!("expected pane.updated payload");
+        };
+        assert_eq!(updated_pane.pane_id, pane_id);
+        assert_eq!(updated_pane.work_context, pane.work_context);
+
+        let no_op = app.handle_pane_work_context_set(
+            "noop".into(),
+            PaneWorkContextSetParams {
+                pane_id: pane_id.clone(),
+                patch: crate::work_context::PaneWorkContextPatch {
+                    ticket_ids: Some(vec!["MAT-7".into(), "SCA-2".into()]),
+                    pr_urls: Some(vec!["https://github.com/o/r/pull/9".into()]),
+                    branch: Some("feat/context".into()),
+                    work_title: Some("Context model".into()),
+                    clear_fields: Vec::new(),
+                },
+            },
+        );
+        assert!(serde_json::from_str::<SuccessResponse>(&no_op).is_ok());
+        assert_eq!(pane_updated_events(&app), 1);
+
+        let before = app.pane_info(0, internal_pane_id).unwrap();
+        let invalid = app.handle_pane_work_context_set(
+            "invalid".into(),
+            PaneWorkContextSetParams {
+                pane_id,
+                patch: crate::work_context::PaneWorkContextPatch {
+                    ticket_ids: Some(vec!["SCA-99".into()]),
+                    pr_urls: Some(vec!["https://evil.test/o/r/pull/1".into()]),
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(metadata_error_code(&invalid), "invalid_work_context");
+        assert_eq!(app.pane_info(0, internal_pane_id).unwrap(), before);
+        assert_eq!(pane_updated_events(&app), 1);
+    }
+
+    fn pane_updated_events(app: &App) -> usize {
+        app.event_hub
+            .events_after(0)
+            .iter()
+            .filter(|(_, event)| event.event == EventKind::PaneUpdated)
+            .count()
+    }
+
     fn app_with_send_key_runtime(
         capacity: usize,
     ) -> (App, String, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
@@ -2704,6 +2836,16 @@ mod tests {
         let source_tab_public = app.public_tab_id(0, 0).unwrap();
         let target_public = app.public_pane_id(0, target).unwrap();
         let target_tab_public = app.public_tab_id(0, target_tab).unwrap();
+        app.state
+            .terminals
+            .get_mut(&source_terminal)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-42".into()]),
+                work_title: Some("Move context".into()),
+                ..Default::default()
+            })
+            .unwrap();
 
         let response = app.handle_pane_move(
             "req".into(),
@@ -2730,6 +2872,11 @@ mod tests {
         assert_eq!(move_result.pane.pane_id, move_result.previous_pane_id);
         assert_eq!(move_result.pane.tab_id, target_tab_public);
         assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(move_result.pane.work_context.ticket_ids, vec!["MAT-42"]);
+        assert_eq!(
+            move_result.pane.work_context.work_title.as_deref(),
+            Some("Move context")
+        );
         assert_eq!(move_result.closed_tab_id, Some(source_tab_public));
         assert_eq!(move_result.closed_workspace_id, None);
         assert_eq!(move_result.target_layout.panes.len(), 2);
