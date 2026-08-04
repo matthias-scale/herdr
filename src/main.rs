@@ -179,6 +179,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
+# open_work_link = "prefix+u"
+# copy_work_link = "prefix+shift+u"
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
 # new_workspace = "prefix+shift+n"
@@ -215,6 +217,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+b"
+# toggle_info_panel = "prefix+i"
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

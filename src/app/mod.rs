@@ -602,6 +602,7 @@ impl App {
             }),
             keybind_help: state::KeybindHelpState::default(),
             navigator: state::NavigatorState::default(),
+            work_link_picker: None,
             copy_mode: None,
             sidebar_presentation: state::SidebarPresentationState::default(),
             sidebar_projection_revision: 0,
@@ -623,6 +624,8 @@ impl App {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                info_panel_rect: Rect::default(),
+                info_panel_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
@@ -650,6 +653,7 @@ impl App {
             sidebar_width,
             sidebar_min_width,
             sidebar_max_width,
+            info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
             sidebar_width_auto: false,
@@ -1905,6 +1909,9 @@ impl App {
             }
             Mode::Navigator => {
                 input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
+            }
+            Mode::WorkLinkPicker => {
+                self.handle_work_link_picker_key(key_event);
             }
             Mode::Terminal => {
                 // Should not be called in terminal mode.

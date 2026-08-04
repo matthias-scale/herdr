@@ -326,16 +326,28 @@
           "description": "Focus the currently visible notification target."
         },
         {
-          "key": "keys.open_work_url",
+          "key": "keys.open_work_link",
           "type": "keybinding",
           "default": "\"prefix+u\"",
-          "description": "Open the focused pane's ticket or pull request."
+          "description": "Open a numbered link from the focused pane's work context."
+        },
+        {
+          "key": "keys.copy_work_link",
+          "type": "keybinding",
+          "default": "\"prefix+shift+u\"",
+          "description": "Copy a numbered link from the focused pane's work context."
+        },
+        {
+          "key": "keys.open_work_url",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Legacy alias for keys.open_work_link. Unset by default."
         },
         {
           "key": "keys.copy_work_url",
           "type": "keybinding",
-          "default": "\"prefix+shift+u\"",
-          "description": "Copy the focused pane's ticket or pull request URL."
+          "default": "unset",
+          "description": "Legacy alias for keys.copy_work_link. Unset by default."
         },
         {
           "key": "keys.copy_work_ticket",
@@ -576,6 +588,12 @@
           "type": "keybinding",
           "default": "\"prefix+b\"",
           "description": "Toggle sidebar collapse."
+        },
+        {
+          "key": "keys.toggle_info_panel",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Toggle the focused pane's right-side work-context panel."
         },
         {
           "key": "keys.indexed.tabs",

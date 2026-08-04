@@ -45,13 +45,13 @@ Focused work:
 
 | Action | Key |
 | --- | --- |
-| Open ticket or pull request | `prefix+u` |
-| Copy ticket or pull request URL | `prefix+shift+u` |
+| Open numbered work link picker | `prefix+u` |
+| Copy numbered work link picker selection | `prefix+shift+u` |
 | Copy ticket ID | `prefix+ctrl+u` |
 | Copy pull request URL | `prefix+alt+u` |
 | Copy preview URL | `prefix+ctrl+shift+u` |
 
-These actions use only the focused pane. A ticket opens its canonical Linear URL; otherwise Herdr uses a validated pull request URL. The granular copy actions copy the bare ticket ID, pull request URL, or first effective Vercel preview URL. If the requested item is absent, Herdr shows a notice and does nothing.
+The picker uses the focused pane's effective context in ticket, pull request, then preview order. One candidate acts immediately; multiple candidates are numbered 1–9 and selected with a digit. Esc cancels, and Herdr re-validates the selected link against live context before acting. The info panel is collapsed by default; toggle it with `prefix+i`. Click a panel link row to copy its ticket ID or canonical URL; clicks never open links.
 
 Tabs:
 

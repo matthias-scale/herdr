@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
+mod info_panel;
 mod keybind_help;
 mod menus;
 mod mobile;
@@ -21,11 +22,13 @@ mod tab_surface;
 mod tabs;
 mod text;
 mod widgets;
+mod work_link_picker;
 
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
+use self::info_panel::{compute_link_rows, panel_width_for_main, render_info_panel};
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
     render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
@@ -66,6 +69,7 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::render_tab_bar;
+use self::work_link_picker::render_work_link_picker;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -246,11 +250,24 @@ fn compute_view_internal(
     let [sidebar_area, main_area] =
         Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(body_area);
 
+    let (content_area, info_panel_rect) = if app.info_panel_expanded {
+        if let Some(panel_width) = panel_width_for_main(main_area.width) {
+            let [content_area, panel_area] =
+                Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_width)])
+                    .areas(main_area);
+            (content_area, panel_area)
+        } else {
+            (main_area, Rect::default())
+        }
+    } else {
+        (main_area, Rect::default())
+    };
+
     let (tab_bar_rect, terminal_area) = app
         .active
         .and_then(|i| app.workspaces.get(i))
-        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
-        .unwrap_or((Rect::default(), main_area));
+        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, content_area))
+        .unwrap_or((Rect::default(), content_area));
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
@@ -301,7 +318,7 @@ fn compute_view_internal(
         cell_size,
     );
     if resize_panes {
-        resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
+        resize_background_tab_panes_for_desktop(app, terminal_runtimes, content_area, cell_size);
         resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
 
@@ -344,6 +361,12 @@ fn compute_view_internal(
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
         terminal_area,
+        info_panel_rect,
+        info_panel_link_rows: if info_panel_rect.width > 0 {
+            compute_link_rows(app, info_panel_rect)
+        } else {
+            Vec::new()
+        },
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
@@ -420,6 +443,8 @@ fn compute_mobile_view(
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
         terminal_area,
+        info_panel_rect: Rect::default(),
+        info_panel_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
@@ -470,6 +495,10 @@ pub fn render_with_runtime_registry(
         render_empty(app, frame, terminal_area);
     }
 
+    if app.view.info_panel_rect.width > 0 {
+        render_info_panel(app, frame, app.view.info_panel_rect);
+    }
+
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
@@ -503,6 +532,7 @@ pub fn render_with_runtime_registry(
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+        Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
         Mode::Terminal => {}
     }
 }
@@ -711,6 +741,26 @@ mod tests {
 
         assert!(screen.contains("new workspace"), "{screen}");
         assert!(screen.contains("project"), "{screen}");
+    }
+
+    #[test]
+    fn info_panel_toggle_reserves_desktop_width_and_hides_on_narrow_layout() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.info_panel_expanded = true;
+
+        compute_view(&mut app, Rect::new(0, 0, 100, 24));
+        assert!(app.view.info_panel_rect.width >= info_panel::INFO_PANEL_MIN_WIDTH);
+        assert!(app.view.terminal_area.width < 74);
+
+        compute_view(&mut app, Rect::new(0, 0, 65, 24));
+        assert_eq!(app.view.info_panel_rect, Rect::default());
+        assert!(
+            app.info_panel_expanded,
+            "narrow layout must not discard the toggle"
+        );
     }
 
     #[tokio::test]

@@ -319,6 +319,8 @@ pub struct Keybinds {
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
+    pub open_work_link: ActionKeybinds,
+    pub copy_work_link: ActionKeybinds,
     pub open_work_url: ActionKeybinds,
     pub copy_work_url: ActionKeybinds,
     pub copy_work_ticket: ActionKeybinds,
@@ -360,6 +362,7 @@ pub struct Keybinds {
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub toggle_info_panel: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -490,6 +493,8 @@ impl Config {
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
+            open_work_link: empty_action!(),
+            copy_work_link: empty_action!(),
             open_work_url: empty_action!(),
             copy_work_url: empty_action!(),
             copy_work_ticket: empty_action!(),
@@ -531,6 +536,7 @@ impl Config {
             zoom: empty_action!(),
             resize_mode: empty_action!(),
             toggle_sidebar: empty_action!(),
+            toggle_info_panel: empty_action!(),
             custom_commands: Vec::new(),
         };
 
@@ -625,6 +631,8 @@ impl Config {
                 open_notification_target,
                 source
             );
+            apply_action!(keybinds.open_work_link, open_work_link, source);
+            apply_action!(keybinds.copy_work_link, copy_work_link, source);
             apply_action!(keybinds.open_work_url, open_work_url, source);
             apply_action!(keybinds.copy_work_url, copy_work_url, source);
             apply_action!(keybinds.copy_work_ticket, copy_work_ticket, source);
@@ -681,6 +689,7 @@ impl Config {
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
+            apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
 
             if source == field_source!(indexed) {
                 append_legacy_indexed_bindings(
@@ -717,6 +726,33 @@ impl Config {
                     &mut diagnostics,
                 );
             }
+        }
+
+        // Keep the pre-picker field names usable for existing configurations;
+        // canonical defaults and new configurations live under *_work_link.
+        if !self.keys.key_field_is_user_configured("open_work_url")
+            && !self.keys.key_field_is_user_configured("open_work_link")
+        {
+            keybinds.open_work_url = keybinds.open_work_link.clone();
+        }
+        if !self.keys.key_field_is_user_configured("copy_work_url")
+            && !self.keys.key_field_is_user_configured("copy_work_link")
+        {
+            keybinds.copy_work_url = keybinds.copy_work_link.clone();
+        }
+
+        // Legacy aliases still dispatch as picker actions. Keep the canonical
+        // help entry populated when a legacy user binding displaced its
+        // canonical default during collision validation.
+        if keybinds.open_work_link.bindings.is_empty()
+            && !keybinds.open_work_url.bindings.is_empty()
+        {
+            keybinds.open_work_link = keybinds.open_work_url.clone();
+        }
+        if keybinds.copy_work_link.bindings.is_empty()
+            && !keybinds.copy_work_url.bindings.is_empty()
+        {
+            keybinds.copy_work_link = keybinds.copy_work_url.clone();
         }
 
         (prefix_diag, prefix, diagnostics, keybinds)
@@ -1622,6 +1658,24 @@ next_tab = "prefix+n"
     fn ac4_work_link_defaults_and_collision_validation_are_registered() {
         let defaults = Config::default().keybinds();
         assert!(defaults
+            .open_work_link
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('u'),
+                KeyModifiers::empty(),
+            )));
+        assert!(defaults
+            .copy_work_link
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('U'),
+                KeyModifiers::SHIFT,
+            )));
+        assert!(defaults
+            .toggle_info_panel
+            .matches_prefix_key(crate::input::TerminalKey::new(
+                KeyCode::Char('i'),
+                KeyModifiers::empty(),
+            )));
+        assert!(defaults
             .open_work_url
             .matches_prefix_key(crate::input::TerminalKey::new(
                 KeyCode::Char('u'),
@@ -1674,6 +1728,21 @@ next_tab = "prefix+n"
             .iter()
             .any(|diagnostic| diagnostic.contains("copy_work_ticket")
                 && diagnostic.contains("disabled")));
+    }
+
+    #[test]
+    fn ac26_legacy_work_url_binding_remains_visible_as_effective_picker_binding() {
+        let config: Config = toml::from_str(
+            r#"
+            [keys]
+            open_work_url = "prefix+u"
+            "#,
+        )
+        .unwrap();
+
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.open_work_url.labels(), vec!["prefix+u"]);
+        assert_eq!(keybinds.open_work_link.labels(), vec!["prefix+u"]);
     }
 
     #[test]

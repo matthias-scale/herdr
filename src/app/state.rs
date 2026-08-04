@@ -821,11 +821,32 @@ pub struct ViewState {
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
+    pub info_panel_rect: Rect,
+    pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfoPanelLinkRow {
+    pub rect: Rect,
+    pub copy_value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkLinkPickerAction {
+    Open,
+    Copy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkLinkPickerState {
+    pub candidates: Vec<crate::work_context::WorkLinkCandidate>,
+    pub action: WorkLinkPickerAction,
+    pub return_mode: Mode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -850,6 +871,7 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    WorkLinkPicker,
 }
 
 impl Mode {
@@ -880,6 +902,7 @@ impl Mode {
                 | Mode::ContextMenu
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::WorkLinkPicker
         )
     }
 }
@@ -1512,6 +1535,7 @@ pub struct AppState {
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
+    pub work_link_picker: Option<WorkLinkPickerState>,
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
     /// Monotonic client-only revision for changes that replace the sidebar row
@@ -1553,6 +1577,8 @@ pub struct AppState {
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    /// Whether the desktop focused-pane work-context panel is expanded.
+    pub info_panel_expanded: bool,
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
@@ -2034,6 +2060,7 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
+            work_link_picker: None,
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
             sidebar_projection_revision: 0,
@@ -2055,6 +2082,8 @@ impl AppState {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                info_panel_rect: Rect::default(),
+                info_panel_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
@@ -2082,6 +2111,7 @@ impl AppState {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,

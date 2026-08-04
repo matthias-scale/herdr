@@ -1832,7 +1832,9 @@ mod tests {
     use super::*;
     use crate::app::input::modal::handle_context_menu_key;
     use crate::{
-        app::state::{ContextMenuKind, ContextMenuState, MenuListState, Mode, ViewLayout},
+        app::state::{
+            ContextMenuKind, ContextMenuState, InfoPanelLinkRow, MenuListState, Mode, ViewLayout,
+        },
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
@@ -1845,6 +1847,53 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    #[test]
+    fn ac26_info_panel_link_click_copies_without_opening() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
+            rect: Rect::new(60, 5, 30, 1),
+            copy_value: "MAT-124".into(),
+        }];
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 62, 5));
+
+        match app.event_rx.try_recv().expect("link click clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"MAT-124")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert_eq!(
+            app.state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("copied")
+        );
+    }
+
+    #[test]
+    fn ac26_narrow_hidden_info_panel_does_not_copy_on_click() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.info_panel_expanded = true;
+        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
+            rect: Rect::new(30, 3, 30, 1),
+            copy_value: "stale".into(),
+        }];
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+
+        assert_eq!(app.state.view.info_panel_rect, Rect::default());
+        assert!(app.state.view.info_panel_link_rows.is_empty());
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 3));
+        assert!(app.event_rx.try_recv().is_err());
     }
 
     #[tokio::test]

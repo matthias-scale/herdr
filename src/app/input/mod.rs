@@ -115,6 +115,7 @@ impl App {
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
                 }
+                Mode::WorkLinkPicker => self.handle_work_link_picker_key(key_event),
                 Mode::Terminal => unreachable!(),
             },
         }
@@ -195,6 +196,7 @@ impl App {
                     .extend(text.chars().filter(|ch| !ch.is_control()));
                 true
             }
+            Mode::WorkLinkPicker => false,
             _ => false,
         }
     }
@@ -296,6 +298,37 @@ impl App {
         }
         if self.handle_overlay_mouse(mouse) {
             return;
+        }
+
+        if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            if let Some(copy_value) = self
+                .state
+                .view
+                .info_panel_link_rows
+                .iter()
+                .find(|row| {
+                    mouse.column >= row.rect.x
+                        && mouse.column < row.rect.x.saturating_add(row.rect.width)
+                        && mouse.row >= row.rect.y
+                        && mouse.row < row.rect.y.saturating_add(row.rect.height)
+                })
+                .map(|row| row.copy_value.clone())
+            {
+                if self
+                    .event_tx
+                    .try_send(crate::events::AppEvent::ClipboardWrite {
+                        content: copy_value.into_bytes(),
+                    })
+                    .is_err()
+                {
+                    self.show_work_link_notice("could not copy work link");
+                } else {
+                    self.show_work_link_notice("copied");
+                }
+                return;
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))

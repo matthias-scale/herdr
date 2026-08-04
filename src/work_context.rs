@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_PREVIEW_URLS: usize = 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkLinkKind {
+    Ticket,
+    PullRequest,
+    Preview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkLinkCandidate {
+    pub kind: WorkLinkKind,
+    pub label: String,
+    pub url: String,
+    /// The value copied by a link-row click. Tickets retain their compact ID;
+    /// URL-backed links copy their canonical URL.
+    pub copy_value: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PaneWorkContext {
@@ -17,6 +34,61 @@ pub struct PaneWorkContext {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_title: Option<String>,
+}
+
+/// Build the canonical, stable-order links shared by the picker and info panel.
+/// Invalid values are omitted defensively even though effective contexts are
+/// normally normalized at their producer boundary.
+pub(crate) fn work_link_candidates(context: &PaneWorkContext) -> Vec<WorkLinkCandidate> {
+    let mut seen_urls = HashSet::new();
+    let mut candidates = Vec::new();
+
+    for ticket in &context.ticket_ids {
+        let Some(ticket) = normalize_ticket_id(ticket).ok() else {
+            continue;
+        };
+        let Some(url) = linear_ticket_url(&ticket) else {
+            continue;
+        };
+        if seen_urls.insert(url.clone()) {
+            candidates.push(WorkLinkCandidate {
+                kind: WorkLinkKind::Ticket,
+                label: ticket.clone(),
+                url,
+                copy_value: ticket,
+            });
+        }
+    }
+
+    for raw_url in &context.pr_urls {
+        let Some(url) = normalize_pr_url(raw_url).ok() else {
+            continue;
+        };
+        if seen_urls.insert(url.clone()) {
+            candidates.push(WorkLinkCandidate {
+                kind: WorkLinkKind::PullRequest,
+                label: url.clone(),
+                copy_value: url.clone(),
+                url,
+            });
+        }
+    }
+
+    for raw_url in &context.preview_urls {
+        let Some(url) = normalize_preview_url(raw_url).ok() else {
+            continue;
+        };
+        if seen_urls.insert(url.clone()) {
+            candidates.push(WorkLinkCandidate {
+                kind: WorkLinkKind::Preview,
+                label: url.clone(),
+                copy_value: url.clone(),
+                url,
+            });
+        }
+    }
+
+    candidates
 }
 
 impl PaneWorkContext {
@@ -733,6 +805,35 @@ mod tests {
             .len(),
             MAX_PREVIEW_URLS
         );
+    }
+
+    #[test]
+    fn ac26_work_link_candidates_are_ordered_and_defensively_canonicalized() {
+        let candidates = work_link_candidates(&PaneWorkContext {
+            ticket_ids: vec!["mat-7".into(), "SCA-8".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/0042".into(), "not-a-pr".into()],
+            preview_urls: vec![
+                "https://Preview-1.Vercel.App".into(),
+                "https://preview-2.vercel.app".into(),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://linear.app/scalable/issue/MAT-7",
+                "https://linear.app/scalable/issue/SCA-8",
+                "https://github.com/o/r/pull/42",
+                "https://preview-1.vercel.app",
+                "https://preview-2.vercel.app",
+            ]
+        );
+        assert_eq!(candidates[0].copy_value, "MAT-7");
+        assert_eq!(candidates[2].copy_value, "https://github.com/o/r/pull/42");
     }
 
     #[test]
