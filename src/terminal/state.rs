@@ -346,6 +346,17 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn replace_hook_work_context(
+        &mut self,
+        context: crate::work_context::PaneWorkContext,
+    ) -> Result<bool, String> {
+        let changed = self.work_context.replace_hook_turn(context)?;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(changed)
+    }
+
     pub(crate) fn restore_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,

@@ -819,19 +819,6 @@ impl App {
         }
     }
 
-    pub(crate) fn focused_pane_tab_label(&self, pane_id: &str) -> Option<String> {
-        let (ws_idx, pane_id) = self.parse_pane_id(pane_id)?;
-        let tab_idx = self
-            .state
-            .workspaces
-            .get(ws_idx)?
-            .find_tab_index_for_pane(pane_id)?;
-        if !self.state.is_active_pane(ws_idx, tab_idx, pane_id) {
-            return None;
-        }
-        self.state.workspaces.get(ws_idx)?.tab_display_name(tab_idx)
-    }
-
     pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
         // Token updates bypass plugin hooks so a hook cannot refresh its own
         // token and recursively trigger workspace.updated.

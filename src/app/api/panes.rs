@@ -1347,6 +1347,13 @@ impl App {
         let requested_work_title = (source == crate::work_title::WORK_TITLE_SOURCE)
             .then(|| title.clone())
             .flatten();
+        let requested_hook_context = match params.work_context {
+            Some(context) => match context.normalized() {
+                Ok(context) => Some(context),
+                Err(message) => return encode_error(id, "invalid_work_context", message),
+            },
+            None => None,
+        };
         let display_agent = normalize_presentation_text(params.display_agent);
         let applies_to_source = match params.applies_to_source {
             Some(applies_to_source) => match normalize_metadata_source(applies_to_source) {
@@ -1371,6 +1378,18 @@ impl App {
             && agent_label.is_some()
             && applies_to_source.is_some()
             && agent_session_id.is_some();
+        if let Some(context) = requested_hook_context.as_ref() {
+            if !work_title_request
+                || context.branch.is_some()
+                || context.work_title != requested_work_title
+            {
+                return encode_error(
+                    id,
+                    "invalid_work_context",
+                    "derived work context requires matching guarded work-title metadata",
+                );
+            }
+        }
         if agent_session_id.is_some() && (agent_label.is_none() || applies_to_source.is_none()) {
             return encode_error(
                 id,
@@ -1504,6 +1523,23 @@ impl App {
                 ),
             _ => None,
         };
+        let hook_context_changed = if work_title_request {
+            let branch = terminal.effective_work_context().branch.clone();
+            let context = match crate::work_context::hook_turn_context(
+                work_title.clone(),
+                branch.as_deref(),
+                requested_hook_context.unwrap_or_default(),
+            ) {
+                Ok(context) => context,
+                Err(message) => return encode_error(id, "invalid_work_context", message),
+            };
+            match terminal.replace_hook_work_context(context) {
+                Ok(changed) => changed,
+                Err(message) => return encode_error(id, "invalid_work_context", message),
+            }
+        } else {
+            false
+        };
         let unchanged_title_only = title.as_ref().is_some_and(|title| {
             terminal
                 .agent_metadata
@@ -1519,7 +1555,8 @@ impl App {
             && !params.clear_title
             && !params.clear_display_agent
             && !params.clear_state_labels
-            && ttl.is_none();
+            && ttl.is_none()
+            && !hook_context_changed;
         if unchanged_title_only {
             return encode_success(id, ResponseResult::Ok {});
         }
@@ -1549,56 +1586,17 @@ impl App {
                 ttl,
             });
         }
-        if let Some(title) = work_title {
-            self.apply_work_title_to_tab(ws_idx, pane_id, title);
+        if hook_context_changed {
+            self.schedule_session_save();
         }
         if token_changed {
             self.sync_agent_metadata_deadline();
+        }
+        if token_changed || hook_context_changed {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
         encode_success(id, ResponseResult::Ok {})
-    }
-
-    fn apply_work_title_to_tab(&mut self, ws_idx: usize, pane_id: PaneId, title: String) {
-        let Some(tab_idx) = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(|workspace| workspace.find_tab_index_for_pane(pane_id))
-        else {
-            return;
-        };
-        let Some(tab) = self
-            .state
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
-        else {
-            return;
-        };
-        if tab.custom_name.as_deref() == Some(title.as_str()) {
-            return;
-        }
-        tab.set_custom_name(title.clone());
-
-        let workspace_id = self.state.workspaces[ws_idx].id.clone();
-        let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
-            crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
-        });
-        crate::logging::tab_renamed(&workspace_id, &tab_id);
-        if self.state.active == Some(ws_idx) {
-            self.state.refresh_tab_bar_view();
-        }
-        self.schedule_session_save();
-        self.emit_event(EventEnvelope {
-            event: EventKind::TabRenamed,
-            data: EventData::TabRenamed {
-                tab_id,
-                workspace_id: self.public_workspace_id(ws_idx),
-                label: title,
-            },
-        });
     }
 
     pub(super) fn handle_pane_clear_agent_authority(
@@ -2199,6 +2197,7 @@ mod tests {
             applies_to_source: None,
             agent_session_id: None,
             title: Some("activity".into()),
+            work_context: None,
             display_agent: None,
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
@@ -4475,16 +4474,20 @@ mod tests {
             reported_at
         );
         assert_eq!(
-            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .work_title
+                .as_deref(),
             Some("Fix Billing Retry Regression")
         );
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
         assert_eq!(
             app.event_hub
                 .events_after(0)
                 .iter()
                 .filter(|(_, event)| event.event == EventKind::TabRenamed)
                 .count(),
-            1
+            0
         );
 
         let stale = guarded_work_title_params(
@@ -4507,6 +4510,199 @@ mod tests {
             !app.state.terminals[&terminal_id]
                 .metadata_report_sequence_is_fresh(crate::work_title::WORK_TITLE_SOURCE, Some(26),),
             "the terse turn still refreshes guarded metadata sequencing"
+        );
+    }
+
+    #[test]
+    fn ac1_ac4_ac5_ac6_guarded_turns_replace_hook_context_with_manual_precedence() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "herdr:codex", "codex", "session-1");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                branch: Some("feat/SCA-88-context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut first = guarded_work_title_params(
+            pane_id.clone(),
+            "codex",
+            "herdr:codex",
+            "session-1",
+            "Implement MAT-1 context",
+            20,
+        );
+        first.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            work_title: first.title.clone(),
+            ..Default::default()
+        });
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("first".into(), first)).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .ticket_ids,
+            vec!["MAT-1", "SCA-88"]
+        );
+        let pane_updates_before = app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .filter(|(_, event)| event.event == EventKind::PaneUpdated)
+            .count();
+
+        let mut same_title_new_pr = guarded_work_title_params(
+            pane_id.clone(),
+            "codex",
+            "herdr:codex",
+            "session-1",
+            "Implement MAT-1 context",
+            21,
+        );
+        same_title_new_pr.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/9".into()],
+            work_title: same_title_new_pr.title.clone(),
+            ..Default::default()
+        });
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("same-title-new-pr".into(), same_title_new_pr),
+        )
+        .unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .pr_urls,
+            vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(
+            app.event_hub
+                .events_after(0)
+                .iter()
+                .filter(|(_, event)| event.event == EventKind::PaneUpdated)
+                .count(),
+            pane_updates_before + 1,
+            "a context-only turn mutation emits exactly one pane update"
+        );
+
+        let mut second = guarded_work_title_params(
+            pane_id.clone(),
+            "codex",
+            "herdr:codex",
+            "session-1",
+            "Continue MAT-2 context",
+            22,
+        );
+        second.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-2".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+            work_title: second.title.clone(),
+            ..Default::default()
+        });
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("second".into(), second))
+                .unwrap();
+        let context = app.state.terminals[&terminal_id].effective_work_context();
+        assert_eq!(context.ticket_ids, vec!["MAT-2", "SCA-88"]);
+        assert_eq!(context.pr_urls, vec!["https://github.com/o/r/pull/2"]);
+        assert_eq!(
+            context.work_title.as_deref(),
+            Some("Continue MAT-2 context")
+        );
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-500".into()]),
+                pr_urls: Some(vec!["https://github.com/manual/repo/pull/99".into()]),
+                work_title: Some("Manual context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut third = guarded_work_title_params(
+            pane_id.clone(),
+            "codex",
+            "herdr:codex",
+            "session-1",
+            "Ship MAT-3 context",
+            23,
+        );
+        third.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-3".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/3".into()],
+            work_title: third.title.clone(),
+            ..Default::default()
+        });
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("third".into(), third)).unwrap();
+
+        let mut stale = guarded_work_title_params(
+            pane_id,
+            "codex",
+            "herdr:codex",
+            "session-1",
+            "Overwrite With MAT-777",
+            22,
+        );
+        stale.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-777".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/777".into()],
+            work_title: stale.title.clone(),
+            ..Default::default()
+        });
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_metadata("stale".into(), stale)).unwrap();
+
+        let context = app.state.terminals[&terminal_id].effective_work_context();
+        assert_eq!(context.ticket_ids, vec!["MAT-500", "MAT-3", "SCA-88"]);
+        assert_eq!(
+            context.pr_urls,
+            vec![
+                "https://github.com/manual/repo/pull/99",
+                "https://github.com/o/r/pull/3"
+            ]
+        );
+        assert_eq!(context.work_title.as_deref(), Some("Manual context"));
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
+        assert_eq!(
+            app.event_hub
+                .events_after(0)
+                .iter()
+                .filter(|(_, event)| event.event == EventKind::TabRenamed)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn ac5_unguarded_metadata_cannot_replace_hook_work_context() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(app.state.workspaces[0].tabs[0].root_pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let mut params = metadata_params(pane_id);
+        params.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-7".into()],
+            work_title: params.title.clone(),
+            ..Default::default()
+        });
+
+        let response = app.handle_pane_report_metadata("unguarded".into(), params);
+
+        assert_eq!(metadata_error_code(&response), "invalid_work_context");
+        assert_eq!(
+            app.state.terminals[&terminal_id].effective_work_context(),
+            &crate::work_context::PaneWorkContext::default()
         );
     }
 
@@ -4551,18 +4747,17 @@ mod tests {
         assert_eq!(metadata.agent_label.as_deref(), Some("codex"));
         assert_eq!(metadata.applies_to_source.as_deref(), Some("herdr:codex"));
         assert_eq!(
-            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .work_title
+                .as_deref(),
             Some("Fix Billing Retry Regression")
         );
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
         assert_eq!(
             app.agent_info(0, internal_pane_id)
                 .and_then(|agent| agent.title)
                 .as_deref(),
-            Some("Fix Billing Retry Regression")
-        );
-        let entries = crate::ui::agent_panel_entries(&app.state);
-        assert_eq!(
-            entries[0].primary_tab_label.as_deref(),
             Some("Fix Billing Retry Regression")
         );
     }
@@ -4610,7 +4805,10 @@ mod tests {
             serde_json::from_str(&app.handle_pane_report_metadata("later".into(), later)).unwrap();
 
         assert_eq!(
-            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .work_title
+                .as_deref(),
             Some("Fix Billing Retry Regression")
         );
         assert_eq!(
@@ -4619,15 +4817,8 @@ mod tests {
                 .as_deref(),
             Some("Fix Billing Retry Regression")
         );
-        assert_eq!(
-            crate::ui::sidebar_thread_entries(&app.state)
-                .into_iter()
-                .filter(|entry| entry.pane_id == internal_pane_id)
-                .filter_map(|entry| entry.primary_tab_label)
-                .collect::<Vec<_>>(),
-            vec!["Fix Billing Retry Regression"],
-            "the pane child references the one persisted tab title rather than creating another"
-        );
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
+        assert!(app.agent_info(0, internal_pane_id).is_some());
     }
 
     #[test]
@@ -4793,15 +4984,31 @@ mod tests {
         }
 
         assert_eq!(
-            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            app.state.terminals[&app.state.workspaces[0]
+                .pane_state(app.state.workspaces[0].tabs[0].root_pane)
+                .unwrap()
+                .attached_terminal_id]
+                .effective_work_context()
+                .work_title
+                .as_deref(),
             Some("Implement Sidebar Lifecycle Assertions")
         );
         assert_eq!(
-            app.state.workspaces[1].tabs[0].custom_name.as_deref(),
+            app.state.terminals[&app.state.workspaces[1]
+                .pane_state(app.state.workspaces[1].tabs[0].root_pane)
+                .unwrap()
+                .attached_terminal_id]
+                .effective_work_context()
+                .work_title
+                .as_deref(),
             Some("Audit Plugin Marketplace Safety")
         );
-        assert!(!app.state.workspaces[0].tabs[0]
-            .custom_name
+        assert!(!app.state.terminals[&app.state.workspaces[0]
+            .pane_state(app.state.workspaces[0].tabs[0].root_pane)
+            .unwrap()
+            .attached_terminal_id]
+            .effective_work_context()
+            .work_title
             .as_deref()
             .unwrap()
             .to_ascii_lowercase()

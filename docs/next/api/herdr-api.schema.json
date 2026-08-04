@@ -2983,6 +2983,16 @@
                 "integer",
                 "null"
               ]
+            },
+            "work_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -3195,6 +3205,37 @@
             "source",
             "match"
           ],
+          "type": "object"
+        },
+        "PaneWorkContext": {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pr_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ticket_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "work_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "PaneWorkContextField": {

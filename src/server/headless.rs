@@ -3127,17 +3127,6 @@ impl HeadlessServer {
             return false;
         }
 
-        let focused_work_title_before = match &msg.request.method {
-            api::schema::Method::PaneReportMetadata(params)
-                if params.source.trim() == crate::work_title::WORK_TITLE_SOURCE =>
-            {
-                Some((
-                    params.pane_id.clone(),
-                    self.app.focused_pane_tab_label(&params.pane_id),
-                ))
-            }
-            _ => None,
-        };
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
@@ -3278,13 +3267,6 @@ impl HeadlessServer {
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
         let _ = msg.respond_to.send(response);
-
-        if let Some((pane_id, title_before)) = focused_work_title_before {
-            let title_after = self.app.focused_pane_tab_label(&pane_id);
-            if title_after.is_some() && title_after != title_before {
-                self.send_to_foreground_client(ServerMessage::WindowTitle { title: title_after });
-            }
-        }
 
         if let Some(revision_before) = pane_graphics_revision_before {
             changed |= revision_before != self.app.state.pane_graphics_revision;
@@ -10490,10 +10472,10 @@ next_tab = ""
     }
 
     #[test]
-    fn focused_work_title_updates_the_herdr_tab_and_outer_client_title_once() {
+    fn ac6_focused_work_context_does_not_rename_tab_or_outer_client() {
         let mut server = test_headless_server();
         let mut workspace = crate::workspace::Workspace::test_new("agent-fleet");
-        workspace.tabs[0].set_custom_name("auto-title".into());
+        workspace.tabs[0].set_custom_name("manual-title".into());
         let pane_id = workspace.tabs[0].root_pane;
         let public_pane_id = format!("{}:p1", workspace.id);
         server.app.state.workspaces = vec![workspace];
@@ -10551,6 +10533,7 @@ next_tab = ""
                 applies_to_source: Some("herdr:codex".into()),
                 agent_session_id: Some("session-1".into()),
                 title: Some(title.into()),
+                work_context: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
@@ -10584,43 +10567,34 @@ next_tab = ""
             server.app.state.workspaces[0].tabs[0]
                 .custom_name
                 .as_deref(),
+            Some("manual-title")
+        );
+        assert_eq!(
+            server.app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .work_title
+                .as_deref(),
             Some("Fix Billing Retry Regression")
         );
-        let entries = crate::ui::agent_panel_entries(&server.app.state);
-        assert_eq!(
-            entries[0].primary_tab_label.as_deref(),
-            Some("Fix Billing Retry Regression")
-        );
-        assert_eq!(entries[0].agent_label.as_deref(), Some("codex"));
-        assert_eq!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("work title window update")
-            ),
-            ServerMessage::WindowTitle {
-                title: Some("Fix Billing Retry Regression".into())
-            }
-        );
-
-        send(&mut server, report("Fix Billing Retry Regression", 21));
         assert!(
             client_control_rx
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
-            "unchanged normalized title must not flicker"
+            "work context must not update the outer client title"
         );
 
         send(&mut server, report("Review Auth Migration Safety", 22));
         assert_eq!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("changed work title window update")
-            ),
-            ServerMessage::WindowTitle {
-                title: Some("Review Auth Migration Safety".into())
-            }
+            server.app.state.workspaces[0].tabs[0]
+                .custom_name
+                .as_deref(),
+            Some("manual-title")
+        );
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "changed work context must not update the outer client title"
         );
 
         send(&mut server, report("Overwrite Newer Work Title", 19));
@@ -10628,7 +10602,7 @@ next_tab = ""
             server.app.state.workspaces[0].tabs[0]
                 .custom_name
                 .as_deref(),
-            Some("Review Auth Migration Safety")
+            Some("manual-title")
         );
         assert!(
             client_control_rx

@@ -16,7 +16,7 @@ pub struct PaneWorkContext {
 }
 
 impl PaneWorkContext {
-    fn normalized(self) -> Result<Self, String> {
+    pub(crate) fn normalized(self) -> Result<Self, String> {
         Ok(Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
@@ -274,6 +274,52 @@ pub fn extract_ticket_ids(text: &str) -> Vec<String> {
     tickets
 }
 
+pub fn extract_pr_urls(text: &str) -> Vec<String> {
+    const PREFIX: &str = "https://github.com/";
+
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    for (start, _) in text.match_indices(PREFIX) {
+        if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
+            continue;
+        }
+        let candidate = text[start..]
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        let Ok(url) = normalize_pr_url(candidate) else {
+            continue;
+        };
+        if seen.insert(url.clone()) {
+            urls.push(url);
+        }
+    }
+    urls
+}
+
+pub(crate) fn hook_turn_context(
+    work_title: Option<String>,
+    branch: Option<&str>,
+    prompt_context: PaneWorkContext,
+) -> Result<PaneWorkContext, String> {
+    let prompt_context = prompt_context.normalized()?;
+    let mut ticket_ids = Vec::new();
+    if let Some(title) = work_title.as_deref() {
+        ticket_ids.extend(extract_ticket_ids(title));
+    }
+    if let Some(branch) = branch {
+        ticket_ids.extend(extract_ticket_ids(branch));
+    }
+    ticket_ids.extend(prompt_context.ticket_ids);
+
+    Ok(PaneWorkContext {
+        ticket_ids: normalize_ticket_ids(ticket_ids)?,
+        pr_urls: prompt_context.pr_urls,
+        branch: None,
+        work_title,
+    })
+}
+
 fn normalize_ticket_id(ticket: &str) -> Result<String, String> {
     let ticket = ticket.trim();
     let tickets = extract_ticket_ids(ticket);
@@ -398,6 +444,20 @@ mod tests {
             vec!["SCA-12", "MAT-7"]
         );
         assert!(extract_ticket_ids("FORMAT-12 XMAT-3 MAT-4X _SCA-5").is_empty());
+    }
+
+    #[test]
+    fn ac2_ac3_prompt_refs_accept_boundaries_and_punctuation_but_reject_malicious_urls() {
+        let text = "MAT-7, sca-9; FORMAT-12 XMAT-3 \
+            (https://github.com/scalable-so/herdr/pull/0042). \
+            https://user@github.com/evil/repo/pull/2#fragment \
+            http://github.com/evil/repo/pull/3";
+
+        assert_eq!(extract_ticket_ids(text), vec!["MAT-7", "SCA-9"]);
+        assert_eq!(
+            extract_pr_urls(text),
+            vec!["https://github.com/scalable-so/herdr/pull/42"]
+        );
     }
 
     #[test]
