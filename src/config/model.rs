@@ -362,9 +362,13 @@ pub struct KeysConfig {
     pub reload_config: BindingConfig,
     /// Focus the currently visible notification target. Default: "prefix+o".
     pub open_notification_target: BindingConfig,
-    /// Open the focused pane's ticket or pull request. Default: "prefix+u".
+    /// Open a numbered link from the focused pane's work context. Default: "prefix+u".
+    pub open_work_link: BindingConfig,
+    /// Copy a numbered link from the focused pane's work context. Default: "prefix+shift+u".
+    pub copy_work_link: BindingConfig,
+    /// Legacy alias for `open_work_link`; unset by default.
     pub open_work_url: BindingConfig,
-    /// Copy the focused pane's ticket or pull request URL. Default: "prefix+shift+u".
+    /// Legacy alias for `copy_work_link`; unset by default.
     pub copy_work_url: BindingConfig,
     /// Copy the focused pane's bare ticket ID. Default: "prefix+ctrl+u".
     pub copy_work_ticket: BindingConfig,
@@ -447,6 +451,8 @@ pub struct KeysConfig {
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
+    pub toggle_info_panel: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -499,6 +505,10 @@ pub(crate) struct KeysConfigOverlay {
     reload_config: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_notification_target: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_work_link: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_work_link: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_work_url: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -584,6 +594,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_info_panel: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -626,6 +638,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(detach);
         apply_field!(reload_config);
         apply_field!(open_notification_target);
+        apply_field!(open_work_link);
+        apply_field!(copy_work_link);
         apply_field!(open_work_url);
         apply_field!(copy_work_url);
         apply_field!(copy_work_ticket);
@@ -668,6 +682,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(zoom);
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
+        apply_field!(toggle_info_panel);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -733,6 +748,8 @@ impl KeysConfig {
         copy_effective_action_field!(detach, keybinds.detach);
         copy_effective_action_field!(reload_config, keybinds.reload_config);
         copy_effective_action_field!(open_notification_target, keybinds.open_notification_target);
+        copy_effective_action_field!(open_work_link, keybinds.open_work_link);
+        copy_effective_action_field!(copy_work_link, keybinds.copy_work_link);
         copy_effective_action_field!(open_work_url, keybinds.open_work_url);
         copy_effective_action_field!(copy_work_url, keybinds.copy_work_url);
         copy_effective_action_field!(copy_work_ticket, keybinds.copy_work_ticket);
@@ -775,6 +792,7 @@ impl KeysConfig {
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_user_field!(indexed);
 
         profile
@@ -1014,8 +1032,10 @@ impl Default for KeysConfig {
             detach: BindingConfig::one("prefix+q"),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
-            open_work_url: BindingConfig::one("prefix+u"),
-            copy_work_url: BindingConfig::one("prefix+shift+u"),
+            open_work_link: BindingConfig::one("prefix+u"),
+            copy_work_link: BindingConfig::one("prefix+shift+u"),
+            open_work_url: BindingConfig::empty(),
+            copy_work_url: BindingConfig::empty(),
             copy_work_ticket: BindingConfig::one("prefix+ctrl+u"),
             copy_work_pr: BindingConfig::one("prefix+alt+u"),
             copy_work_preview: BindingConfig::one("prefix+ctrl+shift+u"),
@@ -1056,6 +1076,7 @@ impl Default for KeysConfig {
             zoom: BindingConfig::one("prefix+z"),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_info_panel: BindingConfig::one("prefix+i"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

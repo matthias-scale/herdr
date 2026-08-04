@@ -20,6 +20,10 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 
 impl App {
     pub(super) fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.state.mode == Mode::WorkLinkPicker {
+            return true;
+        }
+
         if self.state.mode == Mode::ReleaseNotes {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left)
