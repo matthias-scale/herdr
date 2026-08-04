@@ -48,31 +48,51 @@ fn visible_candidates(terminal: &TerminalState) -> Vec<crate::work_context::Work
         .collect()
 }
 
-pub(crate) fn compute_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLinkRow> {
-    let Some(terminal) = focused_terminal(app) else {
-        return Vec::new();
-    };
+fn info_panel_layout_line(inner: Rect, index: usize) -> Option<Rect> {
+    let offset = u16::try_from(index).ok()?;
+    let y = inner.y.checked_add(offset)?;
+    (y < inner.y.saturating_add(inner.height)).then_some(Rect::new(inner.x, y, inner.width, 1))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InfoPanelLayout {
+    inner: Rect,
+    link_rows: Vec<Rect>,
+}
+
+impl InfoPanelLayout {
+    fn line(&self, index: usize) -> Option<Rect> {
+        info_panel_layout_line(self.inner, index)
+    }
+}
+
+fn info_panel_layout(area: Rect, link_count: usize) -> Option<InfoPanelLayout> {
     if area.width < 2 || area.height < 3 {
-        return Vec::new();
+        return None;
     }
     let inner = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .inner(area);
+    let link_rows = (0..link_count)
+        .filter_map(|index| info_panel_layout_line(inner, 2usize.saturating_add(index)))
+        .collect();
+    Some(InfoPanelLayout { inner, link_rows })
+}
+
+pub(crate) fn compute_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLinkRow> {
+    let Some(terminal) = focused_terminal(app) else {
+        return Vec::new();
+    };
     let candidates = visible_candidates(terminal);
-    // Render order: header, title field, then link rows.
-    let mut row = inner.y.saturating_add(2);
+    let Some(layout) = info_panel_layout(area, candidates.len()) else {
+        return Vec::new();
+    };
     candidates
         .into_iter()
-        .filter_map(|candidate| {
-            if row >= inner.y.saturating_add(inner.height) {
-                return None;
-            }
-            let result = InfoPanelLinkRow {
-                rect: Rect::new(inner.x, row, inner.width, 1),
-                copy_value: candidate.copy_value,
-            };
-            row = row.saturating_add(1);
-            Some(result)
+        .zip(layout.link_rows)
+        .map(|(candidate, rect)| InfoPanelLinkRow {
+            rect,
+            copy_value: candidate.copy_value,
         })
         .collect()
 }
@@ -118,49 +138,82 @@ pub(super) fn render_info_panel(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let context = terminal.effective_work_context();
     let candidates = visible_candidates(terminal);
+    let Some(layout) = info_panel_layout(area, candidates.len()) else {
+        return;
+    };
+    debug_assert_eq!(inner, layout.inner);
     let title = context.work_title.as_deref().unwrap_or("untitled");
     let branch = context.branch.as_deref().unwrap_or("—");
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "WORK CONTEXT",
-        Style::default()
-            .fg(app.palette.text)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(field_line("title", title, &app.palette));
+
+    if let Some(row) = layout.line(0) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "WORK CONTEXT",
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            row,
+        );
+    }
+    if let Some(row) = layout.line(1) {
+        frame.render_widget(
+            Paragraph::new(field_line("title", title, &app.palette)),
+            row,
+        );
+    }
     for (index, candidate) in candidates.iter().enumerate() {
+        let Some(row) = layout.link_rows.get(index).copied() else {
+            break;
+        };
         let number = if index < 9 {
             format!("{} ", index + 1)
         } else {
             "  ".to_string()
         };
-        lines.push(Line::from(vec![
-            Span::styled(number, Style::default().fg(app.palette.accent)),
-            Span::styled(
-                format!("{}: ", link_prefix(candidate.kind)),
-                Style::default().fg(app.palette.overlay0),
-            ),
-            Span::styled(
-                candidate.label.clone(),
-                Style::default().fg(app.palette.text),
-            ),
-        ]));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(number, Style::default().fg(app.palette.accent)),
+                Span::styled(
+                    format!("{}: ", link_prefix(candidate.kind)),
+                    Style::default().fg(app.palette.overlay0),
+                ),
+                Span::styled(
+                    candidate.label.clone(),
+                    Style::default().fg(app.palette.text),
+                ),
+            ])),
+            row,
+        );
     }
     if candidates.is_empty() {
-        lines.push(field_line("links", "—", &app.palette));
+        if let Some(row) = layout.line(2) {
+            frame.render_widget(Paragraph::new(field_line("links", "—", &app.palette)), row);
+        }
     }
-    lines.push(field_line("branch", branch, &app.palette));
-    lines.push(field_line("agent", &state_label(terminal), &app.palette));
+    let footer_start = 2usize.saturating_add(candidates.len().max(1));
+    if let Some(row) = layout.line(footer_start) {
+        frame.render_widget(
+            Paragraph::new(field_line("branch", branch, &app.palette)),
+            row,
+        );
+    }
+    if let Some(row) = layout.line(footer_start.saturating_add(1)) {
+        frame.render_widget(
+            Paragraph::new(field_line("agent", &state_label(terminal), &app.palette)),
+            row,
+        );
+    }
 
     // Keep each link as one screen row so its hit target matches the rendered
     // numbering even when a URL is longer than the desktop panel.
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{app::state::AppState, work_context::PaneWorkContextPatch};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn info_panel_link_rows_follow_shared_candidate_order() {
@@ -189,10 +242,26 @@ mod tests {
             })
             .unwrap();
 
-        let rows = compute_link_rows(&app, Rect::new(80, 0, 36, 12));
+        let area = Rect::new(0, 0, 50, 12);
+        let rows = compute_link_rows(&app, area);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].copy_value, "MAT-1");
         assert_eq!(rows[1].copy_value, "https://github.com/o/r/pull/2");
         assert_eq!(rows[2].copy_value, "https://preview.vercel.app");
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_info_panel(&app, frame, area))
+            .unwrap();
+        for (row, label) in rows.iter().zip([
+            "MAT-1",
+            "https://github.com/o/r/pull/2",
+            "https://preview.vercel.app",
+        ]) {
+            let rendered = (area.x..area.x + area.width)
+                .map(|x| terminal.backend().buffer()[(x, row.rect.y)].symbol())
+                .collect::<String>();
+            assert!(rendered.contains(label), "row {}: {rendered}", row.rect.y);
+        }
     }
 }

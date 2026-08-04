@@ -1875,6 +1875,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ac26_narrow_hidden_info_panel_does_not_copy_on_click() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.info_panel_expanded = true;
+        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
+            rect: Rect::new(30, 3, 30, 1),
+            copy_value: "stale".into(),
+        }];
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+
+        assert_eq!(app.state.view.info_panel_rect, Rect::default());
+        assert!(app.state.view.info_panel_link_rows.is_empty());
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 3));
+        assert!(app.event_rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn terminal_wheel_uses_configured_mouse_scroll_lines() {
         let mut app = app_for_mouse_test();

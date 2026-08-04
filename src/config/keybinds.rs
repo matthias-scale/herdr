@@ -741,6 +741,20 @@ impl Config {
             keybinds.copy_work_url = keybinds.copy_work_link.clone();
         }
 
+        // Legacy aliases still dispatch as picker actions. Keep the canonical
+        // help entry populated when a legacy user binding displaced its
+        // canonical default during collision validation.
+        if keybinds.open_work_link.bindings.is_empty()
+            && !keybinds.open_work_url.bindings.is_empty()
+        {
+            keybinds.open_work_link = keybinds.open_work_url.clone();
+        }
+        if keybinds.copy_work_link.bindings.is_empty()
+            && !keybinds.copy_work_url.bindings.is_empty()
+        {
+            keybinds.copy_work_link = keybinds.copy_work_url.clone();
+        }
+
         (prefix_diag, prefix, diagnostics, keybinds)
     }
 }
@@ -1714,6 +1728,21 @@ next_tab = "prefix+n"
             .iter()
             .any(|diagnostic| diagnostic.contains("copy_work_ticket")
                 && diagnostic.contains("disabled")));
+    }
+
+    #[test]
+    fn ac26_legacy_work_url_binding_remains_visible_as_effective_picker_binding() {
+        let config: Config = toml::from_str(
+            r#"
+            [keys]
+            open_work_url = "prefix+u"
+            "#,
+        )
+        .unwrap();
+
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.open_work_url.labels(), vec!["prefix+u"]);
+        assert_eq!(keybinds.open_work_link.labels(), vec!["prefix+u"]);
     }
 
     #[test]

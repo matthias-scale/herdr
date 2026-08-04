@@ -102,11 +102,6 @@ impl App {
     }
 
     fn execute_prefix_key_action(&mut self, action: NavigateAction) {
-        let action = match action {
-            NavigateAction::OpenWorkUrl => NavigateAction::OpenWorkLink,
-            NavigateAction::CopyWorkUrl => NavigateAction::CopyWorkLink,
-            action => action,
-        };
         if action == NavigateAction::EditScrollback {
             let previous_mode = self.state.mode;
             self.cancel_copy_mode_if_active();
@@ -430,14 +425,12 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
-            NavigateAction::OpenWorkLink => {
+            NavigateAction::OpenWorkUrl | NavigateAction::OpenWorkLink => {
                 self.open_or_copy_work_link(crate::app::state::WorkLinkPickerAction::Open, context)
             }
-            NavigateAction::CopyWorkLink => {
+            NavigateAction::CopyWorkUrl | NavigateAction::CopyWorkLink => {
                 self.open_or_copy_work_link(crate::app::state::WorkLinkPickerAction::Copy, context)
             }
-            NavigateAction::OpenWorkUrl => self.open_focused_work_url(),
-            NavigateAction::CopyWorkUrl => self.copy_focused_work_url(),
             NavigateAction::CopyWorkTicket => self.copy_focused_work_ticket(),
             NavigateAction::CopyWorkPr => self.copy_focused_work_pr(),
             NavigateAction::CopyWorkPreview => self.copy_focused_work_preview(),
@@ -468,27 +461,6 @@ impl App {
         });
         self.copy_feedback_deadline =
             Some(std::time::Instant::now() + super::super::COPY_FEEDBACK_DURATION);
-    }
-
-    fn open_focused_work_url(&mut self) {
-        let Some(url) = focused_work_url(&self.state) else {
-            self.show_work_link_notice("focused pane has no work link");
-            leave_navigate_mode(&mut self.state);
-            return;
-        };
-        if let Err(error) = crate::platform::open_url(&url) {
-            tracing::warn!(%error, %url, "failed to open focused pane work link");
-            self.show_work_link_notice("could not open work link");
-        }
-        leave_navigate_mode(&mut self.state);
-    }
-
-    fn copy_focused_work_url(&mut self) {
-        self.copy_focused_work_value(
-            focused_work_url(&self.state),
-            "focused pane has no work link",
-            "could not copy work link",
-        );
     }
 
     fn open_or_copy_work_link(
@@ -2081,6 +2053,7 @@ fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<u
     (idx < state.workspaces.len()).then_some(idx)
 }
 
+#[cfg(test)]
 fn focused_work_url(state: &AppState) -> Option<String> {
     focused_work_context(state)?.primary_action_url()
 }
@@ -2238,6 +2211,24 @@ mod tests {
         app
     }
 
+    fn add_multiple_work_links(app: &mut App) {
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
     #[test]
     fn ac4_default_work_link_keybindings_map_to_distinct_prefix_actions() {
         let state = app_with_test_workspaces(&["one"]).state;
@@ -2340,6 +2331,8 @@ mod tests {
             Some("https://linear.app/scalable/issue/SCA-42")
         );
         app.execute_tui_navigate_action(NavigateAction::CopyWorkUrl, ActionContext::Prefix);
+        assert_eq!(app.state.mode, Mode::WorkLinkPicker);
+        app.handle_work_link_picker_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
         match app.event_rx.try_recv().expect("clipboard event") {
             crate::events::AppEvent::ClipboardWrite { content } => {
                 assert_eq!(content, b"https://linear.app/scalable/issue/SCA-42")
@@ -2519,21 +2512,7 @@ mod tests {
     #[test]
     fn ac26_legacy_prefix_binding_dispatches_to_picker_action() {
         let mut app = app_with_test_workspaces(&["one"]);
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0]
-            .terminal_id(pane_id)
-            .cloned()
-            .unwrap();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
-                ticket_ids: Some(vec!["MAT-1".into()]),
-                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
-                ..Default::default()
-            })
-            .unwrap();
+        add_multiple_work_links(&mut app);
         app.state.mode = Mode::Prefix;
         app.handle_prefix_key(TerminalKey::new(KeyCode::Char('U'), KeyModifiers::SHIFT));
 
@@ -2545,22 +2524,71 @@ mod tests {
     }
 
     #[test]
+    fn ac26_navigate_mode_work_link_aliases_open_picker_and_escape_restores_mode() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        add_multiple_work_links(&mut app);
+        app.state.mode = Mode::Navigate;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('u'), KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::WorkLinkPicker);
+        assert_eq!(
+            app.state.work_link_picker.as_ref().unwrap().action,
+            crate::app::state::WorkLinkPickerAction::Open
+        );
+
+        app.handle_work_link_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::Navigate);
+        assert!(app.state.work_link_picker.is_none());
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('U'), KeyModifiers::SHIFT));
+        assert_eq!(app.state.mode, Mode::WorkLinkPicker);
+        assert_eq!(
+            app.state.work_link_picker.as_ref().unwrap().action,
+            crate::app::state::WorkLinkPickerAction::Copy
+        );
+    }
+
+    #[test]
+    fn ac26_direct_legacy_alias_binding_dispatches_to_picker() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        add_multiple_work_links(&mut app);
+        app.state.keybinds.open_work_url = crate::config::ActionKeybinds::direct("u");
+
+        assert!(app
+            .handle_terminal_key_headless(TerminalKey::new(
+                KeyCode::Char('u'),
+                KeyModifiers::empty()
+            ))
+            .is_none());
+        assert_eq!(app.state.mode, Mode::WorkLinkPicker);
+        assert_eq!(
+            app.state.work_link_picker.as_ref().unwrap().action,
+            crate::app::state::WorkLinkPickerAction::Open
+        );
+    }
+
+    #[test]
+    fn ac26_open_link_picker_preserves_open_action() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        add_multiple_work_links(&mut app);
+
+        app.execute_tui_navigate_action(NavigateAction::OpenWorkLink, ActionContext::Prefix);
+
+        assert_eq!(app.state.mode, Mode::WorkLinkPicker);
+        assert_eq!(
+            app.state.work_link_picker.as_ref().unwrap().action,
+            crate::app::state::WorkLinkPickerAction::Open
+        );
+    }
+
+    #[test]
     fn ac26_link_picker_revalidates_stale_snapshot_before_acting() {
         let mut app = app_with_test_workspaces(&["one"]);
+        add_multiple_work_links(&mut app);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0]
             .terminal_id(pane_id)
             .cloned()
-            .unwrap();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
-                ticket_ids: Some(vec!["MAT-1".into()]),
-                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
-                ..Default::default()
-            })
             .unwrap();
         app.execute_tui_navigate_action(NavigateAction::CopyWorkLink, ActionContext::Prefix);
         app.state
@@ -2584,6 +2612,36 @@ mod tests {
                 .map(|feedback| feedback.message.as_str()),
             Some("work link is stale")
         );
+    }
+
+    #[test]
+    fn ac26_link_picker_revalidates_reordered_candidates_by_url() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        add_multiple_work_links(&mut app);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+
+        app.execute_tui_navigate_action(NavigateAction::CopyWorkLink, ActionContext::Prefix);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-2".into(), "MAT-1".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+
+        app.handle_work_link_picker_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
+        match app.event_rx.try_recv().expect("picker clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"https://linear.app/scalable/issue/MAT-1")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 
     #[test]
