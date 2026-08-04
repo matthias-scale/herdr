@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.work_context.set`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -164,6 +164,40 @@ pane.
 ```
 
 Clients can treat `offset_from_bottom == 0` as at-bottom state.
+
+`PaneInfo` and `AgentInfo` include the pane-owned effective `work_context`:
+
+```json
+{
+  "ticket_ids": ["MAT-123"],
+  "pr_urls": ["https://github.com/owner/repo/pull/42"],
+  "branch": "feat/work-context",
+  "work_title": "Add pane work context"
+}
+```
+
+Set or clear manual context fields atomically with `pane.work_context.set`.
+Omitted fields remain unchanged. A field cannot appear in both its setter and
+`clear_fields`. Ticket IDs are canonicalized to uppercase and pull request URLs
+must be HTTPS GitHub `/pull/<positive-number>` URLs.
+
+```json
+{
+  "id": "req_context",
+  "method": "pane.work_context.set",
+  "params": {
+    "pane_id": "w1:p1",
+    "ticket_ids": ["mat-123"],
+    "pr_urls": ["https://github.com/owner/repo/pull/42"],
+    "work_title": "Add pane work context",
+    "clear_fields": ["branch"]
+  }
+}
+```
+
+Valid fields for `clear_fields` are `ticket_ids`, `pr_urls`, `branch`, and
+`work_title`. Successful mutations emit `pane.updated` with the new effective
+context.
 
 ### Experimental pane graphics
 

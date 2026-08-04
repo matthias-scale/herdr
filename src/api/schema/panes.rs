@@ -228,6 +228,13 @@ pub struct PaneRenameParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneWorkContextSetParams {
+    pub pane_id: String,
+    #[serde(flatten)]
+    pub patch: crate::work_context::PaneWorkContextPatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneSendTextParams {
     pub pane_id: String,
     pub text: String,
@@ -400,6 +407,8 @@ pub struct PaneInfo {
     pub workspace_id: String,
     pub tab_id: String,
     pub focused: bool,
+    #[serde(default)]
+    pub work_context: crate::work_context::PaneWorkContext,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

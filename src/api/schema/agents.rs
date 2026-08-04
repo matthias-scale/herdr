@@ -183,6 +183,8 @@ pub struct AgentPromptParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     pub terminal_id: String,
+    #[serde(default)]
+    pub work_context: crate::work_context::PaneWorkContext,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
