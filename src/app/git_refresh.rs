@@ -197,36 +197,66 @@ impl App {
         };
 
         if self.state.status_bar_enabled {
+            // The status bar projects whichever pane becomes focused next, so every
+            // live pane cwd across all workspaces and tabs needs an observation.
+            // Job-level deduplication by checkout/cache key happens downstream in
+            // `deduplicate_git_refresh_items`.
+            for ws in &self.state.workspaces {
+                for tab in &ws.tabs {
+                    for pane_id in tab.layout.pane_ids() {
+                        let Some(cwd) = tab.cwd_for_pane(
+                            pane_id,
+                            &self.state.terminals,
+                            &self.terminal_runtimes,
+                        ) else {
+                            continue;
+                        };
+                        push_branch_refresh_item(&mut items, ws, cwd, refresh_repo_discovery);
+                    }
+                }
+            }
+
+            // Keep the focused status-bar projection target even when its cached
+            // projection cwd is not resolvable through a live pane right now.
             if let Some(ws) = self
                 .state
                 .active
                 .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
             {
                 if let Some(cwd) = self.state.status_focused_cwd.clone() {
-                    if let Some(existing) = items.iter_mut().find(|item| {
-                        item.workspace_id == ws.id && item.resolved_identity_cwd == cwd
-                    }) {
-                        existing.demand.branch = true;
-                    } else {
-                        let cache_key_hint = (!refresh_repo_discovery
-                            && ws.cached_identity_cwd == cwd)
-                            .then(|| ws.cached_git_status_key.clone());
-                        items.push(WorkspaceGitRefreshItem {
-                            workspace_id: ws.id.clone(),
-                            resolved_identity_cwd: cwd,
-                            cache_key_hint,
-                            demand: GitStatusRefreshDemand {
-                                branch: true,
-                                ahead_behind: false,
-                            },
-                        });
-                    }
+                    push_branch_refresh_item(&mut items, ws, cwd, refresh_repo_discovery);
                 }
             }
         }
 
         items
     }
+}
+
+fn push_branch_refresh_item(
+    items: &mut Vec<WorkspaceGitRefreshItem>,
+    ws: &crate::workspace::Workspace,
+    cwd: PathBuf,
+    refresh_repo_discovery: bool,
+) {
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|item| item.workspace_id == ws.id && item.resolved_identity_cwd == cwd)
+    {
+        existing.demand.branch = true;
+        return;
+    }
+    let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
+        .then(|| ws.cached_git_status_key.clone());
+    items.push(WorkspaceGitRefreshItem {
+        workspace_id: ws.id.clone(),
+        resolved_identity_cwd: cwd,
+        cache_key_hint,
+        demand: GitStatusRefreshDemand {
+            branch: true,
+            ahead_behind: false,
+        },
+    });
 }
 
 fn deduplicate_git_refresh_items(
@@ -508,31 +538,70 @@ mod tests {
         assert!(app.git_refresh_in_flight.is_some());
     }
 
+    // ac: every live pane cwd — across workspaces, tabs, and unfocused panes — is a
+    // branch refresh target, deduplicated per (workspace, cwd), while the focused
+    // status projection cwd stays included.
     #[test]
-    fn status_branch_refresh_targets_only_the_active_focused_cwd() {
+    fn status_branch_refresh_targets_every_live_pane_cwd() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
-        let inactive = Workspace::test_new("inactive");
-        let active = Workspace::test_new("active");
-        let focused_cwd = active.identity_cwd.clone();
+
+        let inactive_cwd = PathBuf::from("/repo-inactive");
+        let mut inactive = Workspace::test_new("inactive");
+        let inactive_root = inactive.tabs[0].root_pane;
+        let inactive_terminal = inactive.terminal_id(inactive_root).expect("terminal").clone();
+        app.state.terminals.insert(
+            inactive_terminal.clone(),
+            crate::terminal::TerminalState::new(inactive_terminal, inactive_cwd.clone()),
+        );
+        let inactive_id = inactive.id.clone();
+
+        let active_cwd = PathBuf::from("/repo-active");
+        let unfocused_cwd = PathBuf::from("/repo-unfocused");
+        let mut active = Workspace::test_new("active");
+        let active_root = active.tabs[0].root_pane;
+        let root_terminal = active.terminal_id(active_root).expect("terminal").clone();
+        let unfocused = active.test_split(ratatui::layout::Direction::Horizontal);
+        let unfocused_terminal = active.terminal_id(unfocused).expect("terminal").clone();
+        // Focus back on the root pane so the split pane is live but unfocused.
+        active.tabs[0].layout.focus_pane(active_root);
+        app.state.terminals.insert(
+            root_terminal.clone(),
+            crate::terminal::TerminalState::new(root_terminal, active_cwd.clone()),
+        );
+        app.state.terminals.insert(
+            unfocused_terminal.clone(),
+            crate::terminal::TerminalState::new(unfocused_terminal, unfocused_cwd.clone()),
+        );
         let active_id = active.id.clone();
+
         app.state.workspaces = vec![inactive, active];
         app.state.active = Some(1);
-        app.state.status_focused_cwd = Some(focused_cwd.clone());
+        app.state.status_focused_cwd = Some(active_cwd.clone());
 
         let items = app.workspace_git_refresh_items(false);
 
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].workspace_id, active_id);
-        assert_eq!(items[0].resolved_identity_cwd, focused_cwd);
-        assert_eq!(
-            items[0].demand,
-            GitStatusRefreshDemand {
-                branch: true,
-                ahead_behind: false,
-            }
-        );
+        assert_eq!(items.len(), 3, "one observation per distinct pane cwd");
+        for (workspace_id, cwd) in [
+            (&inactive_id, &inactive_cwd),
+            (&active_id, &active_cwd),
+            (&active_id, &unfocused_cwd),
+        ] {
+            let item = items
+                .iter()
+                .find(|item| {
+                    &item.workspace_id == workspace_id && &item.resolved_identity_cwd == cwd
+                })
+                .unwrap_or_else(|| panic!("missing refresh item for {workspace_id} {cwd:?}"));
+            assert_eq!(
+                item.demand,
+                GitStatusRefreshDemand {
+                    branch: true,
+                    ahead_behind: false,
+                }
+            );
+        }
     }
 
     #[test]
