@@ -4679,6 +4679,194 @@ mod tests {
         );
     }
 
+    fn seed_manual_work_context(app: &mut App, terminal_id: &crate::terminal::TerminalId) {
+        app.state
+            .terminals
+            .get_mut(terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-500".into()]),
+                pr_urls: Some(vec!["https://github.com/manual/repo/pull/99".into()]),
+                work_title: Some("Manual context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
+    fn populate_guarded_hook_context(
+        app: &mut App,
+        pane_id: &str,
+        agent: &str,
+        lifecycle_source: &str,
+        session_id: &str,
+        seq: u64,
+    ) {
+        let mut params = guarded_work_title_params(
+            pane_id.to_string(),
+            agent,
+            lifecycle_source,
+            session_id,
+            "Implement MAT-1 context",
+            seq,
+        );
+        params.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            work_title: params.title.clone(),
+            ..Default::default()
+        });
+        let response = app.handle_pane_report_metadata("populate".into(), params);
+        let _: SuccessResponse =
+            serde_json::from_str(&response).unwrap_or_else(|_| panic!("{response}"));
+    }
+
+    fn assert_only_manual_work_context_remains(
+        app: &App,
+        terminal_id: &crate::terminal::TerminalId,
+    ) {
+        let context = app.state.terminals[terminal_id].effective_work_context();
+        assert_eq!(context.ticket_ids, vec!["MAT-500"]);
+        assert_eq!(
+            context.pr_urls,
+            vec!["https://github.com/manual/repo/pull/99"]
+        );
+        assert_eq!(context.work_title.as_deref(), Some("Manual context"));
+    }
+
+    fn assert_hook_and_manual_work_context_live(
+        app: &App,
+        terminal_id: &crate::terminal::TerminalId,
+    ) {
+        let context = app.state.terminals[terminal_id].effective_work_context();
+        assert_eq!(context.ticket_ids, vec!["MAT-500", "MAT-1"]);
+        assert_eq!(
+            context.pr_urls,
+            vec![
+                "https://github.com/manual/repo/pull/99",
+                "https://github.com/o/r/pull/1"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_release_clears_hook_work_context_and_keeps_manual_tier() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "custom:pi", "pi", "session-pi");
+        seed_manual_work_context(&mut app, &terminal_id);
+        populate_guarded_hook_context(&mut app, &pane_id, "pi", "custom:pi", "session-pi", 20);
+        assert_hook_and_manual_work_context_live(&app, &terminal_id);
+
+        let response = app.handle_pane_release_agent(
+            "release".into(),
+            PaneReleaseAgentParams {
+                pane_id,
+                source: "custom:pi".into(),
+                agent: "pi".into(),
+                seq: Some(30),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
+    #[test]
+    fn hook_authority_clear_clears_hook_work_context_and_keeps_manual_tier() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "herdr:pi", "pi", "session-pi");
+        seed_manual_work_context(&mut app, &terminal_id);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Idle,
+            );
+        let response = app.handle_pane_report_agent(
+            "working".into(),
+            PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
+                state: crate::api::schema::PaneAgentState::Working,
+                message: None,
+                seq: Some(5),
+                agent_session_id: Some("session-pi".into()),
+                agent_session_path: None,
+            },
+        );
+        let _: SuccessResponse =
+            serde_json::from_str(&response).unwrap_or_else(|_| panic!("{response}"));
+        populate_guarded_hook_context(&mut app, &pane_id, "pi", "herdr:pi", "session-pi", 20);
+        assert_hook_and_manual_work_context_live(&app, &terminal_id);
+
+        let response = app.handle_pane_clear_agent_authority(
+            "clear".into(),
+            PaneClearAgentAuthorityParams {
+                pane_id,
+                source: Some("herdr:pi".into()),
+                seq: Some(6),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
+    #[test]
+    fn replaced_agent_session_exposes_no_prior_refs_before_first_guarded_prompt() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        seed_manual_work_context(&mut app, &terminal_id);
+        let response = app.handle_pane_report_agent_session(
+            "session-1".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(10),
+                agent_session_id: Some("session-1".into()),
+                agent_session_path: None,
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        populate_guarded_hook_context(&mut app, &pane_id, "codex", "herdr:codex", "session-1", 20);
+        assert_hook_and_manual_work_context_live(&app, &terminal_id);
+
+        let response = app.handle_pane_report_agent_session(
+            "session-2".into(),
+            PaneReportAgentSessionParams {
+                pane_id,
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(11),
+                agent_session_id: Some("session-2".into()),
+                agent_session_path: None,
+                session_start_source: Some("clear".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            app.state.terminals[&terminal_id].agent_session_matches(
+                "herdr:codex",
+                "codex",
+                "session-2"
+            ),
+            "the replacement session owns the terminal before its first guarded prompt"
+        );
+
+        assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
     #[test]
     fn ac5_unguarded_metadata_cannot_replace_hook_work_context() {
         let (mut app, pane_id) = app_with_test_workspace();

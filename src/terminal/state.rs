@@ -361,6 +361,18 @@ impl TerminalState {
         Ok(changed)
     }
 
+    /// The hook tier is transient per agent session: any accepted mutation that
+    /// tears down or replaces the session identity that authorized guarded
+    /// work-title reports must also drop the hook tier, so stale ticket/PR refs
+    /// never outlive their session. Manual and git tiers are untouched.
+    fn clear_hook_work_context(&mut self) -> bool {
+        let changed = self.work_context.clear_hook_turn();
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        changed
+    }
+
     pub(crate) fn restore_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,
@@ -769,6 +781,10 @@ impl TerminalState {
         if agent_released {
             self.clear_agent_name();
         }
+        let current_session = self.current_session_identity_for_persistence();
+        if (process_exited && !newer_custom_authority) || previous_session != current_session {
+            self.clear_hook_work_context();
+        }
         TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -777,8 +793,7 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session
-                != self.current_session_identity_for_persistence(),
+            session_ref_changed: previous_session != current_session,
             agent_released,
         }
     }
@@ -927,6 +942,9 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        if previous_session != current_session {
+            self.clear_hook_work_context();
+        }
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1657,6 +1675,9 @@ impl TerminalState {
             if process_present {
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
                 let current_session = self.current_session_identity_for_persistence();
+                if previous_session != current_session {
+                    self.clear_hook_work_context();
+                }
                 return Some(TerminalStateMutation {
                     effective_state_change: self.recompute_effective_state(
                         previous_agent_label,
@@ -1757,6 +1778,9 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        if previous_session != current_session {
+            self.clear_hook_work_context();
+        }
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1874,6 +1898,7 @@ impl TerminalState {
         );
         self.hook_authority = None;
         self.persisted_agent_session = None;
+        self.clear_hook_work_context();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1939,6 +1964,7 @@ impl TerminalState {
             self.persisted_agent_session = None;
         }
         let current_session = self.current_session_identity_for_persistence();
+        self.clear_hook_work_context();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -2249,6 +2275,7 @@ impl TerminalState {
     }
 
     pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
+        self.clear_hook_work_context();
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;

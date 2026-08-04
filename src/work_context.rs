@@ -181,6 +181,17 @@ impl PaneWorkContextState {
         Ok(true)
     }
 
+    /// Drops the hook tier when the agent session that authorized it ends or
+    /// is replaced; the manual and git tiers are preserved.
+    pub fn clear_hook_turn(&mut self) -> bool {
+        if self.hook_turn == PaneWorkContext::default() {
+            return false;
+        }
+        self.hook_turn = PaneWorkContext::default();
+        self.recompute();
+        true
+    }
+
     #[allow(dead_code)]
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
