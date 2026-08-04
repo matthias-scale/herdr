@@ -2774,10 +2774,11 @@ impl AppState {
                 }
             }
 
-            if self.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
-                .as_ref()
-                != Some(&result.resolved_identity_cwd)
+            if !result.updates_workspace_identity
+                || self.workspaces[ws_idx]
+                    .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                    .as_ref()
+                    != Some(&result.resolved_identity_cwd)
             {
                 continue;
             }
@@ -3029,6 +3030,7 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::GitStatusRefreshed {
+                generation: _,
                 results,
                 cache_updates,
             } => {
@@ -4124,6 +4126,7 @@ mod tests {
                 resolved_identity_cwd: first_cwd.clone(),
                 status_cache_key: first_cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "one".into(),
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
@@ -4136,6 +4139,41 @@ mod tests {
         assert_eq!(state.workspaces[0].git_ahead_behind(), Some((2, 1)));
         assert_eq!(state.workspaces[1].id, second_id);
         assert_eq!(state.workspaces[1].git_ahead_behind(), None);
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_keeps_status_projection_out_of_workspace_identity() {
+        let mut state = app_with_workspaces(&["one"]);
+        state.status_bar_enabled = true;
+        let workspace_id = state.workspaces[0].id.clone();
+        let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
+        let previous_label = state.workspaces[0].cached_auto_label.clone();
+        state.workspaces[0].cached_git_branch = Some("last-good".into());
+        state.sync_status_focused_cwd(&crate::terminal::TerminalRuntimeRegistry::new());
+
+        let changed = state.apply_workspace_git_statuses(
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: std::path::PathBuf::from("/new-cache-key"),
+                demand: crate::workspace::GitStatusRefreshDemand {
+                    branch: true,
+                    ahead_behind: false,
+                },
+                updates_workspace_identity: false,
+                auto_label: "new-label".into(),
+                branch: Some("focused-branch".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+        );
+
+        assert!(changed);
+        assert_eq!(state.status_git_branch.as_deref(), Some("focused-branch"));
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("last-good"));
+        assert_eq!(state.workspaces[0].cached_auto_label, previous_label);
+        assert_eq!(state.workspaces[0].cached_git_status_key, cwd);
     }
 
     #[test]
@@ -4166,6 +4204,7 @@ mod tests {
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "one".into(),
                 branch: Some("main".into()),
                 ahead_behind: None,
@@ -4194,6 +4233,7 @@ mod tests {
                 resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
                 status_cache_key: std::path::PathBuf::from("/definitely/not/current"),
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "stale".into(),
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
@@ -4226,6 +4266,7 @@ mod tests {
                     branch: false,
                     ahead_behind: true,
                 },
+                updates_workspace_identity: true,
                 auto_label: "one".into(),
                 branch: Some("new".into()),
                 ahead_behind: None,
@@ -4253,6 +4294,7 @@ mod tests {
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "one".into(),
                 branch: None,
                 ahead_behind: None,
@@ -4281,6 +4323,7 @@ mod tests {
                 resolved_identity_cwd: cwd.clone(),
                 status_cache_key: cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "other".into(),
                 branch: Some("scratch".into()),
                 ahead_behind: None,

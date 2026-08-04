@@ -146,6 +146,7 @@ pub enum AppEvent {
     },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
+        generation: u64,
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },

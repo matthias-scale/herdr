@@ -70,9 +70,10 @@ impl App {
                 should_repaint && self.status_metrics_visible
             }
             AppEvent::GitStatusRefreshed {
+                generation,
                 results,
                 cache_updates,
-            } => self.handle_git_status_refreshed(results, cache_updates),
+            } => self.handle_git_status_refreshed(generation, results, cache_updates),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -82,18 +83,33 @@ impl App {
 
     fn handle_git_status_refreshed(
         &mut self,
+        generation: u64,
         results: Vec<crate::workspace::WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
     ) -> bool {
-        self.git_refresh_in_flight = false;
+        let Some(refresh) = self.git_refresh_in_flight else {
+            return false;
+        };
+        if generation != refresh.generation {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= refresh.deadline {
+            self.git_refresh_in_flight = None;
+            self.git_refresh_due_after_in_flight = false;
+            self.mark_git_status_refresh_due(now);
+            return false;
+        }
+
+        self.git_refresh_in_flight = None;
         for (key, entry) in cache_updates {
             self.git_status_cache.insert(key, entry);
         }
         if self.git_refresh_due_after_in_flight {
-            self.mark_git_status_refresh_due(Instant::now());
+            self.mark_git_status_refresh_due(now);
             self.git_refresh_due_after_in_flight = false;
         } else {
-            self.last_git_remote_status_refresh = Instant::now();
+            self.last_git_remote_status_refresh = now;
         }
         let projected_focus = self
             .state
@@ -148,11 +164,12 @@ impl App {
         }
 
         if let AppEvent::GitStatusRefreshed {
+            generation,
             results,
             cache_updates,
         } = ev
         {
-            self.handle_git_status_refreshed(results, cache_updates);
+            self.handle_git_status_refreshed(generation, results, cache_updates);
             return;
         }
 
@@ -1533,7 +1550,7 @@ mod tests {
         app.state.status_git_cwd = Some(old_cwd);
         app.state.status_git_branch = Some("stale-branch".into());
         app.state.status_focus_projection_initialized = true;
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
         app.handle_internal_event(AppEvent::TerminalCwdReported {
             pane_id,

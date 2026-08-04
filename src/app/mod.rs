@@ -36,6 +36,7 @@ pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const GIT_REPO_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const GIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -83,6 +84,13 @@ pub(crate) struct PaneClickState {
     at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GitRefreshInFlight {
+    pub(crate) generation: u64,
+    pub(crate) started_at: Instant,
+    pub(crate) deadline: Instant,
+}
+
 impl PaneClickState {
     fn is_double_click_for(self, next: Self) -> bool {
         self.pane_id == next.pane_id
@@ -115,10 +123,13 @@ pub struct App {
     pub(crate) last_api_notification_at: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) last_git_repo_discovery_refresh: Instant,
-    pub(crate) git_refresh_in_flight: bool,
+    pub(crate) git_refresh_in_flight: Option<GitRefreshInFlight>,
+    pub(crate) last_git_refresh_generation: u64,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    #[cfg(test)]
+    pub(crate) git_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -766,10 +777,13 @@ impl App {
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             last_git_repo_discovery_refresh: Instant::now(),
-            git_refresh_in_flight: false,
+            git_refresh_in_flight: None,
+            last_git_refresh_generation: 0,
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            #[cfg(test)]
+            git_program_override: None,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
@@ -2221,58 +2235,145 @@ mod tests {
     }
 
     #[test]
-    fn git_refresh_deadline_is_suppressed_while_in_flight() {
+    fn git_refresh_deadline_uses_hard_in_flight_deadline() {
         let mut app = test_app();
         app.state.workspaces.push(Workspace::test_new("one"));
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert_eq!(
+            app.git_refresh_deadline(),
+            app.git_refresh_in_flight.map(|refresh| refresh.deadline)
+        );
     }
 
     #[test]
     fn unchanged_git_status_event_has_no_render_impact() {
         let mut app = test_app();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
         let changed = app.handle_internal_event_with_prefix_sync(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });
 
         assert!(!changed);
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
     }
 
     #[test]
     fn git_status_event_clears_in_flight_refresh() {
         let mut app = test_app();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
         let previous_refresh = Instant::now() - Duration::from_secs(10);
         app.last_git_remote_status_refresh = previous_refresh;
 
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });
 
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
         assert!(app.last_git_remote_status_refresh > previous_refresh);
+    }
+
+    // ac2: an event from an invalidated generation cannot overwrite the last good branch.
+    #[test]
+    fn stale_git_status_event_is_dropped_by_generation() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("one");
+        workspace.cached_git_branch = Some("last-good".into());
+        let workspace_id = workspace.id.clone();
+        let cwd = workspace.identity_cwd.clone();
+        app.state.workspaces.push(workspace);
+        app.git_refresh_in_flight = Some(GitRefreshInFlight {
+            generation: 2,
+            started_at: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(2),
+        });
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
+                auto_label: "one".into(),
+                branch: Some("stale".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("last-good")
+        );
+        assert_eq!(
+            app.git_refresh_in_flight.map(|refresh| refresh.generation),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn late_git_status_event_is_dropped_at_generation_deadline() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("one");
+        workspace.cached_git_branch = Some("last-good".into());
+        let workspace_id = workspace.id.clone();
+        let cwd = workspace.identity_cwd.clone();
+        app.state.workspaces.push(workspace);
+        app.test_begin_git_refresh(1);
+        app.git_refresh_in_flight.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_millis(1);
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
+                auto_label: "one".into(),
+                branch: Some("late".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("last-good")
+        );
+        assert!(app.git_refresh_in_flight.is_none());
+        assert!(app
+            .git_refresh_deadline()
+            .is_some_and(|deadline| deadline <= Instant::now()));
     }
 
     #[test]
     fn git_status_event_marks_render_dirty_when_status_changes() {
         let mut app = test_app();
+        app.test_begin_git_refresh(1);
         app.state.workspaces.push(Workspace::test_new("one"));
         let _ = app.render_dirty.take();
         let workspace_id = app.state.workspaces[0].id.clone();
         let resolved_identity_cwd = app.state.workspaces[0].resolved_identity_cwd().unwrap();
 
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: resolved_identity_cwd.clone(),
                 status_cache_key: resolved_identity_cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "one".into(),
                 branch: Some("render-dirty-test".into()),
                 ahead_behind: Some((1, 0)),
@@ -2506,16 +2607,17 @@ mod tests {
     #[test]
     fn unchanged_git_status_drain_has_no_render_impact() {
         let mut app = test_app();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
         app.event_tx
             .try_send(AppEvent::GitStatusRefreshed {
+                generation: 1,
                 results: Vec::new(),
                 cache_updates: Vec::new(),
             })
             .unwrap();
 
         assert!(!app.drain_internal_events());
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
     }
 
     #[test]
@@ -5578,8 +5680,9 @@ last_pane = "prefix+tab"
 
         app.state.status_bar_enabled = false;
         app.state.workspaces[0].switch_tab(second_tab);
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });
