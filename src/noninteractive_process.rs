@@ -26,10 +26,8 @@ pub(crate) fn curl_command() -> Command {
 /// `deadline` is reached.
 ///
 /// On Unix the child is spawned as the leader of its own process group so expiry can
-/// signal every descendant, not just the direct child. On Windows there is no job-object
-/// integration yet: only the direct child is terminated, and descendants that inherit
-/// the output pipes are covered solely by the bounded reader joins, which detach rather
-/// than block past the deadline.
+/// signal every descendant, not just the direct child. On Windows the child is assigned to a
+/// private Job Object configured to terminate its descendants when deadline cleanup runs.
 pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Output> {
     if Instant::now() >= deadline {
         return Err(io::Error::new(
@@ -54,7 +52,14 @@ pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> i
         }
     }
     let mut child = command.spawn()?;
-    let process_tree = ProcessTree::for_child(&child);
+    let process_tree = match ProcessTree::for_child(&child) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
     let stdout = child
         .stdout
         .take()
@@ -71,12 +76,12 @@ pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> i
             Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(error) => {
-                let _ = terminate_and_reap(&mut child, process_tree);
+                let _ = terminate_and_reap(&mut child, &process_tree);
                 let _ = drain_readers(
                     stdout_reader,
                     stderr_reader,
                     &mut child,
-                    process_tree,
+                    &process_tree,
                     Instant::now(),
                 );
                 return Err(error);
@@ -84,12 +89,12 @@ pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> i
         }
         let now = Instant::now();
         if now >= deadline {
-            let terminate_result = terminate_and_reap(&mut child, process_tree);
+            let terminate_result = terminate_and_reap(&mut child, &process_tree);
             let _ = drain_readers(
                 stdout_reader,
                 stderr_reader,
                 &mut child,
-                process_tree,
+                &process_tree,
                 Instant::now(),
             );
             terminate_result?;
@@ -107,7 +112,7 @@ pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> i
         stdout_reader,
         stderr_reader,
         &mut child,
-        process_tree,
+        &process_tree,
         deadline,
     )?;
     Ok(Output {
@@ -117,21 +122,37 @@ pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> i
     })
 }
 
-#[derive(Clone, Copy)]
 struct ProcessTree {
     #[cfg(unix)]
     pgid: libc::pid_t,
+    #[cfg(windows)]
+    job: crate::platform::ProcessJobObject,
 }
 
 impl ProcessTree {
-    fn for_child(child: &std::process::Child) -> Self {
-        Self {
-            #[cfg(unix)]
-            pgid: child.id() as libc::pid_t,
+    fn for_child(child: &std::process::Child) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            return Ok(Self {
+                pgid: child.id() as libc::pid_t,
+            });
+        }
+
+        #[cfg(windows)]
+        {
+            return Ok(Self {
+                job: crate::platform::ProcessJobObject::for_child(child)?,
+            });
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = child;
+            Ok(Self {})
         }
     }
 
-    fn kill(self, child: &mut std::process::Child) -> io::Result<()> {
+    fn kill(&self, child: &mut std::process::Child) -> io::Result<()> {
         #[cfg(unix)]
         {
             // The child is the process-group leader, so a negative pgid signal reaches
@@ -150,11 +171,14 @@ impl ProcessTree {
             };
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // Windows scope: without job objects only the direct child can be
-            // terminated. The bounded reader drain still prevents a descendant that
-            // inherits a pipe from blocking the refresh worker past its deadline.
+            let _ = child;
+            self.job.terminate()
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
             child.kill()
         }
     }
@@ -162,7 +186,7 @@ impl ProcessTree {
 
 fn terminate_and_reap(
     child: &mut std::process::Child,
-    process_tree: ProcessTree,
+    process_tree: &ProcessTree,
 ) -> io::Result<()> {
     let kill_result = process_tree.kill(child);
     if let Err(kill_error) = kill_result {
@@ -181,7 +205,7 @@ fn drain_readers(
     stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
     stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
     child: &mut std::process::Child,
-    process_tree: ProcessTree,
+    process_tree: &ProcessTree,
     deadline: Instant,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut reader_deadline = deadline;
