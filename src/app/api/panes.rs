@@ -1589,6 +1589,9 @@ impl App {
         if token_changed {
             self.sync_agent_metadata_deadline();
         }
+        if hook_context_changed {
+            self.schedule_session_save();
+        }
         if token_changed || hook_context_changed {
             self.emit_pane_updated(ws_idx, pane_id);
         }
@@ -4748,6 +4751,60 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn save_and_restore_work_context(app: &mut App) -> crate::work_context::PaneWorkContext {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config_home = std::env::temp_dir().join(format!(
+            "herdr-pr24-work-context-save-{}-{suffix}",
+            std::process::id()
+        ));
+        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let original_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        app.save_session_now();
+        assert!(!app.state.session_dirty, "session save should complete");
+        let snapshot = crate::persist::load().expect("session save should write a snapshot");
+        let (events, _event_rx) = tokio::sync::mpsc::channel(4);
+        let (workspaces, terminals, runtimes) = crate::persist::restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            "/bin/sh",
+            app.state.shell_mode,
+            false,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        let root_pane = workspaces[0].tabs[0].root_pane;
+        let terminal_id = workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        let context = terminals[&terminal_id].effective_work_context().clone();
+        for runtime in runtimes.into_values() {
+            runtime.shutdown();
+        }
+
+        match original_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match original_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(config_home);
+        context
+    }
+
     #[test]
     fn agent_release_clears_hook_work_context_and_keeps_manual_tier() {
         let (mut app, pane_id) = app_with_test_workspace();
@@ -4769,6 +4826,148 @@ mod tests {
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
 
         assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn accepted_hook_work_context_is_saved_and_restored() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        app.no_session = false;
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "herdr:codex", "codex", "session-codex");
+
+        populate_guarded_hook_context(
+            &mut app,
+            &pane_id,
+            "codex",
+            "herdr:codex",
+            "session-codex",
+            20,
+        );
+
+        assert!(app.state.session_dirty);
+        assert!(app.session_save_deadline.is_some());
+        assert_eq!(pane_updated_events(&app), 1);
+        let restored = save_and_restore_work_context(&mut app);
+        assert_eq!(restored.ticket_ids, vec!["MAT-1"]);
+        assert_eq!(restored.pr_urls, vec!["https://github.com/o/r/pull/1"]);
+        assert_eq!(
+            restored.work_title.as_deref(),
+            Some("Implement MAT-1 context")
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].effective_work_context(),
+            &crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-1".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                work_title: Some("Implement MAT-1 context".into()),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn release_with_foreign_session_saves_hook_clear_and_restores_without_it() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        app.no_session = false;
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:claude",
+            "claude",
+            "claude-session",
+        );
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal
+            .replace_hook_work_context(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-1".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                work_title: Some("Stale hook context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let response = app.handle_pane_release_agent(
+            "release-foreign".into(),
+            PaneReleaseAgentParams {
+                pane_id,
+                source: "custom:pi".into(),
+                agent: "pi".into(),
+                seq: Some(21),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id].effective_work_context(),
+            &crate::work_context::PaneWorkContext::default()
+        );
+        assert!(app.state.session_dirty);
+        assert!(app.session_save_deadline.is_some());
+        assert_eq!(pane_updated_events(&app), 1);
+
+        let restored = save_and_restore_work_context(&mut app);
+        assert_eq!(restored, crate::work_context::PaneWorkContext::default());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn deferred_resume_failure_saves_hook_clear_and_restores_without_it() {
+        let mut app = {
+            let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+            App::new(
+                &Config::default(),
+                true,
+                None,
+                api_rx,
+                crate::api::EventHub::default(),
+            )
+        };
+        let workspace = Workspace::test_new("resume-failure");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        app.state.view.pane_infos = workspace.tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "/herdr/pr24/missing-shell".into();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .replace_hook_work_context(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-1".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                work_title: Some("Stale hook context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["codex".into()],
+            dedupe_key: "herdr:codex\0codex\0Id\0resume-failure".into(),
+        });
+        app.no_session = false;
+
+        assert!(!app.start_pending_agent_resumes(true));
+        assert_eq!(
+            app.state.terminals[&terminal_id].effective_work_context(),
+            &crate::work_context::PaneWorkContext::default()
+        );
+        assert!(app.state.session_dirty);
+        assert!(app.session_save_deadline.is_some());
+        assert_eq!(pane_updated_events(&app), 1);
+
+        let restored = save_and_restore_work_context(&mut app);
+        assert_eq!(restored, crate::work_context::PaneWorkContext::default());
     }
 
     #[test]

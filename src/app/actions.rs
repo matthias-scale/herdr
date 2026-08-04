@@ -247,6 +247,7 @@ pub struct PaneStateUpdate {
     pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
     pub agent_name_changed: bool,
+    pub hook_work_context_changed: bool,
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
 }
@@ -1061,6 +1062,7 @@ impl AppState {
                     seen,
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
+                    hook_work_context_changed: false,
                     agent_released: false,
                     agent_release_status: None,
                 };
@@ -3062,7 +3064,9 @@ impl AppState {
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let agent_name_changed = terminal.agent_name != previous_agent_name;
-            let unchanged_change = (mutation.agent_released || agent_name_changed)
+            let unchanged_change = (mutation.agent_released
+                || agent_name_changed
+                || mutation.hook_work_context_changed)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
             (
                 mutation,
@@ -3071,7 +3075,11 @@ impl AppState {
                 unchanged_change,
             )
         };
-        if mutation.session_ref_changed || managed_changed || agent_name_changed {
+        if mutation.session_ref_changed
+            || managed_changed
+            || agent_name_changed
+            || mutation.hook_work_context_changed
+        {
             self.mark_session_dirty();
         }
         let agent_released = mutation.agent_released;
@@ -3105,6 +3113,7 @@ impl AppState {
             seen,
             presentation: change.presentation.clone(),
             agent_name_changed,
+            hook_work_context_changed: mutation.hook_work_context_changed,
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
         };

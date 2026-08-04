@@ -211,6 +211,9 @@ impl App {
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
                 self.sync_full_lifecycle_authority_detection_pauses();
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                if update.hook_work_context_changed {
+                    self.schedule_session_save();
+                }
                 self.emit_pane_state_update(&update);
                 self.emit_terminal_or_system_agent_notifications(std::slice::from_ref(&update));
             }
@@ -298,6 +301,12 @@ impl App {
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        if pane_updates
+            .iter()
+            .any(|update| update.hook_work_context_changed)
+        {
+            self.schedule_session_save();
+        }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
@@ -606,7 +615,7 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(update.ws_idx);
 
-        if update.agent_name_changed {
+        if update.agent_name_changed || update.hook_work_context_changed {
             self.emit_pane_updated(update.ws_idx, update.pane_id);
         }
 
