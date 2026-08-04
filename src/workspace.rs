@@ -22,10 +22,10 @@ mod tab;
 #[cfg(test)]
 use self::git::git_ahead_behind;
 use self::git::git_status_cache_key_for_space;
-pub(crate) use self::{
-    git::git_status_snapshot_for_cwd_with_demand,
-    tab::{MovedPane, TabDisplayProjection},
-};
+#[cfg(test)]
+pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand;
+pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand_and_program;
+pub(crate) use self::tab::{MovedPane, TabDisplayProjection};
 pub use self::{
     git::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
@@ -76,6 +76,7 @@ pub struct WorkspaceGitStatus {
     pub resolved_identity_cwd: PathBuf,
     pub status_cache_key: PathBuf,
     pub demand: GitStatusRefreshDemand,
+    pub updates_workspace_identity: bool,
     pub auto_label: String,
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
@@ -112,12 +113,14 @@ impl WorkspaceGitStatusSnapshot {
         resolved_identity_cwd: PathBuf,
         status_cache_key: PathBuf,
         demand: GitStatusRefreshDemand,
+        updates_workspace_identity: bool,
     ) -> WorkspaceGitStatus {
         WorkspaceGitStatus {
             workspace_id,
             resolved_identity_cwd,
             status_cache_key,
             demand,
+            updates_workspace_identity,
             auto_label: self.auto_label,
             branch: self.branch,
             ahead_behind: self.ahead_behind,

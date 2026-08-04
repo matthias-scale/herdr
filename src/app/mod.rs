@@ -36,6 +36,7 @@ pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const GIT_REPO_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const GIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -83,6 +84,13 @@ pub(crate) struct PaneClickState {
     at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GitRefreshInFlight {
+    pub(crate) generation: u64,
+    pub(crate) started_at: Instant,
+    pub(crate) deadline: Instant,
+}
+
 impl PaneClickState {
     fn is_double_click_for(self, next: Self) -> bool {
         self.pane_id == next.pane_id
@@ -115,10 +123,13 @@ pub struct App {
     pub(crate) last_api_notification_at: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) last_git_repo_discovery_refresh: Instant,
-    pub(crate) git_refresh_in_flight: bool,
+    pub(crate) git_refresh_in_flight: Option<GitRefreshInFlight>,
+    pub(crate) last_git_refresh_generation: u64,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    #[cfg(test)]
+    pub(crate) git_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -138,7 +149,10 @@ pub struct App {
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
-    pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) session_save_scheduled_revision: Option<u64>,
+    pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
+    pub(crate) session_save_failures: u32,
+    pub(crate) session_save_retry_deadline: Option<Instant>,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
@@ -706,6 +720,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -762,10 +777,13 @@ impl App {
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             last_git_repo_discovery_refresh: Instant::now(),
-            git_refresh_in_flight: false,
+            git_refresh_in_flight: None,
+            last_git_refresh_generation: 0,
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            #[cfg(test)]
+            git_program_override: None,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
@@ -785,7 +803,10 @@ impl App {
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
+            session_save_scheduled_revision: None,
             session_save_thread: None,
+            session_save_failures: 0,
+            session_save_retry_deadline: None,
             detached_custom_command_children: Vec::new(),
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
@@ -2214,58 +2235,145 @@ mod tests {
     }
 
     #[test]
-    fn git_refresh_deadline_is_suppressed_while_in_flight() {
+    fn git_refresh_deadline_uses_hard_in_flight_deadline() {
         let mut app = test_app();
         app.state.workspaces.push(Workspace::test_new("one"));
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert_eq!(
+            app.git_refresh_deadline(),
+            app.git_refresh_in_flight.map(|refresh| refresh.deadline)
+        );
     }
 
     #[test]
     fn unchanged_git_status_event_has_no_render_impact() {
         let mut app = test_app();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
         let changed = app.handle_internal_event_with_prefix_sync(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });
 
         assert!(!changed);
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
     }
 
     #[test]
     fn git_status_event_clears_in_flight_refresh() {
         let mut app = test_app();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
         let previous_refresh = Instant::now() - Duration::from_secs(10);
         app.last_git_remote_status_refresh = previous_refresh;
 
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });
 
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
         assert!(app.last_git_remote_status_refresh > previous_refresh);
+    }
+
+    // ac2: an event from an invalidated generation cannot overwrite the last good branch.
+    #[test]
+    fn stale_git_status_event_is_dropped_by_generation() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("one");
+        workspace.cached_git_branch = Some("last-good".into());
+        let workspace_id = workspace.id.clone();
+        let cwd = workspace.identity_cwd.clone();
+        app.state.workspaces.push(workspace);
+        app.git_refresh_in_flight = Some(GitRefreshInFlight {
+            generation: 2,
+            started_at: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(2),
+        });
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
+                auto_label: "one".into(),
+                branch: Some("stale".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("last-good")
+        );
+        assert_eq!(
+            app.git_refresh_in_flight.map(|refresh| refresh.generation),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn late_git_status_event_is_dropped_at_generation_deadline() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("one");
+        workspace.cached_git_branch = Some("last-good".into());
+        let workspace_id = workspace.id.clone();
+        let cwd = workspace.identity_cwd.clone();
+        app.state.workspaces.push(workspace);
+        app.test_begin_git_refresh(1);
+        app.git_refresh_in_flight.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_millis(1);
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
+                auto_label: "one".into(),
+                branch: Some("late".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("last-good")
+        );
+        assert!(app.git_refresh_in_flight.is_none());
+        assert!(app
+            .git_refresh_deadline()
+            .is_some_and(|deadline| deadline <= Instant::now()));
     }
 
     #[test]
     fn git_status_event_marks_render_dirty_when_status_changes() {
         let mut app = test_app();
+        app.test_begin_git_refresh(1);
         app.state.workspaces.push(Workspace::test_new("one"));
         let _ = app.render_dirty.take();
         let workspace_id = app.state.workspaces[0].id.clone();
         let resolved_identity_cwd = app.state.workspaces[0].resolved_identity_cwd().unwrap();
 
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: vec![crate::workspace::WorkspaceGitStatus {
                 workspace_id,
                 resolved_identity_cwd: resolved_identity_cwd.clone(),
                 status_cache_key: resolved_identity_cwd,
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
                 auto_label: "one".into(),
                 branch: Some("render-dirty-test".into()),
                 ahead_behind: Some((1, 0)),
@@ -2499,16 +2607,17 @@ mod tests {
     #[test]
     fn unchanged_git_status_drain_has_no_render_impact() {
         let mut app = test_app();
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
         app.event_tx
             .try_send(AppEvent::GitStatusRefreshed {
+                generation: 1,
                 results: Vec::new(),
                 cache_updates: Vec::new(),
             })
             .unwrap();
 
         assert!(!app.drain_internal_events());
-        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_refresh_in_flight.is_none());
     }
 
     #[test]
@@ -4833,12 +4942,61 @@ mod tests {
     fn session_dirty_flag_schedules_debounced_save() {
         let mut app = test_app();
         app.no_session = false;
-        app.state.session_dirty = true;
+        app.state.mark_session_dirty();
 
         app.sync_session_save_schedule();
 
-        assert!(!app.state.session_dirty);
+        assert!(app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn ac1_5_second_dirty_mutation_resets_debounce_deadline() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+        let first_deadline = app.session_save_deadline.expect("first deadline");
+
+        std::thread::sleep(Duration::from_millis(2));
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+
+        assert!(app.session_save_deadline.expect("second deadline") > first_deadline);
+    }
+
+    #[test]
+    fn ac1_5_explicit_save_schedule_records_dirty_revision() {
+        let mut app = test_app();
+        app.no_session = false;
+        let previous_revision = app.state.session_dirty_revision;
+
+        app.schedule_session_save();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(
+            app.state.session_dirty_revision,
+            previous_revision.wrapping_add(1)
+        );
+    }
+
+    #[test]
+    fn ac1_5_dirty_mutation_does_not_disturb_retry_deadline() {
+        let mut app = test_app();
+        app.no_session = false;
+        let retry_deadline = Instant::now() + Duration::from_secs(3);
+        app.session_save_retry_deadline = Some(retry_deadline);
+        app.session_save_deadline = Some(retry_deadline);
+
+        let previous_revision = app.state.session_dirty_revision;
+        app.schedule_session_save();
+
+        assert_eq!(
+            app.state.session_dirty_revision,
+            previous_revision.wrapping_add(1)
+        );
+        assert_eq!(app.session_save_retry_deadline, Some(retry_deadline));
+        assert_eq!(app.session_save_deadline, Some(retry_deadline));
     }
 
     #[test]
@@ -4987,12 +5145,13 @@ mod tests {
         app.no_session = false;
         app.state.workspaces = vec![Workspace::test_new("autosave")];
         app.state.ensure_test_terminals();
+        app.state.session_dirty = true;
         app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));
 
         app.handle_scheduled_tasks(Instant::now(), false);
 
         assert!(app.session_save_thread.is_some());
-        assert!(app.session_save_deadline.is_none());
+        assert!(app.session_save_deadline.is_some());
         app.save_session_now();
         assert!(crate::session::data_dir().join("session.json").exists());
 
@@ -5007,6 +5166,10 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         app.session_save_thread = Some(std::thread::spawn(move || {
             let _ = release_rx.recv();
+            session::SessionSaveResult {
+                revision: 0,
+                result: Ok(()),
+            }
         }));
 
         app.start_background_session_save();
@@ -5020,6 +5183,95 @@ mod tests {
     }
 
     #[test]
+    fn ac1_applied_save_failure_keeps_dirty_and_preserves_retry_through_sync() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 7;
+        app.apply_session_save_result(session::SessionSaveResult {
+            revision: 7,
+            result: Err(std::io::Error::other("injected save failure")),
+        });
+        let retry_deadline = app.session_save_deadline.expect("retry deadline");
+
+        app.sync_session_save_schedule();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 1);
+        assert_eq!(app.session_save_deadline, Some(retry_deadline));
+    }
+
+    #[test]
+    fn ac1_4_real_persist_failure_is_reaped_and_schedules_bounded_retry() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("failed-background-session-save");
+        std::fs::write(&config_home, b"not a directory").unwrap();
+        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let original_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("failed-autosave")];
+        app.state.ensure_test_terminals();
+        app.state.mark_session_dirty();
+        let save_started = Instant::now();
+
+        app.start_background_session_save();
+        let writer_spawned = app.session_save_thread.is_some();
+        while app
+            .session_save_thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            std::thread::yield_now();
+        }
+        app.sync_session_save_schedule();
+        let reaped_at = Instant::now();
+        let retry_deadline = app.session_save_retry_deadline;
+
+        match original_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match original_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        std::fs::remove_file(config_home).unwrap();
+
+        assert!(writer_spawned);
+        assert!(app.session_save_thread.is_none());
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 1);
+        assert_eq!(app.session_save_deadline, retry_deadline);
+        assert!(retry_deadline.is_some_and(|deadline| {
+            deadline >= save_started + Duration::from_millis(250)
+                && deadline <= reaped_at + Duration::from_millis(250)
+        }));
+    }
+
+    #[test]
+    fn ac1_success_does_not_clear_mutation_made_during_save_and_resets_backoff() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 11;
+        app.session_save_failures = 4;
+
+        app.apply_session_save_result(session::SessionSaveResult {
+            revision: 10,
+            result: Ok(()),
+        });
+        app.sync_session_save_schedule();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 0);
+        assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
     fn final_session_save_joins_background_writer_before_returning() {
         let mut app = test_app();
         app.no_session = true;
@@ -5028,6 +5280,10 @@ mod tests {
         app.session_save_thread = Some(std::thread::spawn(move || {
             let _ = release_rx.recv();
             done_tx.send(()).unwrap();
+            session::SessionSaveResult {
+                revision: 0,
+                result: Ok(()),
+            }
         }));
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));
@@ -5424,8 +5680,9 @@ last_pane = "prefix+tab"
 
         app.state.status_bar_enabled = false;
         app.state.workspaces[0].switch_tab(second_tab);
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
         app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
         });

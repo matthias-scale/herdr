@@ -76,6 +76,12 @@ pub(crate) fn request_from_turn_start(
         .filter(|value| !value.is_empty())?;
     let prompt = input.prompt.as_deref()?;
     let title = calculate_work_title(prompt);
+    let work_context = crate::work_context::PaneWorkContext {
+        ticket_ids: crate::work_context::extract_ticket_ids(prompt),
+        pr_urls: crate::work_context::extract_pr_urls(prompt),
+        branch: None,
+        work_title: title.clone(),
+    };
 
     Some(PaneReportMetadataParams {
         pane_id: pane_id.to_string(),
@@ -84,6 +90,7 @@ pub(crate) fn request_from_turn_start(
         applies_to_source: Some(provider.lifecycle_source().to_string()),
         agent_session_id: Some(session_id),
         title,
+        work_context: Some(work_context),
         display_agent: None,
         state_labels: std::collections::HashMap::new(),
         tokens: std::collections::HashMap::new(),
@@ -513,6 +520,41 @@ mod tests {
         assert_eq!(
             claude.title.as_deref(),
             Some("Review Auth Migration Safety")
+        );
+    }
+
+    #[test]
+    fn ac1_ac2_ac3_provider_fixtures_carry_prompt_derived_work_context() {
+        let codex = request_from_turn_start(
+            WorkTitleProvider::Codex,
+            Some("w1:p2"),
+            include_str!(
+                "../tests/fixtures/work-titles/codex-work-context-user-prompt-submit.json"
+            ),
+            44,
+        )
+        .unwrap();
+        let codex_context = codex.work_context.expect("derived Codex work context");
+        assert_eq!(codex_context.ticket_ids, vec!["MAT-7", "SCA-9"]);
+        assert_eq!(
+            codex_context.pr_urls,
+            vec!["https://github.com/scalable-so/herdr/pull/21"]
+        );
+
+        let claude = request_from_turn_start(
+            WorkTitleProvider::Claude,
+            Some("w1:p3"),
+            include_str!(
+                "../tests/fixtures/work-titles/claude-work-context-user-prompt-submit.json"
+            ),
+            45,
+        )
+        .unwrap();
+        let claude_context = claude.work_context.expect("derived Claude work context");
+        assert_eq!(claude_context.ticket_ids, vec!["SCA-42"]);
+        assert_eq!(
+            claude_context.pr_urls,
+            vec!["https://github.com/scalable-so/herdr/pull/17"]
         );
     }
 

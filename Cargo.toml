@@ -50,6 +50,7 @@ portable-pty = { path = "vendor/portable-pty" }
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
@@ -59,6 +60,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Pipes",
+    "Win32_Security",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_Ime",

@@ -254,8 +254,16 @@ impl App {
                     err = %err,
                     "failed to start shell for deferred agent resume"
                 );
-                if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-                    terminal.clear_agent_runtime_identity_after_respawn();
+                let hook_work_context_changed = self
+                    .state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .is_some_and(|terminal| terminal.clear_agent_runtime_identity_after_respawn());
+                if hook_work_context_changed {
+                    self.schedule_session_save();
+                    if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                        self.emit_pane_updated(ws_idx, pane_id);
+                    }
                 }
                 return false;
             }

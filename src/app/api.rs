@@ -70,9 +70,10 @@ impl App {
                 should_repaint && self.status_metrics_visible
             }
             AppEvent::GitStatusRefreshed {
+                generation,
                 results,
                 cache_updates,
-            } => self.handle_git_status_refreshed(results, cache_updates),
+            } => self.handle_git_status_refreshed(generation, results, cache_updates),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -82,18 +83,33 @@ impl App {
 
     fn handle_git_status_refreshed(
         &mut self,
+        generation: u64,
         results: Vec<crate::workspace::WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
     ) -> bool {
-        self.git_refresh_in_flight = false;
+        let Some(refresh) = self.git_refresh_in_flight else {
+            return false;
+        };
+        if generation != refresh.generation {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= refresh.deadline {
+            self.git_refresh_in_flight = None;
+            self.git_refresh_due_after_in_flight = false;
+            self.mark_git_status_refresh_due(now);
+            return false;
+        }
+
+        self.git_refresh_in_flight = None;
         for (key, entry) in cache_updates {
             self.git_status_cache.insert(key, entry);
         }
         if self.git_refresh_due_after_in_flight {
-            self.mark_git_status_refresh_due(Instant::now());
+            self.mark_git_status_refresh_due(now);
             self.git_refresh_due_after_in_flight = false;
         } else {
-            self.last_git_remote_status_refresh = Instant::now();
+            self.last_git_remote_status_refresh = now;
         }
         let projected_focus = self
             .state
@@ -148,11 +164,12 @@ impl App {
         }
 
         if let AppEvent::GitStatusRefreshed {
+            generation,
             results,
             cache_updates,
         } = ev
         {
-            self.handle_git_status_refreshed(results, cache_updates);
+            self.handle_git_status_refreshed(generation, results, cache_updates);
             return;
         }
 
@@ -211,6 +228,9 @@ impl App {
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
                 self.sync_full_lifecycle_authority_detection_pauses();
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                if update.hook_work_context_changed {
+                    self.schedule_session_save();
+                }
                 self.emit_pane_state_update(&update);
                 self.emit_terminal_or_system_agent_notifications(std::slice::from_ref(&update));
             }
@@ -298,6 +318,12 @@ impl App {
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        if pane_updates
+            .iter()
+            .any(|update| update.hook_work_context_changed)
+        {
+            self.schedule_session_save();
+        }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
         }
@@ -606,7 +632,7 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(update.ws_idx);
 
-        if update.agent_name_changed {
+        if update.agent_name_changed || update.hook_work_context_changed {
             self.emit_pane_updated(update.ws_idx, update.pane_id);
         }
 
@@ -817,19 +843,6 @@ impl App {
                 data: crate::api::schema::EventData::PaneUpdated { pane },
             });
         }
-    }
-
-    pub(crate) fn focused_pane_tab_label(&self, pane_id: &str) -> Option<String> {
-        let (ws_idx, pane_id) = self.parse_pane_id(pane_id)?;
-        let tab_idx = self
-            .state
-            .workspaces
-            .get(ws_idx)?
-            .find_tab_index_for_pane(pane_id)?;
-        if !self.state.is_active_pane(ws_idx, tab_idx, pane_id) {
-            return None;
-        }
-        self.state.workspaces.get(ws_idx)?.tab_display_name(tab_idx)
     }
 
     pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
@@ -1533,7 +1546,7 @@ mod tests {
         app.state.status_git_cwd = Some(old_cwd);
         app.state.status_git_branch = Some("stale-branch".into());
         app.state.status_focus_projection_initialized = true;
-        app.git_refresh_in_flight = true;
+        app.test_begin_git_refresh(1);
 
         app.handle_internal_event(AppEvent::TerminalCwdReported {
             pane_id,

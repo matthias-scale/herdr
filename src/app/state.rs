@@ -1647,6 +1647,8 @@ pub struct AppState {
     pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// Monotonic revision used to avoid clearing mutations made during a save.
+    pub(crate) session_dirty_revision: u64,
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
@@ -1792,6 +1794,7 @@ impl AppState {
 
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+        self.session_dirty_revision = self.session_dirty_revision.wrapping_add(1);
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -2158,6 +2161,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
         }
     }

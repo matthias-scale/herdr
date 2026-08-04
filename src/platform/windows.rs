@@ -1,12 +1,55 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
+    io,
     mem::{size_of, MaybeUninit},
-    path::PathBuf,
+    os::windows::ffi::OsStrExt,
+    path::{Path, PathBuf},
     ptr::{copy_nonoverlapping, null_mut},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+pub(crate) fn replace_file_durably(source: &Path, target: &Path) -> std::io::Result<()> {
+    move_file_write_through(source, target)
+}
+
+pub(crate) fn remove_file_durably(path: &Path, tombstone: &Path) -> std::io::Result<()> {
+    match move_file_write_through(path, tombstone) {
+        Ok(()) => match std::fs::remove_file(tombstone) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn move_file_write_through(source: &Path, target: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let flags = MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING;
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers that remain
+    // alive for the duration of this synchronous call.
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), flags) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 use windows_sys::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
@@ -25,7 +68,11 @@ use windows_sys::{
                     TH32CS_SNAPPROCESS,
                 },
             },
-            JobObjects::IsProcessInJob,
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+                JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
             Ole::CF_UNICODETEXT,
             Threading::{
@@ -301,6 +348,66 @@ pub(crate) fn configure_background_command_platform(command: &mut std::process::
     use std::os::windows::process::CommandExt;
 
     command.creation_flags(CREATE_NO_WINDOW);
+}
+
+pub(crate) struct ProcessJobObject {
+    handle: HANDLE,
+}
+
+impl ProcessJobObject {
+    pub(crate) fn for_child(child: &std::process::Child) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        // A private job keeps deadline cleanup scoped to this subprocess tree.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+        };
+        if !configured {
+            let error = io::Error::last_os_error();
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(error);
+        }
+
+        let assigned = unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) != 0 };
+        if !assigned {
+            let error = io::Error::last_os_error();
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(error);
+        }
+
+        Ok(Self { handle })
+    }
+
+    pub(crate) fn terminate(&self) -> io::Result<()> {
+        if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProcessJobObject {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
 }
 
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {

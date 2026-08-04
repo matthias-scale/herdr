@@ -443,9 +443,11 @@ fn mobile_tab_status(
     max_width: usize,
 ) -> String {
     let prefix = "tab ";
-    let suffix = (ws.tabs.len() > 1)
-        .then(|| format!(" · {}/{}", ws.active_tab + 1, ws.tabs.len()))
-        .unwrap_or_default();
+    let suffix = if ws.tabs.len() > 1 {
+        format!(" · {}/{}", ws.active_tab + 1, ws.tabs.len())
+    } else {
+        String::new()
+    };
     let label_width = max_width
         .saturating_sub(display_width(prefix))
         .saturating_sub(display_width(&suffix));
