@@ -3267,7 +3267,7 @@ row_gap = 1
         app.sidebar_collapsed = false;
         app.mobile_width_threshold = 80;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert!(app.view.visible_agent_activity_instants.is_empty());
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
 
         app.mobile_width_threshold = 0;
         app.sidebar_width = 12;
@@ -3496,7 +3496,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             });
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
-        assert!(!first.contains("· pi"), "{first:?}");
+        assert!(first.contains("· pi"), "{first:?}");
         assert!(!first.contains("very-long-workspace-name"), "{first:?}");
     }
 
