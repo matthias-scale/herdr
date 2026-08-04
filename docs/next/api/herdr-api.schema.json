@@ -867,6 +867,7 @@
               "$ref": "#/schemas/event/$defs/PaneWorkContext",
               "default": {
                 "pr_urls": [],
+                "preview_urls": [],
                 "ticket_ids": []
               }
             },
@@ -1038,6 +1039,13 @@
               ]
             },
             "pr_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "preview_urls": {
               "default": [],
               "items": {
                 "type": "string"
@@ -3216,6 +3224,13 @@
               ]
             },
             "pr_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "preview_urls": {
               "default": [],
               "items": {
                 "type": "string"
@@ -6324,6 +6339,7 @@
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
               "default": {
                 "pr_urls": [],
+                "preview_urls": [],
                 "ticket_ids": []
               }
             },
@@ -7605,6 +7621,7 @@
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
               "default": {
                 "pr_urls": [],
+                "preview_urls": [],
                 "ticket_ids": []
               }
             },
@@ -8106,6 +8123,13 @@
               ]
             },
             "pr_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "preview_urls": {
               "default": [],
               "items": {
                 "type": "string"

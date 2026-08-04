@@ -4,5 +4,5 @@
   "transcript_path": "/tmp/fixture-codex-context-session.jsonl",
   "cwd": "/tmp/fixture-workspace",
   "hook_event_name": "UserPromptSubmit",
-  "prompt": "Implement mat-7 and SCA-9 using (https://github.com/scalable-so/herdr/pull/21), not FORMAT-12 or http://github.com/evil/repo/pull/4"
+  "prompt": "Implement mat-7 and SCA-9 using (https://github.com/scalable-so/herdr/pull/21) with https://codex-preview.vercel.app, not FORMAT-12 or http://github.com/evil/repo/pull/4"
 }

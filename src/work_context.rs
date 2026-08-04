@@ -4,11 +4,15 @@ use std::sync::OnceLock;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
+pub const MAX_PREVIEW_URLS: usize = 8;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PaneWorkContext {
     pub ticket_ids: Vec<String>,
     pub pr_urls: Vec<String>,
+    #[serde(default)]
+    pub preview_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -20,6 +24,7 @@ impl PaneWorkContext {
         Ok(Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
+            preview_urls: normalize_preview_urls(self.preview_urls)?,
             branch: normalize_optional_text("branch", self.branch)?,
             work_title: normalize_optional_text("work title", self.work_title)?,
         })
@@ -152,11 +157,17 @@ impl PaneWorkContextState {
         let Some(tiers) = tiers else {
             return Self::from_restored(flat);
         };
+        let mut manual = tiers.manual.normalized()?;
+        manual.preview_urls.clear();
+        let hook_turn = tiers.hook_turn.normalized()?;
+        let mut git_observation = tiers.git_observation.normalized()?;
+        git_observation.preview_urls.clear();
+        let restored_fallback = tiers.restored_fallback.normalized()?;
         let mut state = Self {
-            manual: tiers.manual.normalized()?,
-            hook_turn: tiers.hook_turn.normalized()?,
-            git_observation: tiers.git_observation.normalized()?,
-            restored_fallback: tiers.restored_fallback.normalized()?,
+            manual,
+            hook_turn,
+            git_observation,
+            restored_fallback,
             effective: PaneWorkContext::default(),
         };
         state.recompute();
@@ -239,7 +250,10 @@ impl PaneWorkContextState {
 
     #[allow(dead_code)]
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
-        let context = context.normalized()?;
+        let mut context = context.normalized()?;
+        // Git observations do not carry preview deployments. Keep this
+        // boundary explicit even if a future caller reuses PaneWorkContext.
+        context.preview_urls.clear();
         // Any live observation supersedes the unknown-provenance legacy value.
         let fallback_changed = self.clear_restored_fallback();
         if context == self.git_observation && !fallback_changed {
@@ -272,6 +286,15 @@ impl PaneWorkContextState {
                 &self.git_observation.pr_urls,
                 &self.restored_fallback.pr_urls,
             ]),
+            preview_urls: stable_merge([
+                &self.manual.preview_urls,
+                &self.hook_turn.preview_urls,
+                &self.git_observation.preview_urls,
+                &self.restored_fallback.preview_urls,
+            ])
+            .into_iter()
+            .take(MAX_PREVIEW_URLS)
+            .collect(),
             branch: first_present([
                 self.manual.branch.as_ref(),
                 self.hook_turn.branch.as_ref(),
@@ -371,6 +394,40 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
     urls
 }
 
+pub fn extract_preview_urls(text: &str) -> Vec<String> {
+    const PREFIX: &str = "https://";
+    const MAX_CANDIDATE_BYTES: usize = 128;
+
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    for (start, _) in text.match_indices(PREFIX) {
+        if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
+            continue;
+        }
+        let remaining = &text[start..];
+        let candidate = match remaining
+            .as_bytes()
+            .iter()
+            .take(MAX_CANDIDATE_BYTES + 1)
+            .position(|byte| byte.is_ascii_whitespace())
+        {
+            Some(end) => &remaining[..end],
+            None if remaining.len() <= MAX_CANDIDATE_BYTES => remaining,
+            None => continue,
+        };
+        let Ok(url) = normalize_preview_url(candidate) else {
+            continue;
+        };
+        if seen.insert(url.clone()) {
+            urls.push(url);
+            if urls.len() == MAX_PREVIEW_URLS {
+                break;
+            }
+        }
+    }
+    urls
+}
+
 pub(crate) fn hook_turn_context(
     work_title: Option<String>,
     branch: Option<&str>,
@@ -389,6 +446,7 @@ pub(crate) fn hook_turn_context(
     Ok(PaneWorkContext {
         ticket_ids: normalize_ticket_ids(ticket_ids)?,
         pr_urls: prompt_context.pr_urls,
+        preview_urls: prompt_context.preview_urls,
         branch: None,
         work_title,
     })
@@ -431,6 +489,25 @@ where
         let url = normalize_pr_url(url.as_ref())?;
         if seen.insert(url.clone()) {
             normalized.push(url);
+        }
+    }
+    Ok(normalized)
+}
+
+pub fn normalize_preview_urls<I, S>(urls: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for url in urls {
+        let url = normalize_preview_url(url.as_ref())?;
+        if seen.insert(url.clone()) {
+            normalized.push(url);
+            if normalized.len() == MAX_PREVIEW_URLS {
+                break;
+            }
         }
     }
     Ok(normalized)
@@ -482,6 +559,56 @@ fn normalize_pr_url(raw: &str) -> Result<String, String> {
         "https://github.com/{}/{}/pull/{number}",
         parts[0], parts[1]
     ))
+}
+
+fn normalize_preview_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | ','
+                | ';'
+                | ':'
+                | '!'
+                | '.'
+                | '\''
+                | '"'
+        )
+    });
+    let Some(authority) = trimmed.strip_prefix("https://") else {
+        return Err(format!("invalid Vercel preview URL: {raw}"));
+    };
+    if authority.is_empty()
+        || authority.bytes().any(|byte| byte.is_ascii_whitespace())
+        || authority.contains(['/', '?', '#', '@', ':'])
+    {
+        return Err(format!("invalid Vercel preview URL: {raw}"));
+    }
+
+    let authority = authority.to_ascii_lowercase();
+    let Some(subdomain) = authority.strip_suffix(".vercel.app") else {
+        return Err(format!("invalid Vercel preview URL: {raw}"));
+    };
+    if !valid_vercel_subdomain(subdomain) {
+        return Err(format!("invalid Vercel preview URL: {raw}"));
+    }
+    Ok(format!("https://{subdomain}.vercel.app"))
+}
+
+fn valid_vercel_subdomain(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn valid_github_owner(value: &str) -> bool {
@@ -544,6 +671,80 @@ mod tests {
     }
 
     #[test]
+    fn ac25_preview_url_normalization_accepts_only_canonical_vercel_roots() {
+        assert_eq!(
+            normalize_preview_urls([
+                "(https://Preview-123.Vercel.App).",
+                "https://preview-123.vercel.app",
+                "https://second-preview.vercel.app",
+            ])
+            .expect("valid preview URLs"),
+            vec![
+                "https://preview-123.vercel.app",
+                "https://second-preview.vercel.app"
+            ]
+        );
+
+        for invalid in [
+            "http://preview.vercel.app",
+            "https://vercel.app",
+            "https://preview.other.test",
+            "https://preview.team.vercel.app",
+            "https://-preview.vercel.app",
+            "https://preview-.vercel.app",
+            "https://preview_vercel.vercel.app",
+            "https://preview.vercel.app/path",
+            "https://preview.vercel.app:443",
+            "https://user:password@preview.vercel.app",
+            "https://preview.vercel.app?token=secret",
+            "https://preview.vercel.app#fragment",
+            &format!("https://{}.vercel.app", "p".repeat(64)),
+        ] {
+            assert!(
+                normalize_preview_urls([invalid]).is_err(),
+                "accepted unsafe preview URL {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn ac25_preview_url_extraction_filters_untrusted_text_and_caps_stable_order() {
+        let text = "https://first.vercel.app https://user@bad.vercel.app https://second.vercel.app https://first.vercel.app https://third.vercel.app";
+        assert_eq!(
+            extract_preview_urls(text),
+            vec![
+                "https://first.vercel.app",
+                "https://second.vercel.app",
+                "https://third.vercel.app"
+            ]
+        );
+
+        let many = (0..MAX_PREVIEW_URLS + 2)
+            .map(|index| format!("https://preview-{index}.vercel.app"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(extract_preview_urls(&many).len(), MAX_PREVIEW_URLS);
+        assert_eq!(
+            normalize_preview_urls(
+                (0..MAX_PREVIEW_URLS + 2)
+                    .map(|index| { format!("https://preview-{index}.vercel.app") })
+            )
+            .unwrap()
+            .len(),
+            MAX_PREVIEW_URLS
+        );
+    }
+
+    #[test]
+    fn ac25_preview_url_extraction_rejects_large_whitespace_free_input_quickly() {
+        let text = "https://".repeat(1_000_000 / "https://".len());
+        let started = std::time::Instant::now();
+
+        assert!(extract_preview_urls(&text).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
     fn ac2_linear_url_canonicalizes_supported_ticket_ids() {
         assert_eq!(
             linear_ticket_url("mat-123").as_deref(),
@@ -565,6 +766,7 @@ mod tests {
         state
             .replace_hook_turn(PaneWorkContext {
                 ticket_ids: vec!["sca-1".into(), "SCA-3".into()],
+                preview_urls: vec!["https://first.vercel.app".into()],
                 work_title: Some("Hook title".into()),
                 ..PaneWorkContext::default()
             })
@@ -583,6 +785,10 @@ mod tests {
         );
         assert_eq!(state.effective().branch.as_deref(), Some("feat/work"));
         assert_eq!(
+            state.effective().preview_urls,
+            vec!["https://first.vercel.app"]
+        );
+        assert_eq!(
             state.effective().work_title.as_deref(),
             Some("Manual title")
         );
@@ -590,6 +796,7 @@ mod tests {
         state
             .replace_hook_turn(PaneWorkContext {
                 ticket_ids: vec!["MAT-9".into()],
+                preview_urls: vec!["https://second.vercel.app".into()],
                 ..PaneWorkContext::default()
             })
             .unwrap();
@@ -597,6 +804,29 @@ mod tests {
             state.effective().ticket_ids,
             vec!["MAT-2", "SCA-1", "MAT-9", "SCA-3"]
         );
+        assert_eq!(
+            state.effective().preview_urls,
+            vec!["https://second.vercel.app"]
+        );
+    }
+
+    #[test]
+    fn ac25_manual_and_git_tiers_do_not_produce_preview_urls() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                preview_urls: vec!["https://git.vercel.app".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert!(state.effective().preview_urls.is_empty());
     }
 
     #[test]
@@ -607,6 +837,7 @@ mod tests {
                 manual: PaneWorkContext {
                     ticket_ids: vec!["MAT-1".into()],
                     pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                    preview_urls: Vec::new(),
                     branch: Some("main".into()),
                     work_title: Some("Initial".into()),
                 },
@@ -691,12 +922,56 @@ mod tests {
     }
 
     #[test]
+    fn ac25_restored_preview_sources_are_bounded_to_hook_and_fallback() {
+        let preview_urls = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|index| format!("https://{prefix}-{index}.vercel.app"))
+                .collect::<Vec<_>>()
+        };
+        let state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    preview_urls: preview_urls("manual", MAX_PREVIEW_URLS),
+                    ..PaneWorkContext::default()
+                },
+                hook_turn: PaneWorkContext {
+                    preview_urls: preview_urls("hook", 2),
+                    ..PaneWorkContext::default()
+                },
+                git_observation: PaneWorkContext {
+                    preview_urls: preview_urls("git", MAX_PREVIEW_URLS),
+                    ..PaneWorkContext::default()
+                },
+                restored_fallback: PaneWorkContext {
+                    preview_urls: preview_urls("fallback", MAX_PREVIEW_URLS),
+                    ..PaneWorkContext::default()
+                },
+            }),
+        )
+        .unwrap();
+
+        let tiers = state.snapshot_tiers();
+        assert!(tiers.manual.preview_urls.is_empty());
+        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            state.effective().preview_urls,
+            preview_urls("hook", 2)
+                .into_iter()
+                .chain(preview_urls("fallback", MAX_PREVIEW_URLS - 2))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(state.effective().preview_urls.len(), MAX_PREVIEW_URLS);
+    }
+
+    #[test]
     fn ac1_legacy_flat_restore_is_fallback_not_manual_pin() {
         // A legacy flat snapshot has unknown provenance: it must load intact
         // but be superseded by later live hook/git observations.
         let mut restored = PaneWorkContextState::from_restored(PaneWorkContext {
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+            preview_urls: Vec::new(),
             branch: Some("old-branch".into()),
             work_title: Some("Old title".into()),
         })
@@ -787,6 +1062,7 @@ mod tests {
                 },
                 restored_fallback: PaneWorkContext {
                     pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                    preview_urls: vec!["https://fallback.vercel.app".into()],
                     ..PaneWorkContext::default()
                 },
             }),
@@ -803,6 +1079,10 @@ mod tests {
         assert_eq!(
             state.effective().pr_urls,
             vec!["https://github.com/o/r/pull/2"]
+        );
+        assert_eq!(
+            state.effective().preview_urls,
+            vec!["https://fallback.vercel.app"]
         );
         assert!(!state.clear_hook_turn());
     }

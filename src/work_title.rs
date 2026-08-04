@@ -79,6 +79,7 @@ pub(crate) fn request_from_turn_start(
     let work_context = crate::work_context::PaneWorkContext {
         ticket_ids: crate::work_context::extract_ticket_ids(prompt),
         pr_urls: crate::work_context::extract_pr_urls(prompt),
+        preview_urls: crate::work_context::extract_preview_urls(prompt),
         branch: None,
         work_title: title.clone(),
     };
@@ -540,6 +541,10 @@ mod tests {
             codex_context.pr_urls,
             vec!["https://github.com/scalable-so/herdr/pull/21"]
         );
+        assert_eq!(
+            codex_context.preview_urls,
+            vec!["https://codex-preview.vercel.app"]
+        );
 
         let claude = request_from_turn_start(
             WorkTitleProvider::Claude,
@@ -555,6 +560,30 @@ mod tests {
         assert_eq!(
             claude_context.pr_urls,
             vec!["https://github.com/scalable-so/herdr/pull/17"]
+        );
+        assert_eq!(
+            claude_context.preview_urls,
+            vec!["https://claude-preview.vercel.app"]
+        );
+    }
+
+    #[test]
+    fn ac25_turn_hook_extracts_only_valid_preview_urls() {
+        let request = request_from_turn_start(
+            WorkTitleProvider::Codex,
+            Some("w1:p1"),
+            r#"{
+                "hook_event_name":"UserPromptSubmit",
+                "session_id":"session-preview",
+                "prompt":"Ship https://Demo-Preview.Vercel.App and https://evil.example.test, then https://second.vercel.app?token=secret"
+            }"#,
+            46,
+        )
+        .expect("guarded turn hook should produce metadata");
+
+        assert_eq!(
+            request.work_context.expect("work context").preview_urls,
+            vec!["https://demo-preview.vercel.app"]
         );
     }
 

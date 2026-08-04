@@ -1325,6 +1325,7 @@ mod tests {
                             work_context: crate::work_context::PaneWorkContext {
                                 ticket_ids: vec!["MAT-12".into()],
                                 pr_urls: vec!["https://github.com/o/r/pull/3".into()],
+                                preview_urls: Vec::new(),
                                 branch: Some("feat/context".into()),
                                 work_title: Some("Restore context".into()),
                             },
@@ -1384,6 +1385,7 @@ mod tests {
             &crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-12".into()],
                 pr_urls: vec!["https://github.com/o/r/pull/3".into()],
+                preview_urls: Vec::new(),
                 branch: Some("feat/context".into()),
                 work_title: Some("Restore context".into()),
             }

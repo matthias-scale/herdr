@@ -695,12 +695,91 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                preview_urls: vec!["https://persisted.vercel.app".into()],
+                ..Default::default()
+            })
+            .unwrap();
 
         let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
         let restored = parse_snapshot(&json).unwrap();
         let context = &restored.workspaces[0].tabs[0].panes[&root.raw()].work_context;
         assert_eq!(context.ticket_ids, vec!["MAT-5"]);
+        assert_eq!(context.preview_urls, vec!["https://persisted.vercel.app"]);
         assert_eq!(context.work_title.as_deref(), Some("Persist context"));
+    }
+
+    #[test]
+    fn ac25_v4_snapshot_restore_discards_forbidden_preview_tiers() {
+        let state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let mut snapshot = capture_from_state(&state);
+        let pane = snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&root.raw())
+            .expect("captured root pane");
+        let preview_urls = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|index| format!("https://{prefix}-{index}.vercel.app"))
+                .collect::<Vec<_>>()
+        };
+        pane.work_context = crate::work_context::PaneWorkContext::default();
+        pane.work_context_tiers = Some(crate::work_context::PaneWorkContextTiers {
+            manual: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("manual", crate::work_context::MAX_PREVIEW_URLS),
+                ..Default::default()
+            },
+            hook_turn: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("hook", 2),
+                ..Default::default()
+            },
+            git_observation: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("git", crate::work_context::MAX_PREVIEW_URLS),
+                ..Default::default()
+            },
+            restored_fallback: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("fallback", crate::work_context::MAX_PREVIEW_URLS),
+                ..Default::default()
+            },
+        });
+
+        let parsed = parse_snapshot(&serde_json::to_string(&snapshot).unwrap())
+            .expect("v4 snapshot should parse");
+        assert_eq!(parsed.version, SNAPSHOT_VERSION);
+        let saved = &parsed.workspaces[0].tabs[0].panes[&root.raw()];
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+
+        let tiers = restored.work_context.snapshot_tiers();
+        assert!(tiers.manual.preview_urls.is_empty());
+        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            restored.effective_work_context().preview_urls,
+            preview_urls("hook", 2)
+                .into_iter()
+                .chain(preview_urls(
+                    "fallback",
+                    crate::work_context::MAX_PREVIEW_URLS - 2,
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            restored.effective_work_context().preview_urls.len(),
+            crate::work_context::MAX_PREVIEW_URLS
+        );
     }
 
     #[test]
@@ -717,6 +796,7 @@ mod tests {
             .work_context
             .replace_hook_turn(crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-1".into()],
+                preview_urls: vec!["https://old-preview.vercel.app".into()],
                 work_title: Some("Old hook title".into()),
                 ..Default::default()
             })
@@ -742,6 +822,10 @@ mod tests {
         );
         assert_eq!(tiers.hook_turn.ticket_ids, vec!["MAT-1".to_string()]);
         assert_eq!(
+            tiers.hook_turn.preview_urls,
+            vec!["https://old-preview.vercel.app"]
+        );
+        assert_eq!(
             tiers.hook_turn.work_title.as_deref(),
             Some("Old hook title")
         );
@@ -763,6 +847,10 @@ mod tests {
             .unwrap();
         assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-1"]);
         assert_eq!(
+            restored.effective_work_context().preview_urls,
+            vec!["https://old-preview.vercel.app"]
+        );
+        assert_eq!(
             restored.effective_work_context().branch.as_deref(),
             Some("old-branch")
         );
@@ -771,6 +859,7 @@ mod tests {
             .work_context
             .replace_hook_turn(crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-2".into()],
+                preview_urls: vec!["https://new-preview.vercel.app".into()],
                 work_title: Some("New hook title".into()),
                 ..Default::default()
             })
@@ -783,6 +872,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-2"]);
+        assert_eq!(
+            restored.effective_work_context().preview_urls,
+            vec!["https://new-preview.vercel.app"]
+        );
         assert_eq!(
             restored.effective_work_context().work_title.as_deref(),
             Some("New hook title")
@@ -919,6 +1012,7 @@ mod tests {
             .unwrap();
         assert!(restored.effective_work_context().ticket_ids.is_empty());
         assert!(restored.effective_work_context().pr_urls.is_empty());
+        assert!(restored.effective_work_context().preview_urls.is_empty());
         assert!(restored.effective_work_context().work_title.is_none());
         restored
             .work_context
