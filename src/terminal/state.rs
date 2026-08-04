@@ -354,6 +354,19 @@ impl TerminalState {
         Ok(())
     }
 
+    pub(crate) fn restore_work_context_with_tiers(
+        &mut self,
+        flat: crate::work_context::PaneWorkContext,
+        tiers: Option<crate::work_context::PaneWorkContextTiers>,
+    ) -> Result<(), String> {
+        let Some(tiers) = tiers else {
+            return self.restore_work_context(flat);
+        };
+        self.work_context =
+            crate::work_context::PaneWorkContextState::from_restored_with_tiers(flat, Some(tiers))?;
+        Ok(())
+    }
+
     pub(crate) fn set_background_job_count(&mut self, count: Option<u16>) -> bool {
         if self.background_job_count == count {
             return false;

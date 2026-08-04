@@ -494,6 +494,7 @@ fn restore_tab(
         let saved_work_context = saved_pane
             .map(|pane| pane.work_context.clone())
             .unwrap_or_default();
+        let saved_work_context_tiers = saved_pane.and_then(|pane| pane.work_context_tiers.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_managed_agent = saved_pane
             .and_then(|pane| pane.managed_agent_kind.as_deref())
@@ -544,7 +545,10 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
-            if let Err(error) = terminal.restore_work_context(saved_work_context.clone()) {
+            if let Err(error) = terminal.restore_work_context_with_tiers(
+                saved_work_context.clone(),
+                saved_work_context_tiers.clone(),
+            ) {
                 warn!(pane_id = id.raw(), %error, "ignoring invalid saved pane work context");
             }
             if let Some(label) = saved_label {
@@ -636,7 +640,10 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
-                if let Err(error) = terminal.restore_work_context(saved_work_context.clone()) {
+                if let Err(error) = terminal.restore_work_context_with_tiers(
+                    saved_work_context.clone(),
+                    saved_work_context_tiers.clone(),
+                ) {
                     warn!(pane_id = id.raw(), %error, "ignoring invalid saved pane work context");
                 }
                 if was_imported {
@@ -1222,6 +1229,7 @@ mod tests {
                                 branch: Some("feat/context".into()),
                                 work_title: Some("Restore context".into()),
                             },
+                            work_context_tiers: None,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
                             managed_agent_kind: Some("opencode".into()),
@@ -1319,6 +1327,7 @@ mod tests {
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
                                 work_context: Default::default(),
+                                work_context_tiers: None,
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
@@ -1331,6 +1340,7 @@ mod tests {
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
                                 work_context: Default::default(),
+                                work_context_tiers: None,
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
@@ -1385,6 +1395,7 @@ mod tests {
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
                     work_context: Default::default(),
+                    work_context_tiers: None,
                     label: None,
                     agent_name: None,
                     managed_agent_kind: None,
@@ -1396,6 +1407,7 @@ mod tests {
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
             work_context: Default::default(),
+            work_context_tiers: None,
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
             managed_agent_kind: None,
@@ -1551,6 +1563,7 @@ mod tests {
                         super::super::snapshot::PaneSnapshot {
                             cwd,
                             work_context: Default::default(),
+                            work_context_tiers: None,
                             label: None,
                             agent_name: None,
                             managed_agent_kind: None,
@@ -1718,6 +1731,7 @@ mod tests {
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
                 work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,

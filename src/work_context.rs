@@ -44,6 +44,20 @@ impl PaneWorkContext {
     }
 }
 
+/// Persisted per-tier work context, preserving source provenance across restarts.
+///
+/// `restored_fallback` carries values whose source tier is unknown (legacy flat
+/// snapshots); live hook/git observations supersede it while `manual` stays
+/// authoritative.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PaneWorkContextTiers {
+    pub manual: PaneWorkContext,
+    pub hook_turn: PaneWorkContext,
+    pub git_observation: PaneWorkContext,
+    pub restored_fallback: PaneWorkContext,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneWorkContextField {
@@ -111,18 +125,51 @@ pub struct PaneWorkContextState {
     manual: PaneWorkContext,
     hook_turn: PaneWorkContext,
     git_observation: PaneWorkContext,
+    /// Legacy restored values with unknown source provenance. Below every live
+    /// tier in precedence; superseded by later hook/git observations.
+    restored_fallback: PaneWorkContext,
     effective: PaneWorkContext,
 }
 
 impl PaneWorkContextState {
+    /// Restore persisted context. When per-tier provenance was persisted it is
+    /// reinstalled tier-by-tier; otherwise the legacy flat value becomes a
+    /// restored fallback that later live observations supersede — it is never
+    /// promoted to a manual pin.
     pub fn from_restored(context: PaneWorkContext) -> Result<Self, String> {
-        let manual = context.normalized()?;
-        let effective = manual.clone();
-        Ok(Self {
-            manual,
-            effective,
+        let mut state = Self {
+            restored_fallback: context.normalized()?,
             ..Self::default()
-        })
+        };
+        state.recompute();
+        Ok(state)
+    }
+
+    pub fn from_restored_with_tiers(
+        flat: PaneWorkContext,
+        tiers: Option<PaneWorkContextTiers>,
+    ) -> Result<Self, String> {
+        let Some(tiers) = tiers else {
+            return Self::from_restored(flat);
+        };
+        let mut state = Self {
+            manual: tiers.manual.normalized()?,
+            hook_turn: tiers.hook_turn.normalized()?,
+            git_observation: tiers.git_observation.normalized()?,
+            restored_fallback: tiers.restored_fallback.normalized()?,
+            effective: PaneWorkContext::default(),
+        };
+        state.recompute();
+        Ok(state)
+    }
+
+    pub fn snapshot_tiers(&self) -> PaneWorkContextTiers {
+        PaneWorkContextTiers {
+            manual: self.manual.clone(),
+            hook_turn: self.hook_turn.clone(),
+            git_observation: self.git_observation.clone(),
+            restored_fallback: self.restored_fallback.clone(),
+        }
     }
 
     pub fn effective(&self) -> &PaneWorkContext {
@@ -169,7 +216,9 @@ impl PaneWorkContextState {
     #[allow(dead_code)]
     pub fn replace_hook_turn(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
-        if context == self.hook_turn {
+        // Any live observation supersedes the unknown-provenance legacy value.
+        let fallback_changed = self.clear_restored_fallback();
+        if context == self.hook_turn && !fallback_changed {
             return Ok(false);
         }
         self.hook_turn = context;
@@ -180,12 +229,22 @@ impl PaneWorkContextState {
     #[allow(dead_code)]
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
         let context = context.normalized()?;
-        if context == self.git_observation {
+        // Any live observation supersedes the unknown-provenance legacy value.
+        let fallback_changed = self.clear_restored_fallback();
+        if context == self.git_observation && !fallback_changed {
             return Ok(false);
         }
         self.git_observation = context;
         self.recompute();
         Ok(true)
+    }
+
+    fn clear_restored_fallback(&mut self) -> bool {
+        if self.restored_fallback == PaneWorkContext::default() {
+            return false;
+        }
+        self.restored_fallback = PaneWorkContext::default();
+        true
     }
 
     fn recompute(&mut self) {
@@ -194,21 +253,25 @@ impl PaneWorkContextState {
                 &self.manual.ticket_ids,
                 &self.hook_turn.ticket_ids,
                 &self.git_observation.ticket_ids,
+                &self.restored_fallback.ticket_ids,
             ]),
             pr_urls: stable_merge([
                 &self.manual.pr_urls,
                 &self.hook_turn.pr_urls,
                 &self.git_observation.pr_urls,
+                &self.restored_fallback.pr_urls,
             ]),
             branch: first_present([
                 self.manual.branch.as_ref(),
                 self.hook_turn.branch.as_ref(),
                 self.git_observation.branch.as_ref(),
+                self.restored_fallback.branch.as_ref(),
             ]),
             work_title: first_present([
                 self.manual.work_title.as_ref(),
                 self.hook_turn.work_title.as_ref(),
                 self.git_observation.work_title.as_ref(),
+                self.restored_fallback.work_title.as_ref(),
             ]),
         };
     }
@@ -481,12 +544,18 @@ mod tests {
 
     #[test]
     fn ac1_patch_is_atomic_and_omitted_fields_are_untouched() {
-        let mut state = PaneWorkContextState::from_restored(PaneWorkContext {
-            ticket_ids: vec!["MAT-1".into()],
-            pr_urls: vec!["https://github.com/o/r/pull/2".into()],
-            branch: Some("main".into()),
-            work_title: Some("Initial".into()),
-        })
+        let mut state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    ticket_ids: vec!["MAT-1".into()],
+                    pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                    branch: Some("main".into()),
+                    work_title: Some("Initial".into()),
+                },
+                ..PaneWorkContextTiers::default()
+            }),
+        )
         .unwrap();
         let before = state.clone();
         let error = state
@@ -511,6 +580,134 @@ mod tests {
             vec!["https://github.com/o/r/pull/2"]
         );
         assert_eq!(state.effective().branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn ac1_restored_tiers_keep_hook_and_git_provenance_replaceable() {
+        // Seed hook-only state, persist tiers, restore, then a NEW hook turn
+        // must fully replace the restored hook value.
+        let mut live = PaneWorkContextState::default();
+        live.replace_hook_turn(PaneWorkContext {
+            ticket_ids: vec!["MAT-1".into()],
+            work_title: Some("Old hook title".into()),
+            ..PaneWorkContext::default()
+        })
+        .unwrap();
+        let mut restored = PaneWorkContextState::from_restored_with_tiers(
+            live.effective().clone(),
+            Some(live.snapshot_tiers()),
+        )
+        .unwrap();
+        assert_eq!(restored.effective(), live.effective());
+        restored
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["MAT-2".into()],
+                work_title: Some("New hook title".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        assert_eq!(restored.effective().ticket_ids, vec!["MAT-2"]);
+        assert_eq!(
+            restored.effective().work_title.as_deref(),
+            Some("New hook title")
+        );
+
+        // Same for a git-only branch observation.
+        let mut live = PaneWorkContextState::default();
+        live.replace_git_observation(PaneWorkContext {
+            branch: Some("old-branch".into()),
+            ..PaneWorkContext::default()
+        })
+        .unwrap();
+        let mut restored = PaneWorkContextState::from_restored_with_tiers(
+            live.effective().clone(),
+            Some(live.snapshot_tiers()),
+        )
+        .unwrap();
+        restored
+            .replace_git_observation(PaneWorkContext {
+                branch: Some("new-branch".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
+    }
+
+    #[test]
+    fn ac1_legacy_flat_restore_is_fallback_not_manual_pin() {
+        // A legacy flat snapshot has unknown provenance: it must load intact
+        // but be superseded by later live hook/git observations.
+        let mut restored = PaneWorkContextState::from_restored(PaneWorkContext {
+            ticket_ids: vec!["MAT-1".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+            branch: Some("old-branch".into()),
+            work_title: Some("Old title".into()),
+        })
+        .unwrap();
+        assert_eq!(restored.effective().ticket_ids, vec!["MAT-1"]);
+        assert_eq!(restored.effective().branch.as_deref(), Some("old-branch"));
+
+        restored
+            .replace_git_observation(PaneWorkContext {
+                branch: Some("new-branch".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
+        assert!(restored.effective().ticket_ids.is_empty());
+        assert!(restored.effective().pr_urls.is_empty());
+        assert!(restored.effective().work_title.is_none());
+
+        restored
+            .replace_hook_turn(PaneWorkContext {
+                ticket_ids: vec!["SCA-9".into()],
+                work_title: Some("New title".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        assert_eq!(restored.effective().ticket_ids, vec!["SCA-9"]);
+        assert!(restored.effective().pr_urls.is_empty());
+        assert_eq!(
+            restored.effective().work_title.as_deref(),
+            Some("New title")
+        );
+        assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
+    }
+
+    #[test]
+    fn ac1_restored_manual_tier_still_wins_over_later_observations() {
+        let mut live = PaneWorkContextState::default();
+        live.apply_manual_patch(PaneWorkContextPatch {
+            branch: Some("pinned-branch".into()),
+            work_title: Some("Pinned title".into()),
+            ..PaneWorkContextPatch::default()
+        })
+        .unwrap();
+        let mut restored = PaneWorkContextState::from_restored_with_tiers(
+            live.effective().clone(),
+            Some(live.snapshot_tiers()),
+        )
+        .unwrap();
+        restored
+            .replace_hook_turn(PaneWorkContext {
+                work_title: Some("Hook title".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        restored
+            .replace_git_observation(PaneWorkContext {
+                branch: Some("git-branch".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        assert_eq!(
+            restored.effective().work_title.as_deref(),
+            Some("Pinned title")
+        );
+        assert_eq!(
+            restored.effective().branch.as_deref(),
+            Some("pinned-branch")
+        );
     }
 
     #[test]

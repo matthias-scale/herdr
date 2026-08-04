@@ -97,8 +97,13 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    /// Flat effective projection, kept for readers of older formats.
     #[serde(default)]
     pub work_context: crate::work_context::PaneWorkContext,
+    /// Per-tier provenance (manual/hook/git/restored). When absent (legacy
+    /// snapshots), the flat `work_context` restores as a replaceable fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_context_tiers: Option<crate::work_context::PaneWorkContextTiers>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +350,7 @@ fn capture_tab(
         let work_context = terminal
             .map(|terminal| terminal.effective_work_context().clone())
             .unwrap_or_default();
+        let work_context_tiers = terminal.map(|terminal| terminal.work_context.snapshot_tiers());
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -371,6 +377,7 @@ fn capture_tab(
             PaneSnapshot {
                 cwd,
                 work_context,
+                work_context_tiers,
                 label,
                 agent_name,
                 managed_agent_kind,
@@ -673,6 +680,242 @@ mod tests {
     }
 
     #[test]
+    fn ac3_restored_hook_and_git_values_are_replaced_by_new_observations() {
+        // Seed hook-only and git-only tiers, capture, serialize, parse, restore
+        // into a fresh terminal, then apply NEW observations: they must win.
+        let mut state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-1".into()],
+                work_title: Some("Old hook title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        terminal
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("old-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+        let saved = &parsed.workspaces[0].tabs[0].panes[&root.raw()];
+        let tiers = saved
+            .work_context_tiers
+            .as_ref()
+            .expect("current snapshots preserve source tiers");
+        assert_eq!(
+            tiers.manual,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(tiers.hook_turn.ticket_ids, vec!["MAT-1".to_string()]);
+        assert_eq!(
+            tiers.hook_turn.work_title.as_deref(),
+            Some("Old hook title")
+        );
+        assert_eq!(tiers.git_observation.branch.as_deref(), Some("old-branch"));
+        assert_eq!(
+            tiers.restored_fallback,
+            crate::work_context::PaneWorkContext::default()
+        );
+
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+        assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-1"]);
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("old-branch")
+        );
+
+        restored
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-2".into()],
+                work_title: Some("New hook title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        restored
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("new-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-2"]);
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("New hook title")
+        );
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("new-branch")
+        );
+    }
+
+    #[test]
+    fn ac3_restored_manual_values_survive_and_win_over_new_observations() {
+        let mut state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                branch: Some("pinned-branch".into()),
+                work_title: Some("Pinned title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+        let saved = &parsed.workspaces[0].tabs[0].panes[&root.raw()];
+        let tiers = saved
+            .work_context_tiers
+            .as_ref()
+            .expect("current snapshots preserve source tiers");
+        assert_eq!(tiers.manual.branch.as_deref(), Some("pinned-branch"));
+        assert_eq!(tiers.manual.work_title.as_deref(), Some("Pinned title"));
+        assert_eq!(
+            tiers.hook_turn,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(
+            tiers.git_observation,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(
+            tiers.restored_fallback,
+            crate::work_context::PaneWorkContext::default()
+        );
+
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+        restored
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                work_title: Some("Hook title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        restored
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("git-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("Pinned title")
+        );
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("pinned-branch")
+        );
+    }
+
+    #[test]
+    fn ac3_legacy_flat_work_context_restores_as_replaceable_fallback() {
+        // A pre-tier snapshot carries only the flat field; it must load intact
+        // and never behave like a manual pin after restore.
+        let raw = r#"{
+            "version": 3,
+            "workspaces": [{
+                "id": "workspace",
+                "identity_cwd": "/tmp",
+                "tabs": [{
+                    "layout": {"Pane": 0},
+                    "panes": {"0": {
+                        "cwd": "/tmp",
+                        "work_context": {
+                            "ticket_ids": ["MAT-1"],
+                            "branch": "old-branch",
+                            "work_title": "Old title"
+                        }
+                    }},
+                    "zoomed": false
+                }]
+            }],
+            "selected": 0
+        }"#;
+        let parsed = parse_snapshot(raw).expect("legacy flat snapshot should load");
+        let saved = &parsed.workspaces[0].tabs[0].panes[&0];
+        assert!(saved.work_context_tiers.is_none());
+
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("old-branch")
+        );
+
+        restored
+            .work_context
+            .replace_git_observation(crate::work_context::PaneWorkContext {
+                branch: Some("new-branch".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(restored.effective_work_context().ticket_ids.is_empty());
+        assert!(restored.effective_work_context().pr_urls.is_empty());
+        assert!(restored.effective_work_context().work_title.is_none());
+        restored
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-9".into()],
+                work_title: Some("New title".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            restored.effective_work_context().branch.as_deref(),
+            Some("new-branch")
+        );
+        assert_eq!(restored.effective_work_context().ticket_ids, vec!["SCA-9"]);
+        assert_eq!(
+            restored.effective_work_context().work_title.as_deref(),
+            Some("New title")
+        );
+    }
+
+    #[test]
     fn round_trip_layout_snapshot() {
         let layout = LayoutSnapshot::Split {
             direction: DirectionSnapshot::Horizontal,
@@ -704,6 +947,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -716,6 +960,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 work_context: Default::default(),
+                work_context_tiers: None,
                 label: Some("website".into()),
                 agent_name: None,
                 managed_agent_kind: None,
@@ -1266,6 +1511,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -1280,6 +1526,7 @@ mod tests {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 work_context: Default::default(),
+                work_context_tiers: None,
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
