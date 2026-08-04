@@ -5062,7 +5062,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_injected_save_failure_keeps_dirty_and_preserves_retry_through_sync() {
+    fn ac1_applied_save_failure_keeps_dirty_and_preserves_retry_through_sync() {
         let mut app = test_app();
         app.no_session = false;
         app.state.session_dirty = true;
@@ -5081,28 +5081,54 @@ mod tests {
     }
 
     #[test]
-    fn ac1_finished_failed_writer_is_reaped_without_another_mutation() {
+    fn ac1_4_real_persist_failure_is_reaped_and_schedules_bounded_retry() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("failed-background-session-save");
+        std::fs::write(&config_home, b"not a directory").unwrap();
+        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let original_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
         let mut app = test_app();
         app.no_session = false;
-        app.state.session_dirty = true;
-        app.state.session_dirty_revision = 3;
-        app.session_save_thread = Some(std::thread::spawn(|| session::SessionSaveResult {
-            revision: 3,
-            result: Err(std::io::Error::other("worker failure")),
-        }));
-        while !app
+        app.state.workspaces = vec![Workspace::test_new("failed-autosave")];
+        app.state.ensure_test_terminals();
+        app.state.mark_session_dirty();
+        let save_started = Instant::now();
+
+        app.start_background_session_save();
+        let writer_spawned = app.session_save_thread.is_some();
+        while app
             .session_save_thread
             .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
+            .is_some_and(|thread| !thread.is_finished())
         {
             std::thread::yield_now();
         }
-
         app.sync_session_save_schedule();
+        let reaped_at = Instant::now();
+        let retry_deadline = app.session_save_retry_deadline;
 
+        match original_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match original_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        std::fs::remove_file(config_home).unwrap();
+
+        assert!(writer_spawned);
         assert!(app.session_save_thread.is_none());
         assert!(app.state.session_dirty);
-        assert!(app.session_save_deadline.is_some());
+        assert_eq!(app.session_save_failures, 1);
+        assert_eq!(app.session_save_deadline, retry_deadline);
+        assert!(retry_deadline.is_some_and(|deadline| {
+            deadline >= save_started + Duration::from_millis(250)
+                && deadline <= reaped_at + Duration::from_millis(250)
+        }));
     }
 
     #[test]
