@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -17,6 +17,9 @@ pub struct SessionSnapshot {
     /// Format version — used to detect incompatible changes.
     #[serde(default)]
     pub version: u32,
+    /// Commit generation shared with the matching history snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub workspaces: Vec<WorkspaceSnapshot>,
     pub active: Option<usize>,
     pub selected: usize,
@@ -33,6 +36,9 @@ pub struct SessionHistorySnapshot {
     /// Format version follows the matching session snapshot version.
     #[serde(default)]
     pub version: u32,
+    /// Commit generation shared with the matching topology snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub workspaces: Vec<WorkspaceHistorySnapshot>,
 }
 
@@ -119,6 +125,9 @@ pub struct PaneAgentSessionSnapshot {
 
 #[derive(Serialize, Deserialize)]
 pub struct PaneHistorySnapshot {
+    /// Stable public pane identity; absent in legacy v3 history files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
     pub ansi: String,
     pub lines: usize,
 }
@@ -175,6 +184,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     version: u32,
     #[serde(default)]
+    generation: Option<String>,
+    #[serde(default)]
     workspaces: Vec<serde_json::Value>,
     #[serde(default)]
     active: Option<usize>,
@@ -191,6 +202,7 @@ struct RawSessionSnapshot {
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
     Ok(SessionSnapshot {
         version: raw.version,
+        generation: raw.generation,
         workspaces: raw
             .workspaces
             .into_iter()
@@ -266,6 +278,7 @@ pub fn capture(
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
+        generation: None,
         workspaces: workspaces
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
@@ -390,6 +403,7 @@ pub fn capture_history(
 ) -> SessionHistorySnapshot {
     SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
+        generation: None,
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceHistorySnapshot {
@@ -397,7 +411,7 @@ pub fn capture_history(
                     .tabs
                     .iter()
                     .map(|tab| TabHistorySnapshot {
-                        panes: capture_tab_history(tab, terminal_runtimes),
+                        panes: capture_tab_history(workspace, tab, terminal_runtimes),
                     })
                     .collect(),
             })
@@ -406,12 +420,16 @@ pub fn capture_history(
 }
 
 fn capture_tab_history(
+    workspace: &Workspace,
     tab: &crate::workspace::Tab,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> HashMap<u32, PaneHistorySnapshot> {
     let mut panes = HashMap::new();
     for (id, pane) in &tab.panes {
-        if let Some(history) = capture_pane_history(Some(pane), terminal_runtimes) {
+        let pane_id = workspace
+            .public_pane_number(*id)
+            .map(|number| crate::workspace::public_pane_id_for_number(&workspace.id, number));
+        if let Some(history) = capture_pane_history(Some(pane), pane_id, terminal_runtimes) {
             panes.insert(id.raw(), history);
         }
     }
@@ -420,13 +438,18 @@ fn capture_tab_history(
 
 fn capture_pane_history(
     pane: Option<&crate::pane::PaneState>,
+    pane_id: Option<String>,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<PaneHistorySnapshot> {
     let ansi = terminal_runtimes
         .get(&pane?.attached_terminal_id)?
         .snapshot_history()?;
     let lines = ansi.lines().count();
-    Some(PaneHistorySnapshot { ansi, lines })
+    Some(PaneHistorySnapshot {
+        pane_id,
+        ansi,
+        lines,
+    })
 }
 
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
@@ -603,6 +626,7 @@ mod tests {
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![],
             active: None,
             selected: 0,
@@ -669,6 +693,7 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1056,6 +1081,12 @@ mod tests {
         let history_snapshot = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
         let history = &history_snapshot.workspaces[0].tabs[0].panes[&root.raw()];
 
+        // ac3: history carries the stable identity used to reject raw-ID reuse.
+        let expected_pane_id = crate::workspace::public_pane_id_for_number(
+            &state.workspaces[0].id,
+            state.workspaces[0].public_pane_number(root).unwrap(),
+        );
+        assert_eq!(history.pane_id.as_deref(), Some(expected_pane_id.as_str()));
         assert!(history.ansi.contains("alpha"));
         assert!(history.ansi.contains("gamma"));
         assert!(history.lines >= 3);
@@ -1232,6 +1263,7 @@ mod tests {
 
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),

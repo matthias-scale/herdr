@@ -2,11 +2,17 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
     mem::{size_of, MaybeUninit},
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr::{copy_nonoverlapping, null_mut},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+pub(crate) fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    // Windows `File::open` cannot open directories. `rename` still provides
+    // atomic replacement, while the synced file handle durably flushes data.
+    Ok(())
+}
 
 use windows_sys::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},

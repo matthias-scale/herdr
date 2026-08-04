@@ -138,7 +138,9 @@ pub struct App {
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
-    pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
+    pub(crate) session_save_failures: u32,
+    pub(crate) session_save_retry_deadline: Option<Instant>,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
@@ -706,6 +708,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -786,6 +789,8 @@ impl App {
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
+            session_save_failures: 0,
+            session_save_retry_deadline: None,
             detached_custom_command_children: Vec::new(),
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
@@ -4837,7 +4842,7 @@ mod tests {
 
         app.sync_session_save_schedule();
 
-        assert!(!app.state.session_dirty);
+        assert!(app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
     }
 
@@ -4987,12 +4992,13 @@ mod tests {
         app.no_session = false;
         app.state.workspaces = vec![Workspace::test_new("autosave")];
         app.state.ensure_test_terminals();
+        app.state.session_dirty = true;
         app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));
 
         app.handle_scheduled_tasks(Instant::now(), false);
 
         assert!(app.session_save_thread.is_some());
-        assert!(app.session_save_deadline.is_none());
+        assert!(app.session_save_deadline.is_some());
         app.save_session_now();
         assert!(crate::session::data_dir().join("session.json").exists());
 
@@ -5007,6 +5013,10 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         app.session_save_thread = Some(std::thread::spawn(move || {
             let _ = release_rx.recv();
+            session::SessionSaveResult {
+                revision: 0,
+                result: Ok(()),
+            }
         }));
 
         app.start_background_session_save();
@@ -5020,6 +5030,69 @@ mod tests {
     }
 
     #[test]
+    fn ac1_injected_save_failure_keeps_dirty_and_preserves_retry_through_sync() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 7;
+        app.apply_session_save_result(session::SessionSaveResult {
+            revision: 7,
+            result: Err(std::io::Error::other("injected save failure")),
+        });
+        let retry_deadline = app.session_save_deadline.expect("retry deadline");
+
+        app.sync_session_save_schedule();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 1);
+        assert_eq!(app.session_save_deadline, Some(retry_deadline));
+    }
+
+    #[test]
+    fn ac1_finished_failed_writer_is_reaped_without_another_mutation() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 3;
+        app.session_save_thread = Some(std::thread::spawn(|| session::SessionSaveResult {
+            revision: 3,
+            result: Err(std::io::Error::other("worker failure")),
+        }));
+        while !app
+            .session_save_thread
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            std::thread::yield_now();
+        }
+
+        app.sync_session_save_schedule();
+
+        assert!(app.session_save_thread.is_none());
+        assert!(app.state.session_dirty);
+        assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn ac1_success_does_not_clear_mutation_made_during_save_and_resets_backoff() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        app.state.session_dirty_revision = 11;
+        app.session_save_failures = 4;
+
+        app.apply_session_save_result(session::SessionSaveResult {
+            revision: 10,
+            result: Ok(()),
+        });
+        app.sync_session_save_schedule();
+
+        assert!(app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 0);
+        assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
     fn final_session_save_joins_background_writer_before_returning() {
         let mut app = test_app();
         app.no_session = true;
@@ -5028,6 +5101,10 @@ mod tests {
         app.session_save_thread = Some(std::thread::spawn(move || {
             let _ = release_rx.recv();
             done_tx.send(()).unwrap();
+            session::SessionSaveResult {
+                revision: 0,
+                result: Ok(()),
+            }
         }));
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));

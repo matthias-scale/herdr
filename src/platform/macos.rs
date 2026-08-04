@@ -12,6 +12,10 @@ use super::{
     LimitedRead, Signal,
 };
 
+pub(crate) fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
 pub(crate) fn sample_status_metrics(
     sampler: &mut super::status_metrics::StatusMetricSampler,
 ) -> super::status_metrics::StatusMetrics {

@@ -267,6 +267,7 @@ fn restore_with_imports_and_failures(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> RestoreFailures<RestoredSession> {
+    let history = compatible_history(snapshot, history);
     let mut workspaces = Vec::new();
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
@@ -497,8 +498,12 @@ fn restore_tab(
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
-        let saved_history =
-            old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
+        let expected_pane_id = old_id.and_then(|old_id| public_pane_ids_by_old_raw.get(old_id));
+        let saved_history = old_id
+            .and_then(|old_id| history.and_then(|history| history.panes.get(old_id)))
+            .and_then(|history| {
+                history_for_pane(Some(history), expected_pane_id.map(String::as_str))
+            });
         let startup = {
             let mut agent_restore = AgentRestoreState {
                 enabled: runtime_context.resume_agents_on_restore,
@@ -746,6 +751,53 @@ fn restore_tab(
     )
 }
 
+pub(super) fn compatible_history<'a>(
+    snapshot: &SessionSnapshot,
+    history: Option<&'a SessionHistorySnapshot>,
+) -> Option<&'a SessionHistorySnapshot> {
+    let history = history?;
+    match (
+        snapshot.generation.as_deref(),
+        history.generation.as_deref(),
+    ) {
+        (Some(session), Some(saved_history)) if !session.is_empty() && session == saved_history => {
+            Some(history)
+        }
+        (None, None) => {
+            warn!(
+                "legacy session history has no verifiable generation; restoring topology without history"
+            );
+            None
+        }
+        _ => {
+            warn!(
+                session_generation = ?snapshot.generation,
+                history_generation = ?history.generation,
+                "session history generation mismatch; restoring topology without history"
+            );
+            None
+        }
+    }
+}
+
+fn history_for_pane<'a>(
+    history: Option<&'a PaneHistorySnapshot>,
+    expected_pane_id: Option<&str>,
+) -> Option<&'a PaneHistorySnapshot> {
+    let history = history?;
+    match (history.pane_id.as_deref(), expected_pane_id) {
+        (Some(saved), Some(expected)) if !saved.is_empty() && saved == expected => Some(history),
+        _ => {
+            warn!(
+                saved_pane_id = ?history.pane_id,
+                expected_pane_id,
+                "session pane history identity mismatch; dropping pane history"
+            );
+            None
+        }
+    }
+}
+
 fn pane_restore_startup<'a>(
     session: Option<&PaneAgentSessionSnapshot>,
     history: Option<&'a PaneHistorySnapshot>,
@@ -931,6 +983,49 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ac3_generation_mismatch_drops_all_history() {
+        let snapshot = SessionSnapshot {
+            generation: Some("topology-generation".into()),
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: Vec::new(),
+            active: None,
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+        };
+        let history = SessionHistorySnapshot {
+            generation: Some("history-generation".into()),
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: Vec::new(),
+        };
+
+        assert!(compatible_history(&snapshot, Some(&history)).is_none());
+    }
+
+    #[test]
+    fn ac3_wrong_pane_identity_drops_history_instead_of_reattaching() {
+        let history = PaneHistorySnapshot {
+            pane_id: Some("workspace:p2".into()),
+            ansi: "private output".into(),
+            lines: 1,
+        };
+
+        assert!(history_for_pane(Some(&history), Some("workspace:p1")).is_none());
+    }
+
+    #[test]
+    fn ac4_legacy_history_without_identity_is_not_confidentiality_safe() {
+        let history = PaneHistorySnapshot {
+            pane_id: None,
+            ansi: "legacy output".into(),
+            lines: 1,
+        };
+
+        assert!(history_for_pane(Some(&history), Some("workspace:p1")).is_none());
+    }
+
     fn test_session_path(name: &str) -> String {
         std::env::current_dir()
             .unwrap()
@@ -1085,6 +1180,7 @@ mod tests {
             value: test_session_path("pi-session.jsonl"),
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
+            pane_id: None,
             ansi: "RESTORED_HISTORY\r\n".into(),
             lines: 1,
         };
@@ -1110,6 +1206,7 @@ mod tests {
             value: test_session_path("pi-session.jsonl"),
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
+            pane_id: None,
             ansi: "RESTORED_HISTORY\r\n".into(),
             lines: 1,
         };
@@ -1138,6 +1235,7 @@ mod tests {
             value: test_session_path("pi-session.jsonl"),
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
+            pane_id: None,
             ansi: "RESTORED_HISTORY\r\n".into(),
             lines: 1,
         };
@@ -1191,6 +1289,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1271,6 +1370,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1381,6 +1481,7 @@ mod tests {
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1506,6 +1607,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            generation: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1681,6 +1783,78 @@ mod tests {
         let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
     }
 
+    #[tokio::test]
+    async fn ac3_matching_generation_with_wrong_pane_identity_drops_secret() {
+        let (snapshot, mut history) = snapshot_with_saved_pane_history();
+        history.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&0)
+            .unwrap()
+            .pane_id = Some("workspace:p2".into());
+
+        let (workspaces, restored_text) = restore_fixture_text(&snapshot, Some(&history));
+
+        assert_eq!(workspaces.len(), 1);
+        assert!(!restored_text.contains("RESTORED_HISTORY"));
+    }
+
+    #[tokio::test]
+    async fn ac2_mismatched_generation_restores_topology_without_history() {
+        let (snapshot, mut history) = snapshot_with_saved_pane_history();
+        history.generation = Some("crash-generation".into());
+
+        let (workspaces, restored_text) = restore_fixture_text(&snapshot, Some(&history));
+
+        assert_eq!(workspaces.len(), 1);
+        assert!(!restored_text.contains("RESTORED_HISTORY"));
+    }
+
+    #[tokio::test]
+    async fn ac4_legacy_v3_restores_topology_but_drops_unverifiable_history() {
+        let (mut snapshot, mut history) = snapshot_with_saved_pane_history();
+        snapshot.version = 3;
+        snapshot.generation = None;
+        history.version = 3;
+        history.generation = None;
+        history.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&0)
+            .unwrap()
+            .pane_id = None;
+
+        let (workspaces, restored_text) = restore_fixture_text(&snapshot, Some(&history));
+
+        assert_eq!(workspaces.len(), 1);
+        assert!(!restored_text.contains("RESTORED_HISTORY"));
+    }
+
+    fn restore_fixture_text(
+        snapshot: &SessionSnapshot,
+        history: Option<&SessionHistorySnapshot>,
+    ) -> (Vec<Workspace>, String) {
+        let (events, _events_rx) = mpsc::channel(8);
+        let (workspaces, _terminals, runtimes) = restore(
+            snapshot,
+            history,
+            5,
+            40,
+            4096,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtime = runtimes
+            .values()
+            .next()
+            .expect("restored runtime should exist");
+        let text = runtime.recent_unwrapped_text(10);
+        let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
+        (workspaces, text)
+    }
+
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut panes = HashMap::new();
@@ -1697,11 +1871,13 @@ mod tests {
         );
         let history = SessionHistorySnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            generation: Some("saved-generation".into()),
             workspaces: vec![WorkspaceHistorySnapshot {
                 tabs: vec![super::super::snapshot::TabHistorySnapshot {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneHistorySnapshot {
+                            pane_id: Some("workspace:p1".into()),
                             ansi: concat!(
                                 "\x1b[31mRESTORED_HISTORY 👨‍👩‍👧\x1b[0m ",
                                 "\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\\r\n"
@@ -1715,6 +1891,7 @@ mod tests {
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            generation: Some("saved-generation".into()),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
