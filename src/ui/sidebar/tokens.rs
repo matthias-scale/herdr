@@ -4,6 +4,7 @@ use crate::config::{
     SpacesSidebarConfig,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedToken {
     pub kind: ResolvedTokenKind,
@@ -88,6 +89,7 @@ pub(super) fn agent_rows(
         .collect()
 }
 
+#[allow(dead_code)]
 pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
     pub branch: Option<&'a str>,
@@ -97,6 +99,7 @@ pub(super) struct SpaceTokenContext<'a> {
     pub suppress_git_details: bool,
 }
 
+#[allow(dead_code)]
 pub(super) fn space_rows(
     config: &SpacesSidebarConfig,
     context: SpaceTokenContext<'_>,
@@ -170,7 +173,10 @@ mod tests {
             agent_label: Some("pi".into()),
             agent_kind_label: Some("pi".into()),
             agent: Some(crate::detect::Agent::Pi),
+            agent_context: Some(crate::detect::Agent::Pi),
+            has_agent: true,
             state: AgentState::Working,
+            background_job_count: None,
             seen: true,
             last_agent_state_change_seq: None,
             activity_at: None,

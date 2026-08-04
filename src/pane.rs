@@ -56,6 +56,7 @@ pub use self::{
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
+const BACKGROUND_JOB_DETECTION_ROWS: usize = 512;
 const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
 
@@ -203,6 +204,43 @@ async fn publish_state_changed_event(
             "failed to deliver StateChanged event"
         );
     }
+}
+
+async fn publish_background_jobs_if_changed(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    agent: Option<Agent>,
+    content: &str,
+    last_count: &mut Option<Option<u16>>,
+) {
+    let count = crate::detect::background_job_count(agent, content);
+    if *last_count == Some(count) {
+        return;
+    }
+    *last_count = Some(count);
+    if let Err(error) = state_events
+        .send(AppEvent::BackgroundJobsChanged { pane_id, count })
+        .await
+    {
+        warn!(pane = pane_id.raw(), %error, "failed to deliver background job count");
+    }
+}
+
+fn background_detection_text_if_supported(
+    agent: Option<Agent>,
+    read: impl FnOnce() -> String,
+) -> Option<String> {
+    (agent == Some(Agent::Codex)).then(read)
+}
+
+fn background_scan_needed(
+    agent_changed: bool,
+    scan_seq: u64,
+    last_scan_seq: Option<u64>,
+    process_exited: bool,
+    last_process_exited: Option<bool>,
+) -> bool {
+    agent_changed || last_scan_seq != Some(scan_seq) || last_process_exited != Some(process_exited)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -644,6 +682,9 @@ fn spawn_basic_detection_task(
         let mut last_screen_scan_detection_content_seq = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
+        let mut last_background_job_count = None;
+        let mut last_background_scan_seq = None;
+        let mut last_background_process_exited = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -672,6 +713,9 @@ fn spawn_basic_detection_task(
                     last_screen_scan_detection_content_seq = None;
                     agent_startup_grace_until = None;
                     pending_idle.clear();
+                    last_background_job_count = None;
+                    last_background_scan_seq = None;
+                    last_background_process_exited = None;
                 }
             }
 
@@ -793,6 +837,31 @@ fn spawn_basic_detection_task(
             let process_exited = pending_foreground_shell_clear
                 && agent.is_some()
                 && !foreground_shell_exit_reported;
+
+            let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
+            if background_scan_needed(
+                agent_changed,
+                background_scan_seq,
+                last_background_scan_seq,
+                process_exited,
+                last_background_process_exited,
+            ) {
+                let background_agent = (!process_exited).then_some(agent).flatten();
+                let background_content =
+                    background_detection_text_if_supported(background_agent, || {
+                        terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS)
+                    });
+                publish_background_jobs_if_changed(
+                    &state_events,
+                    pane_id,
+                    background_agent,
+                    background_content.as_deref().unwrap_or_default(),
+                    &mut last_background_job_count,
+                )
+                .await;
+                last_background_scan_seq = Some(background_scan_seq);
+                last_background_process_exited = Some(process_exited);
+            }
 
             if lifecycle_authority_active && !process_exited {
                 pending_idle.clear();
@@ -2072,6 +2141,9 @@ impl PaneRuntime {
                 let mut last_screen_scan_detection_content_seq = None;
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
+                let mut last_background_job_count = None;
+                let mut last_background_scan_seq = None;
+                let mut last_background_process_exited = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2110,6 +2182,9 @@ impl PaneRuntime {
                             last_screen_scan_detection_content_seq = None;
                             agent_startup_grace_until = None;
                             pending_idle.clear();
+                            last_background_job_count = None;
+                            last_background_scan_seq = None;
+                            last_background_process_exited = None;
                         }
                     }
 
@@ -2269,6 +2344,31 @@ impl PaneRuntime {
                     let process_exited = pending_foreground_shell_clear
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
+
+                    let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
+                    if background_scan_needed(
+                        agent_changed,
+                        background_scan_seq,
+                        last_background_scan_seq,
+                        process_exited,
+                        last_background_process_exited,
+                    ) {
+                        let background_agent = (!process_exited).then_some(agent).flatten();
+                        let background_content =
+                            background_detection_text_if_supported(background_agent, || {
+                                terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS)
+                            });
+                        publish_background_jobs_if_changed(
+                            &state_events,
+                            pane_id,
+                            background_agent,
+                            background_content.as_deref().unwrap_or_default(),
+                            &mut last_background_job_count,
+                        )
+                        .await;
+                        last_background_scan_seq = Some(background_scan_seq);
+                        last_background_process_exited = Some(process_exited);
+                    }
 
                     if lifecycle_authority_active && !process_exited {
                         pending_idle.clear();
@@ -4160,5 +4260,64 @@ mod tests {
                 observed_at: _,
             } if delivered_pane == pane_id
         ));
+    }
+
+    #[tokio::test]
+    async fn background_job_publisher_clears_a_stale_supported_count() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let pane_id = PaneId::from_raw(43);
+        let mut last_count = None;
+
+        publish_background_jobs_if_changed(
+            &tx,
+            pane_id,
+            Some(Agent::Codex),
+            "2 background terminals running · /ps to view · /stop to close",
+            &mut last_count,
+        )
+        .await;
+        publish_background_jobs_if_changed(
+            &tx,
+            pane_id,
+            None,
+            "2 background terminals running · /ps to view · /stop to close",
+            &mut last_count,
+        )
+        .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppEvent::BackgroundJobsChanged {
+                pane_id: event_pane,
+                count: Some(2),
+            }) if event_pane == pane_id
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppEvent::BackgroundJobsChanged {
+                pane_id: event_pane,
+                count: None,
+            }) if event_pane == pane_id
+        ));
+    }
+
+    #[test]
+    fn background_detection_text_is_not_read_for_unsupported_agents() {
+        assert_eq!(
+            background_detection_text_if_supported(Some(Agent::Claude), || {
+                panic!("unsupported agent snapshot was read")
+            }),
+            None
+        );
+        assert_eq!(
+            background_detection_text_if_supported(Some(Agent::Codex), || "footer".to_owned()),
+            Some("footer".to_owned())
+        );
+    }
+
+    #[test]
+    fn background_scan_runs_when_the_agent_process_exits_without_new_content() {
+        assert!(background_scan_needed(false, 7, Some(7), true, Some(false)));
+        assert!(!background_scan_needed(false, 7, Some(7), true, Some(true)));
     }
 }

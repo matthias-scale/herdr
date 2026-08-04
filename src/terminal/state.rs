@@ -276,6 +276,9 @@ pub struct TerminalState {
     metadata_report_agents: HashMap<String, Agent>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
+    /// Provider-reported background jobs owned by this agent thread. `None`
+    /// means the provider does not expose a supported count.
+    pub background_job_count: Option<u16>,
     pub last_agent_state_change_seq: Option<u64>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
@@ -313,6 +316,7 @@ impl TerminalState {
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
+            background_job_count: None,
             last_agent_state_change_seq: None,
             agent_active_since: None,
             agent_last_active_at: None,
@@ -323,6 +327,15 @@ impl TerminalState {
             recent_agent_process_exit: None,
             pending_agent_resume_plan: None,
         }
+    }
+
+    pub(crate) fn set_background_job_count(&mut self, count: Option<u16>) -> bool {
+        if self.background_job_count == count {
+            return false;
+        }
+        self.background_job_count = count;
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
 
     pub(crate) fn terminal_title_stripped(&self) -> Option<String> {
@@ -1922,6 +1935,11 @@ impl TerminalState {
     pub fn effective_known_agent(&self) -> Option<Agent> {
         self.effective_agent_label()
             .and_then(crate::detect::parse_agent_label)
+    }
+
+    pub(crate) fn agent_lifecycle_context(&self) -> Option<Agent> {
+        self.effective_known_agent()
+            .or_else(|| self.recent_agent_process_exit.map(|exit| exit.agent))
     }
 
     /// Authoritative runtime timestamp behind the sidebar activity-age field.

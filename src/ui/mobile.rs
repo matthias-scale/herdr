@@ -9,11 +9,11 @@ use ratatui::{
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
-    agent_panel_status_key, grouped_child_display_label, mobile_sidebar_rows,
-    mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace, AgentPanelEntry, SidebarRow,
+    mobile_sidebar_rows, mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace,
+    sidebar_space_member_indices, tab_row_layout, AgentPanelEntry, SidebarRow,
 };
-use super::status::{state_dot, state_label, state_label_color};
-use super::text::{display_width_u16, truncate_end};
+use super::status::{state_dot, state_label_color};
+use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
 use crate::detect::AgentState;
@@ -52,27 +52,15 @@ pub(crate) enum MobileSwitcherTarget {
     Menu(usize),
 }
 
-/// Columns of the agent disclosure control on a workspace title line. The
-/// control is right-aligned inside `content`, so render and hit-testing share
-/// this range without depending on the rendered workspace label width.
-fn mobile_workspace_disclosure_columns(
-    content: Rect,
-    agent_count: usize,
-    indented: bool,
-) -> Option<std::ops::Range<u16>> {
-    if agent_count == 0 || content.width == 0 {
+/// Columns of the Space disclosure immediately before its title. Render and
+/// hit-testing share this range so the control never moves to the row's right
+/// edge as the title or window count changes.
+fn mobile_space_disclosure_columns(content: Rect) -> Option<std::ops::Range<u16>> {
+    if content.width < 3 {
         return None;
     }
-    let width = 1u16.saturating_add(agent_count.to_string().len() as u16);
-    // Two-cell inset + optional linked-worktree connector + status dot/space.
-    // Keep this in the shared geometry helper so render and hit-testing elide
-    // the disclosure together on ultra-narrow clients.
-    let prefix_width = 4u16.saturating_add(if indented { 3 } else { 0 });
-    if content.width < prefix_width.saturating_add(width) {
-        return None;
-    }
-    let start = content.x + content.width - width;
-    Some(start..start + width)
+    let start = content.x + 2;
+    Some(start..start + 1)
 }
 
 pub(crate) fn is_mobile_width(area: Rect, threshold: u16) -> bool {
@@ -136,8 +124,8 @@ fn mobile_sidebar_rows_start(app: &AppState, rows: &[SidebarRow]) -> usize {
 
 fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
     match row {
-        SidebarRow::Tab { .. } => 1,
-        SidebarRow::Workspace { .. } | SidebarRow::Agent { .. } => 2,
+        SidebarRow::Workspace { .. } | SidebarRow::Tab { .. } => 1,
+        SidebarRow::Agent { .. } => 2,
     }
 }
 
@@ -170,6 +158,44 @@ pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
     mobile_switcher_max_scroll_for_height(app, mobile_switcher_areas(app).viewport.height)
 }
 
+pub(crate) fn visible_tab_activity_instants_from(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    viewport: Rect,
+) -> Vec<std::time::Instant> {
+    let content = inset_for_left_scrollbar(viewport);
+    if content == Rect::default() {
+        return Vec::new();
+    }
+    let rows = mobile_sidebar_rows_from(app, terminal_runtimes);
+    let visible_start = app.mobile_switcher_scroll;
+    let visible_end = visible_start.saturating_add(usize::from(viewport.height));
+    let mut doc_y = mobile_sidebar_rows_start(app, &rows);
+
+    rows.iter()
+        .filter_map(|row| {
+            let row_start = doc_y;
+            doc_y = doc_y.saturating_add(mobile_sidebar_row_height(row));
+            if row_start >= visible_end || doc_y <= visible_start {
+                return None;
+            }
+            let SidebarRow::Tab { entry, depth } = row else {
+                return None;
+            };
+            let indent = " ".repeat(2 + usize::from(*depth) * 3);
+            tab_row_layout(
+                entry,
+                app.view_observed_at,
+                usize::from(content.width),
+                display_width(&indent),
+                &app.palette,
+            )
+            .activity_age
+            .and(entry.activity_at)
+        })
+        .collect()
+}
+
 pub(crate) fn mobile_switcher_target_at(
     app: &AppState,
     col: u16,
@@ -199,15 +225,9 @@ pub(crate) fn mobile_switcher_target_at(
         if doc_row >= cursor && doc_row < cursor + row_height {
             let on_title_line = doc_row == cursor;
             return Some(match entry {
-                SidebarRow::Workspace { ws_idx, indented } => {
-                    let agent_count = crate::ui::agent_counts_by_workspace(
-                        &crate::ui::sidebar_thread_entries(app),
-                    )
-                    .get(ws_idx)
-                    .copied()
-                    .unwrap_or(0);
+                SidebarRow::Workspace { ws_idx, .. } => {
                     let on_disclosure = on_title_line
-                        && mobile_workspace_disclosure_columns(content, agent_count, *indented)
+                        && mobile_space_disclosure_columns(content)
                             .is_some_and(|columns| columns.contains(&col));
                     if on_disclosure {
                         MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
@@ -584,103 +604,52 @@ fn render_mobile_switcher_content(
         ws.focused_pane_id()
             .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
     });
-    let agent_counts = crate::ui::agent_counts_by_workspace(
-        &super::sidebar::sidebar_thread_entries_from(app, terminal_runtimes),
-    );
-    for (entry_idx, row) in rows.iter().enumerate() {
+    for row in &rows {
         match row {
-            SidebarRow::Workspace { ws_idx, indented } => {
+            SidebarRow::Workspace { ws_idx, .. } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
-                let active = Some(*ws_idx) == app.active;
-                let selected = *ws_idx == app.selected;
+                let member_indices = sidebar_space_member_indices(app, *ws_idx);
+                let active = app
+                    .active
+                    .is_some_and(|active| member_indices.contains(&active));
+                let selected = member_indices.contains(&app.selected);
                 let bg = mobile_item_bg(selected, active, p);
-                let (state, seen) = ws.aggregate_state(&app.terminals);
-                let (dot, dot_style) = state_dot(state, seen, p);
                 let mut title_spans = vec![Span::styled("  ", Style::default().bg(bg))];
-                // Disclosed agent rows sit between a workspace and its next
-                // sibling, so the connector glyph looks past them.
-                let next_linked_child = rows
-                    .iter()
-                    .skip(entry_idx + 1)
-                    .find(|next| matches!(next, SidebarRow::Workspace { .. }))
-                    .is_some_and(|next| {
-                        matches!(next, SidebarRow::Workspace { indented: true, .. })
-                    });
-                let detail_prefix = if *indented {
-                    title_spans.push(Span::styled(
-                        if next_linked_child {
-                            "├─ "
-                        } else {
-                            "└─ "
-                        },
-                        Style::default().fg(p.overlay0).bg(bg),
-                    ));
-                    if next_linked_child {
-                        "  │    "
-                    } else {
-                        "       "
-                    }
-                } else {
-                    "  "
-                };
-                title_spans.push(Span::styled(dot, dot_style.bg(bg)));
+                let expanded = app.workspace_agents_expanded(*ws_idx);
+                title_spans.push(Span::styled(
+                    if expanded { "▾" } else { "▸" },
+                    Style::default().fg(p.accent).bg(bg),
+                ));
                 title_spans.push(Span::styled(" ", Style::default().bg(bg)));
-                let raw_label = ws.display_name_from(&app.terminals, terminal_runtimes);
-                let name = if *indented {
-                    grouped_child_display_label(
-                        &raw_label,
-                        ws.branch().as_deref(),
-                        ws.custom_name.is_some(),
-                    )
+                let name = if crate::ui::workspace_parent_group_state(app, *ws_idx).is_some() {
+                    ws.worktree_space()
+                        .map(|space| space.label.clone())
+                        .unwrap_or_else(|| ws.display_name_from(&app.terminals, terminal_runtimes))
                 } else {
-                    raw_label
+                    ws.display_name_from(&app.terminals, terminal_runtimes)
                 };
-                let agent_count = agent_counts.get(ws_idx).copied().unwrap_or(0);
-                let disclosure_columns =
-                    mobile_workspace_disclosure_columns(content, agent_count, *indented);
-                let used = title_spans
+                let window_count = member_indices
                     .iter()
-                    .map(|span| display_width_u16(span.content.as_ref()))
-                    .sum::<u16>();
-                let name_width = disclosure_columns
-                    .as_ref()
-                    .map(|columns| columns.start.saturating_sub(content.x).saturating_sub(used))
-                    .unwrap_or_else(|| content.width.saturating_sub(used).saturating_sub(1));
+                    .filter_map(|member| app.workspaces.get(*member))
+                    .map(|workspace| workspace.tabs.len())
+                    .sum::<usize>();
+                let count_label = format!(" ({window_count})");
+                let fixed_width = 4u16.saturating_add(display_width_u16(&count_label));
+                let name_width = content.width.saturating_sub(fixed_width);
                 title_spans.push(Span::styled(
                     truncate_end(&name, name_width as usize),
                     mobile_item_title_style(selected, active, p).bg(bg),
                 ));
-                if let Some(columns) = disclosure_columns {
-                    let used = title_spans
-                        .iter()
-                        .map(|span| display_width_u16(span.content.as_ref()))
-                        .sum::<u16>();
-                    let filler = columns.start.saturating_sub(content.x).saturating_sub(used);
-                    title_spans.push(Span::styled(
-                        " ".repeat(filler as usize),
-                        Style::default().bg(bg),
-                    ));
-                    title_spans.push(Span::styled(
-                        format!(
-                            "{}{}",
-                            if app.workspace_agents_expanded(*ws_idx) {
-                                "▾"
-                            } else {
-                                "▸"
-                            },
-                            agent_count
-                        ),
-                        Style::default().fg(p.accent).bg(bg),
-                    ));
-                }
-                let detail = format!(
-                    "{detail_prefix}{} · {}",
-                    ws.branch().unwrap_or_else(|| "shell".into()),
-                    mobile_tab_status(ws)
-                );
-                render_two_line_item(
+                title_spans.push(Span::styled(
+                    count_label,
+                    Style::default()
+                        .fg(p.overlay0)
+                        .bg(bg)
+                        .add_modifier(Modifier::DIM),
+                ));
+                render_one_line_item(
                     frame,
                     viewport,
                     content,
@@ -688,8 +657,6 @@ fn render_mobile_switcher_content(
                     app.mobile_switcher_scroll,
                     bg,
                     Line::from(title_spans),
-                    truncate_end(&detail, content.width as usize),
-                    p.overlay0,
                 );
             }
             SidebarRow::Agent { entry, depth } => {
@@ -731,42 +698,66 @@ fn render_mobile_switcher_content(
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let show_status = entry.state != AgentState::Idle || !entry.seen;
-                let state = show_status.then(|| {
-                    entry
-                        .state_labels
-                        .get(agent_panel_status_key(entry.state, entry.seen))
-                        .map(String::as_str)
-                        .unwrap_or_else(|| match entry.state {
-                            AgentState::Idle if !entry.seen => "done",
-                            _ => state_label(entry.state, entry.seen),
-                        })
-                });
-                let status_width = state
-                    .map(|state| 1 + state.len() + " · ".len())
-                    .unwrap_or_default();
-                let fixed_width = indent.len() + status_width;
+                let layout = tab_row_layout(
+                    entry,
+                    app.view_observed_at,
+                    usize::from(content.width),
+                    display_width(&indent),
+                    p,
+                );
                 let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
-                if let Some(state) = state {
+                if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
-                    spans.extend([
-                        Span::styled(icon, icon_style.bg(bg)),
-                        Span::styled(
-                            format!(" {state}"),
-                            Style::default()
-                                .fg(state_label_color(entry.state, entry.seen, p))
-                                .bg(bg),
-                        ),
-                        Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
-                    ]);
+                    spans.push(Span::styled(icon, icon_style.bg(bg)));
+                    if layout.show_state_label {
+                        spans.extend([
+                            Span::styled(
+                                format!(" {state}"),
+                                Style::default()
+                                    .fg(state_label_color(entry.state, entry.seen, p))
+                                    .bg(bg),
+                            ),
+                            Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
+                        ]);
+                    } else {
+                        spans.push(Span::styled(" ", Style::default().bg(bg)));
+                    }
                 }
                 spans.push(Span::styled(
-                    truncate_end(
-                        entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
-                        usize::from(content.width).saturating_sub(fixed_width),
-                    ),
+                    layout.title,
                     mobile_item_title_style(false, active, p).bg(bg),
                 ));
+                if let Some(agent_suffix) = layout.agent_suffix {
+                    spans.push(Span::styled(
+                        agent_suffix,
+                        Style::default().fg(p.overlay1).bg(bg),
+                    ));
+                }
+                if let Some(background_jobs) = layout.background_jobs {
+                    spans.push(Span::styled(
+                        background_jobs,
+                        Style::default().fg(p.overlay0).bg(bg),
+                    ));
+                }
+                if let Some(activity_age) = layout.activity_age {
+                    let used_width = spans
+                        .iter()
+                        .map(|span| display_width(span.content.as_ref()))
+                        .sum::<usize>();
+                    let padding = usize::from(content.width)
+                        .saturating_sub(used_width)
+                        .saturating_sub(display_width(&activity_age));
+                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
+                    let activity_color = if entry.state == AgentState::Working {
+                        p.blue
+                    } else {
+                        p.green
+                    };
+                    spans.push(Span::styled(
+                        activity_age,
+                        Style::default().fg(activity_color).bg(bg),
+                    ));
+                }
                 let title = Line::from(spans);
                 render_one_line_item(
                     frame,
@@ -1295,7 +1286,10 @@ mod tests {
             agent_label: agent_label.map(str::to_string),
             agent_kind_label: agent_label.map(str::to_string),
             agent: agent_label.and_then(crate::detect::parse_agent_label),
+            agent_context: agent_label.and_then(crate::detect::parse_agent_label),
+            has_agent: agent_label.is_some(),
             state: AgentState::Idle,
+            background_job_count: None,
             seen: true,
             last_agent_state_change_seq: None,
             activity_at: None,
@@ -1468,14 +1462,14 @@ mod tests {
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 2);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
         assert_eq!(
-            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4),
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 3),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 0
             })
         );
         assert_eq!(
-            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5),
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 1
@@ -1516,13 +1510,13 @@ mod tests {
 
         let viewport = mobile_switcher_areas(&app).viewport;
         let content = inset_for_left_scrollbar(viewport);
-        let columns = mobile_workspace_disclosure_columns(content, 1, false).unwrap();
+        let columns = mobile_space_disclosure_columns(content).unwrap();
         let disclosure_start = columns.start;
         let row = viewport.y + mobile_switcher_workspace_doc_range(&app, 0).unwrap().start as u16;
         let disclosure = columns
             .map(|x| terminal.backend().buffer()[(x, row)].symbol())
             .collect::<String>();
-        assert_eq!(disclosure, "▾1");
+        assert_eq!(disclosure, "▾");
         assert_eq!(
             mobile_switcher_target_at(&app, disclosure_start, row),
             Some(MobileSwitcherTarget::WorkspaceDisclosure(0))
@@ -1530,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn review_findings_mobile_disclosure_elides_before_prefix_overflow() {
+    fn mobile_disclosure_stays_top_left_in_narrow_layout() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("narrow")];
         app.ensure_test_terminals();
@@ -1548,9 +1542,14 @@ mod tests {
         let viewport = mobile_switcher_areas(&app).viewport;
         let content = inset_for_left_scrollbar(viewport);
         assert_eq!(content.width, 5);
-        assert!(mobile_workspace_disclosure_columns(content, 1, false).is_none());
+        let columns = mobile_space_disclosure_columns(content).unwrap();
+        assert_eq!(columns.start, content.x + 2);
 
         let row = viewport.y + mobile_switcher_workspace_doc_range(&app, 0).unwrap().start as u16;
+        assert_eq!(
+            mobile_switcher_target_at(&app, columns.start, row),
+            Some(MobileSwitcherTarget::WorkspaceDisclosure(0))
+        );
         assert_eq!(
             mobile_switcher_target_at(&app, content.x + content.width - 1, row),
             Some(MobileSwitcherTarget::Workspace(0))
@@ -1579,15 +1578,16 @@ mod tests {
         ];
         app.active = Some(0);
         app.selected = 0;
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
 
-        // Grouped order pulls the worktree (idx 2) up under its parent (idx 0),
-        // ahead of the unrelated "other" workspace (idx 1): rows are main,
-        // feature, other.
+        // Linked worktrees no longer create an intermediate Space row. Their
+        // windows remain direct children of the root Space.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 2)
-                .expect("workspace row")
+                .expect("linked worktree window row")
                 .start,
             4
         );
@@ -1595,25 +1595,35 @@ mod tests {
             mobile_switcher_workspace_doc_range(&app, 1)
                 .expect("workspace row")
                 .start,
-            6
+            5
         );
 
         let viewport = mobile_switcher_areas(&app).viewport;
-        // The second space row on screen is the worktree, not workspaces[1].
         let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
-        assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
+        assert_eq!(
+            hit,
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 2,
+                tab_idx: 0
+            })
+        );
 
-        // Mobile ignores collapse: even with the space folded on desktop, the
-        // worktree child still renders in the same position.
+        // Legacy worktree-group collapse does not restore an intermediate row.
         app.collapsed_space_keys.insert("repo-key".to_string());
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 2)
-                .expect("workspace row")
+                .expect("linked worktree window row")
                 .start,
             4
         );
         let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
-        assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
+        assert!(matches!(
+            hit,
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 2,
+                tab_idx: 0
+            })
+        ));
     }
 
     #[test]
@@ -1745,6 +1755,14 @@ mod tests {
                 observed_at,
             );
         }
+        let first_pane = app.workspaces[0].tabs[0].root_pane;
+        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .background_job_count = Some(2);
         app.active = Some(0);
         app.selected = 0;
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
@@ -1773,20 +1791,148 @@ mod tests {
             .collect::<Vec<_>>();
         let first = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("First task"))
+            .position(|row| row.contains("working") && row.contains("Fir… · cx  2 >_"))
             .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
         let second = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("Second task"))
+            .position(|row| row.contains("working") && row.contains("Second ta… · cx"))
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
-        assert!(rows[first].find("working").unwrap() < rows[first].find("First task").unwrap());
-        assert!(rows[second].find("working").unwrap() < rows[second].find("Second task").unwrap());
+        assert!(rows[first].find("working").unwrap() < rows[first].find("Fir…").unwrap());
+        assert!(
+            rows[first].contains("Fir… · cx  2 >_"),
+            "mobile tab row must place the provider suffix and badge after its title: {:?}",
+            rows[first]
+        );
+        assert!(
+            rows[second].contains("Second ta… · cx"),
+            "mobile tab row must show the provider suffix: {:?}",
+            rows[second]
+        );
+        assert!(rows[second].find("working").unwrap() < rows[second].find("Second ta…").unwrap());
         assert_eq!(
             second,
             first + 1,
             "tab rows must not reserve subtitle lines"
         );
         assert!(!rows[first].contains("codex"));
+        assert!(
+            rows.iter().any(|row| row.contains("▾ mobile-tabs (2)")),
+            "mobile Space row must use disclosure, title, and window count: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("shell · tab")),
+            "mobile Space row must not render a branch subtitle: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
+        let started = std::time::Instant::now();
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
+        workspace.tabs[0].custom_name = Some("Investigate release regression".into());
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal_state.background_job_count = Some(2);
+        app.view_observed_at = started + std::time::Duration::from_secs(65);
+        app.active = Some(0);
+        app.selected = 0;
+        app.reconcile_sidebar_presentation();
+
+        for width in [18, 40] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_mobile_switcher_content(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        Rect::new(0, 0, width, 20),
+                    )
+                })
+                .unwrap();
+            let rows = (0..20)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let rendered = rows
+                .iter()
+                .find(|row| row.contains(" · cx"))
+                .unwrap_or_else(|| panic!("missing provider row at {width}: {rows:?}"));
+
+            assert!(rendered.contains('●'), "{width}: {rendered:?}");
+            let dot = rendered.find('●').unwrap();
+            let suffix = rendered.find(" · cx").unwrap();
+            assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
+            if width == 18 {
+                assert!(!rendered.contains("working"), "{rendered:?}");
+                assert!(!rendered.contains(">_"), "{rendered:?}");
+                assert!(!rendered.contains("ago"), "{rendered:?}");
+            } else {
+                assert!(rendered.contains("working"), "{rendered:?}");
+                assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
+                assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mobile_activity_deadlines_follow_visible_age_fields() {
+        let started = std::time::Instant::now() - std::time::Duration::from_secs(65);
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
+        workspace.tabs[0].custom_name = Some("Investigate release regression".into());
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Navigate;
+        app.status_bar_enabled = false;
+        app.mobile_width_threshold = 80;
+        let runtimes = TerminalRuntimeRegistry::new();
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 18, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 4));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        app.mode = crate::app::Mode::Terminal;
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
     }
 
     #[test]
@@ -1863,6 +2009,54 @@ mod tests {
         assert!(!row.contains("idle"), "{row:?}");
         assert!(!row.contains("done"), "{row:?}");
         assert!(!row.contains(" · Review release"), "{row:?}");
+    }
+
+    #[test]
+    fn unseen_agentless_mobile_tab_omits_lifecycle_status() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("one");
+        workspace.tabs[0].custom_name = Some("Agent task".into());
+        workspace.test_add_tab(Some("Agentless window"));
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let first_pane = app.workspaces[0].tabs[0].root_pane;
+        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 10);
+        app.reconcile_sidebar_presentation();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 12),
+                )
+            })
+            .unwrap();
+        let rendered = (0..12)
+            .map(|y| {
+                (0..40)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("Agentless window"))
+            .expect("agentless mobile tab row");
+
+        for lifecycle in ["idle", "done", "working", "blocked", "unknown"] {
+            assert!(!rendered.contains(lifecycle), "{rendered:?}");
+        }
     }
 
     #[cfg(unix)]

@@ -569,23 +569,6 @@ impl AppState {
                         self.toggle_workspace_agent_disclosure(card.ws_idx);
                         return None;
                     }
-                    if let Some(card) = cards.iter().find(|card| {
-                        let chevron = crate::ui::workspace_group_chevron_rect(card);
-                        mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
-                    }) {
-                        if let Some((key, collapsed)) =
-                            crate::ui::workspace_parent_group_state(self, card.ws_idx)
-                        {
-                            if collapsed {
-                                self.collapsed_space_keys.remove(&key);
-                            } else {
-                                self.collapsed_space_keys.insert(key);
-                            }
-                            self.mark_session_dirty();
-                            return None;
-                        }
-                    }
-
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,
@@ -3617,8 +3600,8 @@ mod tests {
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 4,
+            viewport.x + 4,
+            viewport.y + 3,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -3651,7 +3634,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 5,
+            viewport.y + 4,
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, target_tab);
@@ -3692,8 +3675,8 @@ mod tests {
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 2,
+            viewport.x + 4,
+            viewport.y + 1,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -3736,7 +3719,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 4,
+            viewport.y + 3,
         ));
         assert_eq!(app.state.workspaces[0].active_tab, 2);
     }
@@ -3837,7 +3820,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 5,
+            viewport.y + 4,
         ));
 
         assert_eq!(app.state.mode, Mode::RenameTab);
@@ -3867,7 +3850,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 5,
+            viewport.y + 4,
         ));
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(!app.state.creating_new_tab);

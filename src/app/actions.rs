@@ -2890,6 +2890,13 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::BackgroundJobsChanged { pane_id, count } => {
+                self.update_terminal_state(pane_id, |terminal| {
+                    terminal.set_background_job_count(count);
+                    None
+                });
+                Vec::new()
+            }
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -4968,6 +4975,28 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+    }
+
+    #[test]
+    fn background_jobs_change_does_not_change_lifecycle_or_seen_state() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+
+        state.handle_app_event(AppEvent::BackgroundJobsChanged {
+            pane_id,
+            count: Some(3),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.background_job_count, Some(3));
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(!state.workspaces[0].panes[&pane_id].seen);
+        assert!(state.toast.is_none());
     }
 
     #[test]

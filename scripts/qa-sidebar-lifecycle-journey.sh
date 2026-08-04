@@ -53,10 +53,30 @@ case "$flow" in
             "active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks"
             "default_space_workspace_style_tracks_active_state"
             "defaults_show_only_thread_titles_and_space_names"
-            "space_row_gap_preserves_compact_worktree_children"
+            "desktop_worktree_group_renders_one_space_row"
+            "active_linked_window_darkens_its_root_space_title"
+            "linked_worktrees_render_as_one_space_with_direct_window_rows"
+            "desktop_worktree_group_has_no_intermediate_connector_rows"
+            "final_space_row_ignores_legacy_custom_token_rows"
+            "tab_background_jobs_sum_across_panes_without_adding_rows"
+            "tab_background_job_badge_renders_immediately_after_title"
+            "tab_provider_suffixes_distinguish_codex_and_claude_after_title"
+            "mixed_provider_tab_omits_provider_suffix"
+            "tab_rows_follow_field_priority_at_minimum_and_normal_widths"
+            "mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths"
+            "mobile_activity_deadlines_follow_visible_age_fields"
+            "pi_uses_pi_suffix_while_unsupported_and_agentless_tabs_omit_it"
+            "unseen_agentless_tab_omits_lifecycle_status"
+            "completed_agent_process_exit_retains_done_without_provider_suffix"
+            "exited_claude_plus_live_codex_omits_provider_suffix"
+            "background_jobs_change_does_not_change_lifecycle_or_seen_state"
+            "codex_background_job_count_uses_live_footer_only"
+            "background_job_count_is_unknown_for_unsupported_agents"
+            "space_row_gap_separates_flattened_groups"
             "space_row_gap_separates_groups_but_never_tabs_inside_them"
             "ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows"
             "seen_idle_mobile_tab_omits_status_segment"
+            "unseen_agentless_mobile_tab_omits_lifecycle_status"
             "ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane"
             "review_findings_agent_navigation_reveals_against_final_picker_projection"
         )
@@ -86,8 +106,12 @@ esac
 
 artifact_dir="$(mkdir -p "$artifact_dir" && cd "$artifact_dir" && pwd -P)"
 log_path="$artifact_dir/${flow}.log"
-zig_bin=""
-if command -v mise >/dev/null 2>&1; then
+zig_bin="${ZIG:-}"
+if [[ -n "$zig_bin" && ! -x "$zig_bin" ]]; then
+    echo "qa-sidebar-lifecycle-journey: ZIG is not executable: $zig_bin" >&2
+    exit 66
+fi
+if [[ -z "$zig_bin" ]] && command -v mise >/dev/null 2>&1; then
     zig_root="$(mise where zig@0.15.2 2>/dev/null || true)"
     if [[ -x "$zig_root/zig" ]]; then
         zig_bin="$zig_root/zig"

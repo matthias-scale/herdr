@@ -714,31 +714,31 @@
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",
-          "description": "Blank terminal rows between expanded Agent sidebar entries. Set to 1 to restore the previous spacing."
+          "description": "Legacy Agent-row gap accepted for compatibility projections. The fixed visible Space/window projection does not use it."
         },
         {
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"pane\", \"state_text\"]]",
-          "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
+          "description": "Legacy Agent-row layout accepted for compatibility projections. Entries may be token strings or inline { token, fg, bold, dim } style tables; declarations are limited to 16 rows and 16 tokens per row."
         },
         {
           "key": "ui.sidebar.agents.rows_by_agent",
           "type": "table of token rows",
           "default": "{}",
-          "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
+          "description": "Legacy Agent-row overrides for compatibility projections, keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
         },
         {
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
           "default": "1",
-          "description": "Blank terminal rows between complete expanded Space groups. Set to 0 for a fully packed list. Tabs and consecutive indented worktree children remain packed within their group."
+          "description": "Blank terminal rows between complete expanded Space groups. Set to 0 for a fully packed list. Direct tab/window rows remain packed within their group."
         },
         {
           "key": "ui.sidebar.spaces.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\"]]",
-          "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim } style tables. Supports built-in and $name metadata tokens; at most 16 rows and 16 tokens per row."
+          "description": "Legacy Space-row layout accepted for compatibility. The visible Space projection always renders disclosure, title, and direct window count on one line; declarations are still limited to 16 rows and 16 tokens per row."
         },
         {
           "key": "ui.accent",

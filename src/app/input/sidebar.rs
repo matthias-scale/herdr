@@ -680,7 +680,10 @@ mod tests {
         ];
         app.state.sidebar_spaces.row_gap = 1;
         app.state.view.sidebar_rect = Rect::new(0, 0, 26, 8);
-        app.state.workspace_scroll = 1;
+        app.state.ensure_test_terminals();
+        app.state.reconcile_sidebar_presentation();
+        app.state.workspace_scroll =
+            crate::ui::sidebar_row_index_for_workspace(&app.state, 1).expect("second Space row");
 
         let (cards, _) =
             crate::ui::compute_sidebar_row_areas(&app.state, app.state.view.sidebar_rect);
@@ -1192,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_worktree_parent_chevron_toggles_group_only() {
+    fn clicking_space_chevron_toggles_direct_window_rows() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
         for (idx, checkout_path) in ["/repo/herdr", "/repo/herdr-issue"].into_iter().enumerate() {
@@ -1207,9 +1210,12 @@ mod tests {
         }
         app.state.active = None;
         app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        app.state.reconcile_sidebar_presentation();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let parent = app.state.view.workspace_card_areas[0];
-        let chevron = crate::ui::workspace_group_chevron_rect(&parent);
+        let chevron = crate::ui::workspace_agent_chevron_rect(&app.state, &parent, true);
+        assert!(app.state.workspace_agents_expanded(0));
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1219,7 +1225,8 @@ mod tests {
 
         assert_eq!(app.state.active, None);
         assert!(app.state.workspace_press.is_none());
-        assert!(app.state.collapsed_space_keys.contains("repo-key"));
+        assert!(!app.state.workspace_agents_expanded(0));
+        assert!(!app.state.collapsed_space_keys.contains("repo-key"));
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1227,7 +1234,7 @@ mod tests {
             chevron.y,
         ));
 
-        assert!(!app.state.collapsed_space_keys.contains("repo-key"));
+        assert!(app.state.workspace_agents_expanded(0));
     }
 
     #[test]
@@ -1595,13 +1602,12 @@ mod tests {
 
         let cards = &app.state.view.workspace_card_areas;
         let order = cards.iter().map(|card| card.ws_idx).collect::<Vec<_>>();
-        assert_eq!(order, vec![0, 2, 1]);
-        let issue = cards.iter().find(|card| card.ws_idx == 2).unwrap();
+        assert_eq!(order, vec![0, 1]);
         let normal = cards.iter().find(|card| card.ws_idx == 1).unwrap();
 
         assert_eq!(
-            app.state.workspace_drop_target_at_row(issue.rect.y),
-            Some(crate::app::state::WorkspaceDropTarget::Before(1))
+            app.state.workspace_drop_target_at_row(cards[0].rect.y),
+            Some(crate::app::state::WorkspaceDropTarget::Before(0))
         );
         assert_eq!(
             crate::ui::workspace_drop_indicator_row(
@@ -1711,7 +1717,7 @@ mod tests {
         let active_id = app.state.workspaces[0].id.clone();
         let selected_id = app.state.workspaces[1].id.clone();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
-        assert_eq!(app.state.view.workspace_card_areas.len(), 3);
+        assert_eq!(app.state.view.workspace_card_areas.len(), 2);
 
         let parent = app.state.view.workspace_card_areas[0].rect;
         let target_row = crate::ui::workspace_drop_indicator_row(
@@ -1745,7 +1751,7 @@ mod tests {
     }
 
     #[test]
-    fn dragging_worktree_space_member_does_not_reorder_workspaces() {
+    fn linked_worktree_has_no_intermediate_draggable_space_row() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![
             workspace_with_space("main", "repo-key"),
@@ -1762,24 +1768,8 @@ mod tests {
             .workspace_card_areas
             .iter()
             .find(|card| card.ws_idx == 2)
-            .unwrap()
-            .rect;
-        let target_row = crate::ui::workspace_drop_indicator_row(
-            &app.state,
-            &app.state.view.workspace_card_areas,
-            app.state.workspace_list_rect(),
-            crate::app::state::WorkspaceDropTarget::Before(0),
-        )
-        .unwrap();
-
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, source.y));
-        app.handle_mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            2,
-            target_row,
-        ));
-        assert!(app.state.drag.is_none());
-        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
+            .copied();
+        assert!(source.is_none());
 
         let names = app
             .state

@@ -1394,10 +1394,12 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
     }
 
+    #[allow(dead_code)]
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
     }

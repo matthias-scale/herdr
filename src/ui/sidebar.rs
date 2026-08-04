@@ -8,13 +8,13 @@ use ratatui::{
     Frame,
 };
 
-use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
+use self::tokens::{ResolvedToken, ResolvedTokenKind};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
-use crate::detect::AgentState;
+use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
@@ -22,6 +22,131 @@ const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
+
+pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
+    match agent {
+        Some(Agent::Codex) => Some("cx"),
+        Some(Agent::Claude) => Some("cc"),
+        Some(Agent::Pi) => Some("pi"),
+        _ => None,
+    }
+}
+
+pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
+    entry.has_agent && (entry.state != AgentState::Idle || !entry.seen)
+}
+
+pub(super) struct TabRowLayout {
+    pub state: Option<String>,
+    pub show_state_label: bool,
+    pub title: String,
+    pub agent_suffix: Option<String>,
+    pub background_jobs: Option<String>,
+    pub activity_age: Option<String>,
+}
+
+pub(super) fn tab_row_layout(
+    entry: &AgentPanelEntry,
+    now: std::time::Instant,
+    width: usize,
+    prefix_width: usize,
+    palette: &Palette,
+) -> TabRowLayout {
+    let state = tab_lifecycle_visible(entry).then(|| {
+        entry
+            .state_labels
+            .get(agent_panel_status_key(entry.state, entry.seen))
+            .cloned()
+            .unwrap_or_else(|| match entry.state {
+                AgentState::Idle if !entry.seen => "done".to_string(),
+                _ => state_label(entry.state, entry.seen).to_string(),
+            })
+    });
+    let dot_width = state
+        .as_ref()
+        .map(|_| display_width(state_dot(entry.state, entry.seen, palette).0))
+        .unwrap_or_default();
+    let full_status_width = state
+        .as_deref()
+        .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
+        .unwrap_or_default();
+    let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
+    let agent_suffix = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
+    let agent_suffix_width = agent_suffix
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    let mut background_jobs = entry
+        .background_job_count
+        .filter(|count| *count > 0)
+        .map(|count| format!("  {count} >_"));
+    let mut activity_age = entry.activity_at.map(|activity_at| {
+        format!(
+            "{} ago",
+            crate::activity_age::compact_label(Some(activity_at), now)
+        )
+    });
+
+    let background_width = background_jobs
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    if activity_age.as_deref().is_some_and(|label| {
+        width
+            < prefix_width
+                + full_status_width
+                + agent_suffix_width
+                + background_width
+                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
+                + 1
+                + display_width(label)
+    }) {
+        activity_age = None;
+    }
+    let activity_width = activity_age
+        .as_deref()
+        .map(|label| 1 + display_width(label))
+        .unwrap_or_default();
+    if width
+        < prefix_width
+            + full_status_width
+            + agent_suffix_width
+            + background_width
+            + activity_width
+            + 1
+    {
+        background_jobs = None;
+    }
+    let background_width = background_jobs
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    let show_state_label = width
+        > prefix_width + full_status_width + agent_suffix_width + background_width + activity_width;
+    let status_width = if show_state_label {
+        full_status_width
+    } else {
+        dot_status_width
+    };
+    let fixed_width =
+        prefix_width + status_width + agent_suffix_width + background_width + activity_width;
+    let title = truncate_end(
+        entry
+            .primary_tab_label
+            .as_deref()
+            .unwrap_or(DEFAULT_THREAD_TITLE),
+        width.saturating_sub(fixed_width),
+    );
+
+    TabRowLayout {
+        state,
+        show_state_label,
+        title,
+        agent_suffix,
+        background_jobs,
+        activity_age,
+    }
+}
 
 /// Selected sidebar titles need stronger foreground contrast without restoring
 /// the old filled-row treatment. Darken RGB text tokens by one third and pair
@@ -53,7 +178,16 @@ pub(crate) struct AgentPanelEntry {
     pub agent_label: Option<String>,
     pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
+    /// Current or most recently exited provider, used only to detect
+    /// ambiguous multi-pane rollups. Rendering still uses `agent` so an exited
+    /// provider never leaves a stale suffix on a single-pane row.
+    pub agent_context: Option<crate::detect::Agent>,
+    /// At least one pane in this row is agent-backed. This stays true for a
+    /// rolled-up tab whose panes have conflicting providers, while `agent`
+    /// becomes `None` so the provider suffix is not misleading.
+    pub has_agent: bool,
     pub state: AgentState,
+    pub background_job_count: Option<u16>,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
     pub activity_at: Option<std::time::Instant>,
@@ -177,7 +311,10 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_label: Some(detail.agent_label),
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
+                        agent_context: detail.agent_context,
+                        has_agent: detail.has_agent,
                         state: detail.state,
+                        background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
                         activity_at: detail.activity_at,
@@ -217,32 +354,14 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
-fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indented: bool) -> u16 {
-    let (state, seen) = ws.aggregate_state(&app.terminals);
-    let label = if indented {
-        grouped_child_display_label(
-            &ws.display_name_from_terminals(&app.terminals),
-            ws.branch().as_deref(),
-            ws.custom_name.is_some(),
-        )
-    } else {
-        ws.display_name_from_terminals(&app.terminals)
-    };
-    let token_values = ws.metadata_tokens.values();
-    tokens::space_rows(
-        &app.sidebar_spaces,
-        SpaceTokenContext {
-            workspace: &label,
-            branch: ws.branch().as_deref(),
-            state_text: state_label(state, seen),
-            ahead_behind: ws.git_ahead_behind(),
-            tokens: &token_values,
-            suppress_git_details: indented,
-        },
-    )
-    .len()
-    .max(1)
-    .min(u16::MAX as usize) as u16
+fn workspace_row_height(
+    _app: &AppState,
+    _ws: &crate::workspace::Workspace,
+    _indented: bool,
+) -> u16 {
+    // The final Spaces projection is deliberately one line per Space. Branch
+    // and worktree identity remain available elsewhere, never as a subtitle.
+    1
 }
 
 fn workspace_row_height_in_body(
@@ -252,16 +371,6 @@ fn workspace_row_height_in_body(
     body_height: u16,
 ) -> u16 {
     workspace_row_height(app, workspace, indented).min(body_height)
-}
-
-fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (AgentState::Blocked, _) => 4,
-        (AgentState::Idle, false) => 3,
-        (AgentState::Working, _) => 2,
-        (AgentState::Idle, true) => 1,
-        (AgentState::Unknown, _) => 0,
-    }
 }
 
 /// Lifecycle precedence for a single tab/window. A completed pane must never
@@ -274,15 +383,6 @@ fn tab_lifecycle_priority(state: AgentState, seen: bool) -> u8 {
         (AgentState::Idle, true) => 1,
         (AgentState::Unknown, _) => 0,
     }
-}
-
-fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
-    app.workspaces
-        .iter()
-        .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
-        .map(|ws| ws.aggregate_state(&app.terminals))
-        .max_by_key(|(state, seen)| workspace_attention_priority(*state, *seen))
-        .unwrap_or((AgentState::Unknown, true))
 }
 
 pub(crate) fn workspace_parent_group_state(
@@ -307,23 +407,6 @@ pub(crate) fn workspace_parent_group_state(
             app.collapsed_space_keys.contains(&space.key),
         )
     })
-}
-
-pub(crate) fn grouped_child_display_label(
-    label: &str,
-    branch: Option<&str>,
-    has_custom_name: bool,
-) -> String {
-    if has_custom_name {
-        return label.to_string();
-    }
-    let Some(branch) = branch else {
-        return label.to_string();
-    };
-    branch
-        .strip_prefix("worktree/")
-        .unwrap_or(branch)
-        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,14 +491,29 @@ fn sidebar_rows_inner(
     };
     for workspace in workspaces {
         let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace;
+        if indented {
+            continue;
+        }
         rows.push(SidebarRow::Workspace { ws_idx, indented });
         if app.workspace_agents_expanded(ws_idx) {
-            let depth = if indented { 2 } else { 1 };
-            if let Some(entries) = agents_by_workspace.remove(&ws_idx) {
+            let depth = 1;
+            for member_idx in sidebar_space_member_indices(app, ws_idx) {
+                let Some(entries) = agents_by_workspace.remove(&member_idx) else {
+                    continue;
+                };
                 let tab_states = entries.iter().fold(
                     std::collections::HashMap::<
                         usize,
-                        (AgentState, bool, Option<std::time::Instant>),
+                        (
+                            AgentState,
+                            bool,
+                            Option<std::time::Instant>,
+                            Option<u16>,
+                            Option<Agent>,
+                            bool,
+                            bool,
+                            bool,
+                        ),
                     >::new(),
                     |mut states, entry| {
                         let candidate = (entry.state, entry.seen);
@@ -434,8 +532,37 @@ fn sidebar_rows_inner(
                                     }
                                     (current, candidate) => current.or(candidate),
                                 };
+                                state.3 = match (state.3, entry.background_job_count) {
+                                    (Some(current), Some(candidate)) => {
+                                        Some(current.saturating_add(candidate))
+                                    }
+                                    (current, candidate) => current.or(candidate),
+                                };
+                                if !state.5 {
+                                    match (state.4, entry.agent_context) {
+                                        (Some(current), Some(candidate))
+                                            if current != candidate =>
+                                        {
+                                            state.4 = None;
+                                            state.5 = true;
+                                        }
+                                        (None, Some(candidate)) => state.4 = Some(candidate),
+                                        _ => {}
+                                    }
+                                }
+                                state.6 |= entry.has_agent;
+                                state.7 |= entry.agent.is_some();
                             })
-                            .or_insert((candidate.0, candidate.1, entry.activity_at));
+                            .or_insert((
+                                candidate.0,
+                                candidate.1,
+                                entry.activity_at,
+                                entry.background_job_count,
+                                entry.agent_context,
+                                false,
+                                entry.has_agent,
+                                entry.agent.is_some(),
+                            ));
                         states
                     },
                 );
@@ -444,10 +571,26 @@ fn sidebar_rows_inner(
                     let tab = entry.tab_idx;
                     if current_tab != Some(tab) {
                         let mut tab_entry = entry.clone();
-                        if let Some((state, seen, activity_at)) = tab_states.get(&tab) {
+                        if let Some((
+                            state,
+                            seen,
+                            activity_at,
+                            background_job_count,
+                            agent,
+                            mixed_agents,
+                            has_agent,
+                            has_current_agent,
+                        )) = tab_states.get(&tab)
+                        {
                             tab_entry.state = *state;
                             tab_entry.seen = *seen;
                             tab_entry.activity_at = *activity_at;
+                            tab_entry.background_job_count = *background_job_count;
+                            tab_entry.agent = (!mixed_agents && *has_current_agent)
+                                .then_some(*agent)
+                                .flatten();
+                            tab_entry.agent_context = (!mixed_agents).then_some(*agent).flatten();
+                            tab_entry.has_agent = *has_agent;
                         }
                         rows.push(SidebarRow::Tab {
                             entry: Box::new(tab_entry),
@@ -462,11 +605,20 @@ fn sidebar_rows_inner(
     rows
 }
 
-pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
-    matches!(
-        entries.get(idx.saturating_add(1)),
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
-    )
+pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
+    let Some((key, _)) = workspace_parent_group_state(app, root_idx) else {
+        return vec![root_idx];
+    };
+    app.workspaces
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, workspace)| {
+            workspace
+                .worktree_space()
+                .is_some_and(|space| space.key == key)
+                .then_some(idx)
+        })
+        .collect()
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
@@ -911,22 +1063,17 @@ pub(crate) fn agent_counts_by_workspace(
 /// `has_agents` is supplied by the caller so a per-frame or per-hit-test agent
 /// scan is shared across every card instead of rebuilt for each row.
 pub(crate) fn workspace_agent_chevron_rect(
-    app: &AppState,
+    _app: &AppState,
     card: &crate::app::state::WorkspaceCardArea,
-    has_agents: bool,
+    _has_agents: bool,
 ) -> Rect {
-    if !has_agents || card.rect.width < 2 || card.rect.height == 0 {
+    if card.rect.width < 2 || card.rect.height == 0 {
         return Rect::default();
     }
-    let worktree_width = u16::from(workspace_parent_group_state(app, card.ws_idx).is_some());
-    Rect::new(
-        card.rect.x + card.rect.width.saturating_sub(1 + worktree_width),
-        card.rect.y,
-        1,
-        1,
-    )
+    Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCardArea) -> Rect {
     if card.rect.width == 0 || card.rect.height == 0 {
         return Rect::default();
@@ -1488,19 +1635,17 @@ fn render_workspace_list(
     } else {
         &app.view.workspace_card_areas
     };
-    let entries = workspace_list_entries(app);
-    let all_agents = sidebar_thread_entries_from(app, terminal_runtimes);
-    let agent_counts = agent_counts_by_workspace(&all_agents);
-
     for card in cards {
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
         let row_y = card.rect.y;
         let row_height = card.rect.height;
-        let selected = i == app.selected && is_navigating;
-        let is_active = Some(i) == app.active;
+        let member_indices = sidebar_space_member_indices(app, i);
+        let selected = is_navigating && member_indices.contains(&app.selected);
+        let is_active = app
+            .active
+            .is_some_and(|active| member_indices.contains(&active));
         let is_dragged = dragged_ws_idx == Some(i);
-        let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if is_dragged {
             let buf = frame.buffer_mut();
@@ -1522,153 +1667,40 @@ fn render_workspace_list(
             Style::default().fg(p.subtext0)
         };
 
-        let label = ws.display_name_from(&app.terminals, terminal_runtimes);
-        let display_label = if card.indented {
-            grouped_child_display_label(&label, ws.branch().as_deref(), ws.custom_name.is_some())
-        } else {
-            label
-        };
-        let parent_group = (!card.indented)
-            .then(|| workspace_parent_group_state(app, i))
-            .flatten();
-        let is_last_child = card.indented
-            && entries
-                .iter()
-                .position(|entry| {
-                    matches!(
-                        entry,
-                        WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == i
-                    )
-                })
-                .is_none_or(|entry_idx| !next_entry_is_indented_workspace(&entries, entry_idx));
-        let (display_state, display_seen) = parent_group
-            .as_ref()
-            .filter(|(_, collapsed)| *collapsed)
-            .map(|(key, _)| space_aggregate_state(app, key))
-            .unwrap_or((agg_state, agg_seen));
-        let state_icon = state_dot(display_state, display_seen, p);
-        let state_text_style = Style::default()
-            .fg(state_label_color(display_state, display_seen, p))
-            .add_modifier(Modifier::DIM);
-        let branch_style = Style::default().fg(if selected || is_active {
-            p.mauve
-        } else {
-            p.overlay0
-        });
-        let token_values = ws.metadata_tokens.values();
-        let rows = tokens::space_rows(
-            &app.sidebar_spaces,
-            SpaceTokenContext {
-                workspace: &display_label,
-                branch: ws.branch().as_deref(),
-                state_text: state_label(display_state, display_seen),
-                ahead_behind: ws.git_ahead_behind(),
-                tokens: &token_values,
-                suppress_git_details: card.indented,
-            },
+        let display_label = workspace_parent_group_state(app, i)
+            .and_then(|_| ws.worktree_space().map(|space| space.label.clone()))
+            .unwrap_or_else(|| ws.display_name_from(&app.terminals, terminal_runtimes));
+        let window_count = member_indices
+            .iter()
+            .filter_map(|member| app.workspaces.get(*member))
+            .map(|workspace| workspace.tabs.len())
+            .sum::<usize>();
+        let count_label = format!(" ({window_count})");
+        let fixed_width = display_width(" ▾ ") + display_width(&count_label);
+        let title = truncate_end(
+            &display_label,
+            usize::from(card.rect.width).saturating_sub(fixed_width),
         );
-
-        for (row_index, resolved) in rows.iter().enumerate() {
-            if row_index as u16 >= row_height || row_y + row_index as u16 >= list_bottom {
-                break;
-            }
-            let mut spans = Vec::new();
-            let prefix_width = if card.indented {
-                spans.push(Span::raw("   "));
-                if row_index == 0 {
-                    spans.push(Span::styled(
-                        if is_last_child { "└─ " } else { "├─ " },
-                        Style::default().fg(p.overlay0),
-                    ));
-                    6
-                } else if is_last_child {
-                    spans.push(Span::raw("     "));
-                    8
-                } else {
-                    spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
-                    spans.push(Span::raw("    "));
-                    8
-                }
-            } else if row_index == 0 {
-                spans.push(Span::raw(" "));
-                1
-            } else {
-                spans.push(Span::raw("   "));
-                3
-            };
-            let agent_suffix_width = if row_index == 0 {
-                agent_counts
-                    .get(&i)
-                    .map(|count| 1u16.saturating_add(count.to_string().len() as u16))
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let trailing_width = agent_suffix_width
-                + if row_index == 0 && parent_group.is_some() {
-                    2
-                } else {
-                    0
-                };
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                state_text_style,
-                name_style,
-                branch_style,
-                branch_style,
-                p,
-                card.rect
-                    .width
-                    .saturating_sub(prefix_width + trailing_width) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)),
-                Rect::new(card.rect.x, row_y + row_index as u16, card.rect.width, 1),
-            );
-        }
-
-        if let Some((_, collapsed)) = parent_group {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    if collapsed { "▸" } else { "▾" },
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    if app.workspace_agents_expanded(i) {
+                        "▾"
+                    } else {
+                        "▸"
+                    },
                     Style::default().fg(p.accent),
-                )),
-                workspace_group_chevron_rect(card),
-            );
-        }
-        if let Some(count) = agent_counts.get(&i) {
-            let chevron = workspace_agent_chevron_rect(app, card, *count > 0);
-            if chevron != Rect::default() {
-                let count_label = count.to_string();
-                let count_width = display_width_u16(&count_label);
-                if chevron.x >= card.rect.x.saturating_add(count_width) {
-                    frame.render_widget(
-                        Paragraph::new(Span::styled(
-                            count_label,
-                            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                        )),
-                        Rect::new(
-                            chevron.x.saturating_sub(count_width),
-                            chevron.y,
-                            count_width,
-                            1,
-                        ),
-                    );
-                }
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        if app.workspace_agents_expanded(i) {
-                            "▾"
-                        } else {
-                            "▸"
-                        },
-                        Style::default().fg(p.accent),
-                    )),
-                    chevron,
-                );
-            }
-        }
+                ),
+                Span::raw(" "),
+                Span::styled(title, name_style),
+                Span::styled(
+                    count_label,
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ])),
+            Rect::new(card.rect.x, row_y, card.rect.width, 1),
+        );
     }
 
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
@@ -1738,18 +1770,6 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         _ => None,
     });
     let Some((entry, depth)) = entry else { return };
-    let show_status = entry.state != AgentState::Idle || !entry.seen;
-    let state = show_status.then(|| {
-        entry
-            .state_labels
-            .get(agent_panel_status_key(entry.state, entry.seen))
-            .map(String::as_str)
-            .unwrap_or_else(|| match entry.state {
-                AgentState::Idle if !entry.seen => "done",
-                _ => state_label(entry.state, entry.seen),
-            })
-    });
-    let state_icon = show_status.then(|| state_dot(entry.state, entry.seen, p));
     let style = if active {
         Style::default()
             .fg(active_sidebar_title_color(p))
@@ -1758,71 +1778,56 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.subtext0)
     };
     let prefix = " ".repeat(usize::from(depth) * 3 + 1);
-    let status_width = state
-        .zip(state_icon.as_ref())
-        .map(|(state, icon)| {
-            display_width(icon.0) + 1 + display_width(state) + display_width(" · ")
-        })
-        .unwrap_or_default();
-    let fixed_width = display_width(&prefix) + status_width;
-    let activity_field =
-        tab_activity_age_field(&entry, app.view_observed_at, card.rect, fixed_width);
-    let activity_width = activity_field
-        .as_deref()
-        .map(|label| display_width(label) + 1)
-        .unwrap_or_default();
-    let title = truncate_end(
-        entry
-            .primary_tab_label
-            .as_deref()
-            .unwrap_or(DEFAULT_THREAD_TITLE),
-        usize::from(card.rect.width).saturating_sub(fixed_width + activity_width),
+    let layout = tab_row_layout(
+        &entry,
+        app.view_observed_at,
+        usize::from(card.rect.width),
+        display_width(&prefix),
+        p,
     );
     let mut spans = vec![Span::raw(prefix)];
-    if let (Some(state), Some(state_icon)) = (state, state_icon) {
-        spans.extend([
-            Span::styled(state_icon.0.to_string(), state_icon.1),
-            Span::styled(
-                format!(" {state}"),
-                Style::default().fg(state_label_color(entry.state, entry.seen, p)),
-            ),
-            Span::styled(" · ", Style::default().fg(p.overlay0)),
-        ]);
+    if let Some(state) = layout.state.as_deref() {
+        let state_icon = state_dot(entry.state, entry.seen, p);
+        spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
+        if layout.show_state_label {
+            spans.extend([
+                Span::styled(
+                    format!(" {state}"),
+                    Style::default().fg(state_label_color(entry.state, entry.seen, p)),
+                ),
+                Span::styled(" · ", Style::default().fg(p.overlay0)),
+            ]);
+        } else {
+            spans.push(Span::raw(" "));
+        }
     }
-    spans.push(Span::styled(title, style));
-    if let Some(activity_field) = activity_field {
+    spans.push(Span::styled(layout.title, style));
+    if let Some(agent_suffix) = layout.agent_suffix {
+        spans.push(Span::styled(agent_suffix, Style::default().fg(p.overlay1)));
+    }
+    if let Some(background_jobs) = layout.background_jobs {
+        spans.push(Span::styled(
+            background_jobs,
+            Style::default().fg(p.overlay0),
+        ));
+    }
+    if let Some(activity_age) = layout.activity_age {
         let used_width = spans
             .iter()
             .map(|span| display_width(span.content.as_ref()))
             .sum::<usize>();
         let padding = usize::from(card.rect.width)
             .saturating_sub(used_width)
-            .saturating_sub(display_width(&activity_field));
+            .saturating_sub(display_width(&activity_age));
         spans.push(Span::raw(" ".repeat(padding)));
         let activity_style = if entry.state == AgentState::Working {
             Style::default().fg(p.blue)
         } else {
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
         };
-        spans.push(Span::styled(activity_field, activity_style));
+        spans.push(Span::styled(activity_age, activity_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), card.rect);
-}
-
-fn tab_activity_age_field(
-    entry: &AgentPanelEntry,
-    now: std::time::Instant,
-    rect: Rect,
-    fixed_width: usize,
-) -> Option<String> {
-    let activity_at = entry.activity_at?;
-    let label = format!(
-        "{} ago",
-        crate::activity_age::compact_label(Some(activity_at), now)
-    );
-    (usize::from(rect.width)
-        >= fixed_width + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH + 1 + display_width(&label))
-    .then_some(label)
 }
 
 fn render_agent_card(
@@ -1998,26 +2003,15 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            let show_status = entry.state != AgentState::Idle || !entry.seen;
-            let status_width = if show_status {
-                let state = entry
-                    .state_labels
-                    .get(agent_panel_status_key(entry.state, entry.seen))
-                    .map(String::as_str)
-                    .unwrap_or_else(|| match entry.state {
-                        AgentState::Idle if !entry.seen => "done",
-                        _ => state_label(entry.state, entry.seen),
-                    });
-                display_width(state_dot(entry.state, entry.seen, &app.palette).0)
-                    + 1
-                    + display_width(state)
-                    + display_width(" · ")
-            } else {
-                0
-            };
-            let fixed_width = usize::from(depth) * 3 + 1 + status_width;
-            tab_activity_age_field(entry, app.view_observed_at, card.rect, fixed_width)
-                .and(entry.activity_at)
+            tab_row_layout(
+                entry,
+                app.view_observed_at,
+                usize::from(card.rect.width),
+                usize::from(depth) * 3 + 1,
+                &app.palette,
+            )
+            .activity_age
+            .and(entry.activity_at)
         })
         .collect()
 }
@@ -2183,8 +2177,11 @@ mod tests {
             .iter()
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
-        assert!(text.iter().any(|line| line.contains(DEFAULT_THREAD_TITLE)));
-        assert!(!text.iter().any(|line| line.contains("pi")));
+        assert!(
+            text.iter()
+                .any(|line| line.contains("New") && line.contains("· pi")),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -2859,6 +2856,7 @@ row_gap = 1
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(Agent::Codex);
         terminal_state.state = AgentState::Working;
+        terminal_state.background_job_count = Some(2);
         app.reconcile_sidebar_presentation();
 
         let width = 60;
@@ -2895,8 +2893,9 @@ row_gap = 1
              p{max-width:760px}.terminal{display:grid;width:max-content;font-size:14px;\
              line-height:20px;box-shadow:0 0 0 1px #bcc0cc;background:#eff1f5}.cell{width:1ch;\
              height:20px;white-space:pre;overflow:visible}</style><h1>Herdr sidebar release layout</h1>\
-             <p>Actual Ratatui test buffer: selected titles, blue Working status, one row per tab,\
-             multi-pane roll-up, and compact spacing between complete Space groups.</p>\
+             <p>Actual Ratatui test buffer: selected titles, blue Working status, provider suffix,\
+             background-terminal count, one row per tab, multi-pane roll-up, and compact spacing\
+             between complete Space groups.</p>\
              <div class=\"terminal\" style=\"grid-template-columns:repeat(60,1ch)\">",
         );
         for cell in terminal.backend().buffer().content() {
@@ -3008,7 +3007,10 @@ row_gap = 1
         assert!(first.contains("repo-folder"));
         assert!(tab_window.contains("Fix Billing Retry"), "{tab_window:?}");
         assert_eq!(tab_window.matches("Fix Billing Retry").count(), 1);
-        assert!(!tab_window.contains("pi"), "{tab_window:?}");
+        assert!(
+            tab_window.contains("Fix Billing Retry · pi"),
+            "{tab_window:?}"
+        );
         assert!(!first.contains("working"));
         assert!(tab_window.contains("working"));
         assert!(agent_cards.is_empty());
@@ -3212,18 +3214,19 @@ row_gap = 1
     fn narrow_tab_rows_keep_status_before_truncated_title() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("one".into());
-        let area = Rect::new(0, 0, 12, 12);
-        let mut terminal = Terminal::new(TestBackend::new(12, 12)).unwrap();
+        let area = Rect::new(0, 0, 23, 12);
+        let mut terminal = Terminal::new(TestBackend::new(23, 12)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let card = &compute_tab_card_areas(&app, area)[0];
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 11);
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 23);
 
         assert!(
             rendered.contains('●') || rendered.contains('w'),
             "{rendered:?}"
         );
+        assert!(rendered.contains("· pi"), "{rendered:?}");
         assert!(!rendered.contains("--"), "{rendered:?}");
     }
 
@@ -3264,7 +3267,7 @@ row_gap = 1
         app.sidebar_collapsed = false;
         app.mobile_width_threshold = 80;
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 80, 20));
-        assert!(app.view.visible_agent_activity_instants.is_empty());
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
 
         app.mobile_width_threshold = 0;
         app.sidebar_width = 12;
@@ -3310,8 +3313,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let buffer = terminal.backend().buffer();
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(buffer, tab_row, 25);
-        assert!(rendered.contains("New Thread"), "{rendered:?}");
-        assert!(!rendered.contains("pi"), "{rendered:?}");
+        assert!(rendered.contains("New Th"), "{rendered:?}");
+        assert!(rendered.contains("· pi"), "{rendered:?}");
         assert!(compute_agent_card_areas(&app, area).is_empty());
     }
 
@@ -3348,7 +3351,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     }
 
     #[test]
-    fn space_occurrence_style_applies_without_styling_separator() {
+    fn final_space_row_ignores_legacy_custom_token_rows() {
         let config: crate::config::Config = toml::from_str(
             r##"
 [ui.sidebar.spaces]
@@ -3374,21 +3377,9 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let buffer = terminal.backend().buffer();
-        let h = buffer[(find_symbol_x(buffer, row, 25, "H"), row)].style();
-        let i = buffer[(find_symbol_x(buffer, row, 25, "I"), row)].style();
-        let separator = buffer[(find_symbol_x(buffer, row, 25, "·"), row)].style();
-
-        for style in [h, i] {
-            assert_eq!(style.fg, Some(ratatui::style::Color::Rgb(0xab, 0xcd, 0xef)));
-            assert!(style.add_modifier.contains(Modifier::BOLD));
-            assert!(!style.add_modifier.contains(Modifier::DIM));
-            assert_eq!(style.bg, Some(ratatui::style::Color::Reset));
-        }
-        assert_eq!(separator.fg, Some(app.palette.overlay0));
-        assert!(separator.add_modifier.contains(Modifier::DIM));
-        assert!(!separator.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(separator.bg, Some(ratatui::style::Color::Reset));
+        let rendered = row_text(terminal.backend().buffer(), row, 25);
+        assert!(rendered.contains("one (1)"), "{rendered:?}");
+        assert!(!rendered.contains("HI"), "{rendered:?}");
     }
 
     #[test]
@@ -3505,6 +3496,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             });
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
+        assert!(first.contains("· pi"), "{first:?}");
         assert!(!first.contains("very-long-workspace-name"), "{first:?}");
     }
 
@@ -3605,21 +3597,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn oversized_space_layout_is_clipped_to_the_section_body() {
+    fn legacy_space_row_config_cannot_reintroduce_subtitles() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]; 10];
         let area = Rect::new(0, 0, 20, 10);
         let workspace_area = workspace_list_rect(area, app.sidebar_section_split);
-        let body = workspace_list_body_rect(workspace_area, false);
-
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
         let (cards, _) = compute_workspace_list_areas(&app, area);
 
-        assert_eq!(metrics.viewport_rows, 1);
-        assert_eq!(cards.len(), 1);
+        assert_eq!(metrics.viewport_rows, 2);
+        assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].ws_idx, 0);
-        assert_eq!(cards[0].rect.height, body.height);
+        assert_eq!(cards[0].rect.height, 1);
     }
 
     #[test]
@@ -3997,23 +3987,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn grouped_child_label_keeps_custom_workspace_name() {
-        assert_eq!(
-            grouped_child_display_label("renamed issue", Some("worktree/issue-137"), true),
-            "renamed issue"
-        );
-    }
-
-    #[test]
-    fn grouped_child_label_uses_short_branch_for_auto_named_workspace() {
-        assert_eq!(
-            grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
-            "issue-137"
-        );
-    }
-
-    #[test]
-    fn workspace_list_truncates_cjk_branch_without_panic() {
+    fn workspace_list_omits_cjk_branch_subtitle_without_panic() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("repo");
         ws.cached_git_branch = Some("feature/中文-分支-644".into());
@@ -4035,6 +4009,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 render_workspace_list(&app, &runtimes, frame, Rect::new(0, 0, 15, 6), false)
             })
             .expect("workspace list should render");
+        let rendered = row_text(terminal.backend().buffer(), 1, 15);
+        assert!(!rendered.contains("中文"), "{rendered:?}");
     }
 
     fn workspace_with_worktree_space(
@@ -4068,7 +4044,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn desktop_worktree_tree_aligns_parents_and_marks_children() {
+    fn desktop_worktree_group_renders_one_space_row() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
@@ -4100,19 +4076,395 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let buffer = terminal.backend().buffer();
         let cards = &app.view.workspace_card_areas;
-        let parent_name_x = find_symbol_x(buffer, cards[0].rect.y, cards[0].rect.width, "m");
-        let plain_name_x = find_symbol_x(buffer, cards[3].rect.y, cards[3].rect.width, "n");
-        assert_eq!(parent_name_x, plain_name_x);
-        assert_eq!(buffer[(cards[1].rect.x + 3, cards[1].rect.y)].symbol(), "├");
-        assert_eq!(buffer[(cards[2].rect.x + 3, cards[2].rect.y)].symbol(), "└");
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].ws_idx, 0);
+        assert_eq!(cards[1].ws_idx, 3);
+        let grouped = row_text(buffer, cards[0].rect.y, cards[0].rect.width);
+        assert!(grouped.contains("herdr (3)"), "{grouped:?}");
+        assert!(!grouped.contains("issue"), "{grouped:?}");
+        assert!(!grouped.contains("review"), "{grouped:?}");
+    }
+
+    #[test]
+    fn active_linked_window_darkens_its_root_space_title() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+        ];
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+        app.active = Some(1);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 30, 10);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let row = app.view.workspace_card_areas[0].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let title = buffer[(find_symbol_x(buffer, row, area.width, "h"), row)].style();
+
+        assert_eq!(title.fg, Some(active_sidebar_title_color(&app.palette)));
+        assert!(title.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn linked_worktrees_render_as_one_space_with_direct_window_rows() {
+        let mut app = AppState::test_new();
+        let mut main = workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr");
+        main.test_add_tab(Some("Main review"));
+        let mut issue =
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue");
+        issue.tabs[0].custom_name = Some("Issue fix".into());
+        app.workspaces = vec![main, issue];
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+
+        let rows = sidebar_rows(&app);
         assert_eq!(
-            buffer[(cards[0].rect.x + cards[0].rect.width - 1, cards[0].rect.y)].symbol(),
-            "▾"
+            rows.iter()
+                .map(|row| match row {
+                    SidebarRow::Workspace { ws_idx, .. } => format!("space:{ws_idx}"),
+                    SidebarRow::Tab { entry, .. } => {
+                        format!("window:{}:{}", entry.ws_idx, entry.tab_idx)
+                    }
+                    SidebarRow::Agent { .. } => "agent".to_string(),
+                })
+                .collect::<Vec<_>>(),
+            vec!["space:0", "window:0:0", "window:0:1", "window:1:0"]
+        );
+
+        assert!(app.toggle_workspace_agent_disclosure(0));
+        assert!(matches!(
+            sidebar_rows(&app).as_slice(),
+            [SidebarRow::Workspace { ws_idx: 0, .. }]
+        ));
+        assert!(app.toggle_workspace_agent_disclosure(0));
+        assert_eq!(
+            sidebar_rows(&app)
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count(),
+            3
         );
     }
 
     #[test]
-    fn desktop_worktree_connector_uses_full_list_at_viewport_boundary() {
+    fn tab_background_jobs_sum_across_panes_without_adding_rows() {
+        let mut app = app_with_agents(&["one"]);
+        let second = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.ensure_test_terminals();
+        let first = app.workspaces[0].tabs[0].root_pane;
+        for (pane, count) in [(first, 1), (second, 2)] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .background_job_count = Some(count);
+        }
+
+        let tabs = sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].background_job_count, Some(3));
+    }
+
+    #[test]
+    fn tab_background_job_badge_renders_immediately_after_title() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Use Repository Instructions".into());
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .background_job_count = Some(2);
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
+
+        assert!(
+            rendered.contains("Use Repository Instructions · cx  2 >_"),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn tab_provider_suffixes_distinguish_codex_and_claude_after_title() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Codex task".into());
+        let codex_pane = app.workspaces[0].tabs[0].root_pane;
+        let codex_terminal = app.workspaces[0].tabs[0].panes[&codex_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&codex_terminal)
+            .unwrap()
+            .detected_agent = Some(Agent::Codex);
+        let claude_tab = app.workspaces[0].test_add_tab(Some("Claude task"));
+        app.ensure_test_terminals();
+        let claude_pane = app.workspaces[0].tabs[claude_tab].root_pane;
+        let claude_terminal = app.workspaces[0].tabs[claude_tab].panes[&claude_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&claude_terminal)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 34, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered.iter().any(|row| row.contains("Codex task · cx")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|row| row.contains("Claude task · cc")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_provider_tab_omits_provider_suffix() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Mixed task".into());
+        let second = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.ensure_test_terminals();
+        let first = app.workspaces[0].tabs[0].root_pane;
+        for (pane, agent) in [(first, Agent::Codex), (second, Agent::Claude)] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(agent);
+        }
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(entry.agent, None);
+        assert!(
+            tab_lifecycle_visible(&entry),
+            "mixed provider ambiguity must not hide agent lifecycle"
+        );
+    }
+
+    #[test]
+    fn tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
+        let started = std::time::Instant::now();
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Investigate release regression".into());
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal_state.background_job_count = Some(2);
+        app.view_observed_at = started + std::time::Duration::from_secs(65);
+        app.reconcile_sidebar_presentation();
+
+        for width in [18, 38] {
+            let area = Rect::new(0, 0, width, 10);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let row = compute_tab_card_areas(&app, area)[0].rect.y;
+            let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
+
+            assert!(rendered.contains("●"), "{width}: {rendered:?}");
+            assert!(rendered.contains(" · cx"), "{width}: {rendered:?}");
+            let dot = rendered.find('●').unwrap();
+            let suffix = rendered.find(" · cx").unwrap();
+            assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
+            if width == 18 {
+                assert!(!rendered.contains("working"), "{rendered:?}");
+                assert!(!rendered.contains(">_"), "{rendered:?}");
+                assert!(!rendered.contains("ago"), "{rendered:?}");
+            } else {
+                assert!(rendered.contains("working"), "{rendered:?}");
+                assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
+                assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pi_uses_pi_suffix_while_unsupported_and_agentless_tabs_omit_it() {
+        assert_eq!(tab_agent_suffix(Some(Agent::Pi)), Some("pi"));
+        assert_eq!(tab_agent_suffix(Some(Agent::Gemini)), None);
+        assert_eq!(tab_agent_suffix(None), None);
+    }
+
+    #[test]
+    fn unseen_agentless_tab_omits_lifecycle_status() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].test_add_tab(Some("Agentless window"));
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 50, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .find(|row| row.contains("Agentless window"))
+            .expect("agentless tab row");
+
+        for lifecycle in ["idle", "done", "working", "blocked", "unknown"] {
+            assert!(!rendered.contains(lifecycle), "{rendered:?}");
+        }
+    }
+
+    #[test]
+    fn completed_agent_process_exit_retains_done_without_provider_suffix() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let workspace = Workspace::test_new("one");
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            true,
+            started + std::time::Duration::from_secs(5),
+        );
+        app.workspaces[0].tabs[0].panes.get_mut(&pane).unwrap().seen = false;
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(entry.agent, None);
+        assert!(entry.has_agent);
+        assert!(tab_lifecycle_visible(&entry));
+        assert_eq!(agent_panel_status_key(entry.state, entry.seen), "done");
+    }
+
+    #[test]
+    fn exited_claude_plus_live_codex_omits_provider_suffix() {
+        let started = std::time::Instant::now();
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let exited_pane = workspace.tabs[0].root_pane;
+        let live_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let exited_terminal = app.workspaces[0].tabs[0].panes[&exited_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&exited_terminal).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            true,
+            started + std::time::Duration::from_secs(5),
+        );
+        let live_terminal = app.workspaces[0].tabs[0].panes[&live_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&live_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started + std::time::Duration::from_secs(6),
+            );
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(entry.agent, None);
+        assert!(tab_lifecycle_visible(&entry));
+    }
+
+    #[test]
+    fn desktop_worktree_group_has_no_intermediate_connector_rows() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
@@ -4123,7 +4475,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 0;
         let area = Rect::new(0, 0, 30, 3);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
-        assert_eq!(app.view.workspace_card_areas.len(), 2);
+        assert_eq!(app.view.workspace_card_areas.len(), 1);
         let list_area = workspace_list_rect(area, app.sidebar_section_split);
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -4139,11 +4491,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .unwrap();
 
-        let child = app.view.workspace_card_areas[1];
-        assert_eq!(
-            terminal.backend().buffer()[(child.rect.x + 3, child.rect.y)].symbol(),
-            "├"
-        );
+        let rendered = row_text(terminal.backend().buffer(), 1, area.width);
+        assert!(!rendered.contains('├'), "{rendered:?}");
+        assert!(!rendered.contains('└'), "{rendered:?}");
     }
 
     #[test]
@@ -4158,16 +4508,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 20));
 
         assert!(headers.is_empty());
+        assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].ws_idx, 0);
         assert!(!cards[0].indented);
-        assert_eq!(cards[1].ws_idx, 1);
-        assert!(cards[1].indented);
-        // ac3: a worktree root and its child remain one packed Space group.
-        assert_eq!(cards[1].rect.y, cards[0].rect.y + cards[0].rect.height);
     }
 
     #[test]
-    fn space_row_gap_preserves_compact_worktree_children() {
+    fn space_row_gap_separates_flattened_groups() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
@@ -4179,21 +4526,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 2;
 
         let (spacious, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
+        assert_eq!(spacious.len(), 2);
         assert_eq!(
             spacious[1].rect.y,
-            spacious[0].rect.y + spacious[0].rect.height
-        );
-        assert_eq!(
-            spacious[2].rect.y,
-            spacious[1].rect.y + spacious[1].rect.height
-        );
-        assert_eq!(
-            spacious[3].rect.y,
-            spacious[2].rect.y + spacious[2].rect.height + 2
+            spacious[0].rect.y + spacious[0].rect.height + 2
         );
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        assert_eq!(spacious_metrics.viewport_rows, 3);
-        assert_eq!(spacious_metrics.max_offset_from_bottom, 2);
+        assert_eq!(spacious_metrics.viewport_rows, 2);
+        assert_eq!(spacious_metrics.max_offset_from_bottom, 0);
 
         app.sidebar_spaces.row_gap = 0;
         let (packed, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
@@ -4201,7 +4541,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        assert_eq!(packed_metrics.viewport_rows, 4);
+        assert_eq!(packed_metrics.viewport_rows, 2);
         assert_eq!(packed_metrics.max_offset_from_bottom, 0);
     }
 
@@ -4316,8 +4656,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert!(headers.is_empty());
         assert_eq!(app.workspace_scroll, 0);
-        assert_eq!(cards.len(), 3);
-        assert_eq!(cards[2].ws_idx, 2);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].ws_idx, 0);
     }
 
     #[test]

@@ -359,8 +359,8 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            // Explicit mobile workspace → tab → pane projection.
-            "d2702de5fef8a24380417633de1bc1323e7b6b4c09aa08d46c170e4af8315456"
+            // One-line mobile Space → direct tab/window projection.
+            "34fd0e2e688c13ca48b905f64b574e442826b6d60a7088b637216b1abd356ff2"
         );
     }
 }
