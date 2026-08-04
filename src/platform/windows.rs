@@ -2,11 +2,53 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
     mem::{size_of, MaybeUninit},
-    path::PathBuf,
+    os::windows::ffi::OsStrExt,
+    path::{Path, PathBuf},
     ptr::{copy_nonoverlapping, null_mut},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+pub(crate) fn replace_file_durably(source: &Path, target: &Path) -> std::io::Result<()> {
+    move_file_write_through(source, target)
+}
+
+pub(crate) fn remove_file_durably(path: &Path, tombstone: &Path) -> std::io::Result<()> {
+    match move_file_write_through(path, tombstone) {
+        Ok(()) => match std::fs::remove_file(tombstone) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn move_file_write_through(source: &Path, target: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let flags = MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING;
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers that remain
+    // alive for the duration of this synchronous call.
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), flags) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 use windows_sys::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},

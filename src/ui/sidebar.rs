@@ -2742,6 +2742,7 @@ mod tests {
     #[test]
     fn agent_tree_does_not_change_runtime_snapshot_or_handoff_schema() {
         let snapshot = crate::persist::SessionSnapshot {
+            generation: None,
             version: 3,
             workspaces: Vec::new(),
             active: None,
