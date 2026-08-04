@@ -7,8 +7,8 @@ use super::{
     config::{read_branch_config, upstream_full_ref},
     discovery::{
         automatic_workspace_label, canonicalize_best_effort_path, fallback_label_from_cwd,
-        git_ref_storage_is_reftable, git_rev_parse_verify, git_space_metadata_from_info,
-        git_symbolic_head_full, git_worktree_info, read_ref_oid, GitWorktreeInfo,
+        git_ref_storage_is_reftable, git_space_metadata_from_info, git_worktree_info, read_ref_oid,
+        GitWorktreeInfo,
     },
 };
 
@@ -86,11 +86,28 @@ pub fn git_status_snapshot_for_cwd(
     )
 }
 
+#[cfg(test)]
 pub fn git_status_snapshot_for_cwd_with_demand(
     cwd: &Path,
     cached: Option<&GitStatusCacheEntry>,
     demand: GitStatusRefreshDemand,
     deadline: Instant,
+) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
+    git_status_snapshot_for_cwd_with_demand_and_program(
+        cwd,
+        cached,
+        demand,
+        deadline,
+        Path::new("git"),
+    )
+}
+
+pub(crate) fn git_status_snapshot_for_cwd_with_demand_and_program(
+    cwd: &Path,
+    cached: Option<&GitStatusCacheEntry>,
+    demand: GitStatusRefreshDemand,
+    deadline: Instant,
+    git_program: &Path,
 ) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
     if let Some(cached) = cached.filter(|entry| {
         entry.fingerprint.is_none()
@@ -124,7 +141,7 @@ pub fn git_status_snapshot_for_cwd_with_demand(
         let branch = demand
             .branch
             .then(|| {
-                read_head_identity(&info, deadline).and_then(|head| match head {
+                read_head_identity(&info, deadline, git_program).and_then(|head| match head {
                     GitHeadIdentity::Branch { short_name, .. } => Some(short_name),
                     GitHeadIdentity::Detached { .. } => None,
                 })
@@ -141,7 +158,7 @@ pub fn git_status_snapshot_for_cwd_with_demand(
         );
     }
 
-    let Some(fingerprint) = git_status_fingerprint_from_info(&info, deadline) else {
+    let Some(fingerprint) = git_status_fingerprint_from_info(&info, deadline, git_program) else {
         return (
             WorkspaceGitStatusSnapshot {
                 auto_label,
@@ -175,7 +192,7 @@ pub fn git_status_snapshot_for_cwd_with_demand(
         .head_oid()
         .zip(fingerprint.upstream_oid())
         .and_then(|(head_oid, upstream_oid)| {
-            git_ahead_behind_between(cwd, head_oid, upstream_oid, deadline)
+            git_ahead_behind_between(cwd, head_oid, upstream_oid, deadline, git_program)
         });
     let snapshot = WorkspaceGitStatusSnapshot {
         auto_label,
@@ -196,17 +213,22 @@ pub fn git_status_snapshot_for_cwd_with_demand(
 #[cfg(test)]
 pub(super) fn git_status_fingerprint(cwd: &Path) -> Option<GitStatusFingerprint> {
     let info = git_worktree_info(cwd)?;
-    git_status_fingerprint_from_info(&info, Instant::now() + Duration::from_secs(2))
+    git_status_fingerprint_from_info(
+        &info,
+        Instant::now() + Duration::from_secs(2),
+        Path::new("git"),
+    )
 }
 
 fn git_status_fingerprint_from_info(
     info: &GitWorktreeInfo,
     deadline: Instant,
+    git_program: &Path,
 ) -> Option<GitStatusFingerprint> {
-    let head = read_head_identity(info, deadline)?;
+    let head = read_head_identity(info, deadline, git_program)?;
     let upstream = match &head {
         GitHeadIdentity::Branch { short_name, .. } => {
-            read_upstream_identity(info, short_name, deadline)
+            read_upstream_identity(info, short_name, deadline, git_program)
         }
         GitHeadIdentity::Detached { .. } => None,
     };
@@ -241,9 +263,13 @@ impl GitStatusFingerprint {
     }
 }
 
-fn read_head_identity(info: &GitWorktreeInfo, deadline: Instant) -> Option<GitHeadIdentity> {
+fn read_head_identity(
+    info: &GitWorktreeInfo,
+    deadline: Instant,
+    git_program: &Path,
+) -> Option<GitHeadIdentity> {
     if git_ref_storage_is_reftable(&info.git_common_dir) {
-        return read_head_identity_from_git(info, deadline);
+        return read_head_identity_from_git(info, deadline, git_program);
     }
 
     read_head_identity_from_files(info)
@@ -252,10 +278,20 @@ fn read_head_identity(info: &GitWorktreeInfo, deadline: Instant) -> Option<GitHe
 fn read_head_identity_from_git(
     info: &GitWorktreeInfo,
     deadline: Instant,
+    git_program: &Path,
 ) -> Option<GitHeadIdentity> {
-    if let Some(full_ref) = git_symbolic_head_full(&info.repo_root, deadline) {
+    if let Some(full_ref) = super::discovery::git_symbolic_head_full_with_program(
+        &info.repo_root,
+        deadline,
+        git_program,
+    ) {
         let short_name = full_ref.strip_prefix("refs/heads/")?.to_string();
-        let oid = git_rev_parse_verify(&info.repo_root, &full_ref, deadline);
+        let oid = super::discovery::git_rev_parse_verify_with_program(
+            &info.repo_root,
+            &full_ref,
+            deadline,
+            git_program,
+        );
         return Some(GitHeadIdentity::Branch {
             full_ref,
             short_name,
@@ -263,8 +299,13 @@ fn read_head_identity_from_git(
         });
     }
 
-    git_rev_parse_verify(&info.repo_root, "HEAD", deadline)
-        .map(|oid| GitHeadIdentity::Detached { oid })
+    super::discovery::git_rev_parse_verify_with_program(
+        &info.repo_root,
+        "HEAD",
+        deadline,
+        git_program,
+    )
+    .map(|oid| GitHeadIdentity::Detached { oid })
 }
 
 fn read_head_identity_from_files(info: &GitWorktreeInfo) -> Option<GitHeadIdentity> {
@@ -289,11 +330,17 @@ fn read_upstream_identity(
     info: &GitWorktreeInfo,
     branch: &str,
     deadline: Instant,
+    git_program: &Path,
 ) -> Option<GitUpstreamIdentity> {
     let config = read_branch_config(info, branch)?;
     let full_ref = upstream_full_ref(&config)?;
     let oid = if git_ref_storage_is_reftable(&info.git_common_dir) {
-        git_rev_parse_verify(&info.repo_root, &full_ref, deadline)
+        super::discovery::git_rev_parse_verify_with_program(
+            &info.repo_root,
+            &full_ref,
+            deadline,
+            git_program,
+        )
     } else {
         read_ref_oid(&info.git_common_dir, &full_ref)
     };
@@ -333,9 +380,10 @@ fn git_ahead_behind_between(
     head_oid: &str,
     upstream_oid: &str,
     deadline: Instant,
+    git_program: &Path,
 ) -> Option<(usize, usize)> {
     let range = format!("{head_oid}...{upstream_oid}");
-    let mut command = crate::noninteractive_process::command("git");
+    let mut command = crate::noninteractive_process::command(git_program);
     command
         .arg("-C")
         .arg(cwd)
@@ -629,7 +677,11 @@ mod tests {
             GitHeadIdentity::Branch {
                 full_ref: "refs/heads/main".into(),
                 short_name: "main".into(),
-                oid: git_rev_parse_verify(&root, "HEAD", Instant::now() + Duration::from_secs(2),),
+                oid: super::super::discovery::git_rev_parse_verify(
+                    &root,
+                    "HEAD",
+                    Instant::now() + Duration::from_secs(2),
+                ),
             }
         );
 

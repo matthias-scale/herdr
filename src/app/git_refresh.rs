@@ -41,6 +41,20 @@ struct WorkspaceGitRefreshOutput {
 }
 
 impl App {
+    fn git_program_for_refresh(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(program) = self.git_program_override.as_ref() {
+            return program.clone();
+        }
+
+        PathBuf::from("git")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_git_program(&mut self, program: PathBuf) {
+        self.git_program_override = Some(program);
+    }
+
     #[cfg(test)]
     pub(crate) fn test_begin_git_refresh(&mut self, generation: u64) {
         let started_at = Instant::now();
@@ -94,12 +108,13 @@ impl App {
         });
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
+        let git_program = self.git_program_for_refresh();
         self.git_identity_refresh_requested = false;
         if refresh_repo_discovery {
             self.last_git_repo_discovery_refresh = now;
         }
         std::thread::spawn(move || {
-            let output = refresh_workspace_git_statuses(workspaces, &cache, deadline);
+            let output = refresh_workspace_git_statuses(workspaces, &cache, deadline, &git_program);
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
                 generation,
                 results: output.results,
@@ -305,17 +320,20 @@ fn refresh_workspace_git_statuses(
     items: Vec<WorkspaceGitRefreshItem>,
     cache: &HashMap<PathBuf, GitStatusCacheEntry>,
     deadline: Instant,
+    git_program: &std::path::Path,
 ) -> WorkspaceGitRefreshOutput {
     let mut results = Vec::new();
     let mut cache_updates = Vec::new();
 
     for job in deduplicate_git_refresh_items(items, cache) {
-        let (snapshot, cache_entry) = crate::workspace::git_status_snapshot_for_cwd_with_demand(
-            &job.cache_key,
-            job.cached.as_ref(),
-            job.demand,
-            deadline,
-        );
+        let (snapshot, cache_entry) =
+            crate::workspace::git_status_snapshot_for_cwd_with_demand_and_program(
+                &job.cache_key,
+                job.cached.as_ref(),
+                job.demand,
+                deadline,
+                git_program,
+            );
         if let Some(cache_entry) = cache_entry {
             cache_updates.push((job.cache_key.clone(), cache_entry));
         }
@@ -339,42 +357,14 @@ fn refresh_workspace_git_statuses(
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use std::ffi::OsString;
-    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::Path;
     #[cfg(unix)]
     use std::time::Duration;
 
     use super::*;
     use crate::workspace::Workspace;
-
-    #[cfg(unix)]
-    struct PathGuard {
-        previous: Option<OsString>,
-    }
-
-    #[cfg(unix)]
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var("PATH", previous);
-            } else {
-                std::env::remove_var("PATH");
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn set_test_path(directory: &std::path::Path) -> PathGuard {
-        let previous = std::env::var_os("PATH");
-        let mut paths = vec![directory.to_path_buf()];
-        if let Some(previous_path) = previous.as_ref() {
-            paths.extend(std::env::split_paths(previous_path));
-        }
-        let path = std::env::join_paths(paths).expect("join test PATH");
-        std::env::set_var("PATH", path);
-        PathGuard { previous }
-    }
 
     #[cfg(unix)]
     fn write_executable(path: &std::path::Path, contents: &str) {
@@ -481,6 +471,7 @@ mod tests {
             ],
             &HashMap::new(),
             Instant::now() + GIT_REFRESH_TIMEOUT,
+            Path::new("git"),
         );
 
         assert_eq!(output.cache_updates.len(), 1);
@@ -596,6 +587,7 @@ mod tests {
             items,
             &HashMap::new(),
             Instant::now() + GIT_REFRESH_TIMEOUT,
+            Path::new("git"),
         );
 
         assert!(app
@@ -958,9 +950,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hung_git_refresh_retries_and_rejects_late_prior_generation() {
-        let _env_guard = crate::config::test_config_env_lock()
-            .lock()
-            .expect("config test env lock");
         let fixture_dir = std::env::temp_dir().join(format!(
             "herdr-git-refresh-consumer-{}-{}",
             std::process::id(),
@@ -1006,11 +995,10 @@ mod tests {
                 descendant_pid_file.display(),
             ),
         );
-        let _path_guard = set_test_path(&fake_bin);
-
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::GitStatus]];
         let mut app = test_app(&config);
+        app.set_test_git_program(fake_bin.join("git"));
         let mut workspace = Workspace::test_new("consumer");
         workspace.identity_cwd = repo.clone();
         workspace.cached_identity_cwd = repo.clone();

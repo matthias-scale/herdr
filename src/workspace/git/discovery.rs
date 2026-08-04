@@ -161,8 +161,17 @@ fn path_is_git_dir_layout(path: &Path) -> bool {
     path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
 }
 
-pub(super) fn git_symbolic_head_full(repo_root: &Path, deadline: Instant) -> Option<String> {
-    git_trimmed_stdout(repo_root, &["symbolic-ref", "--quiet", "HEAD"], deadline)
+pub(super) fn git_symbolic_head_full_with_program(
+    repo_root: &Path,
+    deadline: Instant,
+    git_program: &Path,
+) -> Option<String> {
+    git_trimmed_stdout(
+        repo_root,
+        &["symbolic-ref", "--quiet", "HEAD"],
+        deadline,
+        git_program,
+    )
 }
 
 fn git_symbolic_head_short(repo_root: &Path, deadline: Instant) -> Option<String> {
@@ -170,15 +179,31 @@ fn git_symbolic_head_short(repo_root: &Path, deadline: Instant) -> Option<String
         repo_root,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
         deadline,
+        Path::new("git"),
     )
 }
 
+#[cfg(test)]
 pub(super) fn git_rev_parse_verify(
     repo_root: &Path,
     revision: &str,
     deadline: Instant,
 ) -> Option<String> {
-    git_trimmed_stdout(repo_root, &["rev-parse", "--verify", revision], deadline)
+    git_rev_parse_verify_with_program(repo_root, revision, deadline, Path::new("git"))
+}
+
+pub(super) fn git_rev_parse_verify_with_program(
+    repo_root: &Path,
+    revision: &str,
+    deadline: Instant,
+    git_program: &Path,
+) -> Option<String> {
+    git_trimmed_stdout(
+        repo_root,
+        &["rev-parse", "--verify", revision],
+        deadline,
+        git_program,
+    )
 }
 
 pub(super) fn git_ref_storage_is_reftable(git_common_dir: &Path) -> bool {
@@ -238,8 +263,13 @@ fn strip_git_config_comment(value: &str) -> &str {
     value
 }
 
-fn git_trimmed_stdout(repo_root: &Path, args: &[&str], deadline: Instant) -> Option<String> {
-    let mut command = crate::noninteractive_process::command("git");
+fn git_trimmed_stdout(
+    repo_root: &Path,
+    args: &[&str],
+    deadline: Instant,
+    git_program: &Path,
+) -> Option<String> {
+    let mut command = crate::noninteractive_process::command(git_program);
     command.arg("-C").arg(repo_root).args(args);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
     if !output.status.success() {

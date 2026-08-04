@@ -14,10 +14,14 @@ pub use self::{
         GitSpaceMetadata,
     },
     status::{
-        git_status_cache_key, git_status_cache_key_for_space,
-        git_status_snapshot_for_cwd_with_demand, GitStatusCacheEntry, GitStatusRefreshDemand,
+        git_status_cache_key, git_status_cache_key_for_space, GitStatusCacheEntry,
+        GitStatusRefreshDemand,
     },
 };
+
+#[cfg(test)]
+pub(crate) use self::status::git_status_snapshot_for_cwd_with_demand;
+pub(crate) use self::status::git_status_snapshot_for_cwd_with_demand_and_program;
 
 #[cfg(test)]
 pub(super) use self::status::git_ahead_behind;
