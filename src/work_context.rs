@@ -157,11 +157,17 @@ impl PaneWorkContextState {
         let Some(tiers) = tiers else {
             return Self::from_restored(flat);
         };
+        let mut manual = tiers.manual.normalized()?;
+        manual.preview_urls.clear();
+        let hook_turn = tiers.hook_turn.normalized()?;
+        let mut git_observation = tiers.git_observation.normalized()?;
+        git_observation.preview_urls.clear();
+        let restored_fallback = tiers.restored_fallback.normalized()?;
         let mut state = Self {
-            manual: tiers.manual.normalized()?,
-            hook_turn: tiers.hook_turn.normalized()?,
-            git_observation: tiers.git_observation.normalized()?,
-            restored_fallback: tiers.restored_fallback.normalized()?,
+            manual,
+            hook_turn,
+            git_observation,
+            restored_fallback,
             effective: PaneWorkContext::default(),
         };
         state.recompute();
@@ -285,7 +291,10 @@ impl PaneWorkContextState {
                 &self.hook_turn.preview_urls,
                 &self.git_observation.preview_urls,
                 &self.restored_fallback.preview_urls,
-            ]),
+            ])
+            .into_iter()
+            .take(MAX_PREVIEW_URLS)
+            .collect(),
             branch: first_present([
                 self.manual.branch.as_ref(),
                 self.hook_turn.branch.as_ref(),
@@ -387,6 +396,7 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
 
 pub fn extract_preview_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://";
+    const MAX_CANDIDATE_BYTES: usize = 128;
 
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
@@ -394,10 +404,17 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
         }
-        let candidate = text[start..]
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default();
+        let remaining = &text[start..];
+        let candidate = match remaining
+            .as_bytes()
+            .iter()
+            .take(MAX_CANDIDATE_BYTES + 1)
+            .position(|byte| byte.is_ascii_whitespace())
+        {
+            Some(end) => &remaining[..end],
+            None if remaining.len() <= MAX_CANDIDATE_BYTES => remaining,
+            None => continue,
+        };
         let Ok(url) = normalize_preview_url(candidate) else {
             continue;
         };
@@ -719,6 +736,15 @@ mod tests {
     }
 
     #[test]
+    fn ac25_preview_url_extraction_rejects_large_whitespace_free_input_quickly() {
+        let text = "https://".repeat(1_000_000 / "https://".len());
+        let started = std::time::Instant::now();
+
+        assert!(extract_preview_urls(&text).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
     fn ac2_linear_url_canonicalizes_supported_ticket_ids() {
         assert_eq!(
             linear_ticket_url("mat-123").as_deref(),
@@ -893,6 +919,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective().branch.as_deref(), Some("new-branch"));
+    }
+
+    #[test]
+    fn ac25_restored_preview_sources_are_bounded_to_hook_and_fallback() {
+        let preview_urls = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|index| format!("https://{prefix}-{index}.vercel.app"))
+                .collect::<Vec<_>>()
+        };
+        let state = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    preview_urls: preview_urls("manual", MAX_PREVIEW_URLS),
+                    ..PaneWorkContext::default()
+                },
+                hook_turn: PaneWorkContext {
+                    preview_urls: preview_urls("hook", 2),
+                    ..PaneWorkContext::default()
+                },
+                git_observation: PaneWorkContext {
+                    preview_urls: preview_urls("git", MAX_PREVIEW_URLS),
+                    ..PaneWorkContext::default()
+                },
+                restored_fallback: PaneWorkContext {
+                    preview_urls: preview_urls("fallback", MAX_PREVIEW_URLS),
+                    ..PaneWorkContext::default()
+                },
+            }),
+        )
+        .unwrap();
+
+        let tiers = state.snapshot_tiers();
+        assert!(tiers.manual.preview_urls.is_empty());
+        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            state.effective().preview_urls,
+            preview_urls("hook", 2)
+                .into_iter()
+                .chain(preview_urls("fallback", MAX_PREVIEW_URLS - 2))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(state.effective().preview_urls.len(), MAX_PREVIEW_URLS);
     }
 
     #[test]

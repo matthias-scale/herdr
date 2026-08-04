@@ -715,6 +715,74 @@ mod tests {
     }
 
     #[test]
+    fn ac25_v4_snapshot_restore_discards_forbidden_preview_tiers() {
+        let state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let mut snapshot = capture_from_state(&state);
+        let pane = snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&root.raw())
+            .expect("captured root pane");
+        let preview_urls = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|index| format!("https://{prefix}-{index}.vercel.app"))
+                .collect::<Vec<_>>()
+        };
+        pane.work_context = crate::work_context::PaneWorkContext::default();
+        pane.work_context_tiers = Some(crate::work_context::PaneWorkContextTiers {
+            manual: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("manual", crate::work_context::MAX_PREVIEW_URLS),
+                ..Default::default()
+            },
+            hook_turn: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("hook", 2),
+                ..Default::default()
+            },
+            git_observation: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("git", crate::work_context::MAX_PREVIEW_URLS),
+                ..Default::default()
+            },
+            restored_fallback: crate::work_context::PaneWorkContext {
+                preview_urls: preview_urls("fallback", crate::work_context::MAX_PREVIEW_URLS),
+                ..Default::default()
+            },
+        });
+
+        let parsed = parse_snapshot(&serde_json::to_string(&snapshot).unwrap())
+            .expect("v4 snapshot should parse");
+        assert_eq!(parsed.version, SNAPSHOT_VERSION);
+        let saved = &parsed.workspaces[0].tabs[0].panes[&root.raw()];
+        let mut restored = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        restored
+            .restore_work_context_with_tiers(
+                saved.work_context.clone(),
+                saved.work_context_tiers.clone(),
+            )
+            .unwrap();
+
+        let tiers = restored.work_context.snapshot_tiers();
+        assert!(tiers.manual.preview_urls.is_empty());
+        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            restored.effective_work_context().preview_urls,
+            preview_urls("hook", 2)
+                .into_iter()
+                .chain(preview_urls(
+                    "fallback",
+                    crate::work_context::MAX_PREVIEW_URLS - 2,
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            restored.effective_work_context().preview_urls.len(),
+            crate::work_context::MAX_PREVIEW_URLS
+        );
+    }
+
+    #[test]
     fn ac3_restored_hook_and_git_values_are_replaced_by_new_observations() {
         // Seed hook-only and git-only tiers, capture, serialize, parse, restore
         // into a fresh terminal, then apply NEW observations: they must win.

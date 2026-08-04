@@ -2279,6 +2279,50 @@ mod tests {
     }
 
     #[test]
+    fn ac25_copy_work_preview_ignores_restored_manual_and_git_tiers() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .restore_work_context_with_tiers(
+                crate::work_context::PaneWorkContext::default(),
+                Some(crate::work_context::PaneWorkContextTiers {
+                    manual: crate::work_context::PaneWorkContext {
+                        preview_urls: vec!["https://manual.vercel.app".into()],
+                        ..Default::default()
+                    },
+                    hook_turn: crate::work_context::PaneWorkContext {
+                        preview_urls: vec!["https://hook.vercel.app".into()],
+                        ..Default::default()
+                    },
+                    git_observation: crate::work_context::PaneWorkContext {
+                        preview_urls: vec!["https://git.vercel.app".into()],
+                        ..Default::default()
+                    },
+                    restored_fallback: crate::work_context::PaneWorkContext {
+                        preview_urls: vec!["https://fallback.vercel.app".into()],
+                        ..Default::default()
+                    },
+                }),
+            )
+            .unwrap();
+
+        app.execute_tui_navigate_action(NavigateAction::CopyWorkPreview, ActionContext::Prefix);
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"https://hook.vercel.app")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
     fn ac25_granular_work_copy_actions_are_safe_noops_when_missing() {
         for (action, notice) in [
             (
