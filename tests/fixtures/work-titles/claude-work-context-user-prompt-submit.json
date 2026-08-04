@@ -4,5 +4,5 @@
   "cwd": "/tmp/fixture-workspace",
   "permission_mode": "default",
   "hook_event_name": "UserPromptSubmit",
-  "prompt": "Review SCA-42, then https://github.com/scalable-so/herdr/pull/17). Reject FORMAT-12 and https://user@github.com/evil/repo/pull/9#fragment"
+  "prompt": "Review SCA-42, then https://github.com/scalable-so/herdr/pull/17) with https://claude-preview.vercel.app. Reject FORMAT-12 and https://user@github.com/evil/repo/pull/9#fragment"
 }

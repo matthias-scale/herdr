@@ -4539,6 +4539,7 @@ mod tests {
         first.work_context = Some(crate::work_context::PaneWorkContext {
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            preview_urls: vec!["https://first.vercel.app".into()],
             work_title: first.title.clone(),
             ..Default::default()
         });
@@ -4549,6 +4550,12 @@ mod tests {
                 .effective_work_context()
                 .ticket_ids,
             vec!["MAT-1", "SCA-88"]
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .preview_urls,
+            vec!["https://first.vercel.app"]
         );
         let pane_updates_before = app
             .event_hub
@@ -4568,6 +4575,7 @@ mod tests {
         same_title_new_pr.work_context = Some(crate::work_context::PaneWorkContext {
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/9".into()],
+            preview_urls: vec!["https://same-title.vercel.app".into()],
             work_title: same_title_new_pr.title.clone(),
             ..Default::default()
         });
@@ -4580,6 +4588,12 @@ mod tests {
                 .effective_work_context()
                 .pr_urls,
             vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .preview_urls,
+            vec!["https://same-title.vercel.app"]
         );
         assert_eq!(
             app.event_hub
@@ -4602,6 +4616,7 @@ mod tests {
         second.work_context = Some(crate::work_context::PaneWorkContext {
             ticket_ids: vec!["MAT-2".into()],
             pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+            preview_urls: vec!["https://second.vercel.app".into()],
             work_title: second.title.clone(),
             ..Default::default()
         });
@@ -4611,6 +4626,7 @@ mod tests {
         let context = app.state.terminals[&terminal_id].effective_work_context();
         assert_eq!(context.ticket_ids, vec!["MAT-2", "SCA-88"]);
         assert_eq!(context.pr_urls, vec!["https://github.com/o/r/pull/2"]);
+        assert_eq!(context.preview_urls, vec!["https://second.vercel.app"]);
         assert_eq!(
             context.work_title.as_deref(),
             Some("Continue MAT-2 context")
@@ -4638,6 +4654,7 @@ mod tests {
         third.work_context = Some(crate::work_context::PaneWorkContext {
             ticket_ids: vec!["MAT-3".into()],
             pr_urls: vec!["https://github.com/o/r/pull/3".into()],
+            preview_urls: vec!["https://third.vercel.app".into()],
             work_title: third.title.clone(),
             ..Default::default()
         });
@@ -4670,6 +4687,7 @@ mod tests {
                 "https://github.com/o/r/pull/3"
             ]
         );
+        assert_eq!(context.preview_urls, vec!["https://third.vercel.app"]);
         assert_eq!(context.work_title.as_deref(), Some("Manual context"));
         assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
         assert_eq!(
@@ -4715,6 +4733,7 @@ mod tests {
         params.work_context = Some(crate::work_context::PaneWorkContext {
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+            preview_urls: vec!["https://hook.vercel.app".into()],
             work_title: params.title.clone(),
             ..Default::default()
         });
@@ -4733,6 +4752,7 @@ mod tests {
             context.pr_urls,
             vec!["https://github.com/manual/repo/pull/99"]
         );
+        assert!(context.preview_urls.is_empty());
         assert_eq!(context.work_title.as_deref(), Some("Manual context"));
     }
 
@@ -4742,6 +4762,7 @@ mod tests {
     ) {
         let context = app.state.terminals[terminal_id].effective_work_context();
         assert_eq!(context.ticket_ids, vec!["MAT-500", "MAT-1"]);
+        assert_eq!(context.preview_urls, vec!["https://hook.vercel.app"]);
         assert_eq!(
             context.pr_urls,
             vec![
@@ -4851,6 +4872,7 @@ mod tests {
         let restored = save_and_restore_work_context(&mut app);
         assert_eq!(restored.ticket_ids, vec!["MAT-1"]);
         assert_eq!(restored.pr_urls, vec!["https://github.com/o/r/pull/1"]);
+        assert_eq!(restored.preview_urls, vec!["https://hook.vercel.app"]);
         assert_eq!(
             restored.work_title.as_deref(),
             Some("Implement MAT-1 context")
@@ -4860,6 +4882,7 @@ mod tests {
             &crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-1".into()],
                 pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                preview_urls: vec!["https://hook.vercel.app".into()],
                 work_title: Some("Implement MAT-1 context".into()),
                 ..Default::default()
             }
@@ -4884,6 +4907,7 @@ mod tests {
             .replace_hook_work_context(crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-1".into()],
                 pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                preview_urls: vec!["https://stale.vercel.app".into()],
                 work_title: Some("Stale hook context".into()),
                 ..Default::default()
             })

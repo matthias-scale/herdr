@@ -695,11 +695,22 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .work_context
+            .replace_hook_turn(crate::work_context::PaneWorkContext {
+                preview_urls: vec!["https://persisted.vercel.app".into()],
+                ..Default::default()
+            })
+            .unwrap();
 
         let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
         let restored = parse_snapshot(&json).unwrap();
         let context = &restored.workspaces[0].tabs[0].panes[&root.raw()].work_context;
         assert_eq!(context.ticket_ids, vec!["MAT-5"]);
+        assert_eq!(context.preview_urls, vec!["https://persisted.vercel.app"]);
         assert_eq!(context.work_title.as_deref(), Some("Persist context"));
     }
 
@@ -717,6 +728,7 @@ mod tests {
             .work_context
             .replace_hook_turn(crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-1".into()],
+                preview_urls: vec!["https://old-preview.vercel.app".into()],
                 work_title: Some("Old hook title".into()),
                 ..Default::default()
             })
@@ -742,6 +754,10 @@ mod tests {
         );
         assert_eq!(tiers.hook_turn.ticket_ids, vec!["MAT-1".to_string()]);
         assert_eq!(
+            tiers.hook_turn.preview_urls,
+            vec!["https://old-preview.vercel.app"]
+        );
+        assert_eq!(
             tiers.hook_turn.work_title.as_deref(),
             Some("Old hook title")
         );
@@ -763,6 +779,10 @@ mod tests {
             .unwrap();
         assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-1"]);
         assert_eq!(
+            restored.effective_work_context().preview_urls,
+            vec!["https://old-preview.vercel.app"]
+        );
+        assert_eq!(
             restored.effective_work_context().branch.as_deref(),
             Some("old-branch")
         );
@@ -771,6 +791,7 @@ mod tests {
             .work_context
             .replace_hook_turn(crate::work_context::PaneWorkContext {
                 ticket_ids: vec!["MAT-2".into()],
+                preview_urls: vec!["https://new-preview.vercel.app".into()],
                 work_title: Some("New hook title".into()),
                 ..Default::default()
             })
@@ -783,6 +804,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.effective_work_context().ticket_ids, vec!["MAT-2"]);
+        assert_eq!(
+            restored.effective_work_context().preview_urls,
+            vec!["https://new-preview.vercel.app"]
+        );
         assert_eq!(
             restored.effective_work_context().work_title.as_deref(),
             Some("New hook title")
@@ -919,6 +944,7 @@ mod tests {
             .unwrap();
         assert!(restored.effective_work_context().ticket_ids.is_empty());
         assert!(restored.effective_work_context().pr_urls.is_empty());
+        assert!(restored.effective_work_context().preview_urls.is_empty());
         assert!(restored.effective_work_context().work_title.is_none());
         restored
             .work_context

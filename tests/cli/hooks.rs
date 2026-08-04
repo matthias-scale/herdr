@@ -303,13 +303,14 @@ fn claude_and_codex_turn_title_fixtures_reach_guarded_metadata() {
 
 #[test]
 fn ac1_ac2_ac3_turn_hooks_forward_derived_work_context_without_asset_changes() {
-    for (provider, fixture, envs, tickets, pr_url) in [
+    for (provider, fixture, envs, tickets, pr_url, preview_url) in [
         (
             "claude",
             include_str!("../fixtures/work-titles/claude-work-context-user-prompt-submit.json"),
             Vec::new(),
             vec!["SCA-42"],
             "https://github.com/scalable-so/herdr/pull/17",
+            "https://claude-preview.vercel.app",
         ),
         (
             "codex",
@@ -317,6 +318,7 @@ fn ac1_ac2_ac3_turn_hooks_forward_derived_work_context_without_asset_changes() {
             vec![("CODEX_THREAD_ID", "fixture-codex-context-session")],
             vec!["MAT-7", "SCA-9"],
             "https://github.com/scalable-so/herdr/pull/21",
+            "https://codex-preview.vercel.app",
         ),
     ] {
         let requests = run_turn_title_cli(provider, fixture, &envs);
@@ -328,6 +330,10 @@ fn ac1_ac2_ac3_turn_hooks_forward_derived_work_context_without_asset_changes() {
         assert_eq!(
             requests[2]["params"]["work_context"]["pr_urls"],
             serde_json::json!([pr_url])
+        );
+        assert_eq!(
+            requests[2]["params"]["work_context"]["preview_urls"],
+            serde_json::json!([preview_url])
         );
     }
 }
