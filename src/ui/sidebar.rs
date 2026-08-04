@@ -36,6 +36,123 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
     entry.has_agent && (entry.state != AgentState::Idle || !entry.seen)
 }
 
+pub(super) struct TabRowLayout {
+    pub state: Option<String>,
+    pub show_state_label: bool,
+    pub title: String,
+    pub agent_suffix: Option<String>,
+    pub background_jobs: Option<String>,
+    pub activity_age: Option<String>,
+}
+
+pub(super) fn tab_row_layout(
+    entry: &AgentPanelEntry,
+    now: std::time::Instant,
+    width: usize,
+    prefix_width: usize,
+    palette: &Palette,
+) -> TabRowLayout {
+    let state = tab_lifecycle_visible(entry).then(|| {
+        entry
+            .state_labels
+            .get(agent_panel_status_key(entry.state, entry.seen))
+            .cloned()
+            .unwrap_or_else(|| match entry.state {
+                AgentState::Idle if !entry.seen => "done".to_string(),
+                _ => state_label(entry.state, entry.seen).to_string(),
+            })
+    });
+    let dot_width = state
+        .as_ref()
+        .map(|_| display_width(state_dot(entry.state, entry.seen, palette).0))
+        .unwrap_or_default();
+    let full_status_width = state
+        .as_deref()
+        .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
+        .unwrap_or_default();
+    let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
+    let agent_suffix = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
+    let agent_suffix_width = agent_suffix
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    let mut background_jobs = entry
+        .background_job_count
+        .filter(|count| *count > 0)
+        .map(|count| format!("  {count} >_"));
+    let mut activity_age = entry.activity_at.map(|activity_at| {
+        format!(
+            "{} ago",
+            crate::activity_age::compact_label(Some(activity_at), now)
+        )
+    });
+
+    let background_width = background_jobs
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    if activity_age.as_deref().is_some_and(|label| {
+        width
+            < prefix_width
+                + full_status_width
+                + agent_suffix_width
+                + background_width
+                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
+                + 1
+                + display_width(label)
+    }) {
+        activity_age = None;
+    }
+    let activity_width = activity_age
+        .as_deref()
+        .map(|label| 1 + display_width(label))
+        .unwrap_or_default();
+    if width
+        < prefix_width
+            + full_status_width
+            + agent_suffix_width
+            + background_width
+            + activity_width
+            + 1
+    {
+        background_jobs = None;
+    }
+    let background_width = background_jobs
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    let show_state_label = width
+        >= prefix_width
+            + full_status_width
+            + agent_suffix_width
+            + background_width
+            + activity_width
+            + 1;
+    let status_width = if show_state_label {
+        full_status_width
+    } else {
+        dot_status_width
+    };
+    let fixed_width =
+        prefix_width + status_width + agent_suffix_width + background_width + activity_width;
+    let title = truncate_end(
+        entry
+            .primary_tab_label
+            .as_deref()
+            .unwrap_or(DEFAULT_THREAD_TITLE),
+        width.saturating_sub(fixed_width),
+    );
+
+    TabRowLayout {
+        state,
+        show_state_label,
+        title,
+        agent_suffix,
+        background_jobs,
+        activity_age,
+    }
+}
+
 /// Selected sidebar titles need stronger foreground contrast without restoring
 /// the old filled-row treatment. Darken RGB text tokens by one third and pair
 /// them with bold weight; terminal/reset themes keep their authored foreground.
@@ -1658,18 +1775,6 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         _ => None,
     });
     let Some((entry, depth)) = entry else { return };
-    let show_status = tab_lifecycle_visible(&entry);
-    let state = show_status.then(|| {
-        entry
-            .state_labels
-            .get(agent_panel_status_key(entry.state, entry.seen))
-            .map(String::as_str)
-            .unwrap_or_else(|| match entry.state {
-                AgentState::Idle if !entry.seen => "done",
-                _ => state_label(entry.state, entry.seen),
-            })
-    });
-    let state_icon = show_status.then(|| state_dot(entry.state, entry.seen, p));
     let style = if active {
         Style::default()
             .fg(active_sidebar_title_color(p))
@@ -1678,99 +1783,56 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.subtext0)
     };
     let prefix = " ".repeat(usize::from(depth) * 3 + 1);
-    let status_width = state
-        .zip(state_icon.as_ref())
-        .map(|(state, icon)| {
-            display_width(icon.0) + 1 + display_width(state) + display_width(" · ")
-        })
-        .unwrap_or_default();
-    let background_job_field = entry
-        .background_job_count
-        .filter(|count| *count > 0)
-        .map(|count| format!("  {count} >_"));
-    let background_job_width = background_job_field
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
-    // Provider identity is part of the row contract, so retain it even when
-    // the title must be truncated to make a narrow sidebar fit.
-    let agent_suffix_field = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
-    let agent_suffix_width = agent_suffix_field
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
-    let fixed_width =
-        display_width(&prefix) + status_width + agent_suffix_width + background_job_width;
-    let activity_field =
-        tab_activity_age_field(&entry, app.view_observed_at, card.rect, fixed_width);
-    let activity_width = activity_field
-        .as_deref()
-        .map(|label| display_width(label) + 1)
-        .unwrap_or_default();
-    let title = truncate_end(
-        entry
-            .primary_tab_label
-            .as_deref()
-            .unwrap_or(DEFAULT_THREAD_TITLE),
-        usize::from(card.rect.width).saturating_sub(fixed_width + activity_width),
+    let layout = tab_row_layout(
+        &entry,
+        app.view_observed_at,
+        usize::from(card.rect.width),
+        display_width(&prefix),
+        p,
     );
     let mut spans = vec![Span::raw(prefix)];
-    if let (Some(state), Some(state_icon)) = (state, state_icon) {
-        spans.extend([
-            Span::styled(state_icon.0.to_string(), state_icon.1),
-            Span::styled(
-                format!(" {state}"),
-                Style::default().fg(state_label_color(entry.state, entry.seen, p)),
-            ),
-            Span::styled(" · ", Style::default().fg(p.overlay0)),
-        ]);
+    if let Some(state) = layout.state.as_deref() {
+        let state_icon = state_dot(entry.state, entry.seen, p);
+        spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
+        if layout.show_state_label {
+            spans.extend([
+                Span::styled(
+                    format!(" {state}"),
+                    Style::default().fg(state_label_color(entry.state, entry.seen, p)),
+                ),
+                Span::styled(" · ", Style::default().fg(p.overlay0)),
+            ]);
+        } else {
+            spans.push(Span::raw(" "));
+        }
     }
-    spans.push(Span::styled(title, style));
-    if let Some(agent_suffix_field) = agent_suffix_field {
-        spans.push(Span::styled(
-            agent_suffix_field,
-            Style::default().fg(p.overlay1),
-        ));
+    spans.push(Span::styled(layout.title, style));
+    if let Some(agent_suffix) = layout.agent_suffix {
+        spans.push(Span::styled(agent_suffix, Style::default().fg(p.overlay1)));
     }
-    if let Some(background_job_field) = background_job_field {
+    if let Some(background_jobs) = layout.background_jobs {
         spans.push(Span::styled(
-            background_job_field,
+            background_jobs,
             Style::default().fg(p.overlay0),
         ));
     }
-    if let Some(activity_field) = activity_field {
+    if let Some(activity_age) = layout.activity_age {
         let used_width = spans
             .iter()
             .map(|span| display_width(span.content.as_ref()))
             .sum::<usize>();
         let padding = usize::from(card.rect.width)
             .saturating_sub(used_width)
-            .saturating_sub(display_width(&activity_field));
+            .saturating_sub(display_width(&activity_age));
         spans.push(Span::raw(" ".repeat(padding)));
         let activity_style = if entry.state == AgentState::Working {
             Style::default().fg(p.blue)
         } else {
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
         };
-        spans.push(Span::styled(activity_field, activity_style));
+        spans.push(Span::styled(activity_age, activity_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), card.rect);
-}
-
-fn tab_activity_age_field(
-    entry: &AgentPanelEntry,
-    now: std::time::Instant,
-    rect: Rect,
-    fixed_width: usize,
-) -> Option<String> {
-    let activity_at = entry.activity_at?;
-    let label = format!(
-        "{} ago",
-        crate::activity_age::compact_label(Some(activity_at), now)
-    );
-    (usize::from(rect.width)
-        >= fixed_width + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH + 1 + display_width(&label))
-    .then_some(label)
 }
 
 fn render_agent_card(
@@ -1946,26 +2008,15 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            let show_status = entry.state != AgentState::Idle || !entry.seen;
-            let status_width = if show_status {
-                let state = entry
-                    .state_labels
-                    .get(agent_panel_status_key(entry.state, entry.seen))
-                    .map(String::as_str)
-                    .unwrap_or_else(|| match entry.state {
-                        AgentState::Idle if !entry.seen => "done",
-                        _ => state_label(entry.state, entry.seen),
-                    });
-                display_width(state_dot(entry.state, entry.seen, &app.palette).0)
-                    + 1
-                    + display_width(state)
-                    + display_width(" · ")
-            } else {
-                0
-            };
-            let fixed_width = usize::from(depth) * 3 + 1 + status_width;
-            tab_activity_age_field(entry, app.view_observed_at, card.rect, fixed_width)
-                .and(entry.activity_at)
+            tab_row_layout(
+                entry,
+                app.view_observed_at,
+                usize::from(card.rect.width),
+                usize::from(depth) * 3 + 1,
+                &app.palette,
+            )
+            .activity_age
+            .and(entry.activity_at)
         })
         .collect()
 }
@@ -4232,7 +4283,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn narrow_tab_rows_reserve_provider_suffix_badge_and_activity_age() {
+    fn tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("Investigate release regression".into());
@@ -4254,16 +4305,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.view_observed_at = started + std::time::Duration::from_secs(65);
         app.reconcile_sidebar_presentation();
 
-        let area = Rect::new(0, 0, 38, 10);
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
-            .unwrap();
-        let row = compute_tab_card_areas(&app, area)[0].rect.y;
-        let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
+        for width in [18, 38] {
+            let area = Rect::new(0, 0, width, 10);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let row = compute_tab_card_areas(&app, area)[0].rect.y;
+            let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
 
-        assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
-        assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+            assert!(rendered.contains("●"), "{width}: {rendered:?}");
+            assert!(rendered.contains(" · cx"), "{width}: {rendered:?}");
+            let dot = rendered.find('●').unwrap();
+            let suffix = rendered.find(" · cx").unwrap();
+            assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
+            if width == 18 {
+                assert!(!rendered.contains("working"), "{rendered:?}");
+                assert!(!rendered.contains(">_"), "{rendered:?}");
+                assert!(!rendered.contains("ago"), "{rendered:?}");
+            } else {
+                assert!(rendered.contains("working"), "{rendered:?}");
+                assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
+                assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+            }
+        }
     }
 
     #[test]

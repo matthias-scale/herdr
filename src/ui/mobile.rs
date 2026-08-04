@@ -9,11 +9,10 @@ use ratatui::{
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
-    agent_panel_status_key, mobile_sidebar_rows, mobile_sidebar_rows_from,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, tab_agent_suffix,
-    tab_lifecycle_visible, AgentPanelEntry, SidebarRow,
+    mobile_sidebar_rows, mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace,
+    sidebar_space_member_indices, tab_row_layout, AgentPanelEntry, SidebarRow,
 };
-use super::status::{state_dot, state_label, state_label_color};
+use super::status::{state_dot, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -661,67 +660,64 @@ fn render_mobile_switcher_content(
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let show_status = tab_lifecycle_visible(entry);
-                let state = show_status.then(|| {
-                    entry
-                        .state_labels
-                        .get(agent_panel_status_key(entry.state, entry.seen))
-                        .map(String::as_str)
-                        .unwrap_or_else(|| match entry.state {
-                            AgentState::Idle if !entry.seen => "done",
-                            _ => state_label(entry.state, entry.seen),
-                        })
-                });
-                let status_width = state
-                    .map(|state| 1 + state.len() + " · ".len())
-                    .unwrap_or_default();
-                let background_job_field = entry
-                    .background_job_count
-                    .filter(|count| *count > 0)
-                    .map(|count| format!("  {count} >_"));
-                let agent_suffix_field =
-                    tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
-                let agent_suffix_width = agent_suffix_field
-                    .as_deref()
-                    .map(display_width)
-                    .unwrap_or_default();
-                let background_job_width = background_job_field
-                    .as_deref()
-                    .map(display_width)
-                    .unwrap_or_default();
-                let fixed_width =
-                    indent.len() + status_width + agent_suffix_width + background_job_width;
+                let layout = tab_row_layout(
+                    entry,
+                    app.view_observed_at,
+                    usize::from(content.width),
+                    display_width(&indent),
+                    p,
+                );
                 let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
-                if let Some(state) = state {
+                if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
-                    spans.extend([
-                        Span::styled(icon, icon_style.bg(bg)),
-                        Span::styled(
-                            format!(" {state}"),
-                            Style::default()
-                                .fg(state_label_color(entry.state, entry.seen, p))
-                                .bg(bg),
-                        ),
-                        Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
-                    ]);
+                    spans.push(Span::styled(icon, icon_style.bg(bg)));
+                    if layout.show_state_label {
+                        spans.extend([
+                            Span::styled(
+                                format!(" {state}"),
+                                Style::default()
+                                    .fg(state_label_color(entry.state, entry.seen, p))
+                                    .bg(bg),
+                            ),
+                            Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
+                        ]);
+                    } else {
+                        spans.push(Span::styled(" ", Style::default().bg(bg)));
+                    }
                 }
                 spans.push(Span::styled(
-                    truncate_end(
-                        entry.primary_tab_label.as_deref().unwrap_or("New Thread"),
-                        usize::from(content.width).saturating_sub(fixed_width),
-                    ),
+                    layout.title,
                     mobile_item_title_style(false, active, p).bg(bg),
                 ));
-                if let Some(agent_suffix_field) = agent_suffix_field {
+                if let Some(agent_suffix) = layout.agent_suffix {
                     spans.push(Span::styled(
-                        agent_suffix_field,
+                        agent_suffix,
                         Style::default().fg(p.overlay1).bg(bg),
                     ));
                 }
-                if let Some(background_job_field) = background_job_field {
+                if let Some(background_jobs) = layout.background_jobs {
                     spans.push(Span::styled(
-                        background_job_field,
+                        background_jobs,
                         Style::default().fg(p.overlay0).bg(bg),
+                    ));
+                }
+                if let Some(activity_age) = layout.activity_age {
+                    let used_width = spans
+                        .iter()
+                        .map(|span| display_width(span.content.as_ref()))
+                        .sum::<usize>();
+                    let padding = usize::from(content.width)
+                        .saturating_sub(used_width)
+                        .saturating_sub(display_width(&activity_age));
+                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
+                    let activity_color = if entry.state == AgentState::Working {
+                        p.blue
+                    } else {
+                        p.green
+                    };
+                    spans.push(Span::styled(
+                        activity_age,
+                        Style::default().fg(activity_color).bg(bg),
                     ));
                 }
                 let title = Line::from(spans);
@@ -1789,6 +1785,73 @@ mod tests {
             rows.iter().all(|row| !row.contains("shell · tab")),
             "mobile Space row must not render a branch subtitle: {rows:?}"
         );
+    }
+
+    #[test]
+    fn mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
+        let started = std::time::Instant::now();
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
+        workspace.tabs[0].custom_name = Some("Investigate release regression".into());
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            started,
+        );
+        terminal_state.background_job_count = Some(2);
+        app.view_observed_at = started + std::time::Duration::from_secs(65);
+        app.active = Some(0);
+        app.selected = 0;
+        app.reconcile_sidebar_presentation();
+
+        for width in [18, 40] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_mobile_switcher_content(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        Rect::new(0, 0, width, 20),
+                    )
+                })
+                .unwrap();
+            let rows = (0..20)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let rendered = rows
+                .iter()
+                .find(|row| row.contains(" · cx"))
+                .unwrap_or_else(|| panic!("missing provider row at {width}: {rows:?}"));
+
+            assert!(rendered.contains('●'), "{width}: {rendered:?}");
+            let dot = rendered.find('●').unwrap();
+            let suffix = rendered.find(" · cx").unwrap();
+            assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
+            if width == 18 {
+                assert!(!rendered.contains("working"), "{rendered:?}");
+                assert!(!rendered.contains(">_"), "{rendered:?}");
+                assert!(!rendered.contains("ago"), "{rendered:?}");
+            } else {
+                assert!(rendered.contains("working"), "{rendered:?}");
+                assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
+                assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+            }
+        }
     }
 
     #[test]
