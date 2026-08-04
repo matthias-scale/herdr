@@ -11,6 +11,7 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
+- Session topology and optional pane history now persist as one crash-safe generation; failed background saves retry without losing dirty state, and unverifiable history is dropped instead of being attached to a reused pane identity.
 - Agent prompts now wait briefly after sending text before pressing Enter, preventing prompts from remaining in agent composers without starting a turn. (#1878)
 - Empty clipboard writes from pane applications no longer erase existing clipboard contents or show a copied confirmation. (#1893)
 - Plain mouse movement no longer triggers continuous full renders while preserving Herdr menu hover and pane application mouse tracking. (#1865)

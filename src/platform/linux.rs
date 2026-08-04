@@ -2,9 +2,32 @@ use std::{
     collections::{HashSet, VecDeque},
     io::Write,
     os::fd::RawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+pub(crate) fn replace_file_durably(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, target)?;
+    sync_parent_dir(
+        target.parent().ok_or_else(|| {
+            std::io::Error::other("persisted session path has no parent directory")
+        })?,
+    )
+}
+
+pub(crate) fn remove_file_durably(path: &Path, _tombstone: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => sync_parent_dir(path.parent().ok_or_else(|| {
+            std::io::Error::other("persisted session path has no parent directory")
+        })?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
