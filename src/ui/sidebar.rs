@@ -1688,12 +1688,21 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         .background_job_count
         .filter(|count| *count > 0)
         .map(|count| format!("  {count} >_"));
-    let agent_suffix_field = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
-    let agent_suffix_width = agent_suffix_field
+    let background_job_width = background_job_field
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
-    let background_job_width = background_job_field
+    let agent_suffix_field = tab_agent_suffix(entry.agent)
+        .map(|suffix| format!(" · {suffix}"))
+        .filter(|suffix| {
+            usize::from(card.rect.width)
+                >= display_width(&prefix)
+                    + status_width
+                    + background_job_width
+                    + display_width(suffix)
+                    + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
+        });
+    let agent_suffix_width = agent_suffix_field
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
@@ -2129,8 +2138,11 @@ mod tests {
             .iter()
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
-        assert!(text.iter().any(|line| line.contains(DEFAULT_THREAD_TITLE)));
-        assert!(!text.iter().any(|line| line.contains("pi")));
+        assert!(
+            text.iter()
+                .any(|line| line.contains("New") && line.contains("· pi")),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -2954,7 +2966,10 @@ row_gap = 1
         assert!(first.contains("repo-folder"));
         assert!(tab_window.contains("Fix Billing Retry"), "{tab_window:?}");
         assert_eq!(tab_window.matches("Fix Billing Retry").count(), 1);
-        assert!(!tab_window.contains("pi"), "{tab_window:?}");
+        assert!(
+            tab_window.contains("Fix Billing Retry · pi"),
+            "{tab_window:?}"
+        );
         assert!(!first.contains("working"));
         assert!(tab_window.contains("working"));
         assert!(agent_cards.is_empty());
@@ -3256,8 +3271,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let buffer = terminal.backend().buffer();
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(buffer, tab_row, 25);
-        assert!(rendered.contains("New Thread"), "{rendered:?}");
-        assert!(!rendered.contains("pi"), "{rendered:?}");
+        assert!(rendered.contains("New Th"), "{rendered:?}");
+        assert!(rendered.contains("· pi"), "{rendered:?}");
         assert!(compute_agent_card_areas(&app, area).is_empty());
     }
 
@@ -3439,6 +3454,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             });
 
         assert!(first.contains("logs"), "rendered row: {first:?}");
+        assert!(!first.contains("· pi"), "{first:?}");
         assert!(!first.contains("very-long-workspace-name"), "{first:?}");
     }
 
