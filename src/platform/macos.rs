@@ -12,8 +12,27 @@ use super::{
     LimitedRead, Signal,
 };
 
-pub(crate) fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
+}
+
+pub(crate) fn replace_file_durably(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, target)?;
+    sync_parent_dir(
+        target.parent().ok_or_else(|| {
+            std::io::Error::other("persisted session path has no parent directory")
+        })?,
+    )
+}
+
+pub(crate) fn remove_file_durably(path: &Path, _tombstone: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => sync_parent_dir(path.parent().ok_or_else(|| {
+            std::io::Error::other("persisted session path has no parent directory")
+        })?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn sample_status_metrics(

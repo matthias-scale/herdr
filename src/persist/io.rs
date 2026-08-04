@@ -90,11 +90,10 @@ fn commit_json_to_path(path: &Path, json: &str) -> std::io::Result<()> {
         return Err(err);
     }
     drop(file);
-    if let Err(err) = std::fs::rename(&tmp_path, &target) {
+    if let Err(err) = crate::platform::replace_file_durably(&tmp_path, &target) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err);
     }
-    crate::platform::sync_parent_dir(parent)?;
     Ok(())
 }
 
@@ -146,16 +145,12 @@ fn save_to_paths_with_hook(
 
 pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
     let target = resolve_write_target(path)?;
-    match std::fs::remove_file(&target) {
-        Ok(()) => {
-            if let Some(parent) = target.parent() {
-                crate::platform::sync_parent_dir(parent)?;
-            }
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
+    let tombstone = target.with_extension(format!(
+        "json.deleted.{}.{}.tmp",
+        std::process::id(),
+        SAVE_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    crate::platform::remove_file_durably(&target, &tombstone)
 }
 
 pub fn save(
