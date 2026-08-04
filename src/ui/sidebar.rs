@@ -23,10 +23,11 @@ const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
-pub(crate) fn tab_agent_icon(agent: Option<Agent>) -> Option<&'static str> {
+pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
     match agent {
-        Some(Agent::Codex) => Some("⌘"),
-        Some(Agent::Claude) => Some("✦"),
+        Some(Agent::Codex) => Some("cx"),
+        Some(Agent::Claude) => Some("cc"),
+        Some(Agent::Pi) => Some("pi"),
         _ => None,
     }
 }
@@ -67,11 +68,11 @@ pub(crate) struct AgentPanelEntry {
     pub agent: Option<crate::detect::Agent>,
     /// Current or most recently exited provider, used only to detect
     /// ambiguous multi-pane rollups. Rendering still uses `agent` so an exited
-    /// provider never leaves a stale glyph on a single-pane row.
+    /// provider never leaves a stale suffix on a single-pane row.
     pub agent_context: Option<crate::detect::Agent>,
     /// At least one pane in this row is agent-backed. This stays true for a
     /// rolled-up tab whose panes have conflicting providers, while `agent`
-    /// becomes `None` so the provider glyph is not misleading.
+    /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
     pub state: AgentState,
     pub background_job_count: Option<u16>,
@@ -1687,8 +1688,8 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         .background_job_count
         .filter(|count| *count > 0)
         .map(|count| format!("  {count} >_"));
-    let agent_icon_field = tab_agent_icon(entry.agent).map(|icon| format!("  {icon}"));
-    let agent_icon_width = agent_icon_field
+    let agent_suffix_field = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
+    let agent_suffix_width = agent_suffix_field
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
@@ -1697,7 +1698,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         .map(display_width)
         .unwrap_or_default();
     let fixed_width =
-        display_width(&prefix) + status_width + agent_icon_width + background_job_width;
+        display_width(&prefix) + status_width + agent_suffix_width + background_job_width;
     let activity_field =
         tab_activity_age_field(&entry, app.view_observed_at, card.rect, fixed_width);
     let activity_width = activity_field
@@ -1723,9 +1724,9 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         ]);
     }
     spans.push(Span::styled(title, style));
-    if let Some(agent_icon_field) = agent_icon_field {
+    if let Some(agent_suffix_field) = agent_suffix_field {
         spans.push(Span::styled(
-            agent_icon_field,
+            agent_suffix_field,
             Style::default().fg(p.overlay1),
         ));
     }
@@ -4143,13 +4144,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
 
         assert!(
-            rendered.contains("Use Repository Instructions  ⌘  2 >_"),
+            rendered.contains("Use Repository Instructions · cx  2 >_"),
             "{rendered:?}"
         );
     }
 
     #[test]
-    fn tab_provider_icons_distinguish_codex_and_claude_after_title() {
+    fn tab_provider_suffixes_distinguish_codex_and_claude_after_title() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("Codex task".into());
         let codex_pane = app.workspaces[0].tabs[0].root_pane;
@@ -4182,17 +4183,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
 
         assert!(
-            rendered.iter().any(|row| row.contains("Codex task  ⌘")),
+            rendered.iter().any(|row| row.contains("Codex task · cx")),
             "{rendered:?}"
         );
         assert!(
-            rendered.iter().any(|row| row.contains("Claude task  ✦")),
+            rendered.iter().any(|row| row.contains("Claude task · cc")),
             "{rendered:?}"
         );
     }
 
     #[test]
-    fn mixed_provider_tab_omits_provider_icon() {
+    fn mixed_provider_tab_omits_provider_suffix() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("Mixed task".into());
         let second = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
@@ -4221,7 +4222,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn narrow_tab_rows_reserve_provider_icon_badge_and_activity_age() {
+    fn narrow_tab_rows_reserve_provider_suffix_badge_and_activity_age() {
         let started = std::time::Instant::now();
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("Investigate release regression".into());
@@ -4251,15 +4252,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
 
-        assert!(rendered.contains("⌘  2 >_"), "{rendered:?}");
+        assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
         assert!(rendered.ends_with("1m ago"), "{rendered:?}");
     }
 
     #[test]
-    fn unsupported_and_agentless_tabs_omit_provider_icons() {
-        assert_eq!(tab_agent_icon(Some(Agent::Pi)), None);
-        assert_eq!(tab_agent_icon(Some(Agent::Gemini)), None);
-        assert_eq!(tab_agent_icon(None), None);
+    fn pi_uses_pi_suffix_while_unsupported_and_agentless_tabs_omit_it() {
+        assert_eq!(tab_agent_suffix(Some(Agent::Pi)), Some("pi"));
+        assert_eq!(tab_agent_suffix(Some(Agent::Gemini)), None);
+        assert_eq!(tab_agent_suffix(None), None);
     }
 
     #[test]
@@ -4285,7 +4286,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn completed_agent_process_exit_retains_done_without_provider_icon() {
+    fn completed_agent_process_exit_retains_done_without_provider_suffix() {
         let started = std::time::Instant::now();
         let mut app = AppState::test_new();
         let workspace = Workspace::test_new("one");
@@ -4330,7 +4331,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn exited_claude_plus_live_codex_omits_provider_icon() {
+    fn exited_claude_plus_live_codex_omits_provider_suffix() {
         let started = std::time::Instant::now();
         let mut app = AppState::test_new();
         let mut workspace = Workspace::test_new("one");

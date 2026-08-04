@@ -10,7 +10,7 @@ use ratatui::{
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     agent_panel_status_key, mobile_sidebar_rows, mobile_sidebar_rows_from,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, tab_agent_icon,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, tab_agent_suffix,
     tab_lifecycle_visible, AgentPanelEntry, SidebarRow,
 };
 use super::status::{state_dot, state_label, state_label_color};
@@ -679,8 +679,9 @@ fn render_mobile_switcher_content(
                     .background_job_count
                     .filter(|count| *count > 0)
                     .map(|count| format!("  {count} >_"));
-                let agent_icon_field = tab_agent_icon(entry.agent).map(|icon| format!("  {icon}"));
-                let agent_icon_width = agent_icon_field
+                let agent_suffix_field =
+                    tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
+                let agent_suffix_width = agent_suffix_field
                     .as_deref()
                     .map(display_width)
                     .unwrap_or_default();
@@ -689,7 +690,7 @@ fn render_mobile_switcher_content(
                     .map(display_width)
                     .unwrap_or_default();
                 let fixed_width =
-                    indent.len() + status_width + agent_icon_width + background_job_width;
+                    indent.len() + status_width + agent_suffix_width + background_job_width;
                 let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
                 if let Some(state) = state {
                     let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
@@ -711,9 +712,9 @@ fn render_mobile_switcher_content(
                     ),
                     mobile_item_title_style(false, active, p).bg(bg),
                 ));
-                if let Some(agent_icon_field) = agent_icon_field {
+                if let Some(agent_suffix_field) = agent_suffix_field {
                     spans.push(Span::styled(
-                        agent_icon_field,
+                        agent_suffix_field,
                         Style::default().fg(p.overlay1).bg(bg),
                     ));
                 }
@@ -1764,13 +1765,13 @@ mod tests {
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
         assert!(rows[first].find("working").unwrap() < rows[first].find("First task").unwrap());
         assert!(
-            rows[first].contains("First task  ⌘  2 >_"),
-            "mobile tab row must place the provider icon and badge after its title: {:?}",
+            rows[first].contains("First task · cx  2 >_"),
+            "mobile tab row must place the provider suffix and badge after its title: {:?}",
             rows[first]
         );
         assert!(
-            rows[second].contains("Second task  ⌘"),
-            "mobile tab row must show the provider icon: {:?}",
+            rows[second].contains("Second task · cx"),
+            "mobile tab row must show the provider suffix: {:?}",
             rows[second]
         );
         assert!(rows[second].find("working").unwrap() < rows[second].find("Second task").unwrap());

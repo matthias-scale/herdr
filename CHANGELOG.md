@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- Sidebar window rows now identify Codex (`⌘`) and Claude (`✦`) immediately after the title, before any background-shell count.
+- Sidebar window rows now identify Claude (`· cc`), Codex (`· cx`), and Pi (`· pi`) immediately after the title, before any background-shell count.
 
 ### Fixed
 - Agentless sidebar windows no longer show a misleading lifecycle status.
