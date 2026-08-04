@@ -37,8 +37,10 @@ removes the status instead of replacing it with idle. Warning and
 machine-status colors are unchanged.
 The selected space and tab use darker,
 bolder title text. Each agent-backed tab ends with a right-aligned elapsed age
-for the latest user/agent communication, truncating the title first when space
-is limited. A multi-pane tab rolls up its strongest lifecycle state and latest
+for the latest user/agent communication. When space is limited, age,
+background count, and lifecycle text disappear in that order before the title
+is truncated, while the provider suffix remains reserved. A multi-pane tab
+rolls up its strongest lifecycle state and latest
 communication timestamp, clicking the row preserves that tab's focused pane,
 and agent navigation scrolls the owning tab row into view. Complete Space groups
 have one compact blank row between them by default, while direct tab/window rows

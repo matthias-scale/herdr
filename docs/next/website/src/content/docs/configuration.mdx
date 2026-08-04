@@ -352,7 +352,9 @@ When Codex explicitly reports background terminals, a nonzero count appears
 after that suffix as `N >_`. The count is summed across panes owned by that tab,
 omitted when zero or unsupported, cleared when Codex exits, and never changes
 the window's lifecycle status or its position. The latest communication age
-remains right-aligned.
+remains right-aligned. On narrow rows, Herdr drops the age, background count,
+and lifecycle text in that order before truncating the title; the provider
+suffix remains reserved ahead of those optional fields.
 
 Legacy per-agent overrides under `rows_by_agent` are also accepted for
 configuration compatibility, but they do not add model or agent subtitle rows:

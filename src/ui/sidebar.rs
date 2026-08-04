@@ -122,12 +122,7 @@ pub(super) fn tab_row_layout(
         .map(display_width)
         .unwrap_or_default();
     let show_state_label = width
-        >= prefix_width
-            + full_status_width
-            + agent_suffix_width
-            + background_width
-            + activity_width
-            + 1;
+        > prefix_width + full_status_width + agent_suffix_width + background_width + activity_width;
     let status_width = if show_state_label {
         full_status_width
     } else {
@@ -2861,6 +2856,7 @@ row_gap = 1
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(Agent::Codex);
         terminal_state.state = AgentState::Working;
+        terminal_state.background_job_count = Some(2);
         app.reconcile_sidebar_presentation();
 
         let width = 60;
@@ -2897,8 +2893,9 @@ row_gap = 1
              p{max-width:760px}.terminal{display:grid;width:max-content;font-size:14px;\
              line-height:20px;box-shadow:0 0 0 1px #bcc0cc;background:#eff1f5}.cell{width:1ch;\
              height:20px;white-space:pre;overflow:visible}</style><h1>Herdr sidebar release layout</h1>\
-             <p>Actual Ratatui test buffer: selected titles, blue Working status, one row per tab,\
-             multi-pane roll-up, and compact spacing between complete Space groups.</p>\
+             <p>Actual Ratatui test buffer: selected titles, blue Working status, provider suffix,\
+             background-terminal count, one row per tab, multi-pane roll-up, and compact spacing\
+             between complete Space groups.</p>\
              <div class=\"terminal\" style=\"grid-template-columns:repeat(60,1ch)\">",
         );
         for cell in terminal.backend().buffer().content() {

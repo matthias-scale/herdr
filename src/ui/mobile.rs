@@ -1791,24 +1791,24 @@ mod tests {
             .collect::<Vec<_>>();
         let first = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("First task"))
+            .position(|row| row.contains("working") && row.contains("Fir… · cx  2 >_"))
             .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
         let second = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("Second task"))
+            .position(|row| row.contains("working") && row.contains("Second ta… · cx"))
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
-        assert!(rows[first].find("working").unwrap() < rows[first].find("First task").unwrap());
+        assert!(rows[first].find("working").unwrap() < rows[first].find("Fir…").unwrap());
         assert!(
-            rows[first].contains("First task · cx  2 >_"),
+            rows[first].contains("Fir… · cx  2 >_"),
             "mobile tab row must place the provider suffix and badge after its title: {:?}",
             rows[first]
         );
         assert!(
-            rows[second].contains("Second task · cx"),
+            rows[second].contains("Second ta… · cx"),
             "mobile tab row must show the provider suffix: {:?}",
             rows[second]
         );
-        assert!(rows[second].find("working").unwrap() < rows[second].find("Second task").unwrap());
+        assert!(rows[second].find("working").unwrap() < rows[second].find("Second ta…").unwrap());
         assert_eq!(
             second,
             first + 1,
