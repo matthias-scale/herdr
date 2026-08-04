@@ -335,10 +335,6 @@ impl TerminalState {
         self.work_context.effective()
     }
 
-    pub(crate) fn persisted_work_context(&self) -> &crate::work_context::PaneWorkContext {
-        self.work_context.persisted()
-    }
-
     pub(crate) fn apply_manual_work_context_patch(
         &mut self,
         patch: crate::work_context::PaneWorkContextPatch,
@@ -361,10 +357,11 @@ impl TerminalState {
         Ok(changed)
     }
 
-    /// The hook tier is transient per agent session: any accepted mutation that
-    /// tears down or replaces the session identity that authorized guarded
+    /// The hook tier is persisted for restore fidelity, but any accepted
+    /// mutation that tears down or replaces the session identity that authorized guarded
     /// work-title reports must also drop the hook tier, so stale ticket/PR refs
-    /// never outlive their session. Manual and git tiers are untouched.
+    /// never outlive their session. Manual, git, and restored-fallback tiers are
+    /// untouched.
     fn clear_hook_work_context(&mut self) -> bool {
         let changed = self.work_context.clear_hook_turn();
         if changed {
@@ -378,6 +375,19 @@ impl TerminalState {
         context: crate::work_context::PaneWorkContext,
     ) -> Result<(), String> {
         self.work_context = crate::work_context::PaneWorkContextState::from_restored(context)?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_work_context_with_tiers(
+        &mut self,
+        flat: crate::work_context::PaneWorkContext,
+        tiers: Option<crate::work_context::PaneWorkContextTiers>,
+    ) -> Result<(), String> {
+        let Some(tiers) = tiers else {
+            return self.restore_work_context(flat);
+        };
+        self.work_context =
+            crate::work_context::PaneWorkContextState::from_restored_with_tiers(flat, Some(tiers))?;
         Ok(())
     }
 
