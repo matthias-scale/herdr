@@ -429,6 +429,9 @@ fn compute_mobile_view(
         if let Some(active) = app.take_pending_workspace_reveal() {
             app.ensure_mobile_workspace_visible(active);
         }
+        let viewport = mobile_switcher_areas(app).viewport;
+        app.view.visible_agent_activity_instants =
+            mobile::visible_tab_activity_instants_from(app, terminal_runtimes, viewport);
     }
     app.sync_copy_mode_search_geometry();
 }

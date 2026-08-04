@@ -158,6 +158,44 @@ pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
     mobile_switcher_max_scroll_for_height(app, mobile_switcher_areas(app).viewport.height)
 }
 
+pub(crate) fn visible_tab_activity_instants_from(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    viewport: Rect,
+) -> Vec<std::time::Instant> {
+    let content = inset_for_left_scrollbar(viewport);
+    if content == Rect::default() {
+        return Vec::new();
+    }
+    let rows = mobile_sidebar_rows_from(app, terminal_runtimes);
+    let visible_start = app.mobile_switcher_scroll;
+    let visible_end = visible_start.saturating_add(usize::from(viewport.height));
+    let mut doc_y = mobile_sidebar_rows_start(app, &rows);
+
+    rows.iter()
+        .filter_map(|row| {
+            let row_start = doc_y;
+            doc_y = doc_y.saturating_add(mobile_sidebar_row_height(row));
+            if row_start >= visible_end || doc_y <= visible_start {
+                return None;
+            }
+            let SidebarRow::Tab { entry, depth } = row else {
+                return None;
+            };
+            let indent = " ".repeat(2 + usize::from(*depth) * 3);
+            tab_row_layout(
+                entry,
+                app.view_observed_at,
+                usize::from(content.width),
+                display_width(&indent),
+                &app.palette,
+            )
+            .activity_age
+            .and(entry.activity_at)
+        })
+        .collect()
+}
+
 pub(crate) fn mobile_switcher_target_at(
     app: &AppState,
     col: u16,
@@ -1852,6 +1890,49 @@ mod tests {
                 assert!(rendered.ends_with("1m ago"), "{rendered:?}");
             }
         }
+    }
+
+    #[test]
+    fn mobile_activity_deadlines_follow_visible_age_fields() {
+        let started = std::time::Instant::now() - std::time::Duration::from_secs(65);
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
+        workspace.tabs[0].custom_name = Some("Investigate release regression".into());
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Navigate;
+        app.status_bar_enabled = false;
+        app.mobile_width_threshold = 80;
+        let runtimes = TerminalRuntimeRegistry::new();
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.view.visible_agent_activity_instants, vec![started]);
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 18, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 4));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
+
+        app.mode = crate::app::Mode::Terminal;
+        crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
+        assert!(app.view.visible_agent_activity_instants.is_empty());
     }
 
     #[test]
