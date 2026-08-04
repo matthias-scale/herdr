@@ -1692,16 +1692,9 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
-    let agent_suffix_field = tab_agent_suffix(entry.agent)
-        .map(|suffix| format!(" · {suffix}"))
-        .filter(|suffix| {
-            usize::from(card.rect.width)
-                >= display_width(&prefix)
-                    + status_width
-                    + background_job_width
-                    + display_width(suffix)
-                    + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
-        });
+    // Provider identity is part of the row contract, so retain it even when
+    // the title must be truncated to make a narrow sidebar fit.
+    let agent_suffix_field = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
     let agent_suffix_width = agent_suffix_field
         .as_deref()
         .map(display_width)
@@ -3173,18 +3166,19 @@ row_gap = 1
     fn narrow_tab_rows_keep_status_before_truncated_title() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("one".into());
-        let area = Rect::new(0, 0, 12, 12);
-        let mut terminal = Terminal::new(TestBackend::new(12, 12)).unwrap();
+        let area = Rect::new(0, 0, 23, 12);
+        let mut terminal = Terminal::new(TestBackend::new(23, 12)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let card = &compute_tab_card_areas(&app, area)[0];
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 11);
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 23);
 
         assert!(
             rendered.contains('●') || rendered.contains('w'),
             "{rendered:?}"
         );
+        assert!(rendered.contains("· pi"), "{rendered:?}");
         assert!(!rendered.contains("--"), "{rendered:?}");
     }
 
