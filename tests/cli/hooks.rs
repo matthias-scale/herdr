@@ -321,7 +321,10 @@ fn ac1_ac2_ac3_turn_hooks_forward_derived_work_context_without_asset_changes() {
     ] {
         let requests = run_turn_title_cli(provider, fixture, &envs);
         assert_eq!(requests[2]["method"], "pane.report_metadata");
-        assert_eq!(requests[2]["params"]["work_context"]["ticket_ids"], tickets);
+        assert_eq!(
+            requests[2]["params"]["work_context"]["ticket_ids"],
+            serde_json::json!(tickets)
+        );
         assert_eq!(
             requests[2]["params"]["work_context"]["pr_urls"],
             serde_json::json!([pr_url])
