@@ -338,8 +338,108 @@ fn refresh_workspace_git_statuses(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::time::Duration;
+
     use super::*;
     use crate::workspace::Workspace;
+
+    #[cfg(unix)]
+    struct PathGuard {
+        previous: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("PATH", previous);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_test_path(directory: &std::path::Path) -> PathGuard {
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![directory.to_path_buf()];
+        if let Some(previous_path) = previous.as_ref() {
+            paths.extend(std::env::split_paths(previous_path));
+        }
+        let path = std::env::join_paths(paths).expect("join test PATH");
+        std::env::set_var("PATH", path);
+        PathGuard { previous }
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).expect("write fake git");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake git metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make fake git executable");
+    }
+
+    #[cfg(unix)]
+    fn pid_is_alive(pid: &str) -> bool {
+        let Ok(pid) = pid.parse::<libc::pid_t>() else {
+            return false;
+        };
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[cfg(unix)]
+    fn assert_pid_dead(pid: &str, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !pid_is_alive(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{what} (pid {pid}) still exists after the deadline");
+    }
+
+    #[cfg(unix)]
+    fn wait_for_file(path: &std::path::Path, what: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if !contents.trim().is_empty() {
+                    return contents;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "{what} was not written before the deadline: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_invocation_count(path: &std::path::Path, minimum: u32) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if contents.trim().parse::<u32>().unwrap_or(0) >= minimum {
+                    return contents;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "fake git did not reach invocation {minimum} before the deadline: {}",
+            path.display()
+        );
+    }
 
     fn config_with_sidebar_branch() -> crate::config::Config {
         let mut config = crate::config::Config::default();
@@ -624,6 +724,7 @@ mod tests {
                     ahead_behind: false,
                 }
             );
+            assert!(!item.updates_workspace_identity);
         }
     }
 
@@ -849,6 +950,167 @@ mod tests {
             app.state.workspaces[0].cached_git_branch.as_deref(),
             Some("last-good")
         );
+    }
+
+    // ac3: a hung refresh-path git descendant is killed at the app deadline; the retry
+    // generation proceeds, and a late completion from the invalidated generation cannot
+    // replace the last good focused branch.
+    #[cfg(unix)]
+    #[test]
+    fn hung_git_refresh_retries_and_rejects_late_prior_generation() {
+        let _env_guard = crate::config::test_config_env_lock()
+            .lock()
+            .expect("config test env lock");
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "herdr-git-refresh-consumer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let repo = fixture_dir.join("repo");
+        let fake_bin = fixture_dir.join("bin");
+        std::fs::create_dir_all(repo.join(".git/refs/heads")).expect("create fake repo");
+        std::fs::create_dir_all(repo.join(".git/refs/remotes/origin"))
+            .expect("create fake upstream refs");
+        std::fs::create_dir_all(&fake_bin).expect("create fake git bin");
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/hung\n").expect("write fake HEAD");
+        std::fs::write(
+            repo.join(".git/refs/heads/hung"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .expect("write fake branch ref");
+        std::fs::write(
+            repo.join(".git/refs/remotes/origin/hung"),
+            "2222222222222222222222222222222222222222\n",
+        )
+        .expect("write fake upstream ref");
+        std::fs::write(
+            repo.join(".git/config"),
+            "[branch \"hung\"]\n\tremote = origin\n\tmerge = refs/heads/hung\n",
+        )
+        .expect("write fake git config");
+
+        let state_file = fake_bin.join("invocations");
+        let shell_pid_file = fake_bin.join("shell-pid");
+        let descendant_pid_file = fake_bin.join("descendant-pid");
+        write_executable(
+            &fake_bin.join("git"),
+            &format!(
+                "#!/bin/sh\ncount=0\nif test -f '{}'; then count=$(cat '{}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nif test \"$count\" -eq 1; then\n  printf '%s' \"$$\" > '{}'\n  sleep 30 &\n  printf '%s' \"$!\" > '{}'\n  wait\nelse\n  printf '0\\t0\\n'\nfi\n",
+                state_file.display(),
+                state_file.display(),
+                state_file.display(),
+                shell_pid_file.display(),
+                descendant_pid_file.display(),
+            ),
+        );
+        let _path_guard = set_test_path(&fake_bin);
+
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::GitStatus]];
+        let mut app = test_app(&config);
+        let mut workspace = Workspace::test_new("consumer");
+        workspace.identity_cwd = repo.clone();
+        workspace.cached_identity_cwd = repo.clone();
+        workspace.cached_git_status_key = repo.clone();
+        workspace.cached_git_branch = Some("last-good".into());
+        let root_pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(root_pane)
+            .expect("workspace root terminal")
+            .clone();
+        app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id, repo.clone()),
+        );
+        app.state.workspaces.push(workspace);
+        app.state.active = Some(0);
+        app.state.status_bar_enabled = true;
+        app.state.sync_status_focused_cwd(&app.terminal_runtimes);
+        app.state.status_git_cwd = Some(repo.clone());
+        app.state.status_git_branch = Some("last-good".into());
+
+        let started_at = Instant::now();
+        app.last_git_remote_status_refresh = started_at
+            .checked_sub(GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+            .expect("refresh interval fits");
+        app.start_git_status_refresh_if_due(started_at);
+        let first_generation = app
+            .git_refresh_in_flight
+            .expect("first refresh started")
+            .generation;
+        let _ = wait_for_file(&shell_pid_file, "first fake git shell pid");
+        let _ = wait_for_file(&descendant_pid_file, "first fake git descendant pid");
+
+        let first_deadline = app
+            .git_refresh_in_flight
+            .expect("first refresh remains in flight")
+            .deadline;
+        while Instant::now() < first_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.start_git_status_refresh_if_due(Instant::now());
+        let second_generation = app
+            .git_refresh_in_flight
+            .expect("retry refresh started")
+            .generation;
+        assert!(second_generation > first_generation);
+        assert_eq!(
+            app.state.status_git_branch.as_deref(),
+            Some("last-good"),
+            "deadline expiry must preserve the focused branch"
+        );
+
+        let shell_pid = std::fs::read_to_string(&shell_pid_file).expect("read shell pid");
+        let descendant_pid =
+            std::fs::read_to_string(&descendant_pid_file).expect("read descendant pid");
+        assert_pid_dead(shell_pid.trim(), "hung fake git shell");
+        assert_pid_dead(descendant_pid.trim(), "hung fake git descendant");
+        let _invocation_count = wait_for_invocation_count(&state_file, 2);
+
+        let event_deadline = Instant::now() + Duration::from_secs(3);
+        let mut refresh_events = Vec::new();
+        while refresh_events.len() < 2 && Instant::now() < event_deadline {
+            match app.event_rx.try_recv() {
+                Ok(event) if matches!(&event, AppEvent::GitStatusRefreshed { .. }) => {
+                    refresh_events.push(event);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("refresh event channel closed: {error}"),
+            }
+        }
+        assert_eq!(refresh_events.len(), 2, "both generations must complete");
+        refresh_events.sort_by_key(|event| match event {
+            AppEvent::GitStatusRefreshed { generation, .. } => *generation,
+            _ => u64::MAX,
+        });
+        let old_event = refresh_events.remove(0);
+        let new_event = refresh_events.remove(0);
+        assert!(matches!(
+            &old_event,
+            AppEvent::GitStatusRefreshed { generation, .. } if *generation == first_generation
+        ));
+        assert!(matches!(
+            &new_event,
+            AppEvent::GitStatusRefreshed { generation, .. } if *generation == second_generation
+        ));
+
+        app.handle_internal_event_with_render_impact(old_event);
+        assert_eq!(
+            app.state.workspaces[0].cached_git_branch.as_deref(),
+            Some("last-good")
+        );
+        assert_eq!(app.state.status_git_branch.as_deref(), Some("last-good"));
+
+        app.handle_internal_event_with_render_impact(new_event);
+        assert!(app.git_refresh_in_flight.is_none());
+
+        std::fs::remove_dir_all(fixture_dir).expect("remove consumer fixture");
     }
 
     fn test_app(config: &crate::config::Config) -> super::super::App {
