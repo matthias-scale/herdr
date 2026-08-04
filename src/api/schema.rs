@@ -163,6 +163,8 @@ pub enum Method {
     PaneFocus(PaneTarget),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
+    #[serde(rename = "pane.work_context.set")]
+    PaneWorkContextSet(PaneWorkContextSetParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_keys")]

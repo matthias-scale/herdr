@@ -491,6 +491,9 @@ fn restore_tab(
         };
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
+        let saved_work_context = saved_pane
+            .map(|pane| pane.work_context.clone())
+            .unwrap_or_default();
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_managed_agent = saved_pane
             .and_then(|pane| pane.managed_agent_kind.as_deref())
@@ -541,6 +544,9 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            if let Err(error) = terminal.restore_work_context(saved_work_context.clone()) {
+                warn!(pane_id = id.raw(), %error, "ignoring invalid saved pane work context");
+            }
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -630,6 +636,9 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                if let Err(error) = terminal.restore_work_context(saved_work_context.clone()) {
+                    warn!(pane_id = id.raw(), %error, "ignoring invalid saved pane work context");
+                }
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -1187,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_carries_persisted_agent_session_metadata() {
+    async fn ac3_restore_carries_persisted_agent_session_and_work_context() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1207,6 +1216,12 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            work_context: crate::work_context::PaneWorkContext {
+                                ticket_ids: vec!["MAT-12".into()],
+                                pr_urls: vec!["https://github.com/o/r/pull/3".into()],
+                                branch: Some("feat/context".into()),
+                                work_title: Some("Restore context".into()),
+                            },
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
                             managed_agent_kind: Some("opencode".into()),
@@ -1257,6 +1272,15 @@ mod tests {
         );
         assert_eq!(terminal.agent_name, None);
         assert_eq!(terminal.manual_label.as_deref(), Some("reviewer"));
+        assert_eq!(
+            terminal.effective_work_context(),
+            &crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["MAT-12".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/3".into()],
+                branch: Some("feat/context".into()),
+                work_title: Some("Restore context".into()),
+            }
+        );
         let session = terminal
             .persisted_agent_session
             .as_ref()
@@ -1294,6 +1318,7 @@ mod tests {
                             10,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                work_context: Default::default(),
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
@@ -1305,6 +1330,7 @@ mod tests {
                             20,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                work_context: Default::default(),
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
@@ -1358,6 +1384,7 @@ mod tests {
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
+                    work_context: Default::default(),
                     label: None,
                     agent_name: None,
                     managed_agent_kind: None,
@@ -1368,6 +1395,7 @@ mod tests {
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
+            work_context: Default::default(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
             managed_agent_kind: None,
@@ -1522,6 +1550,7 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            work_context: Default::default(),
                             label: None,
                             agent_name: None,
                             managed_agent_kind: None,
@@ -1688,6 +1717,7 @@ mod tests {
             0,
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
+                work_context: Default::default(),
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,

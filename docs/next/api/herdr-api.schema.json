@@ -863,6 +863,13 @@
               },
               "type": "object"
             },
+            "work_context": {
+              "$ref": "#/schemas/event/$defs/PaneWorkContext",
+              "default": {
+                "pr_urls": [],
+                "ticket_ids": []
+              }
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -1020,6 +1027,37 @@
             "max_offset_from_bottom",
             "viewport_rows"
           ],
+          "type": "object"
+        },
+        "PaneWorkContext": {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pr_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ticket_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "work_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "SplitDirection": {
@@ -3156,6 +3194,62 @@
             "pane_id",
             "source",
             "match"
+          ],
+          "type": "object"
+        },
+        "PaneWorkContextField": {
+          "enum": [
+            "ticket_ids",
+            "pr_urls",
+            "branch",
+            "work_title"
+          ],
+          "type": "string"
+        },
+        "PaneWorkContextSetParams": {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "clear_fields": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/PaneWorkContextField"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "pr_urls": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "ticket_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "work_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id"
           ],
           "type": "object"
         },
@@ -5354,6 +5448,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.work_context.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneWorkContextSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.send_text",
               "type": "string"
             },
@@ -6168,6 +6278,13 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "work_context": {
+              "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
+              "default": {
+                "pr_urls": [],
+                "ticket_ids": []
+              }
             },
             "workspace_id": {
               "type": "string"
@@ -7443,6 +7560,13 @@
               },
               "type": "object"
             },
+            "work_context": {
+              "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
+              "default": {
+                "pr_urls": [],
+                "ticket_ids": []
+              }
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -7930,6 +8054,37 @@
             "focused_pane_id",
             "layout"
           ],
+          "type": "object"
+        },
+        "PaneWorkContext": {
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pr_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ticket_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "work_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "PaneZoomReason": {

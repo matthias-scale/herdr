@@ -261,6 +261,7 @@ pub struct TerminalState {
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
+    pub work_context: crate::work_context::PaneWorkContextState,
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
@@ -301,6 +302,7 @@ impl TerminalState {
             fallback_observed_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
+            work_context: crate::work_context::PaneWorkContextState::default(),
             work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
@@ -327,6 +329,29 @@ impl TerminalState {
             recent_agent_process_exit: None,
             pending_agent_resume_plan: None,
         }
+    }
+
+    pub fn effective_work_context(&self) -> &crate::work_context::PaneWorkContext {
+        self.work_context.effective()
+    }
+
+    pub(crate) fn apply_manual_work_context_patch(
+        &mut self,
+        patch: crate::work_context::PaneWorkContextPatch,
+    ) -> Result<bool, String> {
+        let changed = self.work_context.apply_manual_patch(patch)?;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn restore_work_context(
+        &mut self,
+        context: crate::work_context::PaneWorkContext,
+    ) -> Result<(), String> {
+        self.work_context = crate::work_context::PaneWorkContextState::from_restored(context)?;
+        Ok(())
     }
 
     pub(crate) fn set_background_job_count(&mut self, count: Option<u16>) -> bool {

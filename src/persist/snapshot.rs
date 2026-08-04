@@ -97,6 +97,8 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    #[serde(default)]
+    pub work_context: crate::work_context::PaneWorkContext,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,6 +342,9 @@ fn capture_tab(
             })
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
+        let work_context = terminal
+            .map(|terminal| terminal.effective_work_context().clone())
+            .unwrap_or_default();
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -365,6 +370,7 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                work_context,
                 label,
                 agent_name,
                 managed_agent_kind,
@@ -619,6 +625,54 @@ mod tests {
     }
 
     #[test]
+    fn ac3_legacy_v3_snapshot_without_work_context_loads_empty() {
+        let raw = r#"{
+            "version": 3,
+            "workspaces": [{
+                "id": "workspace",
+                "identity_cwd": "/tmp",
+                "tabs": [{
+                    "layout": {"Pane": 0},
+                    "panes": {"0": {"cwd": "/tmp"}},
+                    "zoomed": false
+                }]
+            }],
+            "selected": 0
+        }"#;
+        let restored = parse_snapshot(raw).expect("legacy v3 snapshot should load");
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&0].work_context,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert_eq!(restored.version, 3);
+    }
+
+    #[test]
+    fn ac3_snapshot_serialization_round_trips_effective_work_context() {
+        let mut state = state_with_workspaces(&["context"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-5".into()]),
+                work_title: Some("Persist context".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+        let context = &restored.workspaces[0].tabs[0].panes[&root.raw()].work_context;
+        assert_eq!(context.ticket_ids, vec!["MAT-5"]);
+        assert_eq!(context.work_title.as_deref(), Some("Persist context"));
+    }
+
+    #[test]
     fn round_trip_layout_snapshot() {
         let layout = LayoutSnapshot::Split {
             direction: DirectionSnapshot::Horizontal,
@@ -649,6 +703,7 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
+                work_context: Default::default(),
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -660,6 +715,7 @@ mod tests {
             1,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
+                work_context: Default::default(),
                 label: Some("website".into()),
                 agent_name: None,
                 managed_agent_kind: None,
@@ -1209,6 +1265,7 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+                work_context: Default::default(),
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
@@ -1222,6 +1279,7 @@ mod tests {
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
+                work_context: Default::default(),
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,

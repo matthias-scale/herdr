@@ -5,7 +5,8 @@ use crate::api::schema::{
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
-    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
+    PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
+    SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -27,6 +28,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "zoom" => pane_zoom(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
+        "work-context" => pane_work_context(&args[1..]),
         "split" => pane_split(&args[1..]),
         "swap" => pane_swap(&args[1..]),
         "move" => pane_move(&args[1..]),
@@ -93,6 +95,118 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
             pane_id: super::normalize_pane_id(raw_pane_id),
         }),
     })?)
+}
+
+fn pane_work_context(args: &[String]) -> std::io::Result<i32> {
+    match args.first().map(String::as_str) {
+        Some("get") => pane_work_context_get(&args[1..]),
+        Some("set") => pane_work_context_set(&args[1..]),
+        _ => {
+            eprintln!("usage: herdr pane work-context get|set ...");
+            Ok(2)
+        }
+    }
+}
+
+fn pane_work_context_get(args: &[String]) -> std::io::Result<i32> {
+    pane_get(args)
+}
+
+fn pane_work_context_set(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_work_context_set_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:work_context:set".into(),
+        method: Method::PaneWorkContextSet(params),
+    })?)
+}
+
+fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSetParams, String> {
+    let Some(raw_pane_id) = args.first() else {
+        return Err(work_context_set_usage());
+    };
+    let pane_id = super::normalize_pane_id(raw_pane_id);
+    let mut patch = crate::work_context::PaneWorkContextPatch::default();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--ticket" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --ticket".into());
+                };
+                patch
+                    .ticket_ids
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
+                index += 2;
+            }
+            "--pr" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pr".into());
+                };
+                patch
+                    .pr_urls
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
+                index += 2;
+            }
+            "--branch" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --branch".into());
+                };
+                if patch.branch.replace(value.clone()).is_some() {
+                    return Err("--branch may only be provided once".into());
+                }
+                index += 2;
+            }
+            "--title" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --title".into());
+                };
+                if patch.work_title.replace(value.clone()).is_some() {
+                    return Err("--title may only be provided once".into());
+                }
+                index += 2;
+            }
+            "--clear" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --clear".into());
+                };
+                patch.clear_fields.push(parse_work_context_field(value)?);
+                index += 2;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    if patch.is_empty() {
+        return Err("missing work-context field to set or clear".into());
+    }
+    Ok(PaneWorkContextSetParams { pane_id, patch })
+}
+
+fn parse_work_context_field(
+    value: &str,
+) -> Result<crate::work_context::PaneWorkContextField, String> {
+    match value {
+        "ticket_ids" | "ticket-ids" | "tickets" => {
+            Ok(crate::work_context::PaneWorkContextField::TicketIds)
+        }
+        "pr_urls" | "pr-urls" | "prs" => Ok(crate::work_context::PaneWorkContextField::PrUrls),
+        "branch" => Ok(crate::work_context::PaneWorkContextField::Branch),
+        "work_title" | "work-title" | "title" => {
+            Ok(crate::work_context::PaneWorkContextField::WorkTitle)
+        }
+        _ => Err(format!("unknown work-context field: {value}")),
+    }
+}
+
+fn work_context_set_usage() -> String {
+    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...".into()
 }
 
 fn pane_current(args: &[String]) -> std::io::Result<i32> {
@@ -1509,6 +1623,8 @@ fn print_pane_help() {
     );
     eprintln!("  herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]");
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
+    eprintln!("  herdr pane work-context get <pane_id>");
+    eprintln!("  herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
         "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
@@ -1548,6 +1664,48 @@ mod tests {
         assert_eq!(params.target_pane_id, Some("issue-1".into()));
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
         assert_eq!(params.ratio, Some(0.333));
+    }
+
+    #[test]
+    fn ac1_parse_work_context_set_builds_one_atomic_mixed_patch() {
+        let params = parse_pane_work_context_set_args(&args(&[
+            "issue-1",
+            "--ticket",
+            "mat-7",
+            "--ticket",
+            "SCA-2",
+            "--pr",
+            "https://github.com/o/r/pull/9",
+            "--title",
+            "Manual title",
+            "--clear",
+            "branch",
+        ]))
+        .unwrap();
+
+        assert_eq!(params.pane_id, "issue-1");
+        assert_eq!(params.patch.ticket_ids.unwrap(), vec!["mat-7", "SCA-2"]);
+        assert_eq!(
+            params.patch.pr_urls.unwrap(),
+            vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(params.patch.work_title.as_deref(), Some("Manual title"));
+        assert_eq!(
+            params.patch.clear_fields,
+            vec![crate::work_context::PaneWorkContextField::Branch]
+        );
+    }
+
+    #[test]
+    fn ac1_parse_work_context_set_rejects_empty_or_invalid_clear() {
+        assert!(parse_pane_work_context_set_args(&args(&["issue-1"]))
+            .unwrap_err()
+            .contains("missing work-context"));
+        assert!(
+            parse_pane_work_context_set_args(&args(&["issue-1", "--clear", "unknown"]))
+                .unwrap_err()
+                .contains("unknown work-context field")
+        );
     }
 
     #[test]
