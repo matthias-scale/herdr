@@ -73,6 +73,7 @@ pub struct WorkspaceGitStatus {
     pub resolved_identity_cwd: PathBuf,
     pub status_cache_key: PathBuf,
     pub demand: GitStatusRefreshDemand,
+    pub updates_workspace_identity: bool,
     pub auto_label: String,
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
@@ -109,12 +110,14 @@ impl WorkspaceGitStatusSnapshot {
         resolved_identity_cwd: PathBuf,
         status_cache_key: PathBuf,
         demand: GitStatusRefreshDemand,
+        updates_workspace_identity: bool,
     ) -> WorkspaceGitStatus {
         WorkspaceGitStatus {
             workspace_id,
             resolved_identity_cwd,
             status_cache_key,
             demand,
+            updates_workspace_identity,
             auto_label: self.auto_label,
             branch: self.branch,
             ahead_behind: self.ahead_behind,

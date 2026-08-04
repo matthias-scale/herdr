@@ -15,6 +15,7 @@ struct WorkspaceGitRefreshItem {
     resolved_identity_cwd: PathBuf,
     cache_key_hint: Option<PathBuf>,
     demand: GitStatusRefreshDemand,
+    updates_workspace_identity: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,7 @@ struct WorkspaceGitRefreshTarget {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
     demand: GitStatusRefreshDemand,
+    updates_workspace_identity: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +193,7 @@ impl App {
                         resolved_identity_cwd: cwd,
                         cache_key_hint,
                         demand: workspace_demand,
+                        updates_workspace_identity: true,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -256,6 +259,7 @@ fn push_branch_refresh_item(
             branch: true,
             ahead_behind: false,
         },
+        updates_workspace_identity: false,
     });
 }
 
@@ -275,6 +279,7 @@ fn deduplicate_git_refresh_items(
             workspace_id: item.workspace_id,
             resolved_identity_cwd: item.resolved_identity_cwd,
             demand: item.demand,
+            updates_workspace_identity: item.updates_workspace_identity,
         };
         if let Some(&index) = indexes.get(&cache_key) {
             jobs[index].targets.push(target);
@@ -320,6 +325,7 @@ fn refresh_workspace_git_statuses(
                 target.resolved_identity_cwd,
                 job.cache_key.clone(),
                 target.demand,
+                target.updates_workspace_identity,
             )
         }));
     }
@@ -363,12 +369,14 @@ mod tests {
                     resolved_identity_cwd: nested.clone(),
                     cache_key_hint: None,
                     demand: GitStatusRefreshDemand::ALL,
+                    updates_workspace_identity: true,
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
                     resolved_identity_cwd: other.clone(),
                     cache_key_hint: None,
                     demand: GitStatusRefreshDemand::ALL,
+                    updates_workspace_identity: true,
                 },
             ],
             &HashMap::new(),
@@ -548,9 +556,12 @@ mod tests {
         let mut app = test_app(&config);
 
         let inactive_cwd = PathBuf::from("/repo-inactive");
-        let mut inactive = Workspace::test_new("inactive");
+        let inactive = Workspace::test_new("inactive");
         let inactive_root = inactive.tabs[0].root_pane;
-        let inactive_terminal = inactive.terminal_id(inactive_root).expect("terminal").clone();
+        let inactive_terminal = inactive
+            .terminal_id(inactive_root)
+            .expect("terminal")
+            .clone();
         app.state.terminals.insert(
             inactive_terminal.clone(),
             crate::terminal::TerminalState::new(inactive_terminal, inactive_cwd.clone()),
@@ -564,6 +575,12 @@ mod tests {
         let root_terminal = active.terminal_id(active_root).expect("terminal").clone();
         let unfocused = active.test_split(ratatui::layout::Direction::Horizontal);
         let unfocused_terminal = active.terminal_id(unfocused).expect("terminal").clone();
+        let other_tab = active.test_add_tab(Some("other-tab"));
+        let other_tab_pane = active.tabs[other_tab].root_pane;
+        let other_tab_terminal = active
+            .terminal_id(other_tab_pane)
+            .expect("terminal")
+            .clone();
         // Focus back on the root pane so the split pane is live but unfocused.
         active.tabs[0].layout.focus_pane(active_root);
         app.state.terminals.insert(
@@ -574,6 +591,11 @@ mod tests {
             unfocused_terminal.clone(),
             crate::terminal::TerminalState::new(unfocused_terminal, unfocused_cwd.clone()),
         );
+        let other_tab_cwd = PathBuf::from("/repo-other-tab");
+        app.state.terminals.insert(
+            other_tab_terminal.clone(),
+            crate::terminal::TerminalState::new(other_tab_terminal, other_tab_cwd.clone()),
+        );
         let active_id = active.id.clone();
 
         app.state.workspaces = vec![inactive, active];
@@ -582,11 +604,12 @@ mod tests {
 
         let items = app.workspace_git_refresh_items(false);
 
-        assert_eq!(items.len(), 3, "one observation per distinct pane cwd");
+        assert_eq!(items.len(), 4, "one observation per distinct pane cwd");
         for (workspace_id, cwd) in [
             (&inactive_id, &inactive_cwd),
             (&active_id, &active_cwd),
             (&active_id, &unfocused_cwd),
+            (&active_id, &other_tab_cwd),
         ] {
             let item = items
                 .iter()
