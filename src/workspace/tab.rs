@@ -24,6 +24,34 @@ pub struct NewPane {
     pub runtime: TerminalRuntime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TabDisplayProjection {
+    Manual(String),
+    Derived {
+        agent: Option<String>,
+        ticket: Option<String>,
+        title: Option<String>,
+    },
+    Fallback(String),
+}
+
+impl TabDisplayProjection {
+    pub(crate) fn full_label(&self) -> String {
+        match self {
+            Self::Manual(name) | Self::Fallback(name) => name.clone(),
+            Self::Derived {
+                agent,
+                ticket,
+                title,
+            } => [agent, ticket, title]
+                .into_iter()
+                .filter_map(|part| part.as_deref())
+                .collect::<Vec<_>>()
+                .join(" · "),
+        }
+    }
+}
+
 enum SplitCommand<'a> {
     Shell {
         command: &'a str,
@@ -52,6 +80,29 @@ pub struct Tab {
 }
 
 impl Tab {
+    pub(crate) fn work_context_display_projection(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<TabDisplayProjection> {
+        let terminal = self
+            .terminal_id(self.layout.focused())
+            .and_then(|terminal_id| terminals.get(terminal_id))?;
+        let context = terminal.effective_work_context();
+        let agent = terminal
+            .effective_display_agent()
+            .or_else(|| terminal.agent_name.clone())
+            .or_else(|| terminal.effective_agent_label().map(str::to_string));
+        let ticket = context.primary_ticket().map(str::to_string);
+        let title = context.work_title.clone();
+        (agent.is_some() || ticket.is_some() || title.is_some()).then_some(
+            TabDisplayProjection::Derived {
+                agent,
+                ticket,
+                title,
+            },
+        )
+    }
+
     pub fn new(
         number: usize,
         initial_cwd: PathBuf,

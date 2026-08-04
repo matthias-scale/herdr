@@ -32,6 +32,23 @@ pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
     }
 }
 
+fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
+    let title = title.trim().to_ascii_lowercase();
+    let provider = match entry.agent {
+        Some(Agent::Codex) => Some("codex"),
+        Some(Agent::Claude) => Some("claude"),
+        Some(Agent::Pi) => Some("pi"),
+        _ => None,
+    };
+    entry
+        .agent_label
+        .as_deref()
+        .into_iter()
+        .chain(entry.agent_kind_label.as_deref())
+        .chain(provider)
+        .any(|identity| identity.trim().eq_ignore_ascii_case(&title))
+}
+
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
     entry.has_agent && (entry.state != AgentState::Idle || !entry.seen)
 }
@@ -71,7 +88,14 @@ pub(super) fn tab_row_layout(
         .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
         .unwrap_or_default();
     let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
-    let agent_suffix = tab_agent_suffix(entry.agent).map(|suffix| format!(" · {suffix}"));
+    let tab_title = entry
+        .primary_tab_label
+        .as_deref()
+        .unwrap_or(DEFAULT_THREAD_TITLE);
+    let agent_suffix = (!title_repeats_agent_identity(entry, tab_title))
+        .then(|| tab_agent_suffix(entry.agent))
+        .flatten()
+        .map(|suffix| format!(" · {suffix}"));
     let agent_suffix_width = agent_suffix
         .as_deref()
         .map(display_width)
@@ -130,13 +154,7 @@ pub(super) fn tab_row_layout(
     };
     let fixed_width =
         prefix_width + status_width + agent_suffix_width + background_width + activity_width;
-    let title = truncate_end(
-        entry
-            .primary_tab_label
-            .as_deref()
-            .unwrap_or(DEFAULT_THREAD_TITLE),
-        width.saturating_sub(fixed_width),
-    );
+    let title = truncate_end(tab_title, width.saturating_sub(fixed_width));
 
     TabRowLayout {
         state,
@@ -297,14 +315,24 @@ fn collect_agent_panel_entries_with_runtimes(
                     let thread_title = ws
                         .tabs
                         .get(detail.tab_idx)
-                        .and_then(|tab| tab.custom_name.clone())
-                        .unwrap_or_else(|| DEFAULT_THREAD_TITLE.to_string());
+                        .and_then(|tab| {
+                            tab.custom_name.clone().or_else(|| {
+                                tab.terminal_id(tab.layout.focused())
+                                    .and_then(|terminal_id| app.terminals.get(terminal_id))
+                                    .and_then(|terminal| {
+                                        terminal.manual_label.clone().or_else(|| {
+                                            terminal.effective_work_context().work_title.clone()
+                                        })
+                                    })
+                            })
+                        })
+                        .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
                     AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
-                        primary_tab_label: Some(thread_title),
+                        primary_tab_label: thread_title,
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
                         terminal_title_stripped: detail.terminal_title_stripped,
@@ -4890,5 +4918,41 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
             ]
         );
+    }
+
+    #[test]
+    fn ac2_work_title_and_manual_label_drive_tab_row_without_losing_lifecycle() {
+        let mut app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Codex);
+        terminal.state = AgentState::Working;
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                work_title: Some("Codex".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let entry = sidebar_thread_entries(&app).remove(0);
+        let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
+        assert_eq!(layout.title, "Codex");
+        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.agent_suffix, None);
+
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                work_title: Some("repair login".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        terminal.set_manual_label("manual pane".into());
+        let entry = sidebar_thread_entries(&app).remove(0);
+        let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
+        assert_eq!(layout.title, "manual pane");
+        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
     }
 }

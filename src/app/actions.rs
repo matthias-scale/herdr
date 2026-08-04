@@ -504,7 +504,8 @@ impl AppState {
         let ws = &self.workspaces[ws_idx];
         let tab = &ws.tabs[tab_idx];
         let label = ws
-            .tab_display_name(tab_idx)
+            .tab_display_projection(&self.terminals, tab_idx)
+            .map(|projection| projection.full_label())
             .unwrap_or_else(|| (tab_idx + 1).to_string());
         let (status, seen) = tab_aggregate_state(tab, &self.terminals);
         let activity = tab_activity_summary(tab, &self.terminals);
@@ -551,11 +552,12 @@ impl AppState {
             let terminal = self.terminals.get(&pane.attached_terminal_id);
             let pane_number = ws.public_pane_number(pane_id).unwrap_or(0);
             let label = terminal
-                .and_then(|terminal| terminal.effective_title())
+                .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
                 .or_else(|| {
                     terminal
-                        .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
+                        .and_then(|terminal| terminal.effective_work_context().work_title.clone())
                 })
+                .or_else(|| terminal.and_then(|terminal| terminal.effective_title()))
                 .or_else(|| {
                     terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
                 })
@@ -581,11 +583,23 @@ impl AppState {
                 .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
             let status = status_label
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
-            let meta = match (agent_label, status.as_deref()) {
-                (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
-                (Some(agent_label), None) => agent_label.to_string(),
-                (None, _) => "shell".to_string(),
-            };
+            let mut meta_parts = Vec::new();
+            if let Some(context) = terminal.map(|terminal| terminal.effective_work_context()) {
+                meta_parts.extend(context.ticket_ids.iter().cloned());
+                meta_parts.extend(context.pr_urls.iter().map(|url| format!("PR {url}")));
+                if let Some(branch) = &context.branch {
+                    meta_parts.push(branch.clone());
+                }
+            }
+            match (agent_label, status.as_deref()) {
+                (Some(agent_label), Some(status)) => {
+                    meta_parts.push(agent_label.to_string());
+                    meta_parts.push(status.to_string());
+                }
+                (Some(agent_label), None) => meta_parts.push(agent_label.to_string()),
+                (None, _) => meta_parts.push("shell".to_string()),
+            }
+            let meta = meta_parts.join(" · ");
             let is_current = self.is_active_pane(ws_idx, tab_idx, pane_id);
             let search_text = format!("{label} {meta}").to_lowercase();
             rows.push(NavigatorRow {
@@ -1787,6 +1801,7 @@ impl AppState {
 
         let layout = crate::ui::compute_tab_bar_view(
             ws,
+            &self.terminals,
             area,
             self.tab_scroll,
             self.tab_scroll_follow_active,
@@ -3878,6 +3893,51 @@ mod tests {
             row.target,
             crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == agent
         ) && row.meta.contains("claude")));
+    }
+
+    #[test]
+    fn ac3_navigator_prefers_manual_then_work_title_and_searches_work_details() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.agent_name = Some("Claude".into());
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["SCA-42".into()]),
+                pr_urls: Some(vec!["https://github.com/ogulcancelik/herdr/pull/4".into()]),
+                branch: Some("feat/work-context-ui".into()),
+                work_title: Some("repair login".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        state.open_navigator();
+        let pane_row = state
+            .navigator_rows()
+            .into_iter()
+            .find(|row| matches!(row.target, crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane))
+            .unwrap();
+        assert_eq!(pane_row.label, "repair login");
+        assert!(pane_row.meta.starts_with(
+            "SCA-42 · PR https://github.com/ogulcancelik/herdr/pull/4 · feat/work-context-ui"
+        ));
+        assert!(pane_row.meta.ends_with("Claude · unknown"));
+        assert!(pane_row.search_text.contains("sca-42"));
+        assert!(pane_row.search_text.contains("pull/4"));
+        assert!(pane_row.search_text.contains("feat/work-context-ui"));
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("manual pane".into());
+        let pane_row = state
+            .navigator_rows()
+            .into_iter()
+            .find(|row| matches!(row.target, crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane))
+            .unwrap();
+        assert_eq!(pane_row.label, "manual pane");
     }
 
     #[test]

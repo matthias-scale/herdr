@@ -25,7 +25,7 @@ use self::git::git_status_cache_key_for_space;
 #[cfg(test)]
 pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand;
 pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand_and_program;
-pub(crate) use self::tab::MovedPane;
+pub(crate) use self::tab::{MovedPane, TabDisplayProjection};
 pub use self::{
     git::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
@@ -513,6 +513,21 @@ impl Workspace {
             tab.custom_name
                 .clone()
                 .unwrap_or_else(|| (tab_idx + 1).to_string()),
+        )
+    }
+
+    pub(crate) fn tab_display_projection(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        tab_idx: usize,
+    ) -> Option<TabDisplayProjection> {
+        let tab = self.tabs.get(tab_idx)?;
+        if let Some(name) = &tab.custom_name {
+            return Some(TabDisplayProjection::Manual(name.clone()));
+        }
+        Some(
+            tab.work_context_display_projection(terminals)
+                .unwrap_or_else(|| TabDisplayProjection::Fallback((tab_idx + 1).to_string())),
         )
     }
 

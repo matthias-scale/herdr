@@ -394,7 +394,7 @@ fn render_header_status(
 
     let (state, seen) = ws.aggregate_state(&app.terminals);
     let (dot, dot_style) = state_dot(state, seen, p);
-    let tab_label = mobile_tab_status(ws);
+    let tab_label = mobile_tab_status(ws, &app.terminals, area.width.saturating_sub(6) as usize);
     let row1 = Rect::new(area.x, area.y, area.width, 1);
     let tab_w = display_width_u16(&tab_label)
         .saturating_add(1)
@@ -434,15 +434,28 @@ fn render_header_status(
     }
 }
 
-fn mobile_tab_status(ws: &crate::workspace::Workspace) -> String {
-    let tab_label = ws
-        .tab_display_name(ws.active_tab)
-        .unwrap_or_else(|| (ws.active_tab + 1).to_string());
-    if ws.tabs.len() <= 1 {
-        format!("tab {tab_label}")
+fn mobile_tab_status(
+    ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    max_width: usize,
+) -> String {
+    let prefix = "tab ";
+    let suffix = if ws.tabs.len() > 1 {
+        format!(" · {}/{}", ws.active_tab + 1, ws.tabs.len())
     } else {
-        format!("tab {tab_label} · {}/{}", ws.active_tab + 1, ws.tabs.len())
-    }
+        String::new()
+    };
+    let label_width = max_width
+        .saturating_sub(display_width(prefix))
+        .saturating_sub(display_width(&suffix));
+    let tab_label = ws
+        .tab_display_projection(terminals, ws.active_tab)
+        .map(|projection| super::tabs::fit_tab_display_projection(projection, label_width))
+        .unwrap_or_else(|| truncate_end(&(ws.active_tab + 1).to_string(), label_width));
+    truncate_end(&format!("{prefix}{tab_label}{suffix}"), max_width)
 }
 
 fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -797,14 +810,21 @@ fn render_mobile_switcher_content(
         for (idx, tab) in ws.tabs.iter().enumerate() {
             let active = idx == ws.active_tab;
             let bg = mobile_item_bg(false, active, p);
-            let display_name = ws
-                .tab_display_name(idx)
-                .unwrap_or_else(|| (idx + 1).to_string());
-            let label = if tab.is_auto_named() {
-                format!("tab {display_name}")
+            let label_prefix = if tab.is_auto_named() {
+                "tab ".to_string()
             } else {
-                format!("{} · {display_name}", idx + 1)
+                format!("{} · ", idx + 1)
             };
+            let label_width = content
+                .width
+                .saturating_sub(3)
+                .saturating_sub(display_width_u16(&label_prefix))
+                as usize;
+            let display_name = ws
+                .tab_display_projection(&app.terminals, idx)
+                .map(|projection| super::tabs::fit_tab_display_projection(projection, label_width))
+                .unwrap_or_else(|| truncate_end(&(idx + 1).to_string(), label_width));
+            let label = format!("{label_prefix}{display_name}");
             let title = Line::from(vec![
                 Span::styled("  ", Style::default().bg(bg)),
                 Span::styled(
@@ -1690,7 +1710,37 @@ mod tests {
         assert!(workspace.close_tab(removed_tab));
         workspace.active_tab = 1;
 
-        assert_eq!(mobile_tab_status(&workspace), "tab 2 · 2/2");
+        assert_eq!(
+            mobile_tab_status(&workspace, &Default::default(), 40),
+            "tab 2 · 2/2"
+        );
+    }
+
+    #[test]
+    fn ac1_mobile_tab_status_uses_context_order_and_narrow_ticket_fallback() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-tabs")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.agent_name = Some("Claude".into());
+        terminal
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["SCA-42".into()]),
+                work_title: Some("repair login regression".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            mobile_tab_status(&app.workspaces[0], &app.terminals, 80),
+            "tab Claude · SCA-42 · repair login regression"
+        );
+        assert_eq!(
+            mobile_tab_status(&app.workspaces[0], &app.terminals, 10),
+            "tab SCA-42"
+        );
     }
 
     #[test]
