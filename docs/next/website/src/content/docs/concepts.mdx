@@ -50,11 +50,11 @@ Agent states are:
 
 ## Sidebar hierarchy
 
-The sidebar is one Spaces tree. Every workspace keeps its rolled-up status row and can independently disclose its tabs/windows underneath, including tabs without a detected agent. Each tab is exactly one status-first title row; multiple panes roll up into that owning tab instead of adding model, agent, or pane subtitle rows. Selected Space and tab titles use darker bold text, and agent-backed tab rows end with a compact age for the latest user/agent activity across their panes. Linked-worktree disclosure remains separate.
+The sidebar is one Spaces tree. A repository and its linked worktrees share one Space row, and every tab appears once as a direct window child, including tabs without a detected agent. Multiple panes roll up into that owning window instead of adding model, agent, or pane subtitle rows. Agent-backed rows place lifecycle status before the title and end with a compact age for the latest user/agent activity; agentless rows omit lifecycle status. Selected Space and window titles use darker bold text. See [UI and sidebar configuration](/docs/configuration/#ui-and-sidebar) for provider suffixes and background-terminal counts.
 
-Agent disclosure is local to each attached UI. Expanding or collapsing a workspace in one client does not change another client, and a fresh attachment initializes its own disclosure state.
+Space disclosure is local to each attached UI. Expanding or collapsing a Space in one client does not change another client, and a fresh attachment initializes its own disclosure state.
 
-The visible tree always keeps workspace and tab ownership order. Legacy priority ordering and API-defined Agent views remain accepted for compatibility but do not replace or reorder it; see [UI and sidebar configuration](/docs/configuration/#ui-and-sidebar) and [Agent view queries](/docs/socket-api/#agent-view-queries) for their remaining effects.
+The visible tree always keeps repository/Space and direct window ownership order. Legacy priority ordering and API-defined Agent views remain accepted for compatibility but do not replace or reorder it; see [UI and sidebar configuration](/docs/configuration/#ui-and-sidebar) and [Agent view queries](/docs/socket-api/#agent-view-queries) for their remaining effects.
 
 Configured `previous_agent` and `next_agent` actions always traverse every detected agent in workspace, tab, and pane order and wrap at both ends. This canonical navigation is independent of sidebar disclosure, priority mode, filters, scrolling, or collapsed presentation. The default `prefix+p` and `prefix+n` bindings remain previous-tab and next-tab inside the active workspace.
 

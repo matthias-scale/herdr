@@ -92,7 +92,7 @@ Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. For sibling-st
 
 Worktree actions are available from Git workspace rows. `New worktree` creates a checkout, checks out an existing local branch when the entered branch already exists, otherwise creates the branch, opens it as a new Herdr workspace, and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo; choosing an already-open checkout focuses it, and choosing a closed checkout opens it in the same group.
 
-Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
+Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. In the sidebar, a repository and its linked worktrees share one Space row, with every workspace tab shown as a direct window child. Closing the Space row closes the whole Herdr group, but it does not delete checkout folders or branches.
 
 Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
 
@@ -256,14 +256,15 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one workspace tree: each workspace keeps its roll-up row, every tab is shown even when it has no detected agent, and each tab exposes panes in layout order. Linked-worktree and agent disclosure are independent. Compact and mobile navigation preserve the same ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
+The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one repository tree: each repository and its linked worktrees share one Space row, and every tab appears once as a direct window child even when it has no detected agent or owns multiple panes. Compact and mobile navigation preserve the same ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
 
 `ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but the visible sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query also leaves the ownership tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
 Each expanded tab shows its persisted title once on one row, even when it owns
-multiple panes. That row rolls up pane state as `working`, `blocked`, or `done`;
-opening a completed tab clears `done` without moving it. Activity age is
-supplementary only and never replaces an unseen `done` state.
+multiple panes. Agent-backed rows roll up pane state as `working`, `blocked`, or
+`done`; agentless rows omit lifecycle status. Opening a completed tab clears
+`done` without moving it. Activity age is supplementary only and never replaces
+an unseen `done` state.
 
 ### Status row
 
@@ -344,11 +345,13 @@ rows default to `1`; set it to `0` for a fully packed list. Tabs within a Space
 remain packed as one group. Legacy Agent row declarations remain independently
 parseable and default to `0`.
 
+Rows backed by one recognized provider append its short identifier immediately
+after the title: Claude uses `· cc`, Codex uses `· cx`, and Pi uses `· pi`.
+Agentless, unsupported, mixed-provider, and exited-agent rows omit the suffix.
 When Codex explicitly reports background terminals, a nonzero count appears
-immediately after the window title as `N >_`. The count is summed across panes
-owned by that tab, omitted when zero or unsupported, and never changes the
-window's lifecycle status or its position. The latest communication age remains
-right-aligned.
+after that suffix as `N >_`. The count is summed across panes owned by that tab,
+omitted when zero or unsupported, and never changes the window's lifecycle
+status or its position. The latest communication age remains right-aligned.
 
 Legacy per-agent overrides under `rows_by_agent` are also accepted for
 configuration compatibility, but they do not add model or agent subtitle rows:
@@ -392,7 +395,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep compact renderings of the same ownership and disclosure tree.
+The fixed Space and window projection is shared by expanded desktop, collapsed, and mobile views. Legacy row settings remain limited to compatibility projections.
 
 ## Notifications
 

@@ -24,10 +24,13 @@ render as one Space row, with disclosure immediately before the title and the
 direct window count immediately after it. Each tab/window appears exactly once
 directly under that Space, whether it is agentless, inactive, completed, or
 owns multiple panes; linked worktrees never add intermediate rows. Each window
-row is one line with status before its sole title; it has no agent/model child
-row or subtitle. A nonzero provider-reported background-terminal count appears
-as `N >_` immediately after the title, sums across panes in that tab, and never
-changes lifecycle state or ordering. Working status and its live age use the
+row is one line with agent lifecycle status before its sole title; agentless
+rows omit lifecycle status, and no row has an agent/model child or subtitle.
+Single-provider Claude, Codex, and Pi rows append `· cc`, `· cx`, or `· pi`
+after the title. Mixed-provider, unsupported, agentless, and exited-agent rows
+omit that suffix. A nonzero Codex-reported background-terminal count appears as
+`N >_` after the suffix, sums across panes in that tab, and never changes
+lifecycle state or ordering. Working status and its live age use the
 blue activity accent; unread completed work shows done, and opening that tab
 removes the status instead of replacing it with idle. Warning and
 machine-status colors are unchanged.
@@ -63,6 +66,11 @@ Evidence: `ac1_ac2_ac3_ac4_cumulative_space_first_single_line_fixture`,
 `background_jobs_change_does_not_change_lifecycle_or_seen_state`,
 `codex_background_job_count_uses_live_footer_only`,
 `background_job_count_is_unknown_for_unsupported_agents`,
+`tab_provider_suffixes_distinguish_codex_and_claude_after_title`,
+`pi_uses_pi_suffix_while_unsupported_and_agentless_tabs_omit_it`,
+`mixed_provider_tab_omits_provider_suffix`,
+`unseen_agentless_tab_omits_lifecycle_status`,
+`completed_agent_process_exit_retains_done_without_provider_suffix`,
 `space_row_gap_separates_flattened_groups`,
 `space_row_gap_separates_groups_but_never_tabs_inside_them`,
 `ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows`,
