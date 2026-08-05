@@ -42,6 +42,7 @@ pub struct TabInfo {
     pub workspace_id: String,
     pub number: usize,
     pub label: String,
+    pub prio: bool,
     pub focused: bool,
     pub pane_count: usize,
     pub agent_status: AgentStatus,

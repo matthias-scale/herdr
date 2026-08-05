@@ -1098,6 +1098,9 @@
               "minimum": 0,
               "type": "integer"
             },
+            "prio": {
+              "type": "boolean"
+            },
             "tab_id": {
               "type": "string"
             },
@@ -1110,6 +1113,7 @@
             "workspace_id",
             "number",
             "label",
+            "prio",
             "focused",
             "pane_count",
             "agent_status"
@@ -9999,6 +10003,9 @@
               "minimum": 0,
               "type": "integer"
             },
+            "prio": {
+              "type": "boolean"
+            },
             "tab_id": {
               "type": "string"
             },
@@ -10011,6 +10018,7 @@
             "workspace_id",
             "number",
             "label",
+            "prio",
             "focused",
             "pane_count",
             "agent_status"

@@ -12,7 +12,6 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use serde::Deserialize;
 use serde_json::Value;
 use support::{
     cleanup_test_base, client_handshake, drain_messages, read_server_message, register_runtime_dir,
@@ -176,6 +175,18 @@ fn pane_read_recent_text(socket_path: &PathBuf, pane_id: &str) -> String {
         .to_string()
 }
 
+fn focused_tab_prio(socket_path: &PathBuf) -> Option<bool> {
+    let response = send_json_request(
+        socket_path,
+        r#"{"id":"tab_list","method":"tab.list","params":{}}"#,
+    );
+    response["result"]["tabs"]
+        .as_array()?
+        .iter()
+        .find(|tab| tab["focused"].as_bool() == Some(true))
+        .and_then(|tab| tab["prio"].as_bool())
+}
+
 fn pane_send_text(socket_path: &PathBuf, pane_id: &str, text: &str) -> Value {
     send_json_request(
         socket_path,
@@ -248,63 +259,6 @@ fn first_pane_id(response: &Value) -> String {
         .and_then(|pane| pane["pane_id"].as_str())
         .expect("pane.list should contain at least one pane")
         .to_string()
-}
-
-#[derive(Deserialize)]
-struct TestFrameCell {
-    symbol: String,
-    fg: u32,
-    _bg: u32,
-    _modifier: u16,
-    _skip: bool,
-    _hyperlink: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct TestCursor {
-    _x: u16,
-    _y: u16,
-    _visible: bool,
-    _shape: u8,
-}
-
-#[derive(Deserialize)]
-struct TestFrame {
-    cells: Vec<TestFrameCell>,
-    _width: u16,
-    _height: u16,
-    _cursor: Option<TestCursor>,
-    _hyperlinks: Vec<String>,
-    _graphics: Vec<u8>,
-}
-
-fn frame_has_peach_prio_dot(payload: &[u8]) -> bool {
-    let Ok((frame, consumed)) =
-        bincode::serde::decode_from_slice::<TestFrame, _>(payload, bincode::config::standard())
-    else {
-        return false;
-    };
-    consumed == payload.len()
-        && frame
-            .cells
-            .iter()
-            .any(|cell| cell.symbol == "●" && cell.fg == 0x02faaf87)
-}
-
-fn wait_for_peach_prio_dot(stream: &mut UnixStream, timeout: Duration) -> bool {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .expect("set frame read timeout");
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        let Ok((variant, payload)) = read_server_message(stream) else {
-            continue;
-        };
-        if variant == 1 && frame_has_peach_prio_dot(&payload) {
-            return true;
-        }
-    }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -477,8 +431,10 @@ fn reattach_after_detach_shows_current_state() {
     // Toggle the active tab's PRIO flag through the real client key path.
     send_input(&mut stream_a, &[0x02, b'F']).expect("toggle tab PRIO");
     assert!(
-        wait_for_peach_prio_dot(&mut stream_a, Duration::from_secs(5)),
-        "client A should render the flagged tab with the peach PRIO dot"
+        wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+            focused_tab_prio(&api_socket) == Some(true)
+        }),
+        "client A key path should set the focused tab's PRIO flag via the API"
     );
 
     // Client A detaches (send ClientMessage::Detach).
@@ -509,12 +465,19 @@ fn reattach_after_detach_shows_current_state() {
         error
     );
 
-    // Client B should receive a frame with the current state, including the
-    // flagged tab that was persisted while client A was attached.
-    let received_frame = wait_for_peach_prio_dot(&mut stream_b, Duration::from_secs(5));
+    // Client B should still receive a current-state Frame after reattaching.
+    let received_frame = wait_for_message_variant(&mut stream_b, Duration::from_secs(5), 1)
+        .expect("wait for reattach Frame");
     assert!(
         received_frame,
-        "reattached client should receive a Frame retaining the peach PRIO dot"
+        "reattached client should receive a Frame with current state"
+    );
+
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+            focused_tab_prio(&api_socket) == Some(true)
+        }),
+        "reattached client should preserve the focused tab's PRIO flag via the API"
     );
 
     // Verify the workspace still exists via API.

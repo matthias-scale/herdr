@@ -337,6 +337,7 @@ impl App {
                 .tab_display_projection(&self.state.terminals, tab_idx)
                 .map(|projection| projection.full_label())
                 .unwrap_or_else(|| (tab_idx + 1).to_string()),
+            prio: tab.prio,
             focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
             pane_count: tab.panes.len(),
             agent_status: pane_agent_status(agg_state, seen),
