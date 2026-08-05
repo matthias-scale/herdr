@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
@@ -22,6 +23,15 @@ pub struct NewPane {
     pub pane_id: PaneId,
     pub terminal: TerminalState,
     pub runtime: TerminalRuntime,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabNameOrigin {
+    #[default]
+    Structural,
+    User,
+    AgentDerived,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +62,12 @@ impl TabDisplayProjection {
     }
 }
 
+impl TabNameOrigin {
+    pub(crate) fn expires_on_agent_session_change(self) -> bool {
+        matches!(self, Self::User | Self::AgentDerived)
+    }
+}
+
 enum SplitCommand<'a> {
     Shell {
         command: &'a str,
@@ -65,6 +81,7 @@ enum SplitCommand<'a> {
 
 pub struct Tab {
     pub custom_name: Option<String>,
+    pub name_origin: TabNameOrigin,
     pub number: usize,
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
@@ -93,7 +110,17 @@ impl Tab {
             .or_else(|| terminal.agent_name.clone())
             .or_else(|| terminal.effective_agent_label().map(str::to_string));
         let ticket = context.primary_ticket().map(str::to_string);
-        let title = context.work_title.clone();
+        let title = terminal
+            .manual_label
+            .clone()
+            .or_else(|| {
+                terminal
+                    .detected_agent
+                    .is_some()
+                    .then(|| terminal.terminal_title_stripped())
+                    .flatten()
+            })
+            .or_else(|| context.work_title.clone());
         (agent.is_some() || ticket.is_some() || title.is_some()).then_some(
             TabDisplayProjection::Derived {
                 agent,
@@ -221,6 +248,7 @@ impl Tab {
         Ok((
             Self {
                 custom_name: None,
+                name_origin: TabNameOrigin::Structural,
                 number,
                 root_pane: root_id,
                 layout,
@@ -243,6 +271,19 @@ impl Tab {
 
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
+        self.name_origin = TabNameOrigin::Structural;
+    }
+
+    pub fn set_user_custom_name(&mut self, name: String) {
+        self.custom_name = Some(name);
+        self.name_origin = TabNameOrigin::User;
+    }
+
+    pub(crate) fn expire_agent_scoped_name(&mut self) {
+        if self.name_origin.expires_on_agent_session_change() {
+            self.custom_name = None;
+            self.name_origin = TabNameOrigin::Structural;
+        }
     }
 
     pub fn split_focused(
@@ -620,6 +661,7 @@ impl Tab {
         panes.insert(pane_id, moved.pane_state);
         Self {
             custom_name,
+            name_origin: TabNameOrigin::Structural,
             number,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),

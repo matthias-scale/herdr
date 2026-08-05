@@ -453,6 +453,7 @@ impl App {
         let workspace_label = ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
         let context = crate::app::actions::notification_context(
             ws,
+            &self.state.terminals,
             &workspace_label,
             update.ws_idx,
             update.pane_id,
@@ -741,6 +742,7 @@ impl App {
                 &format!("{} {}", agent_label, event_text),
                 Some(&crate::app::actions::notification_context(
                     ws,
+                    &self.state.terminals,
                     &workspace_label,
                     update.ws_idx,
                     update.pane_id,
@@ -810,6 +812,7 @@ impl App {
                 ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
             let context = crate::app::actions::notification_context(
                 ws,
+                &self.state.terminals,
                 &workspace_label,
                 ws_idx,
                 delivery.pane_id,

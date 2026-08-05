@@ -153,7 +153,7 @@ impl App {
         else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_custom_name(params.label.clone());
+        tab.set_user_custom_name(params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         if self.state.active == Some(ws_idx) {
             // Reflow the tab bar so the new label width takes effect immediately.

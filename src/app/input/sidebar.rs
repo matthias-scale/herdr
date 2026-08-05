@@ -1461,7 +1461,11 @@ mod tests {
             .tabs
             .iter()
             .enumerate()
-            .map(|(tab_idx, _)| app.state.workspaces[0].tab_display_name(tab_idx).unwrap())
+            .map(|(tab_idx, _)| {
+                app.state.workspaces[0]
+                    .tab_display_name_from(&app.state.terminals, tab_idx)
+                    .unwrap_or_else(|| (tab_idx + 1).to_string())
+            })
             .collect();
         assert_eq!(labels, vec!["foo", "2", "3"]);
         assert_eq!(

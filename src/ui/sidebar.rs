@@ -313,19 +313,8 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let thread_title = ws
-                        .tabs
-                        .get(detail.tab_idx)
-                        .and_then(|tab| {
-                            tab.custom_name.clone().or_else(|| {
-                                tab.terminal_id(tab.layout.focused())
-                                    .and_then(|terminal_id| app.terminals.get(terminal_id))
-                                    .and_then(|terminal| {
-                                        terminal.manual_label.clone().or_else(|| {
-                                            terminal.effective_work_context().work_title.clone()
-                                        })
-                                    })
-                            })
-                        })
+                        .tab_display_projection(&app.terminals, detail.tab_idx)
+                        .map(|projection| projection.full_label())
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
                     AgentPanelEntry {
                         ws_idx,
@@ -2205,11 +2194,7 @@ mod tests {
             .iter()
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
-        assert!(
-            text.iter()
-                .any(|line| line.contains("New") && line.contains("· pi")),
-            "{text:?}"
-        );
+        assert!(text.iter().any(|line| line.contains("· pi")), "{text:?}");
     }
 
     #[test]
@@ -2337,10 +2322,7 @@ mod tests {
             .filter(|entry| entry.ws_idx == 0)
             .collect::<Vec<_>>();
         assert_eq!(empty_threads.len(), 1);
-        assert_eq!(
-            empty_threads[0].primary_tab_label.as_deref(),
-            Some(DEFAULT_THREAD_TITLE)
-        );
+        assert_eq!(empty_threads[0].primary_tab_label.as_deref(), Some("1"));
         assert_eq!(empty_threads[0].agent, None);
         assert!(all_agent_panel_entries(&app)
             .iter()
@@ -3342,9 +3324,37 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let buffer = terminal.backend().buffer();
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(buffer, tab_row, 25);
-        assert!(rendered.contains("New Th"), "{rendered:?}");
-        assert!(rendered.contains("· pi"), "{rendered:?}");
+        assert!(!rendered.contains("New Th"), "{rendered:?}");
+        assert!(rendered.contains("pi"), "{rendered:?}");
         assert!(compute_agent_card_areas(&app, area).is_empty());
+    }
+
+    #[test]
+    fn sidebar_tab_row_uses_live_agent_title() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("⠋ Add Subabe management token to Doppler".into()));
+
+        let entries = sidebar_thread_entries(&app);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
+            Some("pi · Add Subabe management token to Doppler")
+        );
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+        assert!(rendered.contains("Add Subabe"), "{rendered:?}");
     }
 
     #[test]
@@ -3760,9 +3770,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             labels,
             [
-                ("auto", Some("New Thread")),
+                ("auto", Some("pi")),
                 ("custom", Some("focus")),
-                ("multi", Some("New Thread")),
+                ("multi", Some("codex")),
                 ("multi", Some("logs")),
             ]
         );
@@ -4937,9 +4947,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let entry = sidebar_thread_entries(&app).remove(0);
         let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
-        assert_eq!(layout.title, "Codex");
+        assert_eq!(layout.title, "codex · Codex");
         assert_eq!(layout.state.as_deref(), Some("working"));
-        assert_eq!(layout.agent_suffix, None);
+        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
 
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal
@@ -4951,7 +4961,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         terminal.set_manual_label("manual pane".into());
         let entry = sidebar_thread_entries(&app).remove(0);
         let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
-        assert_eq!(layout.title, "manual pane");
+        assert_eq!(layout.title, "codex · manual pane");
         assert_eq!(layout.state.as_deref(), Some("working"));
         assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
     }

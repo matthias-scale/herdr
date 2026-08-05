@@ -1717,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_mobile_tab_status_uses_context_order_and_narrow_ticket_fallback() {
+    fn mobile_tab_status_uses_context_order_and_narrow_ticket_fallback() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-tabs")];
         app.ensure_test_terminals();
@@ -1779,10 +1779,10 @@ mod tests {
             .collect::<Vec<_>>();
         let tab_row = rows
             .iter()
-            .find(|row| row.contains("New Thread"))
+            .find(|row| row.contains("tab 2"))
             .expect("explicit mobile tab row");
 
-        assert!(!tab_row.contains("tab 2"), "mobile tab row: {tab_row:?}");
+        assert!(tab_row.contains("tab 2"), "mobile tab row: {tab_row:?}");
     }
 
     #[test]

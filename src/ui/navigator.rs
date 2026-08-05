@@ -420,7 +420,8 @@ fn tab_detail(
         ws.display_name_from(&app.terminals, terminal_runtimes),
         format!(
             "tab: {}",
-            ws.tab_display_name(tab_idx)
+            ws.tab_display_projection(&app.terminals, tab_idx)
+                .map(|projection| projection.full_label())
                 .unwrap_or_else(|| (tab_idx + 1).to_string())
         ),
         format!("{} panes", tab.panes.len()),
@@ -454,7 +455,8 @@ fn pane_detail(
     if ws.tabs.len() > 1 {
         parts.push(format!(
             "tab: {}",
-            ws.tab_display_name(tab_idx)
+            ws.tab_display_projection(&app.terminals, tab_idx)
+                .map(|projection| projection.full_label())
                 .unwrap_or_else(|| (tab_idx + 1).to_string())
         ));
     }

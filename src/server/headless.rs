@@ -1895,6 +1895,7 @@ impl HeadlessServer {
             ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context = crate::app::actions::notification_context(
             ws,
+            &self.app.state.terminals,
             &workspace_label,
             update.ws_idx,
             update.pane_id,
@@ -3373,6 +3374,7 @@ impl HeadlessServer {
                         );
                         let context = crate::app::actions::notification_context(
                             &self.app.state.workspaces[*ws_idx],
+                            &self.app.state.terminals,
                             &workspace_label,
                             *ws_idx,
                             *pane_id,
@@ -4953,12 +4955,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains("New Thread"),
-            "rendered frame: {rendered:?}"
+            rendered.contains("task"),
+            "agent terminal titles drive the tab label: {rendered:?}"
         );
         assert!(
             !rendered.contains("⠋ task"),
-            "terminal titles must not create a sidebar subtitle: {rendered:?}"
+            "spinner decorations must be stripped before the title reaches the sidebar: {rendered:?}"
         );
 
         server

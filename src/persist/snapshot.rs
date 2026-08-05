@@ -91,6 +91,8 @@ struct LegacyWorkspaceSnapshot {
 pub struct TabSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
+    #[serde(default)]
+    pub name_origin: crate::workspace::TabNameOrigin,
     pub layout: LayoutSnapshot,
     pub panes: HashMap<u32, PaneSnapshot>,
     pub zoomed: bool,
@@ -164,6 +166,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
         let identity_cwd = legacy_identity_cwd(&snap);
         let tab = TabSnapshot {
             custom_name: None,
+            name_origin: Default::default(),
             layout: snap.layout,
             panes: snap.panes,
             zoomed: snap.zoomed,
@@ -401,6 +404,7 @@ fn capture_tab(
     }
     TabSnapshot {
         custom_name: tab.custom_name.clone(),
+        name_origin: tab.name_origin,
         layout: capture_node(tab.layout.root()),
         panes,
         zoomed: tab.zoomed,
@@ -1100,6 +1104,7 @@ mod tests {
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
                     custom_name: Some("api".to_string()),
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
                         leading: false,
@@ -1276,6 +1281,20 @@ mod tests {
         assert_eq!(workspace.active_tab, second_tab);
         assert_eq!(workspace.tabs[0].custom_name.as_deref(), Some("main"));
         assert_eq!(workspace.tabs[1].custom_name.as_deref(), Some("logs"));
+    }
+
+    #[test]
+    fn tab_snapshot_without_name_origin_defaults_to_structural() {
+        let snapshot = capture_from_state(&state_with_workspaces(&["one"]));
+        let mut value = serde_json::to_value(&snapshot.workspaces[0].tabs[0]).unwrap();
+        value.as_object_mut().unwrap().remove("name_origin");
+
+        let restored: TabSnapshot = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            restored.name_origin,
+            crate::workspace::TabNameOrigin::Structural
+        );
     }
 
     #[test]
@@ -1674,6 +1693,7 @@ mod tests {
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
                         leading: false,

@@ -766,7 +766,9 @@ mod tests {
         };
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert_eq!(
-            app.state.workspaces[0].tab_display_name(0).as_deref(),
+            app.state.workspaces[0]
+                .tab_display_name_from(&app.state.terminals, 0)
+                .as_deref(),
             Some("dev")
         );
         let LayoutNode::Split {

@@ -50,7 +50,13 @@ pub(crate) fn toast_message_from_state_change(
                     "{} {}: {}",
                     agent_label,
                     toast_event_text(kind),
-                    app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
+                    app::actions::notification_context(
+                        ws,
+                        &state.terminals,
+                        &workspace_label,
+                        ws_idx,
+                        pane_id,
+                    )
                 ))
             })
         })

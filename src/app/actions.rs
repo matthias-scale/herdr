@@ -217,6 +217,10 @@ fn sound_for_toast_kind(
 
 pub fn notification_context(
     ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
     workspace_label: &str,
     ws_idx: usize,
     pane_id: PaneId,
@@ -224,9 +228,11 @@ pub fn notification_context(
     let mut context = format!("{} · {}", workspace_label, ws_idx + 1);
     if ws.tabs.len() > 1 {
         if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
-            if let Some(label) = ws.tab_display_name(tab_idx) {
-                context.push_str(&format!(" · {label}"));
-            }
+            let label = ws
+                .tab_display_projection(terminals, tab_idx)
+                .map(|projection| projection.full_label())
+                .unwrap_or_else(|| (tab_idx + 1).to_string());
+            context.push_str(&format!(" · {label}"));
         }
     }
     context
@@ -3082,6 +3088,7 @@ impl AppState {
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let unchanged_change = (mutation.agent_released
+                || mutation.session_ref_changed
                 || agent_name_changed
                 || mutation.hook_work_context_changed)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
@@ -3098,6 +3105,11 @@ impl AppState {
             || mutation.hook_work_context_changed
         {
             self.mark_session_dirty();
+        }
+        if mutation.session_ref_changed {
+            if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
+                self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
+            }
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
@@ -3325,8 +3337,13 @@ impl AppState {
         let build_toast = || {
             let workspace_label =
                 self.workspaces[ws_idx].display_name_from_terminals(&self.terminals);
-            let context =
-                notification_context(&self.workspaces[ws_idx], &workspace_label, ws_idx, pane_id);
+            let context = notification_context(
+                &self.workspaces[ws_idx],
+                &self.terminals,
+                &workspace_label,
+                ws_idx,
+                pane_id,
+            );
             ToastNotification {
                 kind,
                 title: format!(
@@ -3577,7 +3594,13 @@ mod tests {
         let root = state.workspaces[0].tabs[0].root_pane;
 
         assert_eq!(
-            notification_context(&state.workspaces[0], "__herdr_projects__", 0, root),
+            notification_context(
+                &state.workspaces[0],
+                &state.terminals,
+                "__herdr_projects__",
+                0,
+                root,
+            ),
             "__herdr_projects__ · 1"
         );
     }
@@ -5704,8 +5727,106 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });
 
-        assert!(second_updates.is_empty());
+        assert_eq!(second_updates.len(), 1);
         assert!(state.session_dirty);
+    }
+
+    #[test]
+    fn session_change_expires_user_tab_name_but_preserves_structural_name() {
+        let mut state = app_with_workspaces(&["active"]);
+        let structural_tab = state.workspaces[0].test_add_tab(Some("layout"));
+        state.ensure_test_terminals();
+        let user_pane = state.workspaces[0].tabs[0].root_pane;
+        let user_terminal_id = state.workspaces[0].tabs[0].panes[&user_pane]
+            .attached_terminal_id
+            .clone();
+        let user_terminal = state.terminals.get_mut(&user_terminal_id).unwrap();
+        user_terminal.detected_agent = Some(Agent::Pi);
+        user_terminal.set_terminal_title(Some("⠋ Fresh agent title".into()));
+        state.workspaces[0].tabs[0].set_user_custom_name("old turn".into());
+
+        let first_session = std::env::current_dir()
+            .unwrap()
+            .join("one.jsonl")
+            .display()
+            .to_string();
+        let second_session = std::env::current_dir()
+            .unwrap()
+            .join("two.jsonl")
+            .display()
+            .to_string();
+        for (seq, session_ref) in [
+            (
+                20,
+                crate::agent_resume::AgentSessionRef::path(first_session),
+            ),
+            (
+                21,
+                crate::agent_resume::AgentSessionRef::path(second_session),
+            ),
+        ] {
+            state.handle_app_event(AppEvent::HookStateReported {
+                pane_id: user_pane,
+                source: "custom:pi".into(),
+                agent_label: "pi".into(),
+                state: AgentState::Working,
+                message: None,
+                seq: Some(seq),
+                session_ref,
+            });
+        }
+
+        let structural_pane = state.workspaces[0].tabs[structural_tab].root_pane;
+        for (seq, session_ref) in [
+            (
+                30,
+                crate::agent_resume::AgentSessionRef::path(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join("layout-one.jsonl")
+                        .display()
+                        .to_string(),
+                ),
+            ),
+            (
+                31,
+                crate::agent_resume::AgentSessionRef::path(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join("layout-two.jsonl")
+                        .display()
+                        .to_string(),
+                ),
+            ),
+        ] {
+            state.handle_app_event(AppEvent::HookStateReported {
+                pane_id: structural_pane,
+                source: "custom:pi".into(),
+                agent_label: "pi".into(),
+                state: AgentState::Working,
+                message: None,
+                seq: Some(seq),
+                session_ref,
+            });
+        }
+
+        assert!(state.workspaces[0].tabs[0].custom_name.is_none());
+        assert_eq!(
+            state.workspaces[0]
+                .tab_display_name_from(&state.terminals, 0)
+                .as_deref(),
+            Some("pi · Fresh agent title")
+        );
+        assert_eq!(
+            state.workspaces[0]
+                .tab_display_name_from(&state.terminals, structural_tab)
+                .as_deref(),
+            Some("layout")
+        );
+        assert_eq!(
+            state.workspaces[0].tabs[0].name_origin,
+            crate::workspace::TabNameOrigin::Structural
+        );
     }
 
     #[test]

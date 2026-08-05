@@ -398,11 +398,11 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
-        if let Some(name) = ws.active_tab_display_name() {
-            state.name_input = name;
-            state.name_input_replace_on_type = replace_on_type;
-            state.mode = Mode::RenameTab;
-        }
+        state.name_input = ws
+            .active_tab_display_name_from(&state.terminals)
+            .unwrap_or_else(|| (ws.active_tab + 1).to_string());
+        state.name_input_replace_on_type = replace_on_type;
+        state.mode = Mode::RenameTab;
     }
 }
 
@@ -538,16 +538,17 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         if let Some(ws) = state.workspaces.get_mut(ws_idx) {
                             let workspace_id = ws.id.clone();
                             let active_tab = ws.active_tab;
+                            let current_name = ws
+                                .tab_display_name_from(&state.terminals, active_tab)
+                                .unwrap_or_else(|| (active_tab + 1).to_string());
                             let keep_auto_name = ws
                                 .tabs
                                 .get(active_tab)
                                 .is_some_and(|tab| tab.is_auto_named())
-                                && ws
-                                    .tab_display_name(active_tab)
-                                    .is_some_and(|name| new_name == name);
+                                && new_name == current_name;
                             if let Some(tab) = ws.active_tab_mut() {
                                 if !new_name.is_empty() && !keep_auto_name {
-                                    tab.set_custom_name(new_name);
+                                    tab.set_user_custom_name(new_name);
                                     let tab_id = ws
                                         .public_tab_number(active_tab)
                                         .map(|number| {
@@ -1060,13 +1061,14 @@ impl App {
                     return;
                 };
                 let tab_idx = self.state.workspaces[ws_idx].active_tab;
+                let current_name = self.state.workspaces[ws_idx]
+                    .tab_display_name_from(&self.state.terminals, tab_idx)
+                    .unwrap_or_else(|| (tab_idx + 1).to_string());
                 let keep_auto_name = self.state.workspaces[ws_idx]
                     .tabs
                     .get(tab_idx)
                     .is_some_and(|tab| tab.is_auto_named())
-                    && self.state.workspaces[ws_idx]
-                        .tab_display_name(tab_idx)
-                        .is_some_and(|name| new_name == name);
+                    && new_name == current_name;
                 if !keep_auto_name {
                     if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
                         self.runtime_tab_rename(
@@ -2062,8 +2064,10 @@ mod tests {
         state.workspaces[0].switch_tab(0);
 
         assert_eq!(
-            state.workspaces[0].tab_display_name(0).as_deref(),
-            Some("1")
+            state.workspaces[0]
+                .tab_display_name_from(&state.terminals, 0)
+                .unwrap_or_else(|| "1".into()),
+            "1"
         );
         assert!(state.workspaces[0].tabs[0].custom_name.is_none());
 
@@ -2086,8 +2090,10 @@ mod tests {
         assert_eq!(state.mode, Mode::Terminal);
         assert!(state.workspaces[0].tabs[1].custom_name.is_none());
         assert_eq!(
-            state.workspaces[0].tab_display_name(1).as_deref(),
-            Some("2")
+            state.workspaces[0]
+                .tab_display_name_from(&state.terminals, 1)
+                .unwrap_or_else(|| "2".into()),
+            "2"
         );
     }
 
