@@ -91,6 +91,7 @@ pub struct Tab {
     #[cfg(test)]
     pub runtimes: HashMap<PaneId, TerminalRuntime>,
     pub zoomed: bool,
+    pub prio: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
@@ -256,6 +257,7 @@ impl Tab {
                 #[cfg(test)]
                 runtimes: HashMap::new(),
                 zoomed: false,
+                prio: false,
                 events,
                 render_notify,
                 render_dirty,
@@ -272,6 +274,14 @@ impl Tab {
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
         self.name_origin = TabNameOrigin::Structural;
+    }
+
+    pub fn set_prio(&mut self, prio: bool) {
+        self.prio = prio;
+    }
+
+    pub fn toggle_prio(&mut self) {
+        self.set_prio(!self.prio);
     }
 
     pub fn set_user_custom_name(&mut self, name: String) {
@@ -669,6 +679,7 @@ impl Tab {
             #[cfg(test)]
             runtimes: HashMap::new(),
             zoomed: false,
+            prio: false,
             events,
             render_notify,
             render_dirty,

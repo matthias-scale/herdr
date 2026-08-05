@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::Deserialize;
 use serde_json::Value;
 use support::{
     cleanup_test_base, client_handshake, drain_messages, read_server_message, register_runtime_dir,
@@ -249,6 +250,63 @@ fn first_pane_id(response: &Value) -> String {
         .to_string()
 }
 
+#[derive(Deserialize)]
+struct TestFrameCell {
+    symbol: String,
+    fg: u32,
+    _bg: u32,
+    _modifier: u16,
+    _skip: bool,
+    _hyperlink: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct TestCursor {
+    _x: u16,
+    _y: u16,
+    _visible: bool,
+    _shape: u8,
+}
+
+#[derive(Deserialize)]
+struct TestFrame {
+    cells: Vec<TestFrameCell>,
+    _width: u16,
+    _height: u16,
+    _cursor: Option<TestCursor>,
+    _hyperlinks: Vec<String>,
+    _graphics: Vec<u8>,
+}
+
+fn frame_has_peach_prio_dot(payload: &[u8]) -> bool {
+    let Ok((frame, consumed)) =
+        bincode::serde::decode_from_slice::<TestFrame, _>(payload, bincode::config::standard())
+    else {
+        return false;
+    };
+    consumed == payload.len()
+        && frame
+            .cells
+            .iter()
+            .any(|cell| cell.symbol == "●" && cell.fg == 0x02faaf87)
+}
+
+fn wait_for_peach_prio_dot(stream: &mut UnixStream, timeout: Duration) -> bool {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("set frame read timeout");
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let Ok((variant, payload)) = read_server_message(stream) else {
+            continue;
+        };
+        if variant == 1 && frame_has_peach_prio_dot(&payload) {
+            return true;
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -416,6 +474,13 @@ fn reattach_after_detach_shows_current_state() {
         "workspace creation should succeed: {ws_response}"
     );
 
+    // Toggle the active tab's PRIO flag through the real client key path.
+    send_input(&mut stream_a, &[0x02, b'F']).expect("toggle tab PRIO");
+    assert!(
+        wait_for_peach_prio_dot(&mut stream_a, Duration::from_secs(5)),
+        "client A should render the flagged tab with the peach PRIO dot"
+    );
+
     // Client A detaches (send ClientMessage::Detach).
     send_detach(&mut stream_a).expect("send detach");
 
@@ -444,30 +509,12 @@ fn reattach_after_detach_shows_current_state() {
         error
     );
 
-    // Client B should receive a frame with the current state,
-    // including the workspace created while client A was attached.
-    stream_b.set_nonblocking(false).unwrap();
-    stream_b
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-
-    let mut received_frame = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        match read_server_message(&mut stream_b) {
-            Ok((variant, _payload)) => {
-                if variant == 1 {
-                    // ServerMessage::Frame
-                    received_frame = true;
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
+    // Client B should receive a frame with the current state, including the
+    // flagged tab that was persisted while client A was attached.
+    let received_frame = wait_for_peach_prio_dot(&mut stream_b, Duration::from_secs(5));
     assert!(
         received_frame,
-        "reattached client should receive a Frame with current state"
+        "reattached client should receive a Frame retaining the peach PRIO dot"
     );
 
     // Verify the workspace still exists via API.

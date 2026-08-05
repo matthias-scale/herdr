@@ -392,6 +392,8 @@ pub struct KeysConfig {
     pub new_tab: BindingConfig,
     /// Rename the active tab. Default: "prefix+shift+t".
     pub rename_tab: BindingConfig,
+    /// Toggle the active tab's PRIO flag. Default: "prefix+shift+f".
+    pub toggle_tab_prio: BindingConfig,
     /// Select the previous tab. Default: "prefix+p".
     pub previous_tab: BindingConfig,
     /// Select the next tab. Default: "prefix+n".
@@ -536,6 +538,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     rename_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_tab_prio: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     previous_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_tab: Option<BindingConfig>,
@@ -653,6 +657,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(remote_image_paste);
         apply_field!(new_tab);
         apply_field!(rename_tab);
+        apply_field!(toggle_tab_prio);
         apply_field!(previous_tab);
         apply_field!(next_tab);
         apply_field!(previous_window);
@@ -763,6 +768,7 @@ impl KeysConfig {
         copy_user_field!(remote_image_paste);
         copy_effective_action_field!(new_tab, keybinds.new_tab);
         copy_effective_action_field!(rename_tab, keybinds.rename_tab);
+        copy_effective_action_field!(toggle_tab_prio, keybinds.toggle_tab_prio);
         copy_effective_action_field!(previous_tab, keybinds.previous_tab);
         copy_effective_action_field!(next_tab, keybinds.next_tab);
         copy_effective_action_field!(previous_window, keybinds.previous_window);
@@ -1047,6 +1053,7 @@ impl Default for KeysConfig {
             remote_image_paste: "ctrl+v".into(),
             new_tab: BindingConfig::one("prefix+c"),
             rename_tab: BindingConfig::one("prefix+shift+t"),
+            toggle_tab_prio: BindingConfig::one("prefix+shift+f"),
             previous_tab: BindingConfig::one("prefix+p"),
             next_tab: BindingConfig::one("prefix+n"),
             previous_window: BindingConfig::empty(),

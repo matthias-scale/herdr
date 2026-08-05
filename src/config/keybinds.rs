@@ -333,6 +333,7 @@ pub struct Keybinds {
     pub focus_agent: Vec<IndexedKeybind>,
     pub new_tab: ActionKeybinds,
     pub rename_tab: ActionKeybinds,
+    pub toggle_tab_prio: ActionKeybinds,
     pub previous_tab: ActionKeybinds,
     pub next_tab: ActionKeybinds,
     pub previous_window: ActionKeybinds,
@@ -507,6 +508,7 @@ impl Config {
             focus_agent: Vec::new(),
             new_tab: empty_action!(),
             rename_tab: empty_action!(),
+            toggle_tab_prio: empty_action!(),
             previous_tab: empty_action!(),
             next_tab: empty_action!(),
             previous_window: empty_action!(),
@@ -650,6 +652,7 @@ impl Config {
             );
             apply_action!(keybinds.new_tab, new_tab, source);
             apply_action!(keybinds.rename_tab, rename_tab, source);
+            apply_action!(keybinds.toggle_tab_prio, toggle_tab_prio, source);
             apply_action!(keybinds.previous_tab, previous_tab, source);
             apply_action!(keybinds.next_tab, next_tab, source);
             apply_action!(keybinds.previous_window, previous_window, source);
@@ -2221,7 +2224,9 @@ switch_tab = "prefix+?"
 
     #[test]
     fn default_keymap_is_prefix_first_and_tab_centered() {
-        let kb = Config::default().keybinds();
+        let config = Config::default();
+        assert!(config.collect_diagnostics().is_empty());
+        let kb = config.keybinds();
         assert_eq!(
             binding_triggers(&kb.next_tab),
             vec![BindingTrigger::Prefix((
@@ -2237,6 +2242,13 @@ switch_tab = "prefix+?"
             ))]
         );
         assert_eq!(kb.switch_tab.len(), 9);
+        assert_eq!(
+            binding_triggers(&kb.toggle_tab_prio),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('f'),
+                KeyModifiers::SHIFT
+            ))]
+        );
         assert!(kb
             .switch_tab
             .iter()

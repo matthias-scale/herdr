@@ -97,6 +97,8 @@ pub struct TabSnapshot {
     pub panes: HashMap<u32, PaneSnapshot>,
     pub zoomed: bool,
     #[serde(default)]
+    pub prio: bool,
+    #[serde(default)]
     pub focused: Option<u32>,
     #[serde(default)]
     pub root_pane: Option<u32>,
@@ -170,6 +172,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             layout: snap.layout,
             panes: snap.panes,
             zoomed: snap.zoomed,
+            prio: false,
             focused: snap.focused,
             root_pane: snap.root_pane,
         };
@@ -408,6 +411,7 @@ fn capture_tab(
         layout: capture_node(tab.layout.root()),
         panes,
         zoomed: tab.zoomed,
+        prio: tab.prio,
         focused: Some(tab.layout.focused().raw()),
         root_pane: Some(tab.root_pane.raw()),
     }
@@ -1114,6 +1118,7 @@ mod tests {
                     },
                     panes,
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1285,9 +1290,13 @@ mod tests {
 
     #[test]
     fn tab_snapshot_without_name_origin_defaults_to_structural() {
-        let snapshot = capture_from_state(&state_with_workspaces(&["one"]));
+        let mut state = state_with_workspaces(&["one"]);
+        state.workspaces[0].tabs[0].set_prio(true);
+        let snapshot = capture_from_state(&state);
+        assert!(snapshot.workspaces[0].tabs[0].prio);
         let mut value = serde_json::to_value(&snapshot.workspaces[0].tabs[0]).unwrap();
         value.as_object_mut().unwrap().remove("name_origin");
+        value.as_object_mut().unwrap().remove("prio");
 
         let restored: TabSnapshot = serde_json::from_value(value).unwrap();
 
@@ -1295,6 +1304,7 @@ mod tests {
             restored.name_origin,
             crate::workspace::TabNameOrigin::Structural
         );
+        assert!(!restored.prio);
     }
 
     #[test]
@@ -1703,6 +1713,7 @@ mod tests {
                     },
                     panes,
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],

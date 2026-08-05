@@ -306,6 +306,17 @@ impl App {
             NavigateAction::RenameTab => {
                 super::modal::open_rename_active_tab(&mut self.state, false)
             }
+            NavigateAction::ToggleTabPrio => {
+                if toggle_tab_prio(&mut self.state, context) {
+                    self.schedule_session_save();
+                    if self.no_session {
+                        self.state.mark_session_dirty();
+                    }
+                    if context == ActionContext::Navigate {
+                        leave_navigate_mode(&mut self.state);
+                    }
+                }
+            }
             NavigateAction::PreviousTab => {
                 if let Some(tab_idx) = self.relative_tab(-1) {
                     self.focus_tab_idx_via_api(tab_idx);
@@ -1541,6 +1552,7 @@ pub(crate) enum NavigateAction {
     NextAgent,
     NewTab,
     RenameTab,
+    ToggleTabPrio,
     PreviousTab,
     NextTab,
     PreviousWindow,
@@ -1596,6 +1608,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::NextAgent
             | NavigateAction::PreviousTab
             | NavigateAction::NextTab
+            | NavigateAction::ToggleTabPrio
             | NavigateAction::PreviousWindow
             | NavigateAction::NextWindow
             | NavigateAction::FocusPaneLeft
@@ -1696,6 +1709,7 @@ fn non_indexed_action_for_key(
         (&kb.next_agent, NavigateAction::NextAgent),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
+        (&kb.toggle_tab_prio, NavigateAction::ToggleTabPrio),
         (&kb.previous_tab, NavigateAction::PreviousTab),
         (&kb.next_tab, NavigateAction::NextTab),
         (&kb.previous_window, NavigateAction::PreviousWindow),
@@ -1899,6 +1913,14 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::RenameTab => super::modal::open_rename_active_tab(state, false),
+        NavigateAction::ToggleTabPrio => {
+            if toggle_tab_prio(state, context) {
+                state.mark_session_dirty();
+                if context == ActionContext::Navigate {
+                    leave_navigate_mode(state);
+                }
+            }
+        }
         NavigateAction::PreviousTab => {
             state.previous_tab();
             leave_navigate_mode(state);
@@ -2051,6 +2073,28 @@ fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<u
         ActionContext::Navigate => state.selected,
     };
     (idx < state.workspaces.len()).then_some(idx)
+}
+
+fn toggle_tab_prio(state: &mut AppState, context: ActionContext) -> bool {
+    let Some(ws_idx) = workspace_action_target(state, context) else {
+        return false;
+    };
+    let Some(tab_idx) = state
+        .workspaces
+        .get(ws_idx)
+        .map(crate::workspace::Workspace::active_tab_index)
+    else {
+        return false;
+    };
+    let Some(tab) = state
+        .workspaces
+        .get_mut(ws_idx)
+        .and_then(|ws| ws.tabs.get_mut(tab_idx))
+    else {
+        return false;
+    };
+    tab.toggle_prio();
+    true
 }
 
 #[cfg(test)]
@@ -2209,6 +2253,23 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[test]
+    fn toggle_tab_prio_flips_flag_and_marks_session_dirty() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        app.no_session = false;
+        app.state.session_dirty = false;
+        app.state.session_dirty_revision = 0;
+
+        app.execute_tui_navigate_action(NavigateAction::ToggleTabPrio, ActionContext::Direct);
+        assert!(app.state.workspaces[0].tabs[0].prio);
+        assert!(app.state.session_dirty);
+        assert_eq!(app.state.session_dirty_revision, 1);
+
+        app.execute_tui_navigate_action(NavigateAction::ToggleTabPrio, ActionContext::Direct);
+        assert!(!app.state.workspaces[0].tabs[0].prio);
+        assert_eq!(app.state.session_dirty_revision, 2);
     }
 
     fn add_multiple_work_links(app: &mut App) {

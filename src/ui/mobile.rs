@@ -719,6 +719,10 @@ fn render_mobile_switcher_content(
                     p,
                 );
                 let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
+                if entry.prio {
+                    spans.push(Span::styled("●", Style::default().fg(p.peach).bg(bg)));
+                    spans.push(Span::styled(" ", Style::default().bg(bg)));
+                }
                 if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
                     spans.push(Span::styled(icon, icon_style.bg(bg)));
@@ -1308,6 +1312,7 @@ mod tests {
             agent: agent_label.and_then(crate::detect::parse_agent_label),
             agent_context: agent_label.and_then(crate::detect::parse_agent_label),
             has_agent: agent_label.is_some(),
+            prio: false,
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,

@@ -21,6 +21,7 @@ const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
+const TAB_PRIO_FIELD_WIDTH: usize = 2;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
@@ -88,6 +89,7 @@ pub(super) fn tab_row_layout(
         .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
         .unwrap_or_default();
     let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
+    let prio_width = if entry.prio { TAB_PRIO_FIELD_WIDTH } else { 0 };
     let tab_title = entry
         .primary_tab_label
         .as_deref()
@@ -118,6 +120,7 @@ pub(super) fn tab_row_layout(
     if activity_age.as_deref().is_some_and(|label| {
         width
             < prefix_width
+                + prio_width
                 + full_status_width
                 + agent_suffix_width
                 + background_width
@@ -133,6 +136,7 @@ pub(super) fn tab_row_layout(
         .unwrap_or_default();
     if width
         < prefix_width
+            + prio_width
             + full_status_width
             + agent_suffix_width
             + background_width
@@ -146,14 +150,23 @@ pub(super) fn tab_row_layout(
         .map(display_width)
         .unwrap_or_default();
     let show_state_label = width
-        > prefix_width + full_status_width + agent_suffix_width + background_width + activity_width;
+        > prefix_width
+            + prio_width
+            + full_status_width
+            + agent_suffix_width
+            + background_width
+            + activity_width;
     let status_width = if show_state_label {
         full_status_width
     } else {
         dot_status_width
     };
-    let fixed_width =
-        prefix_width + status_width + agent_suffix_width + background_width + activity_width;
+    let fixed_width = prefix_width
+        + prio_width
+        + status_width
+        + agent_suffix_width
+        + background_width
+        + activity_width;
     let title = truncate_end(tab_title, width.saturating_sub(fixed_width));
 
     TabRowLayout {
@@ -204,6 +217,7 @@ pub(crate) struct AgentPanelEntry {
     /// rolled-up tab whose panes have conflicting providers, while `agent`
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
+    pub prio: bool,
     pub state: AgentState,
     pub background_job_count: Option<u16>,
     pub seen: bool,
@@ -312,6 +326,7 @@ fn collect_agent_panel_entries_with_runtimes(
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
+                    let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
                     let thread_title = ws
                         .tab_display_projection(&app.terminals, detail.tab_idx)
                         .map(|projection| projection.full_label())
@@ -330,6 +345,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent: detail.agent,
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
+                        prio,
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
@@ -1803,6 +1819,10 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         p,
     );
     let mut spans = vec![Span::raw(prefix)];
+    if entry.prio {
+        spans.push(Span::styled("●", Style::default().fg(p.peach)));
+        spans.push(Span::raw(" "));
+    }
     if let Some(state) = layout.state.as_deref() {
         let state_icon = state_dot(entry.state, entry.seen, p);
         spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
@@ -2195,6 +2215,110 @@ mod tests {
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
         assert!(text.iter().any(|line| line.contains("· pi")), "{text:?}");
+    }
+
+    #[test]
+    fn flagged_tab_renders_peach_prio_dot_before_state() {
+        let mut app = app_with_agents(&["one", "two"]);
+        app.workspaces[0].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 40, 20);
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let prio_cell = buffer
+            .cell((card.rect.x + 4, card.rect.y))
+            .expect("flagged tab should have a PRIO cell");
+        assert_eq!(prio_cell.symbol(), "●");
+        assert_eq!(prio_cell.fg, app.palette.peach);
+        assert!(row_text(buffer, card.rect.y, 39).contains("●"));
+    }
+
+    #[test]
+    fn unflagged_tab_keeps_title_column_and_has_no_peach_prio_dot() {
+        let app = app_with_agents(&["one", "two"]);
+        let area = Rect::new(0, 0, 40, 20);
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. }
+                    if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
+                {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .expect("tab row should exist");
+        let title = entry
+            .primary_tab_label
+            .as_deref()
+            .expect("test tab should have a title");
+        let layout = tab_row_layout(&entry, app.view_observed_at, 39, 4, &app.palette);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let title_start = (card.rect.x..card.rect.x + card.rect.width)
+            .find(|x| {
+                buffer.cell((*x, card.rect.y)).is_some_and(|cell| {
+                    cell.symbol() == layout.title.chars().next().unwrap_or_default().to_string()
+                })
+            })
+            .expect("unflagged title should be visible");
+        let mut flagged = app_with_agents(&["one", "two"]);
+        flagged.workspaces[0].tabs[0].set_prio(true);
+        let mut flagged_terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        flagged_terminal
+            .draw(|frame| render_sidebar(&flagged, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let flagged_card = compute_tab_card_areas(&flagged, area)[0].clone();
+        let flagged_buffer = flagged_terminal.backend().buffer();
+        let flagged_title_start = (flagged_card.rect.x
+            ..flagged_card.rect.x + flagged_card.rect.width)
+            .find(|x| {
+                flagged_buffer
+                    .cell((*x, flagged_card.rect.y))
+                    .is_some_and(|cell| {
+                        cell.symbol() == layout.title.chars().next().unwrap_or_default().to_string()
+                    })
+            })
+            .expect("flagged title should be visible");
+        assert_eq!(
+            flagged_title_start,
+            title_start + TAB_PRIO_FIELD_WIDTH as u16
+        );
+        assert_ne!(
+            buffer.cell((card.rect.x + 4, card.rect.y)).unwrap().fg,
+            app.palette.peach
+        );
+        assert!(row_text(buffer, card.rect.y, 39).contains(title));
+    }
+
+    #[test]
+    fn narrow_flagged_tab_budget_truncates_title() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("a deliberately long tab title".into());
+        app.workspaces[0].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 18, 12);
+        let mut terminal = Terminal::new(TestBackend::new(18, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 17);
+        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(
+            !rendered.contains("deliberately long tab title"),
+            "{rendered:?}"
+        );
+        assert!(rendered.chars().count() <= 17, "{rendered:?}");
     }
 
     #[test]
