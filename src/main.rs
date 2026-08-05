@@ -198,6 +198,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # new_tab = "prefix+c"
 # rename_tab = "prefix+shift+t"
 # toggle_tab_prio = "prefix+shift+f"
+# toggle_prio_panel = "" # optional, unset by default
 # previous_tab = "prefix+p"
 # next_tab = "prefix+n"
 # switch_tab = "prefix+1..9"

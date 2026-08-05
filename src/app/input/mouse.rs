@@ -553,6 +553,17 @@ impl AppState {
                         return None;
                     }
 
+                    let panel = crate::ui::prio_panel_rect(self, self.view.sidebar_rect);
+                    let panel_chevron = crate::ui::prio_panel_chevron_rect(panel);
+                    if mouse.row == panel_chevron.y
+                        && mouse.column == panel_chevron.x
+                        && panel_chevron.width > 0
+                    {
+                        self.toggle_prio_panel();
+                        self.mark_session_dirty();
+                        return None;
+                    }
+
                     let (cards, _) =
                         crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
                     let agent_counts = crate::ui::agent_counts_by_workspace(
@@ -579,6 +590,14 @@ impl AppState {
                     }
 
                     if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
+                        self.selected = ws_idx;
+                        self.mode = Mode::Terminal;
+                        return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
+                    }
+
+                    if let Some((ws_idx, tab_idx)) =
+                        self.prio_panel_target_at(mouse.column, mouse.row)
+                    {
                         self.selected = ws_idx;
                         self.mode = Mode::Terminal;
                         return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
@@ -1847,6 +1866,38 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    #[test]
+    fn clicking_prio_panel_row_produces_sidebar_tab_focus_action() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.workspaces[1].tabs[0].set_prio(true);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+        let target = crate::ui::compute_prio_panel_row_areas(&app.state, sidebar)[0];
+        app.state.view.prio_panel_row_areas = vec![target];
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                target.rect.x,
+                target.rect.y,
+            ),
+        );
+
+        assert!(matches!(
+            action,
+            Some(MouseAction::FocusSidebarTab {
+                ws_idx: 1,
+                tab_idx: 0
+            })
+        ));
     }
 
     #[test]

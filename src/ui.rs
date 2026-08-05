@@ -85,15 +85,16 @@ pub(crate) use self::{
     sidebar::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
-        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_prio_panel_row_areas,
+        compute_sidebar_row_areas, compute_workspace_card_areas, expanded_sidebar_toggle_rect,
+        normalized_workspace_scroll, prio_panel_chevron_rect, prio_panel_rect,
         relative_agent_navigation_entry, sidebar_header_new_space_rect,
         sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries,
         workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry, SidebarRow,
-        WorkspaceListEntry,
+        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
     },
 };
 
@@ -345,6 +346,11 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
+    let prio_panel_row_areas = if app.sidebar_collapsed {
+        Vec::new()
+    } else {
+        sidebar::compute_prio_panel_row_areas(app, sidebar_area)
+    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
 
@@ -354,6 +360,7 @@ fn compute_view_internal(
         sidebar_rect: sidebar_area,
         workspace_card_areas,
         agent_card_areas,
+        prio_panel_row_areas,
         visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -436,6 +443,7 @@ fn compute_mobile_view(
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
+        prio_panel_row_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),

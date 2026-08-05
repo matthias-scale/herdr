@@ -18,6 +18,8 @@ use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
+const PRIO_PANEL_HEADER_ROWS: u16 = 1;
+const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
@@ -230,14 +232,42 @@ pub(crate) struct AgentPanelEntry {
     pub tab_first_pane: bool,
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, _split_ratio: f32) -> (Rect, Rect) {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+    // This is the single vertical partition for the expanded sidebar. All
+    // list geometry, scrolling, rendering, and hit-testing derive from it.
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
     }
-    // Both legacy callers receive the same unified content rectangle. The
-    // sidebar no longer has independent Spaces and Agents sections.
-    (content, content)
+    let max_panel_height = content.height.saturating_sub(MIN_WORKSPACE_LIST_ROWS);
+    let ratio = split_ratio.clamp(0.0, 1.0);
+    let panel_height = (f32::from(content.height) * ratio)
+        .round()
+        .clamp(1.0, f32::from(max_panel_height.max(1))) as u16;
+    let panel_height = panel_height
+        .clamp(1, content.height)
+        .min(max_panel_height.max(1));
+    let list_height = content.height.saturating_sub(panel_height);
+    (
+        Rect::new(content.x, content.y, content.width, list_height),
+        Rect::new(
+            content.x,
+            content.y + list_height,
+            content.width,
+            panel_height,
+        ),
+    )
+}
+
+fn expanded_sidebar_sections_for_app(app: &AppState, area: Rect) -> (Rect, Rect) {
+    let panel_collapsed = app.prio_panel_collapsed || prio_panel_entries(app).is_empty();
+    let split_ratio = if panel_collapsed {
+        f32::from(PRIO_PANEL_HEADER_ROWS) / f32::from(area.height.max(1))
+    } else {
+        app.sidebar_section_split
+    };
+    expanded_sidebar_sections(area, split_ratio)
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -250,6 +280,13 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
 
 pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_sidebar_thread_entries_with_runtimes(app, None)
+}
+
+pub(crate) fn prio_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    sidebar_thread_entries(app)
+        .into_iter()
+        .filter(|entry| entry.prio && entry.tab_first_pane)
+        .collect()
 }
 
 pub(crate) fn sidebar_thread_entries_from(
@@ -655,7 +692,7 @@ pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -779,9 +816,14 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
     let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
     ws_area
+}
+
+pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
+    expanded_sidebar_sections_for_app(app, area).0
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -893,7 +935,7 @@ pub(crate) fn sidebar_row_scroll_for_target(
     current_scroll: usize,
     target: usize,
 ) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     let max_scroll = workspace_list_bottom_start(app, ws_area);
     if target < current_scroll {
         return target.min(max_scroll);
@@ -975,7 +1017,7 @@ pub(crate) fn compute_sidebar_row_areas(
     Vec<crate::app::state::WorkspaceCardArea>,
     Vec<crate::app::state::AgentCardArea>,
 ) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -1050,7 +1092,7 @@ pub(crate) fn compute_tab_card_areas(
     app: &AppState,
     area: Rect,
 ) -> Vec<crate::app::state::TabCardArea> {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
     let mut y = body.y;
@@ -1104,6 +1146,44 @@ pub(crate) fn workspace_agent_chevron_rect(
         return Rect::default();
     }
     Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
+}
+
+pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {
+    if panel.width < 2 || panel.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(panel.x.saturating_add(1), panel.y, 1, 1)
+}
+
+pub(crate) fn compute_prio_panel_row_areas(
+    app: &AppState,
+    area: Rect,
+) -> Vec<crate::app::state::PrioPanelRowArea> {
+    let (_, panel) = expanded_sidebar_sections_for_app(app, area);
+    let body = Rect::new(
+        panel.x,
+        panel.y.saturating_add(PRIO_PANEL_HEADER_ROWS),
+        panel.width,
+        panel.height.saturating_sub(PRIO_PANEL_HEADER_ROWS),
+    );
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+
+    prio_panel_entries(app)
+        .into_iter()
+        .take(usize::from(body.height))
+        .enumerate()
+        .map(|(row, entry)| crate::app::state::PrioPanelRowArea {
+            ws_idx: entry.ws_idx,
+            tab_idx: entry.tab_idx,
+            rect: Rect::new(body.x, body.y + row as u16, body.width, 1),
+        })
+        .collect()
+}
+
+pub(crate) fn prio_panel_rect(app: &AppState, area: Rect) -> Rect {
+    expanded_sidebar_sections_for_app(app, area).1
 }
 
 #[cfg(test)]
@@ -1388,9 +1468,160 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, _) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, panel_area) = expanded_sidebar_sections_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    render_prio_panel(app, frame, panel_area, area);
     render_sidebar_header(app, frame, area, p);
+}
+
+fn render_prio_panel(app: &AppState, frame: &mut Frame, panel: Rect, sidebar_area: Rect) {
+    if panel.width == 0 || panel.height == 0 {
+        return;
+    }
+
+    let p = &app.palette;
+    let entries = prio_panel_entries(app);
+    let expanded = !app.prio_panel_collapsed && !entries.is_empty();
+    let chevron = if expanded { "▾" } else { "▸" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(chevron, Style::default().fg(p.accent)),
+            Span::raw(" "),
+            Span::styled(
+                "PRIO",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect::new(panel.x, panel.y, panel.width, PRIO_PANEL_HEADER_ROWS),
+    );
+
+    if !expanded {
+        return;
+    }
+
+    let rows = compute_prio_panel_row_areas(app, sidebar_area);
+    for row in rows {
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.ws_idx == row.ws_idx && entry.tab_idx == row.tab_idx)
+        else {
+            continue;
+        };
+        render_prio_panel_row(app, frame, entry, row.rect);
+    }
+}
+
+fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEntry, rect: Rect) {
+    let p = &app.palette;
+    let width = usize::from(rect.width);
+    let prefix = "  ";
+    let state_icon = state_dot(entry.state, entry.seen, p);
+    let workspace = entry.primary_label.as_str();
+    let agent = entry
+        .agent_kind_label
+        .as_deref()
+        .or(entry.agent_label.as_deref())
+        .or_else(|| tab_agent_suffix(entry.agent))
+        .map(|label| format!(" · {label}"));
+
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    push_prio_panel_span(&mut spans, &mut used, width, prefix, Style::default());
+    push_prio_panel_span(
+        &mut spans,
+        &mut used,
+        width,
+        "●",
+        Style::default().fg(p.peach),
+    );
+    push_prio_panel_span(&mut spans, &mut used, width, " ", Style::default());
+    push_prio_panel_span(&mut spans, &mut used, width, state_icon.0, state_icon.1);
+    push_prio_panel_span(&mut spans, &mut used, width, " ", Style::default());
+
+    let remaining = width.saturating_sub(used);
+    let agent_width = agent.as_deref().map(display_width).unwrap_or_default();
+    let include_agent = agent.as_ref().is_some_and(|_| {
+        remaining >= 1 + display_width(" · ") + display_width(workspace) + agent_width
+    });
+    let agent_width = if include_agent { agent_width } else { 0 };
+    if remaining > display_width(" · ") {
+        let workspace_width = display_width(workspace)
+            .min(remaining.saturating_sub(display_width(" · ") + agent_width + 1));
+        let title_width =
+            remaining.saturating_sub(display_width(" · ") + workspace_width + agent_width);
+        let title = truncate_end(
+            entry
+                .primary_tab_label
+                .as_deref()
+                .unwrap_or(DEFAULT_THREAD_TITLE),
+            title_width,
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            &title,
+            Style::default().fg(p.subtext0),
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            " · ",
+            Style::default().fg(p.overlay0),
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            &truncate_end(workspace, workspace_width),
+            Style::default().fg(p.overlay1),
+        );
+        if include_agent {
+            if let Some(agent) = agent {
+                push_prio_panel_span(
+                    &mut spans,
+                    &mut used,
+                    width,
+                    &agent,
+                    Style::default().fg(p.overlay0),
+                );
+            }
+        }
+    } else {
+        let title = truncate_end(
+            entry
+                .primary_tab_label
+                .as_deref()
+                .unwrap_or(DEFAULT_THREAD_TITLE),
+            remaining,
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            &title,
+            Style::default().fg(p.subtext0),
+        );
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+fn push_prio_panel_span(
+    spans: &mut Vec<Span<'static>>,
+    used: &mut usize,
+    width: usize,
+    text: &str,
+    style: Style,
+) {
+    let clipped = truncate_end(text, width.saturating_sub(*used));
+    let clipped_width = display_width(&clipped);
+    if clipped_width == 0 {
+        return;
+    }
+    spans.push(Span::styled(clipped, style));
+    *used += clipped_width;
 }
 
 fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Palette) {
@@ -2238,6 +2469,75 @@ mod tests {
     }
 
     #[test]
+    fn prio_panel_renders_flagged_tab_in_bottom_rows_with_workspace_context() {
+        let mut app = app_with_agents(&["one", "two"]);
+        app.workspaces[1].tabs[0].custom_name = Some("review auth".into());
+        app.workspaces[1].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 40, 16);
+        let panel = prio_panel_rect(&app, area);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].rect.y > panel.y);
+        assert!(rows[0].rect.y < panel.y + panel.height);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width - 1);
+        assert!(rendered.contains("review auth"), "{rendered:?}");
+        assert!(rendered.contains("two"), "{rendered:?}");
+        assert!(rendered.contains("●"), "{rendered:?}");
+    }
+
+    #[test]
+    fn empty_prio_panel_has_header_only_without_empty_body() {
+        let app = app_with_agents(&["one"]);
+        let area = Rect::new(0, 0, 40, 16);
+        let panel = prio_panel_rect(&app, area);
+        assert_eq!(panel.height, PRIO_PANEL_HEADER_ROWS);
+        assert!(compute_prio_panel_row_areas(&app, area).is_empty());
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        assert!(row_text(terminal.backend().buffer(), panel.y, area.width - 1).contains("PRIO"));
+    }
+
+    #[test]
+    fn collapsing_prio_panel_expands_workspace_list_and_normalizes_scroll() {
+        let mut app = app_with_agents(&["one", "two", "three", "four", "five", "six"]);
+        for workspace in &mut app.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        let area = Rect::new(0, 0, 40, 12);
+        app.view.sidebar_rect = area;
+        app.workspace_scroll = usize::MAX;
+        let expanded_list_height = workspace_list_rect_for_app(&app, area).height;
+
+        let requested = app.workspace_scroll;
+        app.toggle_prio_panel();
+
+        assert!(app.prio_panel_collapsed);
+        assert!(workspace_list_rect_for_app(&app, area).height > expanded_list_height);
+        assert!(compute_prio_panel_row_areas(&app, area).is_empty());
+        assert_eq!(
+            app.workspace_scroll,
+            normalized_workspace_scroll(&app, area, requested)
+        );
+    }
+
+    #[test]
+    fn expanded_prio_panel_keeps_minimum_workspace_height_in_short_sidebar() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 30, 5);
+        let list = workspace_list_rect_for_app(&app, area);
+        assert!(list.height >= MIN_WORKSPACE_LIST_ROWS);
+    }
+
+    #[test]
     fn unflagged_tab_keeps_title_column_and_has_no_peach_prio_dot() {
         let app = app_with_agents(&["one", "two"]);
         let area = Rect::new(0, 0, 40, 20);
@@ -2884,6 +3184,7 @@ mod tests {
             sidebar_width: Some(24),
             sidebar_section_split: Some(0.4),
             collapsed_space_keys: std::collections::HashSet::new(),
+            prio_panel_collapsed: false,
         };
         let value = serde_json::to_value(snapshot).unwrap();
         let object = value.as_object().unwrap();
@@ -2926,7 +3227,11 @@ row_gap = 1
         let area = Rect::new(0, 0, 31, 20);
         assert_eq!(
             expanded_sidebar_sections(area, 0.1),
-            expanded_sidebar_sections(area, 0.9)
+            (Rect::new(0, 0, 30, 18), Rect::new(0, 18, 30, 2))
+        );
+        assert_eq!(
+            expanded_sidebar_sections(area, 0.9),
+            (Rect::new(0, 0, 30, 3), Rect::new(0, 3, 30, 17))
         );
     }
 
@@ -4145,8 +4450,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn expanded_sidebar_sections_handle_tiny_heights() {
         let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
 
-        assert_eq!(ws_area, Rect::new(0, 0, 19, 5));
-        assert_eq!(detail_area, ws_area);
+        assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
+        assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
     }
 
     #[test]
@@ -4859,7 +5164,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.mode = Mode::Terminal;
         app.workspace_scroll = 1;
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 2));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);

@@ -135,6 +135,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.new_tab), "new tab"),
         help_entry(keybind_label(&kb.rename_tab), "rename tab"),
         help_entry(keybind_label(&kb.toggle_tab_prio), "toggle tab PRIO"),
+        help_entry(keybind_label(&kb.toggle_prio_panel), "toggle PRIO panel"),
         help_entry(keybind_label(&kb.previous_tab), "previous tab"),
         help_entry(keybind_label(&kb.next_tab), "next tab"),
         help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),

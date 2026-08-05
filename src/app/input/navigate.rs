@@ -317,6 +317,16 @@ impl App {
                     }
                 }
             }
+            NavigateAction::TogglePrioPanel => {
+                self.state.toggle_prio_panel();
+                self.schedule_session_save();
+                if self.no_session {
+                    self.state.mark_session_dirty();
+                }
+                if context == ActionContext::Navigate {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::PreviousTab => {
                 if let Some(tab_idx) = self.relative_tab(-1) {
                     self.focus_tab_idx_via_api(tab_idx);
@@ -1553,6 +1563,7 @@ pub(crate) enum NavigateAction {
     NewTab,
     RenameTab,
     ToggleTabPrio,
+    TogglePrioPanel,
     PreviousTab,
     NextTab,
     PreviousWindow,
@@ -1710,6 +1721,7 @@ fn non_indexed_action_for_key(
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.toggle_tab_prio, NavigateAction::ToggleTabPrio),
+        (&kb.toggle_prio_panel, NavigateAction::TogglePrioPanel),
         (&kb.previous_tab, NavigateAction::PreviousTab),
         (&kb.next_tab, NavigateAction::NextTab),
         (&kb.previous_window, NavigateAction::PreviousWindow),
@@ -1919,6 +1931,13 @@ pub(super) fn execute_navigate_action_in_context(
                 if context == ActionContext::Navigate {
                     leave_navigate_mode(state);
                 }
+            }
+        }
+        NavigateAction::TogglePrioPanel => {
+            state.toggle_prio_panel();
+            state.mark_session_dirty();
+            if context == ActionContext::Navigate {
+                leave_navigate_mode(state);
             }
         }
         NavigateAction::PreviousTab => {

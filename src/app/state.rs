@@ -638,6 +638,13 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrioPanelRowArea {
+    pub ws_idx: usize,
+    pub tab_idx: usize,
+    pub rect: Rect,
+}
+
 /// Attach-local sidebar state. The headless server swaps one instance into
 /// `AppState` while routing input or rendering for that client; the monolithic
 /// app keeps its own instance directly.
@@ -814,6 +821,7 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
+    pub prio_panel_row_areas: Vec<PrioPanelRowArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1528,6 +1536,7 @@ pub struct AppState {
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    pub prio_panel_collapsed: bool,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1818,6 +1827,16 @@ impl AppState {
         true
     }
 
+    pub(crate) fn toggle_prio_panel(&mut self) -> bool {
+        self.prio_panel_collapsed = !self.prio_panel_collapsed;
+        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+            self,
+            self.view.sidebar_rect,
+            self.workspace_scroll,
+        );
+        true
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
         self.session_dirty_revision = self.session_dirty_revision.wrapping_add(1);
@@ -2075,6 +2094,7 @@ impl AppState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                prio_panel_row_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -2118,6 +2138,7 @@ impl AppState {
             sidebar_collapsed: false,
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
+            prio_panel_collapsed: false,
             agent_panel_sort: AgentPanelSort::Spaces,
             agent_view_override: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),

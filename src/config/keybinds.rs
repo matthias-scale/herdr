@@ -334,6 +334,7 @@ pub struct Keybinds {
     pub new_tab: ActionKeybinds,
     pub rename_tab: ActionKeybinds,
     pub toggle_tab_prio: ActionKeybinds,
+    pub toggle_prio_panel: ActionKeybinds,
     pub previous_tab: ActionKeybinds,
     pub next_tab: ActionKeybinds,
     pub previous_window: ActionKeybinds,
@@ -509,6 +510,7 @@ impl Config {
             new_tab: empty_action!(),
             rename_tab: empty_action!(),
             toggle_tab_prio: empty_action!(),
+            toggle_prio_panel: empty_action!(),
             previous_tab: empty_action!(),
             next_tab: empty_action!(),
             previous_window: empty_action!(),
@@ -653,6 +655,7 @@ impl Config {
             apply_action!(keybinds.new_tab, new_tab, source);
             apply_action!(keybinds.rename_tab, rename_tab, source);
             apply_action!(keybinds.toggle_tab_prio, toggle_tab_prio, source);
+            apply_action!(keybinds.toggle_prio_panel, toggle_prio_panel, source);
             apply_action!(keybinds.previous_tab, previous_tab, source);
             apply_action!(keybinds.next_tab, next_tab, source);
             apply_action!(keybinds.previous_window, previous_window, source);
