@@ -74,6 +74,11 @@ impl App {
                 results,
                 cache_updates,
             } => self.handle_git_status_refreshed(generation, results, cache_updates),
+            AppEvent::GitWorkContextRefreshed {
+                generation,
+                observations,
+                cache_updates,
+            } => self.handle_git_work_context_refreshed(generation, observations, cache_updates),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -170,6 +175,16 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(generation, results, cache_updates);
+            return;
+        }
+
+        if let AppEvent::GitWorkContextRefreshed {
+            generation,
+            observations,
+            cache_updates,
+        } = ev
+        {
+            self.handle_git_work_context_refreshed(generation, observations, cache_updates);
             return;
         }
 
@@ -345,6 +360,7 @@ impl App {
             if self.state.status_bar_enabled {
                 self.project_status_context_from_cached();
             }
+            self.request_git_work_context_refresh(Instant::now());
             self.request_git_identity_refresh(Instant::now());
             self.render_dirty.request_generic();
             self.render_notify.notify_one();

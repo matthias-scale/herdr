@@ -358,6 +358,17 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn replace_git_work_context(
+        &mut self,
+        context: crate::work_context::PaneWorkContext,
+    ) -> Result<bool, String> {
+        let changed = self.work_context.replace_git_observation(context)?;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(changed)
+    }
+
     /// The hook tier is persisted for restore fidelity, but any accepted
     /// mutation that tears down or replaces the session identity that authorized guarded
     /// work-title reports must also drop the hook tier, so stale ticket/PR refs

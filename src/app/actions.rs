@@ -3061,6 +3061,7 @@ impl AppState {
                 let _ = cache_updates;
                 Vec::new()
             }
+            AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),

@@ -4190,6 +4190,7 @@ impl HeadlessServer {
         changed |= self.app.clear_due_selection_highlight(now);
 
         if self.has_app_client() {
+            self.app.start_git_work_context_refresh_if_due(now);
             self.app.start_git_status_refresh_if_due(now);
         }
 

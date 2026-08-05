@@ -297,6 +297,7 @@ impl App {
 
         changed |= self.clear_due_selection_highlight(now);
 
+        self.start_git_work_context_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
 
         if self
@@ -630,6 +631,9 @@ impl App {
                 .flatten(),
             include_client_refresh
                 .then(|| self.git_refresh_deadline())
+                .flatten(),
+            include_client_refresh
+                .then(|| self.git_work_context_refresh_deadline())
                 .flatten(),
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,

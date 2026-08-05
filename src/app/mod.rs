@@ -23,6 +23,7 @@ pub mod state;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+pub(crate) mod work_context_git;
 mod worktrees;
 
 use std::collections::{HashMap, HashSet};
@@ -128,6 +129,14 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) git_work_context_refresh_in_flight:
+        Option<work_context_git::GitWorkContextRefreshInFlight>,
+    pub(crate) last_git_work_context_refresh_generation: u64,
+    pub(crate) next_git_work_context_refresh: Instant,
+    pub(crate) git_work_context_cache:
+        HashMap<work_context_git::GitWorkContextCacheKey, crate::work_context::PaneWorkContext>,
+    pub(crate) git_work_context_inputs:
+        HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
@@ -793,6 +802,11 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            git_work_context_refresh_in_flight: None,
+            last_git_work_context_refresh_generation: 0,
+            next_git_work_context_refresh: Instant::now(),
+            git_work_context_cache: HashMap::new(),
+            git_work_context_inputs: HashMap::new(),
             #[cfg(test)]
             git_program_override: None,
             pending_api_worktree_creates: HashMap::new(),

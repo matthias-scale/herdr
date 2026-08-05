@@ -2481,7 +2481,7 @@ mod tests {
     }
 
     #[test]
-    fn ac25_copy_work_preview_ignores_restored_manual_and_git_tiers() {
+    fn ac25_copy_work_preview_hook_tier_precedes_restored_manual_and_git_tiers() {
         let mut app = app_with_test_workspaces(&["one"]);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0]

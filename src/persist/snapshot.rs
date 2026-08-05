@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn ac25_v4_snapshot_restore_discards_forbidden_preview_tiers() {
+    fn ac25_v4_snapshot_restore_preserves_git_preview_tier() {
         let state = state_with_workspaces(&["context"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let mut snapshot = capture_from_state(&state);
@@ -783,13 +783,16 @@ mod tests {
 
         let tiers = restored.work_context.snapshot_tiers();
         assert!(tiers.manual.preview_urls.is_empty());
-        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            tiers.git_observation.preview_urls,
+            preview_urls("git", crate::work_context::MAX_PREVIEW_URLS)
+        );
         assert_eq!(
             restored.effective_work_context().preview_urls,
             preview_urls("hook", 2)
                 .into_iter()
                 .chain(preview_urls(
-                    "fallback",
+                    "git",
                     crate::work_context::MAX_PREVIEW_URLS - 2,
                 ))
                 .collect::<Vec<_>>()
