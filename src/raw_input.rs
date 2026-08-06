@@ -1,4 +1,6 @@
 use std::io::Read;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -240,6 +242,19 @@ impl RawInputByteFramer {
     pub(crate) fn host_color_query_sent(&mut self) {
         self.host_color_replies_awaited = HOST_COLOR_QUERY_REPLIES;
         self.held_pending_color_esc = false;
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn sync_host_color_query_generation(
+        &mut self,
+        seen_query_generation: &mut u64,
+        host_color_query_generation: &AtomicU64,
+    ) {
+        let query_generation = host_color_query_generation.load(Ordering::Acquire);
+        if query_generation != *seen_query_generation {
+            self.host_color_query_sent();
+            *seen_query_generation = query_generation;
+        }
     }
 
     pub(crate) fn enable_host_color_scheme_change_tracking(&mut self) {
@@ -1415,15 +1430,43 @@ mod tests {
 
     #[test]
     fn missing_host_color_reply_does_not_create_visible_input() {
+        let host_color_query_generation = AtomicU64::new(0);
+        let mut seen_query_generation = 0;
         let mut framer = RawInputByteFramer::for_host_input();
-        framer.host_color_query_sent();
 
-        // A terminal that never answers contributes no bytes, so the input
-        // timeout must not invent an Escape key or pane input.
-        assert!(framer.push(b"").is_empty());
+        // The query writer publishes before the blocked stdin read returns.
+        host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+
+        // The response arrives in multiple reads, split at the OSC 11 ESC
+        // introducer. Each read performs the same generation handshake as the
+        // real reader's post-read path before giving bytes to the framer.
+        framer.sync_host_color_query_generation(
+            &mut seen_query_generation,
+            &host_color_query_generation,
+        );
+        assert!(framer.push(b"\x1b").is_empty());
         assert!(framer.flush_timeout().is_empty());
-        assert!(!framer.has_pending_input());
-        assert_eq!(framer.push(b"x"), vec![b"x".to_vec()]);
+
+        framer.sync_host_color_query_generation(
+            &mut seen_query_generation,
+            &host_color_query_generation,
+        );
+        assert!(framer.push(b"]11;rgb:2424/2727/3a3a").is_empty());
+
+        framer.sync_host_color_query_generation(
+            &mut seen_query_generation,
+            &host_color_query_generation,
+        );
+        let chunks = framer.push(b"\x1b\\");
+        assert_eq!(chunks.len(), 1);
+        let events = parse_raw_input_bytes_sync(&chunks.concat());
+        assert!(matches!(
+            events.as_slice(),
+            [RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Background,
+                ..
+            }]
+        ));
     }
 
     #[test]

@@ -82,19 +82,17 @@ fn unix_stdin_reader_loop(
     let mut pending_palette = Vec::new();
 
     while !should_quit.load(Ordering::Acquire) {
-        let query_generation = host_color_query_generation.load(Ordering::Acquire);
-        if query_generation != seen_query_generation {
-            framer.host_color_query_sent();
-            seen_query_generation = query_generation;
-        }
+        framer.sync_host_color_query_generation(
+            &mut seen_query_generation,
+            &host_color_query_generation,
+        );
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
-                let query_generation = host_color_query_generation.load(Ordering::Acquire);
-                if query_generation != seen_query_generation {
-                    framer.host_color_query_sent();
-                    seen_query_generation = query_generation;
-                }
+                framer.sync_host_color_query_generation(
+                    &mut seen_query_generation,
+                    &host_color_query_generation,
+                );
                 if !send_unix_input_chunks(
                     framer.push(&scratch[..n]),
                     &event_tx,

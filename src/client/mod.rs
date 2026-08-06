@@ -121,6 +121,14 @@ impl HostTerminalAppearanceQuerySchedule {
     }
 }
 
+fn appearance_query_due_after_event_loop_iteration(
+    schedule: &mut HostTerminalAppearanceQuerySchedule,
+    enabled: bool,
+    now: Instant,
+) -> bool {
+    enabled && schedule.poll_due(now)
+}
+
 #[derive(Debug, Default)]
 #[cfg(windows)]
 struct AttachEscapeState;
@@ -1415,6 +1423,17 @@ async fn run_client_loop(
             _ = tokio::time::sleep(Duration::from_millis(100)) => ClientLoopEvent::Timer,
         };
 
+        let mut appearance_query_sent_this_iteration =
+            appearance_query_due_after_event_loop_iteration(
+                &mut appearance_query_schedule,
+                will_query_host_terminal_theme,
+                Instant::now(),
+            );
+        if appearance_query_sent_this_iteration {
+            host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+            query_host_terminal_appearance();
+        }
+
         match event {
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
@@ -1461,12 +1480,14 @@ async fn run_client_loop(
                         state.request_repaint();
                     }
                     if will_query_host_terminal_theme
+                        && !appearance_query_sent_this_iteration
                         && crate::raw_input::events_require_host_terminal_theme_query(&events)
                     {
                         host_color_query_generation.fetch_add(1, Ordering::AcqRel);
                         query_host_terminal_theme();
                         appearance_query_schedule.mark_query_sent(Instant::now());
                     } else if will_query_host_terminal_theme
+                        && !appearance_query_sent_this_iteration
                         && crate::raw_input::events_require_host_terminal_appearance_query(&events)
                     {
                         host_color_query_generation.fetch_add(1, Ordering::AcqRel);
@@ -1549,10 +1570,11 @@ async fn run_client_loop(
             }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
-                if will_query_host_terminal_theme {
+                if will_query_host_terminal_theme && !appearance_query_sent_this_iteration {
                     host_color_query_generation.fetch_add(1, Ordering::AcqRel);
                     query_host_terminal_appearance();
                     appearance_query_schedule.mark_query_sent(Instant::now());
+                    appearance_query_sent_this_iteration = true;
                 }
                 // Resizing invalidates the host-side blit baseline.
                 state.request_repaint();
@@ -1677,14 +1699,7 @@ async fn run_client_loop(
                     "server closed connection",
                 )));
             }
-            ClientLoopEvent::Timer => {
-                if will_query_host_terminal_theme
-                    && appearance_query_schedule.poll_due(Instant::now())
-                {
-                    host_color_query_generation.fetch_add(1, Ordering::AcqRel);
-                    query_host_terminal_appearance();
-                }
-            }
+            ClientLoopEvent::Timer => {}
         }
     }
 
@@ -2538,6 +2553,28 @@ mod tests {
         assert!(schedule.poll_due(now + interval));
         assert!(!schedule.poll_due(now + interval));
         assert!(schedule.poll_due(now + interval + interval));
+    }
+
+    #[test]
+    fn appearance_query_deadline_is_checked_between_continuous_events() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(50);
+        let mut schedule = HostTerminalAppearanceQuerySchedule::new(interval, start);
+        let mut query_count = 0;
+
+        // Every iteration represents an event arriving before the existing
+        // 100 ms timer can win the select. The deadline still has to fire.
+        for elapsed_ms in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
+            if appearance_query_due_after_event_loop_iteration(
+                &mut schedule,
+                true,
+                start + Duration::from_millis(elapsed_ms),
+            ) {
+                query_count += 1;
+            }
+        }
+
+        assert_eq!(query_count, 2);
     }
 
     #[test]
