@@ -120,37 +120,9 @@ pub(super) fn tab_row_layout(
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
-    if activity_age.as_deref().is_some_and(|label| {
-        width
-            < prefix_width
-                + prio_width
-                + full_status_width
-                + agent_suffix_width
-                + background_width
-                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
-                + 1
-                + display_width(label)
-    }) {
-        activity_age = None;
-    }
     let activity_width = activity_age
         .as_deref()
         .map(|label| 1 + display_width(label))
-        .unwrap_or_default();
-    if width
-        < prefix_width
-            + prio_width
-            + full_status_width
-            + agent_suffix_width
-            + background_width
-            + activity_width
-            + 1
-    {
-        background_jobs = None;
-    }
-    let background_width = background_jobs
-        .as_deref()
-        .map(display_width)
         .unwrap_or_default();
     let mut foreground_process = entry
         .foreground_process_name
@@ -173,6 +145,40 @@ pub(super) fn tab_row_layout(
         }
     }
     let foreground_process_width = foreground_process
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
+    if activity_age.as_deref().is_some_and(|label| {
+        width
+            < prefix_width
+                + prio_width
+                + full_status_width
+                + agent_suffix_width
+                + foreground_process_width
+                + background_width
+                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
+                + 1
+                + display_width(label)
+    }) {
+        activity_age = None;
+    }
+    let activity_width = activity_age
+        .as_deref()
+        .map(|label| 1 + display_width(label))
+        .unwrap_or_default();
+    if width
+        < prefix_width
+            + prio_width
+            + full_status_width
+            + agent_suffix_width
+            + foreground_process_width
+            + background_width
+            + activity_width
+            + 1
+    {
+        background_jobs = None;
+    }
+    let background_width = background_jobs
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
@@ -3824,6 +3830,34 @@ row_gap = 1
         assert!(layout.foreground_process.is_none());
         assert!(layout.agent_suffix.is_some());
         assert!(display_width(&layout.title) >= TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH);
+    }
+
+    #[test]
+    fn foreground_process_drops_before_activity_age_in_width_ladder() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("ticket".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("node".into());
+        let mut entry = sidebar_thread_entries(&app).remove(0);
+        entry.background_job_count = Some(1);
+        entry.activity_at = Some(
+            app.view_observed_at
+                .checked_sub(std::time::Duration::from_secs(12 * 60))
+                .expect("activity timestamp before observation time"),
+        );
+
+        // At this width the old ladder kept "node" while dropping "12m ago".
+        let layout = tab_row_layout(&entry, app.view_observed_at, 32, 1, &app.palette);
+
+        assert!(layout.foreground_process.is_none());
+        assert!(layout.activity_age.is_none());
+        assert!(layout.background_jobs.is_some());
     }
 
     #[test]
