@@ -549,6 +549,45 @@ fn terminal_agent_session_info(
 mod tests {
     use super::*;
 
+    fn title_test_app() -> (App, crate::terminal::TerminalId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        (app, terminal_id)
+    }
+
+    fn configure_title_test_terminal(
+        app: &mut App,
+        terminal_id: &crate::terminal::TerminalId,
+        cwd: std::path::PathBuf,
+        title: &str,
+        work_title: Option<&str>,
+    ) {
+        let terminal = app.state.terminals.get_mut(terminal_id).unwrap();
+        terminal.cwd = cwd;
+        terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal.set_terminal_title(Some(title.into()));
+        if let Some(work_title) = work_title {
+            terminal
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    work_title: Some(work_title.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+    }
+
     #[test]
     fn tab_info_label_uses_live_detected_agent_title() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -574,6 +613,110 @@ mod tests {
             app.tab_info(0, 0).unwrap().label,
             "claude · Add Subabe management token to Doppler"
         );
+    }
+
+    #[test]
+    fn tab_info_label_rejects_cwd_title_in_favor_of_work_title() {
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "herdr-test",
+            Some("Write Poem"),
+        );
+
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+    }
+
+    #[test]
+    fn tab_info_label_keeps_distinct_terminal_title_ahead_of_work_title() {
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "Review the patch",
+            Some("Write Poem"),
+        );
+
+        assert_eq!(
+            app.tab_info(0, 0).unwrap().label,
+            "codex · Review the patch"
+        );
+    }
+
+    #[test]
+    fn tab_info_label_rejects_full_and_tilde_cwd_titles() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("HOME").expect("test environment should define HOME"),
+        );
+        let cwd = home.join("Repos/herdr-test");
+        let relative = cwd.strip_prefix(&home).unwrap().display().to_string();
+        let expected = "codex · Write Poem";
+
+        let (mut full_app, full_terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut full_app,
+            &full_terminal_id,
+            cwd.clone(),
+            &cwd.display().to_string(),
+            Some("Write Poem"),
+        );
+        assert_eq!(full_app.tab_info(0, 0).unwrap().label, expected);
+
+        let (mut tilde_app, tilde_terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut tilde_app,
+            &tilde_terminal_id,
+            cwd,
+            &format!("~/{relative}"),
+            Some("Write Poem"),
+        );
+        assert_eq!(tilde_app.tab_info(0, 0).unwrap().label, expected);
+    }
+
+    #[test]
+    fn tab_info_label_rejects_cwd_path_fragment_title() {
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "Repos/herdr-test",
+            Some("Write Poem"),
+        );
+
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+    }
+
+    #[test]
+    fn tab_info_label_keeps_manual_label_and_degrades_without_other_title() {
+        let (mut manual_app, manual_terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut manual_app,
+            &manual_terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "herdr-test",
+            Some("Write Poem"),
+        );
+        manual_app
+            .state
+            .terminals
+            .get_mut(&manual_terminal_id)
+            .unwrap()
+            .set_manual_label("Pinned".into());
+        assert_eq!(manual_app.tab_info(0, 0).unwrap().label, "codex · Pinned");
+
+        let (mut no_title_app, no_title_terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut no_title_app,
+            &no_title_terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "herdr-test",
+            None,
+        );
+        assert_eq!(no_title_app.tab_info(0, 0).unwrap().label, "codex");
     }
 
     #[test]

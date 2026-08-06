@@ -98,6 +98,60 @@ pub struct Tab {
 }
 
 impl Tab {
+    /// Agent CLIs often set the terminal title to the current directory; that
+    /// location label duplicates the workspace and hides the useful work title.
+    fn is_informative_terminal_title(terminal: &TerminalState, title: &str) -> bool {
+        let title = title.trim();
+        let cwd = terminal.cwd.to_string_lossy();
+        let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
+
+        if terminal
+            .cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(same_text)
+            || same_text(&cwd)
+        {
+            return false;
+        }
+
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            let home = home.to_string_lossy();
+            let cwd_lower = cwd.to_ascii_lowercase();
+            let home_lower = home.to_ascii_lowercase();
+            if let Some(relative) = cwd_lower.strip_prefix(&home_lower) {
+                if relative.is_empty() || relative.starts_with('/') || relative.starts_with('\\') {
+                    let relative = relative.trim_start_matches(['/', '\\']);
+                    let abbreviated = if relative.is_empty() {
+                        "~".to_string()
+                    } else {
+                        format!("~/{relative}")
+                    };
+                    if same_text(&abbreviated) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        let path_parts = |value: &str| {
+            value
+                .split(['/', '\\'])
+                .filter(|part| !part.is_empty() && *part != ".")
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let cwd_parts = path_parts(&cwd);
+        let title_parts = path_parts(title);
+        if !title_parts.is_empty()
+            && (cwd_parts.starts_with(&title_parts) || cwd_parts.ends_with(&title_parts))
+        {
+            return false;
+        }
+
+        true
+    }
+
     pub(crate) fn work_context_display_projection(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
@@ -120,6 +174,7 @@ impl Tab {
                     .is_some()
                     .then(|| terminal.terminal_title_stripped())
                     .flatten()
+                    .filter(|title| Self::is_informative_terminal_title(terminal, title))
             })
             .or_else(|| context.work_title.clone());
         (agent.is_some() || ticket.is_some() || title.is_some()).then_some(
