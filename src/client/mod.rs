@@ -16,7 +16,7 @@ mod input;
 
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write as _};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -112,21 +112,52 @@ impl HostTerminalAppearanceQuerySchedule {
         self.next_poll_at = now + self.interval;
     }
 
-    fn poll_due(&mut self, now: Instant) -> bool {
-        if now < self.next_poll_at {
-            return false;
-        }
-        self.mark_query_sent(now);
-        true
+    fn is_due(&self, now: Instant) -> bool {
+        now >= self.next_poll_at
     }
 }
 
 fn appearance_query_due_after_event_loop_iteration(
-    schedule: &mut HostTerminalAppearanceQuerySchedule,
+    schedule: &HostTerminalAppearanceQuerySchedule,
     enabled: bool,
     now: Instant,
 ) -> bool {
-    enabled && schedule.poll_due(now)
+    enabled && schedule.is_due(now)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostTerminalQuery {
+    Theme,
+    Appearance,
+}
+
+fn host_terminal_query_for_iteration(
+    appearance_query_deadline_due: bool,
+    event_requires_theme_query: bool,
+    event_requires_appearance_query: bool,
+) -> Option<HostTerminalQuery> {
+    if event_requires_theme_query {
+        Some(HostTerminalQuery::Theme)
+    } else if event_requires_appearance_query || appearance_query_deadline_due {
+        Some(HostTerminalQuery::Appearance)
+    } else {
+        None
+    }
+}
+
+fn emit_host_terminal_query(
+    query: HostTerminalQuery,
+    appearance_query_schedule: &mut HostTerminalAppearanceQuerySchedule,
+    host_color_query_generation: &AtomicU64,
+) {
+    // Publish before writing: the stdin reader must classify a reply as
+    // terminal color data before the terminal can answer the query.
+    host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+    match query {
+        HostTerminalQuery::Theme => query_host_terminal_theme(),
+        HostTerminalQuery::Appearance => query_host_terminal_appearance(),
+    }
+    appearance_query_schedule.mark_query_sent(Instant::now());
 }
 
 #[derive(Debug, Default)]
@@ -1373,8 +1404,11 @@ async fn run_client_loop(
         Instant::now(),
     );
     if will_query_host_terminal_theme {
-        query_host_terminal_theme();
-        appearance_query_schedule.mark_query_sent(Instant::now());
+        emit_host_terminal_query(
+            HostTerminalQuery::Theme,
+            &mut appearance_query_schedule,
+            &host_color_query_generation,
+        );
     }
 
     // Spawn the resize poller thread.
@@ -1423,16 +1457,12 @@ async fn run_client_loop(
             _ = tokio::time::sleep(Duration::from_millis(100)) => ClientLoopEvent::Timer,
         };
 
-        let mut appearance_query_sent_this_iteration =
-            appearance_query_due_after_event_loop_iteration(
-                &mut appearance_query_schedule,
-                will_query_host_terminal_theme,
-                Instant::now(),
-            );
-        if appearance_query_sent_this_iteration {
-            host_color_query_generation.fetch_add(1, Ordering::AcqRel);
-            query_host_terminal_appearance();
-        }
+        let appearance_query_deadline_due = appearance_query_due_after_event_loop_iteration(
+            &appearance_query_schedule,
+            will_query_host_terminal_theme,
+            Instant::now(),
+        );
+        let mut query_emitted_this_iteration = false;
 
         match event {
             #[cfg(unix)]
@@ -1479,20 +1509,18 @@ async fn run_client_loop(
                     ) {
                         state.request_repaint();
                     }
-                    if will_query_host_terminal_theme
-                        && !appearance_query_sent_this_iteration
-                        && crate::raw_input::events_require_host_terminal_theme_query(&events)
-                    {
-                        host_color_query_generation.fetch_add(1, Ordering::AcqRel);
-                        query_host_terminal_theme();
-                        appearance_query_schedule.mark_query_sent(Instant::now());
-                    } else if will_query_host_terminal_theme
-                        && !appearance_query_sent_this_iteration
-                        && crate::raw_input::events_require_host_terminal_appearance_query(&events)
-                    {
-                        host_color_query_generation.fetch_add(1, Ordering::AcqRel);
-                        query_host_terminal_appearance();
-                        appearance_query_schedule.mark_query_sent(Instant::now());
+                    let query = host_terminal_query_for_iteration(
+                        appearance_query_deadline_due,
+                        crate::raw_input::events_require_host_terminal_theme_query(&events),
+                        crate::raw_input::events_require_host_terminal_appearance_query(&events),
+                    );
+                    if let Some(query) = query {
+                        emit_host_terminal_query(
+                            query,
+                            &mut appearance_query_schedule,
+                            &host_color_query_generation,
+                        );
+                        query_emitted_this_iteration = true;
                     }
                     data
                 };
@@ -1570,11 +1598,15 @@ async fn run_client_loop(
             }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
-                if will_query_host_terminal_theme && !appearance_query_sent_this_iteration {
-                    host_color_query_generation.fetch_add(1, Ordering::AcqRel);
-                    query_host_terminal_appearance();
-                    appearance_query_schedule.mark_query_sent(Instant::now());
-                    appearance_query_sent_this_iteration = true;
+                if let Some(query) =
+                    host_terminal_query_for_iteration(appearance_query_deadline_due, false, true)
+                {
+                    emit_host_terminal_query(
+                        query,
+                        &mut appearance_query_schedule,
+                        &host_color_query_generation,
+                    );
+                    query_emitted_this_iteration = true;
                 }
                 // Resizing invalidates the host-side blit baseline.
                 state.request_repaint();
@@ -1694,12 +1726,33 @@ async fn run_client_loop(
                 }
             },
             ClientLoopEvent::ServerDisconnected => {
+                if let Some(query) =
+                    host_terminal_query_for_iteration(appearance_query_deadline_due, false, false)
+                {
+                    emit_host_terminal_query(
+                        query,
+                        &mut appearance_query_schedule,
+                        &host_color_query_generation,
+                    );
+                }
                 return Err(ClientError::ConnectionLost(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "server closed connection",
                 )));
             }
             ClientLoopEvent::Timer => {}
+        }
+
+        if !query_emitted_this_iteration {
+            if let Some(query) =
+                host_terminal_query_for_iteration(appearance_query_deadline_due, false, false)
+            {
+                emit_host_terminal_query(
+                    query,
+                    &mut appearance_query_schedule,
+                    &host_color_query_generation,
+                );
+            }
         }
     }
 
@@ -2544,15 +2597,49 @@ mod tests {
     }
 
     #[test]
+    fn coinciding_theme_event_uses_full_theme_query_over_deadline_appearance_query() {
+        let start = Instant::now();
+        let schedule = HostTerminalAppearanceQuerySchedule::new(Duration::from_secs(60), start);
+        let deadline_due = appearance_query_due_after_event_loop_iteration(
+            &HostTerminalAppearanceQuerySchedule {
+                next_poll_at: start,
+                ..schedule
+            },
+            true,
+            start,
+        );
+        let query = host_terminal_query_for_iteration(deadline_due, true, false);
+
+        assert_eq!(query, Some(HostTerminalQuery::Theme));
+
+        let mut output = Vec::new();
+        match query.expect("theme event must emit a query") {
+            HostTerminalQuery::Theme => write_host_terminal_theme_query(&mut output).unwrap(),
+            HostTerminalQuery::Appearance => {
+                write_host_terminal_appearance_query(&mut output).unwrap()
+            }
+        }
+        assert_eq!(
+            output,
+            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
+        );
+        assert_ne!(
+            output,
+            crate::terminal_theme::HOST_APPEARANCE_QUERY_SEQUENCE.as_bytes()
+        );
+    }
+
+    #[test]
     fn appearance_query_schedule_waits_for_interval_and_rearms() {
         let now = Instant::now();
         let interval = Duration::from_secs(60);
         let mut schedule = HostTerminalAppearanceQuerySchedule::new(interval, now);
 
-        assert!(!schedule.poll_due(now + Duration::from_secs(59)));
-        assert!(schedule.poll_due(now + interval));
-        assert!(!schedule.poll_due(now + interval));
-        assert!(schedule.poll_due(now + interval + interval));
+        assert!(!schedule.is_due(now + Duration::from_secs(59)));
+        assert!(schedule.is_due(now + interval));
+        schedule.mark_query_sent(now + interval);
+        assert!(!schedule.is_due(now + interval));
+        assert!(schedule.is_due(now + interval + interval));
     }
 
     #[test]
@@ -2565,11 +2652,17 @@ mod tests {
         // Every iteration represents an event arriving before the existing
         // 100 ms timer can win the select. The deadline still has to fire.
         for elapsed_ms in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
-            if appearance_query_due_after_event_loop_iteration(
-                &mut schedule,
-                true,
-                start + Duration::from_millis(elapsed_ms),
+            if let Some(query) = host_terminal_query_for_iteration(
+                appearance_query_due_after_event_loop_iteration(
+                    &schedule,
+                    true,
+                    start + Duration::from_millis(elapsed_ms),
+                ),
+                false,
+                false,
             ) {
+                assert_eq!(query, HostTerminalQuery::Appearance);
+                schedule.mark_query_sent(start + Duration::from_millis(elapsed_ms));
                 query_count += 1;
             }
         }
