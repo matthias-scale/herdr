@@ -1489,7 +1489,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 66, 20));
 
         let right = app.state.view.tab_scroll_right_hit_area;
         assert!(right.width > 0);
@@ -1531,15 +1531,16 @@ mod tests {
         let target = app.state.view.tab_hit_areas[last_idx];
         let clamped_scroll = app.state.tab_scroll;
         assert!(target.width > 0, "last tab should already be visible");
+        let target_col = target.x + target.width - 1;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            target.x + 1,
+            target_col,
             target.y,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            target.x + 1,
+            target_col,
             target.y,
         ));
 

@@ -844,6 +844,35 @@ pub enum ViewLayout {
     Mobile,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockTab {
+    Editor,
+    Shortcuts,
+    Context,
+}
+
+impl DockTab {
+    pub const ALL: [Self; 3] = [Self::Editor, Self::Shortcuts, Self::Context];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "Editor",
+            Self::Shortcuts => "Shortcuts",
+            Self::Context => "Context",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    pub fn previous(self) -> Self {
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
@@ -866,6 +895,12 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+    pub dock_rect: Rect,
+    pub dock_handle_rect: Rect,
+    pub dock_divider_rect: Rect,
+    pub dock_tab_bar_rect: Rect,
+    pub dock_tab_hit_areas: Vec<Rect>,
+    pub dock_body_rect: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1252,6 +1287,7 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
+    DockDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1594,6 +1630,9 @@ pub struct AppState {
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
     pub sidebar_max_width: u16,
+    pub dock_width: u16,
+    pub dock_collapsed: bool,
+    pub dock_tab: DockTab,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -2122,6 +2161,12 @@ impl AppState {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                dock_rect: Rect::default(),
+                dock_handle_rect: Rect::default(),
+                dock_divider_rect: Rect::default(),
+                dock_tab_bar_rect: Rect::default(),
+                dock_tab_hit_areas: Vec::new(),
+                dock_body_rect: Rect::default(),
             },
             drag: None,
             workspace_press: None,
@@ -2144,6 +2189,9 @@ impl AppState {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
+            dock_collapsed: true,
+            dock_tab: DockTab::Editor,
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,

@@ -4112,6 +4112,8 @@ mod tests {
             sidebar_section_split: Some(0.4),
             collapsed_space_keys: std::collections::HashSet::new(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         let value = serde_json::to_value(snapshot).unwrap();
         let object = value.as_object().unwrap();
