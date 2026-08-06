@@ -106,6 +106,30 @@ impl AgentPanelSortConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LegacyAgentPanelScopeConfig {
+    Current,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusIndicatorStyle {
+    #[default]
+    Dots,
+    Symbols,
+}
+
+impl StatusIndicatorStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dots => "dots",
+            Self::Symbols => "symbols",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostCursorModeConfig {
@@ -857,6 +881,14 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBarPositionConfig {
+    #[default]
+    Top,
+    Bottom,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -891,6 +923,8 @@ pub struct UiConfig {
     pub prompt_new_workspace_name: bool,
     /// Draw borders around split panes. Default: true.
     pub pane_borders: bool,
+    /// Draw interactive scrollbars beside terminal panes. Default: true.
+    pub pane_scrollbars: bool,
     /// Keep split panes visually separated instead of sharing divider borders. Default: true.
     pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
@@ -903,7 +937,15 @@ pub struct UiConfig {
     pub status_bar: StatusBarConfig,
     /// Legacy indexed-Agent projection ordering. The visible sidebar remains canonical.
     /// Saved values are "spaces" or "priority". Default: "spaces".
+    /// Desktop tab row placement. Default: top.
+    pub tab_bar_position: TabBarPositionConfig,
+    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
+    /// Retired setting that Herdr wrote before the workspace filter was removed.
+    #[serde(rename = "agent_panel_scope")]
+    _legacy_agent_panel_scope: Option<LegacyAgentPanelScopeConfig>,
+    /// Agent status indicator style. Saved values are "dots" or "symbols". Default: "dots".
+    pub status_indicators: StatusIndicatorStyle,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -1113,12 +1155,16 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
+            pane_scrollbars: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
+            tab_bar_position: TabBarPositionConfig::Top,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
+            _legacy_agent_panel_scope: None,
+            status_indicators: StatusIndicatorStyle::Dots,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -1364,28 +1410,54 @@ agent_panel_scope = "current"
     }
 
     #[test]
+    fn status_indicator_style_defaults_to_dots_and_parses_symbols() {
+        assert_eq!(
+            Config::default().ui.status_indicators,
+            StatusIndicatorStyle::Dots
+        );
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+status_indicators = "symbols"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+    }
+
+    #[test]
     fn pane_appearance_defaults_and_parse() {
         let default_config = Config::default();
         assert!(default_config.ui.pane_borders);
+        assert!(default_config.ui.pane_scrollbars);
         assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
         assert!(!default_config.ui.hide_tab_bar_when_single_tab);
         assert!(default_config.ui.show_subscription_usage);
+        assert_eq!(
+            default_config.ui.tab_bar_position,
+            TabBarPositionConfig::Top
+        );
 
         let toml = r#"
 [ui]
 pane_borders = false
+pane_scrollbars = false
 pane_gaps = true
 show_agent_labels_on_pane_borders = true
 hide_tab_bar_when_single_tab = true
 show_subscription_usage = false
+tab_bar_position = "bottom"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.pane_borders);
+        assert!(!config.ui.pane_scrollbars);
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
         assert!(config.ui.hide_tab_bar_when_single_tab);
         assert!(!config.ui.show_subscription_usage);
+        assert_eq!(config.ui.tab_bar_position, TabBarPositionConfig::Bottom);
     }
 
     #[test]
