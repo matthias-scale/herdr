@@ -9,6 +9,14 @@ use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 
+/// The pin lives in the leading pad column every tab cell already renders, so
+/// the affordance costs no width and never touches the label: a pinned tab
+/// shows `*` where an unpinned one shows the blank that was always there. The
+/// click target is that column either way -- an icon you can only hit once it
+/// is already on would be no way to turn it on.
+pub(crate) const PIN_GLYPH_ON: char = '*';
+pub(crate) const PIN_GLYPH_OFF: char = ' ';
+
 const MIN_TAB_WIDTH: u16 = 8;
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
@@ -93,6 +101,8 @@ pub(crate) fn tab_chrome_label(
     max_width: usize,
 ) -> String {
     let zoomed = ws.tabs.get(tab_idx).is_some_and(|tab| tab.zoomed);
+    // Same budgeting rule as the zoom marker: the glyph is paid for out of the
+    // label, never out of the cell, so a pin can never widen or shove a tab.
     let label_width = max_width.saturating_sub(if zoomed { 2 } else { 0 });
     let name = ws
         .tab_display_projection(terminals, tab_idx)
@@ -430,7 +440,12 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         };
         let width = rect.width as usize;
         let name = tab_chrome_label(ws, &app.terminals, idx, width.saturating_sub(1));
-        let text = format!(" {:width$}", name, width = width.saturating_sub(1));
+        let pin = if tab.pinned {
+            PIN_GLYPH_ON
+        } else {
+            PIN_GLYPH_OFF
+        };
+        let text = format!("{pin}{:width$}", name, width = width.saturating_sub(1));
         frame.render_widget(Paragraph::new(text).style(style), rect);
     }
 

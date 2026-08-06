@@ -4267,6 +4267,29 @@
           },
           "type": "object"
         },
+        "TabPinMode": {
+          "enum": [
+            "toggle",
+            "pin",
+            "unpin"
+          ],
+          "type": "string"
+        },
+        "TabPinParams": {
+          "properties": {
+            "mode": {
+              "$ref": "#/schemas/request/$defs/TabPinMode",
+              "default": "toggle"
+            },
+            "tab_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tab_id"
+          ],
+          "type": "object"
+        },
         "TabRenameParams": {
           "properties": {
             "label": {
@@ -5040,6 +5063,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TabPrioParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.pin",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabPinParams"
             }
           },
           "required": [

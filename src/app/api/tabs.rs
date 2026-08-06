@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
     TabMoveParams, TabPrioMode, TabPrioParams, TabPrioResult, TabRenameParams, TabTarget,
+    TabMoveParams, TabPinMode, TabPinParams, TabRenameParams, TabTarget,
 };
 use crate::app::{App, Mode};
 use crate::workspace::TabPrioAction as StateTabPrioAction;
@@ -213,6 +214,29 @@ impl App {
                 },
             },
         )
+    }
+
+    pub(super) fn handle_tab_pin(&mut self, id: String, params: TabPinParams) -> String {
+        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        let Some(tab) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+        else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        tab.pinned = match params.mode {
+            TabPinMode::Pin => true,
+            TabPinMode::Unpin => false,
+            TabPinMode::Toggle => !tab.pinned,
+        };
+        self.schedule_session_save();
+        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+
+        encode_success(id, ResponseResult::TabInfo { tab })
     }
 
     pub(super) fn handle_tab_move(&mut self, id: String, params: TabMoveParams) -> String {
@@ -636,6 +660,49 @@ mod tests {
             "tab bar should reflow to the new label width immediately: \
              before={width_before}, after={width_after}"
         );
+    }
+
+    #[test]
+    fn api_tab_pin_toggle_flips_pinned_flag() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let workspace = Workspace::test_new("tabs");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        assert!(!app.state.workspaces[0].tabs[0].pinned);
+
+        let response = app.handle_tab_pin(
+            "req".into(),
+            TabPinParams {
+                tab_id: tab_id.clone(),
+                mode: TabPinMode::Toggle,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabInfo { .. }));
+        assert!(app.state.workspaces[0].tabs[0].pinned);
+
+        app.handle_tab_pin(
+            "req2".into(),
+            TabPinParams {
+                tab_id: tab_id.clone(),
+                mode: TabPinMode::Toggle,
+            },
+        );
+        assert!(!app.state.workspaces[0].tabs[0].pinned);
+
+        app.handle_tab_pin(
+            "req3".into(),
+            TabPinParams {
+                tab_id,
+                mode: TabPinMode::Pin,
+            },
+        );
+        assert!(app.state.workspaces[0].tabs[0].pinned);
     }
 
     #[tokio::test]

@@ -105,6 +105,9 @@ pub struct Tab {
     pub runtimes: HashMap<PaneId, TerminalRuntime>,
     pub zoomed: bool,
     pub prio: bool,
+    /// Pinned by the user into the sidebar's Pinned group. Unlike the derived
+    /// attention priority, nothing but an explicit toggle ever changes it.
+    pub pinned: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
@@ -375,6 +378,7 @@ impl Tab {
                 runtimes: HashMap::new(),
                 zoomed: false,
                 prio: false,
+                pinned: false,
                 events,
                 render_notify,
                 render_dirty,
@@ -741,6 +745,7 @@ impl Tab {
             runtimes: HashMap::new(),
             zoomed: false,
             prio: false,
+            pinned: false,
             events,
             render_notify,
             render_dirty,

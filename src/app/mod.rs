@@ -584,6 +584,7 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -1092,6 +1093,11 @@ impl App {
                         env: Default::default(),
                     },
                 );
+                needs_render = true;
+            }
+
+            if let Some((ws_idx, tab_idx)) = self.state.request_pin_toggle.take() {
+                self.toggle_pin_tab_via_api(ws_idx, tab_idx);
                 needs_render = true;
             }
 
