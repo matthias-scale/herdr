@@ -29,6 +29,12 @@
           "description": "Follow host terminal light/dark appearance and switch between theme names."
         },
         {
+          "key": "theme.auto_switch_poll_interval_seconds",
+          "type": "integer",
+          "default": "60",
+          "description": "Seconds between host background refreshes for auto-switching; clamped to 5–3600."
+        },
+        {
           "key": "theme.dark_name",
           "type": "string",
           "default": "unset",

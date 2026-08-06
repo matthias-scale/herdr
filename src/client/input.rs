@@ -39,11 +39,16 @@ pub fn stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     #[cfg(windows)]
     {
-        let _ = (host_color_query_sent, host_mouse_capture_active);
+        let _ = (
+            host_color_query_sent,
+            host_color_query_generation,
+            host_mouse_capture_active,
+        );
         windows_stdin_reader_loop(event_tx, should_quit);
     }
 
@@ -52,6 +57,7 @@ pub fn stdin_reader_loop(
         event_tx,
         should_quit,
         host_color_query_sent,
+        host_color_query_generation,
         host_mouse_capture_active,
     );
 }
@@ -61,6 +67,7 @@ fn unix_stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     let stdin = io::stdin();
@@ -71,12 +78,21 @@ fn unix_stdin_reader_loop(
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
     }
+    let mut seen_query_generation = host_color_query_generation.load(Ordering::Acquire);
     let mut pending_palette = Vec::new();
 
     while !should_quit.load(Ordering::Acquire) {
+        framer.sync_host_color_query_generation(
+            &mut seen_query_generation,
+            &host_color_query_generation,
+        );
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
+                framer.sync_host_color_query_generation(
+                    &mut seen_query_generation,
+                    &host_color_query_generation,
+                );
                 if !send_unix_input_chunks(
                     framer.push(&scratch[..n]),
                     &event_tx,

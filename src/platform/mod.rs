@@ -78,7 +78,7 @@ pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }
 }
 
-/// Raised by the SIGWINCH handler, consumed by the host resize watcher.
+/// Raised by the terminal wake-signal handler, consumed by the host resize watcher.
 #[cfg(unix)]
 static TERMINAL_RESIZE_SIGNALLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -88,7 +88,7 @@ extern "C" fn record_terminal_resize_signal(_signal: libc::c_int) {
     TERMINAL_RESIZE_SIGNALLED.store(true, std::sync::atomic::Ordering::Release);
 }
 
-/// Records SIGWINCH events that size polling can miss.
+/// Records terminal wake signals that size polling can miss.
 #[cfg(unix)]
 pub(crate) fn watch_terminal_resize_signal() {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -99,6 +99,7 @@ pub(crate) fn watch_terminal_resize_signal() {
     unsafe {
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(libc::SIGWINCH, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGCONT, &action, std::ptr::null_mut());
     }
 }
 
@@ -354,14 +355,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_resize_signal_is_recorded_once_per_delivery() {
+    fn terminal_wake_signals_are_recorded_once_per_delivery() {
         watch_terminal_resize_signal();
         assert!(!take_terminal_resize_signal());
 
-        unsafe {
-            libc::raise(libc::SIGWINCH);
-        }
+        unsafe { libc::raise(libc::SIGWINCH) };
+        assert!(take_terminal_resize_signal());
+        assert!(!take_terminal_resize_signal());
 
+        unsafe { libc::raise(libc::SIGCONT) };
         assert!(take_terminal_resize_signal());
         assert!(!take_terminal_resize_signal());
     }
