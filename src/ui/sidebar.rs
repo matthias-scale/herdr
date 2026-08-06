@@ -464,9 +464,15 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    // Clicking the info cell focuses the tab and opens the panel on that tab's own
+                    // focused pane, so only that pane may claim the affordance. Reading any pane of
+                    // a split would promise links the panel then does not show — and hide links it
+                    // does. The tab-level aggregate ORs these, which with this gate yields exactly
+                    // "the tab's focused pane has links".
                     let has_work_context_links = ws
                         .tabs
                         .get(detail.tab_idx)
+                        .filter(|tab| tab.layout.focused() == detail.pane_id)
                         .and_then(|tab| tab.terminal_id(detail.pane_id))
                         .and_then(|terminal_id| app.terminals.get(terminal_id))
                         .is_some_and(|terminal| {
@@ -633,6 +639,9 @@ fn aggregate_tab_entries(
                     }
                     *has_agent |= entry.has_agent;
                     *has_current_agent |= entry.agent.is_some();
+                    // Only the tab's focused pane sets this, so the OR picks that one pane out of
+                    // the split regardless of which pane happened to be aggregated first.
+                    tab_entry.has_work_context_links |= entry.has_work_context_links;
                 },
             )
             .or_insert_with(|| {
@@ -1272,26 +1281,33 @@ pub(crate) fn workspace_agent_chevron_rect(
     Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
 }
 
-fn tab_gutter_rect(card: &crate::app::state::TabCardArea, offset: u16) -> Rect {
+/// A gutter cell is `TAB_*_FIELD_WIDTH` columns wide — the marker plus its trailing spacer — and the
+/// whole cell is the hitbox. Returning only the marker column would leave the spacer falling through
+/// to the row's focus target, so half of every visible cell would do the wrong thing.
+fn tab_gutter_rect(card: &crate::app::state::TabCardArea, offset: u16, width: u16) -> Rect {
     let prefix_width = card.depth.saturating_mul(3).saturating_add(1);
     let x = card
         .rect
         .x
         .saturating_add(prefix_width)
         .saturating_add(offset);
-    if card.rect.height == 0 || x < card.rect.x || x >= card.rect.x.saturating_add(card.rect.width)
-    {
+    let card_end = card.rect.x.saturating_add(card.rect.width);
+    if card.rect.height == 0 || x < card.rect.x || x >= card_end {
         return Rect::default();
     }
-    Rect::new(x, card.rect.y, 1, 1)
+    Rect::new(x, card.rect.y, width.min(card_end.saturating_sub(x)), 1)
 }
 
 pub(crate) fn tab_prio_rect(card: &crate::app::state::TabCardArea) -> Rect {
-    tab_gutter_rect(card, 0)
+    tab_gutter_rect(card, 0, TAB_PRIO_FIELD_WIDTH as u16)
 }
 
 pub(crate) fn tab_info_rect(card: &crate::app::state::TabCardArea) -> Rect {
-    tab_gutter_rect(card, TAB_PRIO_FIELD_WIDTH as u16)
+    tab_gutter_rect(
+        card,
+        TAB_PRIO_FIELD_WIDTH as u16,
+        TAB_INFO_FIELD_WIDTH as u16,
+    )
 }
 
 pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {

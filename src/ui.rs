@@ -17,6 +17,9 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+/// Gutter cell widths are asserted by mouse-dispatch tests that live outside this module.
+#[cfg(test)]
+pub(crate) use sidebar::{TAB_INFO_FIELD_WIDTH, TAB_PRIO_FIELD_WIDTH};
 mod status;
 mod tab_surface;
 mod tabs;
