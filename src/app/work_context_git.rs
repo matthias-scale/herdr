@@ -475,7 +475,9 @@ fn git_work_context_for_branch(
     let mut command = crate::noninteractive_process::command(gh_program);
     command
         .current_dir(repo_root)
-        .args(["pr", "view", "--json", "url,statusCheckRollup"]);
+        .args(["pr", "view"])
+        .arg(branch)
+        .args(["--json", "url,statusCheckRollup"]);
     let Ok(output) = crate::noninteractive_process::output_with_deadline(command, deadline) else {
         return context;
     };
@@ -627,6 +629,29 @@ mod tests {
 
         let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
         assert_eq!(output.observations[0].context.ticket_ids, vec!["MAT-123"]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_query_is_qualified_by_the_sampled_branch() {
+        let dir = fixture_dir("branch-qualified-gh");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/MAT-27-branch-qualified");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nif [ \"$3\" = \"feat/MAT-27-branch-qualified\" ]; then printf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/27\"}'; else exit 1; fi\n",
+        );
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            output.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/27"]
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
