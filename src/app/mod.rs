@@ -678,6 +678,7 @@ impl App {
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
+            show_subscription_usage: config.ui.show_subscription_usage,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -1171,10 +1172,12 @@ impl App {
                             area,
                         );
                     }
-                    crate::ui::render_with_runtime_registry(
+                    crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,
                         frame,
+                        &self.render_notify,
+                        &self.render_dirty,
                     );
                 })?;
                 self.status_metrics_visible =
@@ -1547,6 +1550,7 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
+                self.state.show_subscription_usage = config.ui.show_subscription_usage;
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 if self.state.status_bar_enabled && !status_bar_was_enabled {
