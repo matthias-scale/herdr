@@ -1020,6 +1020,39 @@ mod tests {
     }
 
     #[test]
+    fn missive_urls_survive_a_snapshot_round_trip_in_both_directions() {
+        let context = PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/c1".into()],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&context).unwrap();
+        assert!(encoded.contains("conversations/c1"));
+        assert_eq!(
+            serde_json::from_str::<PaneWorkContext>(&encoded).unwrap(),
+            context
+        );
+
+        // A snapshot written by an older build has no such key at all.
+        let legacy = r#"{"ticket_ids":["MAT-1"],"pr_urls":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<PaneWorkContext>(legacy)
+                .unwrap()
+                .missive_urls,
+            Vec::<String>::new()
+        );
+
+        // And a snapshot written by this build must still load on a build without the field.
+        #[derive(Default, serde::Deserialize)]
+        #[serde(default)]
+        struct OlderPaneWorkContext {
+            ticket_ids: Vec<String>,
+        }
+        let older: OlderPaneWorkContext = serde_json::from_str(&encoded)
+            .expect("an older build must ignore the field it does not know");
+        assert!(older.ticket_ids.is_empty());
+    }
+
+    #[test]
     fn missive_links_follow_previews_and_copy_the_full_url() {
         let candidates = work_link_candidates(&PaneWorkContext {
             preview_urls: vec!["https://preview-1.vercel.app".into()],
