@@ -70,7 +70,7 @@ impl TabDisplayProjection {
 
 impl TabNameOrigin {
     pub(crate) fn expires_on_agent_session_change(self) -> bool {
-        matches!(self, Self::User | Self::AgentDerived)
+        matches!(self, Self::AgentDerived)
     }
 }
 

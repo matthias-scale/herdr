@@ -5747,7 +5747,7 @@ mod tests {
     }
 
     #[test]
-    fn session_change_expires_user_tab_name_but_preserves_structural_name() {
+    fn session_change_preserves_user_tab_name_and_structural_name() {
         let mut state = app_with_workspaces(&["active"]);
         let structural_tab = state.workspaces[0].test_add_tab(Some("layout"));
         state.ensure_test_terminals();
@@ -5770,26 +5770,37 @@ mod tests {
             .join("two.jsonl")
             .display()
             .to_string();
-        for (seq, session_ref) in [
-            (
-                20,
-                crate::agent_resume::AgentSessionRef::path(first_session),
-            ),
-            (
-                21,
-                crate::agent_resume::AgentSessionRef::path(second_session),
-            ),
-        ] {
-            state.handle_app_event(AppEvent::HookStateReported {
-                pane_id: user_pane,
-                source: "custom:pi".into(),
-                agent_label: "pi".into(),
-                state: AgentState::Working,
-                message: None,
-                seq: Some(seq),
-                session_ref,
-            });
-        }
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: user_pane,
+            source: "custom:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
+        });
+        assert_eq!(
+            state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("old turn")
+        );
+        assert_eq!(
+            state.workspaces[0].tabs[0].name_origin,
+            crate::workspace::TabNameOrigin::User
+        );
+
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: user_pane,
+            source: "custom:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(21),
+            session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
+        });
+        assert_eq!(
+            state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("old turn")
+        );
 
         let structural_pane = state.workspaces[0].tabs[structural_tab].root_pane;
         for (seq, session_ref) in [
@@ -5825,12 +5836,15 @@ mod tests {
             });
         }
 
-        assert!(state.workspaces[0].tabs[0].custom_name.is_none());
+        assert_eq!(
+            state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("old turn")
+        );
         assert_eq!(
             state.workspaces[0]
                 .tab_display_name_from(&state.terminals, 0)
                 .as_deref(),
-            Some("pi · Fresh agent title")
+            Some("old turn")
         );
         assert_eq!(
             state.workspaces[0]
@@ -5840,7 +5854,7 @@ mod tests {
         );
         assert_eq!(
             state.workspaces[0].tabs[0].name_origin,
-            crate::workspace::TabNameOrigin::Structural
+            crate::workspace::TabNameOrigin::User
         );
     }
 
