@@ -10,10 +10,11 @@ use ratatui::{
 
 use self::tokens::{ResolvedToken, ResolvedTokenKind};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
-use super::status::{state_dot, state_label, state_label_color};
+use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
+use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -68,6 +69,7 @@ pub(super) fn tab_row_layout(
     width: usize,
     prefix_width: usize,
     palette: &Palette,
+    indicator_style: StatusIndicatorStyle,
 ) -> TabRowLayout {
     let state = tab_lifecycle_visible(entry).then(|| {
         entry
@@ -81,7 +83,7 @@ pub(super) fn tab_row_layout(
     });
     let dot_width = state
         .as_ref()
-        .map(|_| display_width(state_dot(entry.state, entry.seen, palette).0))
+        .map(|_| display_width(state_icon(entry.state, entry.seen, indicator_style, palette).0))
         .unwrap_or_default();
     let full_status_width = state
         .as_deref()
@@ -1200,7 +1202,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     continue;
                 };
                 let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-                let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
+                let (icon, icon_style) = state_icon(agg_state, agg_seen, app.status_indicators, p);
                 let is_selected = *ws_idx == app.selected && is_navigating;
                 let is_active = Some(*ws_idx) == app.active;
                 let row_style = Style::default();
@@ -1229,7 +1231,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 );
             }
             SidebarRow::Agent { entry, depth } => {
-                let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
+                let (icon, icon_style) =
+                    state_icon(entry.state, entry.seen, app.status_indicators, p);
                 let row_style = Style::default();
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -1251,7 +1254,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 );
             }
             SidebarRow::Tab { entry, .. } => {
-                let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
+                let (icon, icon_style) =
+                    state_icon(entry.state, entry.seen, app.status_indicators, p);
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::raw("  "),
@@ -1812,10 +1816,11 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         usize::from(card.rect.width),
         display_width(&prefix),
         p,
+        app.status_indicators,
     );
     let mut spans = vec![Span::raw(prefix)];
     if let Some(state) = layout.state.as_deref() {
-        let state_icon = state_dot(entry.state, entry.seen, p);
+        let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
         spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
         if layout.show_state_label {
             spans.extend([
@@ -1885,7 +1890,7 @@ fn render_agent_card(
         Modifier::DIM
     });
     let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    let state_icon = state_dot(detail.state, detail.seen, p);
+    let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
     let indent = usize::from(depth) * 3;
 
     for (row_index, resolved) in rows
@@ -1987,7 +1992,7 @@ fn agent_activity_age_fits(
         Modifier::DIM
     });
     let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    let state_icon = state_dot(detail.state, detail.seen, p);
+    let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
     let resolve_tokens = |max_width| {
         resolved_token_spans(
             &resolved,
@@ -2037,6 +2042,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 usize::from(card.rect.width),
                 usize::from(depth) * 3 + 1,
                 &app.palette,
+                app.status_indicators,
             )
             .activity_age
             .and(entry.activity_at)
@@ -2210,6 +2216,42 @@ mod tests {
                 .any(|line| line.contains("New") && line.contains("· pi")),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn flattened_spaces_sidebar_uses_configured_status_symbols() {
+        let mut app = app_with_agents(&["blocked", "done"]);
+        app.status_indicators = StatusIndicatorStyle::Symbols;
+
+        let first_pane = app.workspaces[0].tabs[0].root_pane;
+        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        let second_pane = app.workspaces[1].tabs[0].root_pane;
+        let second_terminal = app.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&first_terminal).unwrap().state = AgentState::Blocked;
+        let second_terminal_state = app.terminals.get_mut(&second_terminal).unwrap();
+        second_terminal_state.state = AgentState::Idle;
+        app.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .seen = false;
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 32, 12);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let text = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>();
+
+        assert!(text.iter().any(|line| line.contains('×')), "{text:?}");
+        assert!(text.iter().any(|line| line.contains('✓')), "{text:?}");
     }
 
     #[test]
@@ -4937,7 +4979,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap();
 
         let entry = sidebar_thread_entries(&app).remove(0);
-        let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
+        let layout = tab_row_layout(
+            &entry,
+            std::time::Instant::now(),
+            40,
+            2,
+            &app.palette,
+            app.status_indicators,
+        );
         assert_eq!(layout.title, "Codex");
         assert_eq!(layout.state.as_deref(), Some("working"));
         assert_eq!(layout.agent_suffix, None);
@@ -4951,7 +5000,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap();
         terminal.set_manual_label("manual pane".into());
         let entry = sidebar_thread_entries(&app).remove(0);
-        let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
+        let layout = tab_row_layout(
+            &entry,
+            std::time::Instant::now(),
+            40,
+            2,
+            &app.palette,
+            app.status_indicators,
+        );
         assert_eq!(layout.title, "manual pane");
         assert_eq!(layout.state.as_deref(), Some("working"));
         assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
