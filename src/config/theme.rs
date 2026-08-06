@@ -1,5 +1,12 @@
+use std::time::Duration;
+
 use serde::Deserialize;
 use tracing::warn;
+
+use super::{
+    DEFAULT_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS, MAX_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
+    MIN_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
+};
 
 /// Theme configuration: pick a built-in or override individual tokens.
 ///
@@ -18,12 +25,28 @@ pub struct ThemeConfig {
     pub name: Option<String>,
     /// Follow host terminal light/dark appearance and switch between theme names.
     pub auto_switch: bool,
+    /// Seconds between background-color refreshes used by `auto_switch`.
+    /// Values are clamped to a safe 1-hour maximum and 5-second minimum.
+    pub auto_switch_poll_interval_seconds: Option<u64>,
     /// Theme name used when `auto_switch` selects a dark appearance.
     pub dark_name: Option<String>,
     /// Theme name used when `auto_switch` selects a light appearance.
     pub light_name: Option<String>,
     /// Custom overrides — applied on top of the selected base theme.
     pub custom: Option<CustomThemeColors>,
+}
+
+impl ThemeConfig {
+    pub fn auto_switch_poll_interval(&self) -> Duration {
+        let seconds = self
+            .auto_switch_poll_interval_seconds
+            .unwrap_or(DEFAULT_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS)
+            .clamp(
+                MIN_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
+                MAX_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS,
+            );
+        Duration::from_secs(seconds)
+    }
 }
 
 /// Per-token color overrides. All fields optional — only set what you want to change.
@@ -146,12 +169,18 @@ name = "dracula"
 [theme]
 name = "catppuccin"
 auto_switch = true
+auto_switch_poll_interval_seconds = 15
 dark_name = "tokyo-night"
 light_name = "catppuccin-latte"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.theme.name.as_deref(), Some("catppuccin"));
         assert!(config.theme.auto_switch);
+        assert_eq!(config.theme.auto_switch_poll_interval_seconds, Some(15));
+        assert_eq!(
+            config.theme.auto_switch_poll_interval(),
+            Duration::from_secs(15)
+        );
         assert_eq!(config.theme.dark_name.as_deref(), Some("tokyo-night"));
         assert_eq!(config.theme.light_name.as_deref(), Some("catppuccin-latte"));
     }
@@ -181,8 +210,27 @@ red = "rgb(255, 85, 85)"
         let config: Config = toml::from_str("").unwrap();
         assert!(config.theme.name.is_none());
         assert!(!config.theme.auto_switch);
+        assert!(config.theme.auto_switch_poll_interval_seconds.is_none());
+        assert_eq!(
+            config.theme.auto_switch_poll_interval(),
+            Duration::from_secs(DEFAULT_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS)
+        );
         assert!(config.theme.dark_name.is_none());
         assert!(config.theme.light_name.is_none());
         assert!(config.theme.custom.is_none());
+    }
+
+    #[test]
+    fn theme_auto_switch_poll_interval_is_clamped() {
+        for (value, expected) in [(0, 5), (999_999, 3600)] {
+            let config: Config = toml::from_str(&format!(
+                "[theme]\nauto_switch_poll_interval_seconds = {value}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                config.theme.auto_switch_poll_interval(),
+                Duration::from_secs(expected)
+            );
+        }
     }
 }
