@@ -4190,6 +4190,7 @@ impl HeadlessServer {
         changed |= self.app.clear_due_selection_highlight(now);
 
         if self.has_app_client() {
+            // Work-context links matter only while a TUI is attached and viewing panes.
             self.app.start_git_work_context_refresh_if_due(now);
             self.app.start_foreground_process_refresh_if_due(now);
             self.app.start_git_status_refresh_if_due(now);

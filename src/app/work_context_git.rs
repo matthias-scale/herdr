@@ -9,10 +9,9 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::work_context::{extract_pr_urls, extract_preview_urls, extract_ticket_ids};
 
-pub(crate) const WORK_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const WORK_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const WORK_CONTEXT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
-// Refresh GitHub metadata often enough to surface newly opened PRs promptly while
-// avoiding a gh call on every five-second work-context refresh.
+// Cache GitHub metadata for repeated refresh requests within a short window.
 pub(crate) const WORK_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +86,10 @@ impl App {
             .is_some_and(|refresh| now >= refresh.deadline)
         {
             self.git_work_context_refresh_in_flight = None;
+            if self.git_work_context_refresh_due_after_in_flight {
+                self.next_git_work_context_refresh = now;
+                self.git_work_context_refresh_due_after_in_flight = false;
+            }
         }
 
         if self.git_work_context_refresh_in_flight.is_some()
@@ -138,7 +141,9 @@ impl App {
     }
 
     pub(crate) fn request_git_work_context_refresh(&mut self, now: Instant) {
-        if self.git_work_context_refresh_in_flight.is_none() {
+        if self.git_work_context_refresh_in_flight.is_some() {
+            self.git_work_context_refresh_due_after_in_flight = true;
+        } else {
             self.next_git_work_context_refresh = now;
         }
     }
@@ -167,7 +172,10 @@ impl App {
                 .as_ref()
                 .is_some_and(|refresh| now >= refresh.deadline);
             self.git_work_context_refresh_in_flight = None;
-            if overran_deadline {
+            if self.git_work_context_refresh_due_after_in_flight {
+                self.next_git_work_context_refresh = now;
+                self.git_work_context_refresh_due_after_in_flight = false;
+            } else if overran_deadline {
                 self.next_git_work_context_refresh = now + WORK_CONTEXT_REFRESH_INTERVAL;
             }
         }
@@ -581,6 +589,11 @@ mod tests {
         )
     }
 
+    #[test]
+    fn work_context_refresh_interval_is_one_minute() {
+        assert_eq!(WORK_CONTEXT_REFRESH_INTERVAL, Duration::from_secs(60));
+    }
+
     #[cfg(unix)]
     #[test]
     fn branch_ticket_ids_reuse_shared_extractor() {
@@ -836,6 +849,39 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn git_work_context_request_during_refresh_is_replayed_after_completion() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("replay")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.git_program_override = Some(PathBuf::from("herdr-test-missing-git"));
+        app.test_begin_git_work_context_refresh(1);
+        app.next_git_work_context_refresh = Instant::now() + WORK_CONTEXT_REFRESH_INTERVAL;
+
+        app.request_git_work_context_refresh(Instant::now());
+        assert!(app.git_work_context_refresh_due_after_in_flight);
+
+        app.handle_git_work_context_refreshed(1, Vec::new(), Vec::new());
+
+        assert!(!app.git_work_context_refresh_due_after_in_flight);
+        assert!(app.next_git_work_context_refresh <= Instant::now());
+        app.start_git_work_context_refresh_if_due(Instant::now());
+        assert_eq!(
+            app.git_work_context_refresh_in_flight
+                .as_ref()
+                .map(|refresh| refresh.generation),
+            Some(2)
+        );
     }
 
     #[test]
