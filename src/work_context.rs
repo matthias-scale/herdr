@@ -479,6 +479,28 @@ pub fn extract_ticket_ids(text: &str) -> Vec<String> {
     tickets
 }
 
+/// Longest candidate a host-only preview URL may be; the preview normalizer rejects anything with a
+/// path, so these are always short.
+const MAX_PREVIEW_CANDIDATE_BYTES: usize = 128;
+/// Longest candidate a routed URL may be. Every extractor must bound its candidate: a hostile or
+/// merely pathological prompt (a log line of repeated `https://` with no whitespace) otherwise costs
+/// O(len) per match over O(len) matches, and the turn hook stalls before it reports any metadata.
+const MAX_ROUTED_CANDIDATE_BYTES: usize = 256;
+
+/// The token starting at a match, or `None` when it runs past `max_bytes` without ending.
+fn bounded_candidate(remaining: &str, max_bytes: usize) -> Option<&str> {
+    match remaining
+        .as_bytes()
+        .iter()
+        .take(max_bytes + 1)
+        .position(|byte| byte.is_ascii_whitespace())
+    {
+        Some(end) => Some(&remaining[..end]),
+        None if remaining.len() <= max_bytes => Some(remaining),
+        None => None,
+    }
+}
+
 pub fn extract_pr_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://github.com/";
 
@@ -488,10 +510,9 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
         }
-        let candidate = text[start..]
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default();
+        let Some(candidate) = bounded_candidate(&text[start..], MAX_ROUTED_CANDIDATE_BYTES) else {
+            continue;
+        };
         let Ok(url) = normalize_pr_url(candidate) else {
             continue;
         };
@@ -504,7 +525,6 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
 
 pub fn extract_preview_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://";
-    const MAX_CANDIDATE_BYTES: usize = 128;
 
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
@@ -512,16 +532,8 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
         }
-        let remaining = &text[start..];
-        let candidate = match remaining
-            .as_bytes()
-            .iter()
-            .take(MAX_CANDIDATE_BYTES + 1)
-            .position(|byte| byte.is_ascii_whitespace())
-        {
-            Some(end) => &remaining[..end],
-            None if remaining.len() <= MAX_CANDIDATE_BYTES => remaining,
-            None => continue,
+        let Some(candidate) = bounded_candidate(&text[start..], MAX_PREVIEW_CANDIDATE_BYTES) else {
+            continue;
         };
         let Ok(url) = normalize_preview_url(candidate) else {
             continue;
@@ -538,16 +550,18 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
 
 pub fn extract_missive_urls(text: &str) -> Vec<String> {
     let prefix = format!("https://{MISSIVE_HOST}");
+    // Hosts are case-insensitive, so scan a lowered copy. `to_ascii_lowercase` maps bytes 1:1 and
+    // leaves non-ASCII untouched, so every index it yields is valid in the original text.
+    let lowered = text.to_ascii_lowercase();
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
-    for (start, _) in text.match_indices(prefix.as_str()) {
+    for (start, _) in lowered.match_indices(prefix.as_str()) {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
         }
-        let candidate = text[start..]
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default();
+        let Some(candidate) = bounded_candidate(&text[start..], MAX_ROUTED_CANDIDATE_BYTES) else {
+            continue;
+        };
         let Ok(url) = normalize_missive_url(candidate) else {
             continue;
         };
@@ -583,28 +597,30 @@ where
 /// Missive conversation routes carry a hash path, so unlike preview URLs the
 /// path and fragment are significant and must survive normalization.
 fn normalize_missive_url(raw: &str) -> Result<String, String> {
-    const MAX_URL_BYTES: usize = 256;
-
     let trimmed = raw.trim().trim_end_matches(|character: char| {
         matches!(
             character,
             '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '.' | '\'' | '"'
         )
     });
-    let invalid = || format!("invalid Missive URL: {raw}");
-    let Some(rest) = trimmed
-        .strip_prefix("https://")
-        .and_then(|rest| rest.strip_prefix(MISSIVE_HOST))
-    else {
-        return Err(invalid());
-    };
-    if !rest.starts_with('/') && !rest.starts_with('#') {
-        return Err(invalid());
-    }
-    if trimmed.len() > MAX_URL_BYTES
+    // The message never echoes the input: it reaches logs, and a rejected candidate is untrusted
+    // text of arbitrary length that may carry a token in its query.
+    let invalid = || "invalid Missive URL".to_string();
+    let authority_len = "https://".len() + MISSIVE_HOST.len();
+    if trimmed.len() > MAX_ROUTED_CANDIDATE_BYTES
+        || trimmed.len() <= authority_len
+        || !trimmed.is_char_boundary(authority_len)
         || trimmed.chars().any(char::is_control)
         || trimmed.bytes().any(|byte| byte.is_ascii_whitespace())
     {
+        return Err(invalid());
+    }
+    let (authority, rest) = trimmed.split_at(authority_len);
+    // Scheme and host are case-insensitive; the route after them is not and must survive verbatim.
+    if !authority.eq_ignore_ascii_case(&format!("https://{MISSIVE_HOST}")) {
+        return Err(invalid());
+    }
+    if !rest.starts_with('/') && !rest.starts_with('#') {
         return Err(invalid());
     }
     Ok(format!("https://{MISSIVE_HOST}{rest}"))
@@ -954,6 +970,53 @@ mod tests {
         );
         assert!(normalize_missive_urls(["https://mail.missiveapp.com"]).is_err());
         assert!(normalize_missive_urls(["https://mail.missiveapp.com.evil.test/#x"]).is_err());
+    }
+
+    #[test]
+    fn url_extraction_stays_linear_on_a_whitespace_free_prefix_flood() {
+        // Each repeated prefix used to scan the entire remaining suffix, so a single pasted log
+        // line cost O(len^2) and stalled the turn hook for tens of seconds before reporting
+        // anything. Every extractor must bound its candidate.
+        let missive = "(https://mail.missiveapp.com/".repeat(20_000);
+        let previews = "(https://preview.example.com".repeat(20_000);
+        let prs = "(https://github.com/o/r/pull/1".repeat(20_000);
+        for (name, text) in [("missive", &missive), ("preview", &previews), ("pr", &prs)] {
+            let started = std::time::Instant::now();
+            let _ = match name {
+                "missive" => extract_missive_urls(text),
+                "preview" => extract_preview_urls(text),
+                _ => extract_pr_urls(text),
+            };
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{name} extraction took {elapsed:?} on a {} byte flood",
+                text.len()
+            );
+        }
+    }
+
+    #[test]
+    fn missive_host_matching_ignores_case_without_touching_the_route() {
+        assert_eq!(
+            extract_missive_urls("see HTTPS://MAIL.MissiveApp.com/#inbox/conversations/AbC123 now"),
+            vec!["https://mail.missiveapp.com/#inbox/conversations/AbC123"],
+            "the host folds to lowercase but the conversation id must survive verbatim"
+        );
+        assert!(normalize_missive_urls(["https://MAIL.missiveapp.com/#x"]).is_ok());
+        // Case folding must not widen the host: a confusable neighbour still has to fail.
+        assert!(normalize_missive_urls(["https://mail.missiveapp.com.evil.test/#x"]).is_err());
+        assert!(normalize_missive_urls(["https://mail.missiveapp.com@evil.test/#x"]).is_err());
+    }
+
+    #[test]
+    fn missive_rejection_never_echoes_the_candidate() {
+        let secret = "https://mail.missiveapp.com.evil.test/?token=SUPERSECRET";
+        let error = normalize_missive_urls([secret]).unwrap_err();
+        assert!(
+            !error.contains("SUPERSECRET") && !error.contains("evil.test"),
+            "a rejected candidate reaches logs and must not be echoed: {error}"
+        );
     }
 
     #[test]
