@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Condvar, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -361,14 +361,16 @@ fn usage_window(usage: &ProviderUsage, minutes: u64) -> Option<&UsageWindow> {
         .find(|window| window.window_minutes == minutes)
 }
 
-fn recent_jsonl_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
+fn recent_jsonl_files(root: &Path, max_files: usize) -> Result<Vec<PathBuf>, ()> {
     if max_files == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let root_mtime = fs::metadata(root)
-        .and_then(|metadata| metadata.modified())
-        .unwrap_or(UNIX_EPOCH);
+    let root_metadata = fs::metadata(root).map_err(|_| ())?;
+    if !root_metadata.is_dir() {
+        return Err(());
+    }
+    let root_mtime = root_metadata.modified().unwrap_or(UNIX_EPOCH);
     let mut directories = vec![(root_mtime, root.to_path_buf(), 0usize)];
     let mut visited_directories = 0usize;
     let mut visited_entries = 0usize;
@@ -380,17 +382,14 @@ fn recent_jsonl_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
         }
         visited_directories = visited_directories.saturating_add(1);
 
-        let Ok(entries) = fs::read_dir(directory) else {
-            continue;
-        };
+        let entries = fs::read_dir(directory).map_err(|_| ())?;
         let remaining_entries = MAX_USAGE_ENTRIES.saturating_sub(visited_entries);
         let mut child_directories = Vec::new();
-        for entry in entries.flatten().take(remaining_entries) {
+        for entry in entries.take(remaining_entries) {
+            let entry = entry.map_err(|_| ())?;
             visited_entries = visited_entries.saturating_add(1);
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
+            let file_type = entry.file_type().map_err(|_| ())?;
             let modified = entry
                 .metadata()
                 .and_then(|metadata| metadata.modified())
@@ -411,7 +410,7 @@ fn recent_jsonl_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
         directories.extend(child_directories.into_iter().rev());
     }
 
-    files.into_iter().map(|(_, path)| path).collect()
+    Ok(files.into_iter().map(|(_, path)| path).collect())
 }
 
 fn read_file_tail(path: &Path) -> Option<String> {
@@ -431,9 +430,9 @@ fn read_file_tail(path: &Path) -> Option<String> {
         .map(|newline| text[newline.saturating_add(1)..].to_owned())
 }
 
-fn latest_codex_usage(path: &Path) -> Option<ProviderUsage> {
-    let contents = read_file_tail(path)?;
-    contents.lines().filter_map(parse_codex_record).next_back()
+fn latest_codex_usage(path: &Path) -> Result<Option<ProviderUsage>, ()> {
+    let contents = read_file_tail(path).ok_or(())?;
+    Ok(contents.lines().filter_map(parse_codex_record).next_back())
 }
 
 fn home_path(directory: &str) -> Option<PathBuf> {
@@ -443,17 +442,26 @@ fn home_path(directory: &str) -> Option<PathBuf> {
         .map(|home| home.join(directory))
 }
 
+fn load_codex_usage_from_root(root: &Path) -> ProviderRefresh<ProviderUsage> {
+    let files = match recent_jsonl_files(root, MAX_USAGE_FILES) {
+        Ok(files) => files,
+        Err(()) => return ProviderRefresh::Failed,
+    };
+    for path in files {
+        match latest_codex_usage(&path) {
+            Ok(Some(usage)) => return ProviderRefresh::Fresh(usage),
+            Ok(None) => {}
+            Err(()) => return ProviderRefresh::Failed,
+        }
+    }
+    ProviderRefresh::Empty
+}
+
 fn load_codex_usage() -> ProviderRefresh<ProviderUsage> {
     let Some(root) = home_path(".codex/sessions") else {
         return ProviderRefresh::Failed;
     };
-    let Some(usage) = recent_jsonl_files(&root, MAX_USAGE_FILES)
-        .into_iter()
-        .find_map(|path| latest_codex_usage(&path))
-    else {
-        return ProviderRefresh::Failed;
-    };
-    ProviderRefresh::Fresh(usage)
+    load_codex_usage_from_root(&root)
 }
 
 fn filter_expired_codex_usage(mut usage: ProviderUsage, now: Option<i64>) -> ProviderUsage {
@@ -477,6 +485,12 @@ fn filter_expired_claude_usage(mut usage: ClaudeUsage, now: Option<i64>) -> Clau
         usage.five_hour = None;
     }
     usage
+}
+
+fn filter_expired_usage_snapshot(mut snapshot: UsageSnapshot, now: Option<i64>) -> UsageSnapshot {
+    snapshot.codex = filter_expired_codex_usage(snapshot.codex, now);
+    snapshot.claude = filter_expired_claude_usage(snapshot.claude, now);
+    snapshot
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -550,7 +564,7 @@ fn load_claude_usage() -> ProviderRefresh<ClaudeUsage> {
         return ProviderRefresh::Failed;
     };
     let mut command = crate::noninteractive_process::command(binary);
-    command.args(["blocks", "--active", "--json"]);
+    command.args(["blocks", "--active", "--json", "--offline"]);
     let output = match crate::noninteractive_process::output_with_deadline_limited(
         command,
         Instant::now() + CCUSAGE_TIMEOUT,
@@ -635,11 +649,14 @@ fn load_usage_snapshot(previous: &UsageSnapshot) -> UsageSnapshot {
 struct UsageCacheState {
     snapshot: UsageSnapshot,
     last_refresh: Option<Instant>,
+    last_wakeup: Option<Instant>,
     refresh_in_progress: bool,
 }
 
 struct UsageCache {
     state: Mutex<UsageCacheState>,
+    wakeup: Condvar,
+    wakeup_started: Mutex<bool>,
     refresh_interval: Duration,
 }
 
@@ -649,8 +666,11 @@ impl UsageCache {
             state: Mutex::new(UsageCacheState {
                 snapshot: UsageSnapshot::default(),
                 last_refresh: None,
+                last_wakeup: None,
                 refresh_in_progress: false,
             }),
+            wakeup: Condvar::new(),
+            wakeup_started: Mutex::new(false),
             refresh_interval,
         }
     }
@@ -677,7 +697,10 @@ impl UsageCache {
         };
         state.snapshot = snapshot;
         state.last_refresh = Some(now);
+        state.last_wakeup = None;
         state.refresh_in_progress = false;
+        drop(state);
+        self.wakeup.notify_all();
     }
 
     fn publish_refresh(
@@ -697,14 +720,111 @@ impl UsageCache {
             return;
         };
         state.last_refresh = Some(now);
+        state.last_wakeup = None;
         state.refresh_in_progress = false;
+        drop(state);
+        self.wakeup.notify_all();
     }
 
     fn snapshot(&self) -> UsageSnapshot {
-        self.state
-            .lock()
-            .map(|state| state.snapshot.clone())
-            .unwrap_or_default()
+        self.snapshot_at(current_unix_timestamp())
+    }
+
+    fn snapshot_at(&self, now: Option<i64>) -> UsageSnapshot {
+        let Ok(mut state) = self.state.lock() else {
+            return UsageSnapshot::default();
+        };
+        let snapshot = filter_expired_usage_snapshot(state.snapshot.clone(), now);
+        let changed = snapshot != state.snapshot;
+        if changed {
+            state.snapshot = snapshot.clone();
+            state.last_wakeup = None;
+        }
+        drop(state);
+        if changed {
+            self.wakeup.notify_all();
+        }
+        snapshot
+    }
+
+    fn next_wakeup_delay(&self, now: Instant) -> Duration {
+        let Ok(state) = self.state.lock() else {
+            return self.refresh_interval;
+        };
+        let last_activity = match (state.last_refresh, state.last_wakeup) {
+            (Some(last_refresh), Some(last_wakeup)) => Some(last_refresh.max(last_wakeup)),
+            (Some(last), None) | (None, Some(last)) => Some(last),
+            (None, None) => None,
+        };
+        let mut delay = last_activity.map_or(self.refresh_interval, |last| {
+            self.refresh_interval
+                .saturating_sub(now.saturating_duration_since(last))
+        });
+        if let Some(unix_now) = current_unix_timestamp() {
+            for resets_at in state
+                .snapshot
+                .codex
+                .windows
+                .iter()
+                .map(|window| window.resets_at)
+                .chain(
+                    state
+                        .snapshot
+                        .claude
+                        .five_hour
+                        .iter()
+                        .map(|window| window.resets_at),
+                )
+            {
+                let expiry = resets_at.saturating_sub(unix_now);
+                let expiry = if expiry <= 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(expiry as u64)
+                };
+                delay = delay.min(expiry);
+            }
+        }
+        delay
+    }
+
+    fn ensure_wakeup(
+        cache: &Arc<Self>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) {
+        let Ok(mut started) = cache.wakeup_started.lock() else {
+            return;
+        };
+        if *started {
+            return;
+        }
+        *started = true;
+        let cache_for_thread = Arc::clone(cache);
+        if std::thread::Builder::new()
+            .name("herdr-usage-wakeup".to_string())
+            .spawn(move || loop {
+                let delay = cache_for_thread.next_wakeup_delay(Instant::now());
+                let Ok(state) = cache_for_thread.state.lock() else {
+                    return;
+                };
+                let (mut state, wait_result) =
+                    match cache_for_thread.wakeup.wait_timeout(state, delay) {
+                        Ok(result) => result,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                if !wait_result.timed_out() {
+                    continue;
+                }
+                state.last_wakeup = Some(Instant::now());
+                drop(state);
+                render_dirty.request_generic();
+                render_notify.notify_one();
+            })
+            .is_err()
+        {
+            *started = false;
+        }
     }
 
     fn request_refresh(
@@ -750,6 +870,7 @@ fn usage_snapshot(render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>) ->
     static CACHE: OnceLock<Arc<UsageCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Arc::new(UsageCache::new(USAGE_REFRESH_INTERVAL)));
     if let Some((render_notify, render_dirty)) = render_handles {
+        UsageCache::ensure_wakeup(cache, Arc::clone(render_notify), Arc::clone(render_dirty));
         UsageCache::request_refresh(cache, Arc::clone(render_notify), Arc::clone(render_dirty));
     }
     cache.snapshot()
@@ -798,7 +919,22 @@ fn usage_window_text(window_label: &str, window: &UsageWindow, width: usize) -> 
         return tight;
     }
 
-    reset
+    let left_only = format!("{left:.0}%");
+    if display_width(&left_only) <= width {
+        return left_only;
+    }
+
+    format!("{left:.0}%")
+}
+
+fn claude_remaining_text(minutes: u64) -> String {
+    if minutes >= 24 * 60 {
+        format!("{}d", minutes / (24 * 60))
+    } else if minutes >= 60 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{minutes}m")
+    }
 }
 
 fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
@@ -827,7 +963,31 @@ fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
         return tight;
     }
 
-    reset
+    let rounded_cost = format!("${:.0}", window.cost_usd);
+    let remaining = claude_remaining_text(window.remaining_minutes);
+    let rounded = format!("5h {rounded_cost} · {remaining} · {reset}");
+    if display_width(&rounded) <= width {
+        return rounded;
+    }
+
+    let compact = format!("{rounded_cost} · {remaining} · {reset}");
+    if display_width(&compact) <= width {
+        return compact;
+    }
+
+    let quota = format!("{rounded_cost} · {remaining}");
+    if display_width(&quota) <= width {
+        return quota;
+    }
+
+    if display_width(&rounded_cost) <= width {
+        return rounded_cost;
+    }
+    if display_width(&remaining) <= width {
+        return remaining;
+    }
+
+    quota
 }
 
 fn credits_text(balance: f64, width: usize) -> String {
@@ -1067,6 +1227,29 @@ mod tests {
         }
     }
 
+    fn codex_snapshot_with_credits() -> UsageSnapshot {
+        UsageSnapshot {
+            codex: ProviderUsage {
+                windows: vec![UsageWindow {
+                    used_percent: 31.0,
+                    window_minutes: 10080,
+                    resets_at: current_unix_timestamp().expect("current test timestamp") + 3600,
+                }],
+                credits: Some(12.5),
+            },
+            ..UsageSnapshot::default()
+        }
+    }
+
+    fn temp_codex_root() -> PathBuf {
+        static NEXT_ROOT: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "herdr-info-panel-codex-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     #[test]
     fn parses_valid_codex_record_and_credit_balance() {
         let usage = parse_codex_record(&codex_record(
@@ -1113,6 +1296,34 @@ mod tests {
     #[test]
     fn ignores_malformed_codex_record() {
         assert_eq!(parse_codex_record("not json"), None);
+    }
+
+    #[test]
+    fn readable_codex_sessions_without_rate_limits_clear_stale_usage() {
+        let root = temp_codex_root();
+        fs::create_dir_all(&root).expect("create temporary Codex sessions root");
+        fs::write(
+            root.join("session.jsonl"),
+            r#"{"payload":{"type":"token_count"}}"#,
+        )
+        .expect("write non-rate-limit Codex record");
+
+        let now = ccusage_now();
+        let previous = populated_usage_snapshot(now + 3600);
+        let refresh = load_codex_usage_from_root(&root);
+        assert_eq!(refresh, ProviderRefresh::Empty);
+
+        let refreshed = merge_usage_refresh(
+            &previous,
+            UsageRefresh {
+                codex: refresh,
+                ..UsageRefresh::default()
+            },
+            Some(now),
+        );
+        assert_eq!(refreshed.codex, ProviderUsage::default());
+
+        fs::remove_dir_all(root).expect("remove temporary Codex sessions root");
     }
 
     #[test]
@@ -1340,19 +1551,24 @@ mod tests {
     }
 
     #[test]
+    fn usage_cache_filters_expired_retained_data_on_idle_read() {
+        let cache = UsageCache::new(Duration::from_secs(60));
+        let now = ccusage_now();
+        let started = Instant::now();
+        assert!(cache.begin_refresh(started));
+        cache.finish_refresh(started, populated_usage_snapshot(now - 1));
+
+        assert_eq!(cache.snapshot_at(Some(now)), UsageSnapshot::default());
+    }
+
+    #[test]
     fn usage_cache_publishes_a_snapshot_and_requests_a_render() {
         let cache = UsageCache::new(Duration::from_secs(60));
         let started = Instant::now();
         assert!(cache.begin_refresh(started));
         let render_notify = Notify::new();
         let render_dirty = RenderSignal::new();
-        let snapshot = UsageSnapshot {
-            codex: ProviderUsage {
-                credits: Some(12.5),
-                ..ProviderUsage::default()
-            },
-            ..UsageSnapshot::default()
-        };
+        let snapshot = codex_snapshot_with_credits();
 
         cache.publish_refresh(started, snapshot.clone(), &render_notify, &render_dirty);
 
@@ -1364,13 +1580,7 @@ mod tests {
     fn usage_cache_keeps_the_previous_snapshot_when_refresh_is_cancelled() {
         let cache = UsageCache::new(Duration::from_secs(60));
         let started = Instant::now();
-        let snapshot = UsageSnapshot {
-            codex: ProviderUsage {
-                credits: Some(12.5),
-                ..ProviderUsage::default()
-            },
-            ..UsageSnapshot::default()
-        };
+        let snapshot = codex_snapshot_with_credits();
         assert!(cache.begin_refresh(started));
         cache.finish_refresh(started, snapshot.clone());
         assert!(cache.begin_refresh(started + Duration::from_secs(60)));
@@ -1433,6 +1643,41 @@ mod tests {
         assert!(display_width(&claude_usage_text(&claude_window, full_inner)) <= full_inner);
         assert_eq!(credits_text(1927.95, minimum_inner), "credits: 1927.95");
         assert_eq!(credits_text(1_000_000.0, 12), "credits: —");
+    }
+
+    #[test]
+    fn usage_rows_keep_quota_figures_at_narrow_realistic_widths() {
+        let claude_window = ClaudeUsageWindow {
+            cost_usd: 1234.56,
+            remaining_minutes: 10_080,
+            resets_at: parse_utc_timestamp("2026-08-06T23:59:00Z").expect("valid reset"),
+        };
+        let codex_window = UsageWindow {
+            used_percent: 99.6,
+            window_minutes: 10_080,
+            resets_at: claude_window.resets_at,
+        };
+
+        assert_eq!(claude_remaining_text(10_080), "7d");
+        assert_eq!(claude_remaining_text(960), "16h");
+        for panel_width in [26usize, 36] {
+            let inner_width = panel_width - 2;
+            let claude = claude_usage_text(&claude_window, inner_width);
+            assert!(
+                display_width(&claude) <= inner_width,
+                "{panel_width}: {claude}"
+            );
+            assert!(claude.contains("$1235") || claude.contains("$1234.56"));
+            assert!(claude.contains("7d") || claude.contains("10080m"));
+
+            let codex = usage_window_text("week", &codex_window, inner_width);
+            assert!(
+                display_width(&codex) <= inner_width,
+                "{panel_width}: {codex}"
+            );
+            assert!(codex.contains("100%"), "{panel_width}: {codex}");
+            assert!(codex.contains("23:59Z"), "{panel_width}: {codex}");
+        }
     }
 
     #[test]
