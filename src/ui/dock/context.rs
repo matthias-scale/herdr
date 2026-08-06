@@ -84,6 +84,9 @@ fn latest_update(terminal: &TerminalState) -> Option<std::time::Instant> {
 
 fn metadata_lines(app: &AppState, terminal: &TerminalState) -> Vec<Line<'static>> {
     let mut metadata = terminal.agent_metadata.values().collect::<Vec<_>>();
+    // Sorted by source so the panel keeps the same shape between frames: the map's
+    // iteration order is arbitrary, and a block that reshuffles under the reader is
+    // worse than one whose order nobody chose.
     metadata.sort_by(|left, right| left.source.cmp(&right.source));
     metadata
         .into_iter()
