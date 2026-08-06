@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -33,8 +34,11 @@ const MAX_USAGE_FILES: usize = 64;
 const MAX_USAGE_DIRECTORIES: usize = 256;
 const MAX_USAGE_ENTRIES: usize = 4096;
 const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
+const MAX_CCUSAGE_DISCOVERY_ENTRIES: usize = 256;
+const MAX_CCUSAGE_OUTPUT_BYTES: usize = 512 * 1024;
 const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const USAGE_WINDOW_MINUTES: [(u64, &str); 2] = [(300, "5h"), (10080, "week")];
+const MAX_USAGE_AMOUNT: f64 = 1_000_000.0;
 
 pub(crate) fn panel_width_for_main(main_width: u16) -> Option<u16> {
     let available = main_width.saturating_sub(INFO_PANEL_MIN_MAIN_WIDTH);
@@ -250,16 +254,22 @@ fn parse_numeric_value(value: serde_json::Value) -> Option<f64> {
         serde_json::Value::String(value) => value.parse().ok()?,
         _ => return None,
     };
-    number.is_finite().then_some(number)
+    (number.is_finite() && (0.0..=MAX_USAGE_AMOUNT).contains(&number)).then_some(number)
 }
 
-fn parse_ccusage_output(output: &str) -> Result<Option<ClaudeUsage>, ()> {
+fn parse_ccusage_output(output: &str, now: i64) -> Result<Option<ClaudeUsage>, ()> {
     let response: RawCcusageResponse = serde_json::from_str(output).map_err(|_| ())?;
     let Some(block) = response.blocks.into_iter().find(|block| block.is_active) else {
         return Ok(None);
     };
-    let cost_usd = block.cost_usd.filter(|cost| cost.is_finite()).ok_or(())?;
+    let cost_usd = block
+        .cost_usd
+        .filter(|cost| cost.is_finite() && (0.0..=MAX_USAGE_AMOUNT).contains(cost))
+        .ok_or(())?;
     let resets_at = parse_utc_timestamp(block.end_time.as_deref().ok_or(())?).ok_or(())?;
+    if resets_at <= now {
+        return Ok(Some(ClaudeUsage::default()));
+    }
     let remaining_minutes = block.projection.ok_or(())?.remaining_minutes;
     Ok(Some(ClaudeUsage {
         five_hour: Some(ClaudeUsageWindow {
@@ -393,11 +403,11 @@ fn recent_jsonl_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
                     .is_some_and(|extension| extension == "jsonl")
             {
                 files.push((modified, path));
-                files.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+                files.sort_unstable_by_key(|entry| Reverse(entry.0));
                 files.truncate(max_files);
             }
         }
-        child_directories.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        child_directories.sort_unstable_by_key(|entry| Reverse(entry.0));
         directories.extend(child_directories.into_iter().rev());
     }
 
@@ -423,7 +433,7 @@ fn read_file_tail(path: &Path) -> Option<String> {
 
 fn latest_codex_usage(path: &Path) -> Option<ProviderUsage> {
     let contents = read_file_tail(path)?;
-    contents.lines().filter_map(parse_codex_record).last()
+    contents.lines().filter_map(parse_codex_record).next_back()
 }
 
 fn home_path(directory: &str) -> Option<PathBuf> {
@@ -433,14 +443,23 @@ fn home_path(directory: &str) -> Option<PathBuf> {
         .map(|home| home.join(directory))
 }
 
-fn load_codex_usage() -> ProviderUsage {
-    let Some(root) = home_path(".codex/sessions") else {
-        return ProviderUsage::default();
-    };
+fn load_codex_usage() -> Option<ProviderUsage> {
+    let root = home_path(".codex/sessions")?;
     recent_jsonl_files(&root, MAX_USAGE_FILES)
         .into_iter()
         .find_map(|path| latest_codex_usage(&path))
-        .unwrap_or_default()
+}
+
+fn filter_expired_codex_usage(mut usage: ProviderUsage, now: Option<i64>) -> ProviderUsage {
+    if let Some(now) = now {
+        usage.windows.retain(|window| window.resets_at > now);
+    } else {
+        usage.windows.clear();
+    }
+    if usage.windows.is_empty() {
+        usage.credits = None;
+    }
+    usage
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -462,7 +481,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn resolve_ccusage() -> Option<PathBuf> {
+fn discover_ccusage() -> Option<PathBuf> {
     let path_candidate = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
@@ -472,62 +491,88 @@ fn resolve_ccusage() -> Option<PathBuf> {
         return path_candidate;
     }
 
-    let mut fallback_candidates = home_path(".local/state/fnm_multishells")
-        .into_iter()
-        .flat_map(|root| {
-            fs::read_dir(root)
-                .into_iter()
-                .flat_map(|entries| entries.flatten())
-                .filter_map(|entry| {
-                    entry
-                        .file_type()
-                        .ok()
-                        .filter(|file_type| file_type.is_dir())
-                        .map(|_| entry.path().join("bin/ccusage"))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    fallback_candidates.push(home_path(".local/bin/ccusage")?);
-    fallback_candidates.sort_unstable();
-    fallback_candidates
-        .into_iter()
-        .find(|path| is_executable_file(path))
+    if let Some(path) = home_path(".local/bin/ccusage") {
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+    }
+
+    let root = home_path(".local/state/fnm_multishells")?;
+    let Ok(entries) = fs::read_dir(root) else {
+        return None;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_CCUSAGE_DISCOVERY_ENTRIES {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Some(candidate) = entry
+            .file_type()
+            .ok()
+            .is_some_and(|file_type| file_type.is_dir())
+            .then(|| entry.path().join("bin/ccusage"))
+        else {
+            continue;
+        };
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
-fn load_claude_usage() -> Result<ClaudeUsage, ()> {
+fn resolve_ccusage() -> Option<PathBuf> {
+    static CCUSAGE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CCUSAGE_PATH.get_or_init(discover_ccusage).clone()
+}
+
+fn load_claude_usage() -> Result<Option<ClaudeUsage>, ()> {
     let Some(binary) = resolve_ccusage() else {
-        return Ok(ClaudeUsage::default());
+        return Ok(None);
     };
     let mut command = crate::noninteractive_process::command(binary);
     command.args(["blocks", "--active", "--json"]);
-    let output = crate::noninteractive_process::output_with_deadline(
+    let output = crate::noninteractive_process::output_with_deadline_limited(
         command,
         Instant::now() + CCUSAGE_TIMEOUT,
+        MAX_CCUSAGE_OUTPUT_BYTES,
     )
     .map_err(|_| ())?;
     if !output.status.success() {
         return Err(());
     }
     let output = String::from_utf8(output.stdout).map_err(|_| ())?;
-    parse_ccusage_output(&output)
-        .map(|usage| usage.unwrap_or_default())
-        .map_err(|_| ())
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .ok_or(())?;
+    parse_ccusage_output(&output, now)
 }
 
-fn load_usage_snapshot() -> Option<UsageSnapshot> {
+#[derive(Debug, Default)]
+struct UsageRefresh {
+    codex: Option<ProviderUsage>,
+    claude: Option<ClaudeUsage>,
+}
+
+fn merge_usage_refresh(previous: &UsageSnapshot, refresh: UsageRefresh) -> UsageSnapshot {
+    UsageSnapshot {
+        codex: refresh.codex.unwrap_or_else(|| previous.codex.clone()),
+        claude: refresh.claude.unwrap_or_else(|| previous.claude.clone()),
+    }
+}
+
+fn load_usage_snapshot(previous: &UsageSnapshot) -> UsageSnapshot {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_secs()).ok());
-    let mut codex = load_codex_usage();
-    if let Some(now) = now {
-        codex.windows.retain(|window| window.resets_at > now);
-    } else {
-        codex.windows.clear();
-    }
-    let claude = load_claude_usage().ok()?;
-    Some(UsageSnapshot { codex, claude })
+    let codex = load_codex_usage().map(|usage| filter_expired_codex_usage(usage, now));
+    let claude = load_claude_usage().ok().flatten();
+    merge_usage_refresh(previous, UsageRefresh { codex, claude })
 }
 
 struct UsageCacheState {
@@ -618,10 +663,8 @@ impl UsageCache {
             .name("herdr-usage-refresh".to_string())
             .spawn(move || {
                 let now = Instant::now();
-                let Some(snapshot) = load_usage_snapshot() else {
-                    cache_for_thread.cancel_refresh(now);
-                    return;
-                };
+                let previous = cache_for_thread.snapshot();
+                let snapshot = load_usage_snapshot(&previous);
                 cache_for_thread.publish_refresh(now, snapshot, &render_notify, &render_dirty);
             })
             .is_err()
@@ -633,10 +676,11 @@ impl UsageCache {
     #[cfg(test)]
     fn refresh_if_due<F>(&self, now: Instant, loader: F) -> UsageSnapshot
     where
-        F: FnOnce() -> UsageSnapshot,
+        F: FnOnce() -> UsageRefresh,
     {
         if self.begin_refresh(now) {
-            let snapshot = loader();
+            let previous = self.snapshot();
+            let snapshot = merge_usage_refresh(&previous, loader());
             self.finish_refresh(now, snapshot.clone());
             snapshot
         } else {
@@ -716,6 +760,20 @@ fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
     format!("5h ${:.2}", window.cost_usd)
 }
 
+fn credits_text(balance: f64, width: usize) -> String {
+    let full = format!("credits: {balance:.2}");
+    if display_width(&full) <= width {
+        return full;
+    }
+
+    let compact = format!("credits: {balance:.0}");
+    if display_width(&compact) <= width {
+        return compact;
+    }
+
+    "credits: —".to_string()
+}
+
 fn render_subscription_usage(
     app: &AppState,
     frame: &mut Frame,
@@ -769,12 +827,15 @@ fn render_subscription_usage(
             render_usage_line(
                 frame,
                 layout.line(provider_start.saturating_add(3)),
-                usage
-                    .codex
-                    .credits
-                    .as_ref()
-                    .map(|balance| format!("credits: {balance:.2}"))
-                    .unwrap_or_else(|| "credits: —".to_string()),
+                usage.codex.credits.as_ref().map_or_else(
+                    || "credits: —".to_string(),
+                    |balance| {
+                        let width = layout
+                            .line(provider_start.saturating_add(3))
+                            .map_or(0, |row| usize::from(row.width));
+                        credits_text(*balance, width)
+                    },
+                ),
                 &app.palette,
             );
         } else {
@@ -912,6 +973,10 @@ mod tests {
         format!(r#"{{"payload":{{"rate_limits":{rate_limits}}}}}"#)
     }
 
+    fn ccusage_now() -> i64 {
+        parse_utc_timestamp("2026-08-06T12:00:00Z").expect("valid test timestamp")
+    }
+
     #[test]
     fn parses_valid_codex_record_and_credit_balance() {
         let usage = parse_codex_record(&codex_record(
@@ -933,6 +998,18 @@ mod tests {
         .expect("valid Codex usage record");
 
         assert_eq!(usage.credits, None);
+    }
+
+    #[test]
+    fn rejects_negative_and_implausibly_large_credit_balances() {
+        for balance in ["-1.0", "1000001.0"] {
+            let usage = parse_codex_record(&codex_record(&format!(
+                r#"{{"primary":{{"used_percent":31.0,"window_minutes":10080,"resets_at":1786537158}},"credits":{{"balance":"{balance}"}}}}"#
+            )))
+            .expect("valid Codex usage record");
+
+            assert_eq!(usage.credits, None, "balance {balance} should be rejected");
+        }
     }
 
     #[test]
@@ -966,8 +1043,9 @@ mod tests {
                             "remainingMinutes": 66
                         }
                     }
-                ]
+            ]
             }"#,
+            ccusage_now(),
         )
         .expect("valid ccusage JSON")
         .expect("active ccusage block");
@@ -979,9 +1057,22 @@ mod tests {
     }
 
     #[test]
+    fn ccusage_expired_active_block_degrades_to_no_current_window() {
+        let usage = parse_ccusage_output(
+            r#"{"blocks":[{"isActive":true,"endTime":"2026-08-06T14:00:00.000Z","costUSD":56.68,"projection":{"remainingMinutes":66}}]}"#,
+            parse_utc_timestamp("2026-08-06T15:00:00Z").expect("valid test timestamp"),
+        )
+        .expect("valid ccusage JSON")
+        .expect("expired block is a parsed refresh");
+
+        assert_eq!(usage.five_hour, None);
+    }
+
+    #[test]
     fn ccusage_without_an_active_block_degrades_to_none() {
         assert_eq!(
-            parse_ccusage_output(r#"{"blocks":[{"isActive":false}]}"#).expect("valid ccusage JSON"),
+            parse_ccusage_output(r#"{"blocks":[{"isActive":false}]}"#, ccusage_now())
+                .expect("valid ccusage JSON"),
             None
         );
     }
@@ -989,20 +1080,21 @@ mod tests {
     #[test]
     fn ccusage_empty_blocks_degrade_to_none() {
         assert_eq!(
-            parse_ccusage_output(r#"{"blocks":[]}"#).expect("valid ccusage JSON"),
+            parse_ccusage_output(r#"{"blocks":[]}"#, ccusage_now()).expect("valid ccusage JSON"),
             None
         );
     }
 
     #[test]
     fn rejects_malformed_ccusage_json() {
-        assert!(parse_ccusage_output("not json").is_err());
+        assert!(parse_ccusage_output("not json", ccusage_now()).is_err());
     }
 
     #[test]
     fn rejects_ccusage_active_block_without_projection() {
         assert!(parse_ccusage_output(
             r#"{"blocks":[{"isActive":true,"endTime":"2026-08-06T14:00:00.000Z","costUSD":56.68}]}"#,
+            ccusage_now(),
         )
         .is_err());
     }
@@ -1035,27 +1127,74 @@ mod tests {
     }
 
     #[test]
+    fn expiry_filter_removes_codex_credits_with_expired_windows() {
+        let usage = ProviderUsage {
+            windows: vec![UsageWindow {
+                used_percent: 31.0,
+                window_minutes: 10080,
+                resets_at: ccusage_now() - 1,
+            }],
+            credits: Some(12.5),
+        };
+
+        let filtered = filter_expired_codex_usage(usage, Some(ccusage_now()));
+
+        assert!(filtered.windows.is_empty());
+        assert_eq!(filtered.credits, None);
+    }
+
+    #[test]
     fn usage_cache_does_not_rescan_within_refresh_interval() {
         let cache = UsageCache::new(Duration::from_secs(60));
         let scans = AtomicUsize::new(0);
         let started = Instant::now();
         let loader = || {
             scans.fetch_add(1, Ordering::Relaxed);
-            UsageSnapshot::default()
+            UsageRefresh::default()
         };
 
         cache.refresh_if_due(started, loader);
         cache.refresh_if_due(started + Duration::from_secs(59), || {
             scans.fetch_add(1, Ordering::Relaxed);
-            UsageSnapshot::default()
+            UsageRefresh::default()
         });
         assert_eq!(scans.load(Ordering::Relaxed), 1);
 
         cache.refresh_if_due(started + Duration::from_secs(60), || {
             scans.fetch_add(1, Ordering::Relaxed);
-            UsageSnapshot::default()
+            UsageRefresh::default()
         });
         assert_eq!(scans.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn usage_refresh_retains_each_provider_when_the_cycle_has_no_data() {
+        let cache = UsageCache::new(Duration::from_secs(60));
+        let started = Instant::now();
+        let snapshot = UsageSnapshot {
+            codex: ProviderUsage {
+                windows: vec![UsageWindow {
+                    used_percent: 31.0,
+                    window_minutes: 10080,
+                    resets_at: ccusage_now() + 3600,
+                }],
+                credits: Some(12.5),
+            },
+            claude: ClaudeUsage {
+                five_hour: Some(ClaudeUsageWindow {
+                    cost_usd: 56.68,
+                    remaining_minutes: 66,
+                    resets_at: ccusage_now() + 3600,
+                }),
+            },
+        };
+        cache.finish_refresh(started, snapshot.clone());
+
+        let refreshed = cache.refresh_if_due(started + Duration::from_secs(60), || {
+            UsageRefresh::default()
+        });
+
+        assert_eq!(refreshed, snapshot);
     }
 
     #[test]
@@ -1134,6 +1273,24 @@ mod tests {
         );
         assert!(display_width(&usage_window_text("week", &window, minimum_inner)) <= minimum_inner);
         assert!(display_width(&usage_window_text("week", &window, full_inner)) <= full_inner);
+
+        let claude_window = ClaudeUsageWindow {
+            cost_usd: 56.68,
+            remaining_minutes: 66,
+            resets_at: 14 * 3_600,
+        };
+        assert_eq!(
+            claude_usage_text(&claude_window, minimum_inner),
+            "5h $56.68 · 66m left"
+        );
+        assert_eq!(
+            claude_usage_text(&claude_window, full_inner),
+            "5h $56.68 · 66m left · 14:00Z"
+        );
+        assert!(display_width(&claude_usage_text(&claude_window, minimum_inner)) <= minimum_inner);
+        assert!(display_width(&claude_usage_text(&claude_window, full_inner)) <= full_inner);
+        assert_eq!(credits_text(1927.95, minimum_inner), "credits: 1927.95");
+        assert_eq!(credits_text(1_000_000.0, 12), "credits: —");
     }
 
     #[test]

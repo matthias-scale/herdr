@@ -2,11 +2,16 @@ use std::{
     ffi::OsStr,
     io::{self, Read},
     process::{Command, Output, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// Extra time granted to pipe readers after the subprocess tree has been killed:
 /// enough for the kernel to deliver EOF, short enough to stay bounded.
 const READER_JOIN_GRACE: Duration = Duration::from_millis(250);
@@ -34,7 +39,23 @@ pub(crate) fn curl_command() -> Command {
 /// return, dropping the Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates any
 /// still-live associated descendants. That scoping is intentional for the current read-only
 /// Git callers.
-pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Output> {
+pub(crate) fn output_with_deadline(command: Command, deadline: Instant) -> io::Result<Output> {
+    output_with_deadline_inner(command, deadline, DEFAULT_MAX_OUTPUT_BYTES)
+}
+
+pub(crate) fn output_with_deadline_limited(
+    command: Command,
+    deadline: Instant,
+    max_output_bytes: usize,
+) -> io::Result<Output> {
+    output_with_deadline_inner(command, deadline, max_output_bytes)
+}
+
+fn output_with_deadline_inner(
+    mut command: Command,
+    deadline: Instant,
+    max_output_bytes: usize,
+) -> io::Result<Output> {
     if Instant::now() >= deadline {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -74,10 +95,32 @@ pub(crate) fn output_with_deadline(mut command: Command, deadline: Instant) -> i
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("subprocess stderr pipe was unavailable after spawn"))?;
-    let stdout_reader = thread::spawn(move || read_all(stdout));
-    let stderr_reader = thread::spawn(move || read_all(stderr));
+    let output_limit = Arc::new(OutputReadLimit::new(max_output_bytes));
+    let stdout_reader = thread::spawn({
+        let limit = Arc::clone(&output_limit);
+        move || read_limited(stdout, limit)
+    });
+    let stderr_reader = thread::spawn({
+        let limit = Arc::clone(&output_limit);
+        move || read_limited(stderr, limit)
+    });
 
     let status = loop {
+        if output_limit.exceeded.load(Ordering::Acquire) {
+            let terminate_result = terminate_and_reap(&mut child, &process_tree);
+            let _ = drain_readers(
+                stdout_reader,
+                stderr_reader,
+                &mut child,
+                &process_tree,
+                Instant::now(),
+            );
+            terminate_result?;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "subprocess output exceeded the configured limit",
+            ));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
@@ -260,10 +303,43 @@ fn readers_finished(
     wait_for_reader(stdout_reader, deadline) && wait_for_reader(stderr_reader, deadline)
 }
 
-fn read_all(mut pipe: impl Read) -> io::Result<Vec<u8>> {
+struct OutputReadLimit {
+    remaining: AtomicUsize,
+    exceeded: AtomicBool,
+}
+
+impl OutputReadLimit {
+    fn new(max_output_bytes: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(max_output_bytes),
+            exceeded: AtomicBool::new(false),
+        }
+    }
+}
+
+fn read_limited(mut pipe: impl Read, limit: Arc<OutputReadLimit>) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
-    pipe.read_to_end(&mut output)?;
-    Ok(output)
+    let mut buffer = [0; 8 * 1024];
+    loop {
+        let bytes_read = pipe.read(&mut buffer)?;
+        if bytes_read == 0 {
+            return Ok(output);
+        }
+        let reservation =
+            limit
+                .remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(bytes_read)
+                });
+        if reservation.is_err() {
+            limit.exceeded.store(true, Ordering::Release);
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "subprocess output exceeded the configured limit",
+            ));
+        }
+        output.extend_from_slice(&buffer[..bytes_read]);
+    }
 }
 
 fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
@@ -306,6 +382,16 @@ mod tests {
     fn process_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn limited_output_reader_rejects_bytes_past_the_shared_cap() {
+        let limit = Arc::new(OutputReadLimit::new(4));
+        let error = read_limited(std::io::Cursor::new(b"12345"), Arc::clone(&limit))
+            .expect_err("output beyond the cap must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(limit.exceeded.load(Ordering::Acquire));
     }
 
     fn pid_is_dead(pid: &str) -> bool {
