@@ -524,6 +524,12 @@ pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent])
         .any(|event| matches!(event, RawInputEvent::HostColorSchemeChanged(_)))
 }
 
+pub(crate) fn events_require_host_terminal_appearance_query(events: &[RawInputEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
+}
+
 fn input_flush_timeout_ms(framer: &RawInputFramer) -> i32 {
     if framer.has_pending_incomplete_sgr_mouse_sequence() {
         MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
@@ -1336,6 +1342,15 @@ mod tests {
     }
 
     #[test]
+    fn outer_focus_gained_requests_host_appearance_refresh() {
+        let gained = parse_raw_input_bytes_sync(b"\x1b[I");
+        assert!(events_require_host_terminal_appearance_query(&gained));
+
+        let lost = parse_raw_input_bytes_sync(b"\x1b[O");
+        assert!(!events_require_host_terminal_appearance_query(&lost));
+    }
+
+    #[test]
     fn parses_ghostty_color_scheme_reports() {
         for bytes in [
             GHOSTTY_COLOR_SCHEME_DARK_REPORT,
@@ -1396,6 +1411,19 @@ mod tests {
         assert!(framer.push(b"1n").is_empty());
         assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
         assert!(framer.flush_timeout().is_empty());
+    }
+
+    #[test]
+    fn missing_host_color_reply_does_not_create_visible_input() {
+        let mut framer = RawInputByteFramer::for_host_input();
+        framer.host_color_query_sent();
+
+        // A terminal that never answers contributes no bytes, so the input
+        // timeout must not invent an Escape key or pane input.
+        assert!(framer.push(b"").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(!framer.has_pending_input());
+        assert_eq!(framer.push(b"x"), vec![b"x".to_vec()]);
     }
 
     #[test]

@@ -125,6 +125,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Follow host terminal light/dark appearance and switch Herdr UI themes.
 # Existing manual behavior is unchanged unless this is true.
 # auto_switch = false
+# Re-query OSC 11 for appearance changes; default 60 seconds (5..3600).
+# auto_switch_poll_interval_seconds = 60
 # dark_name = "catppuccin"
 # light_name = "catppuccin-latte"
 

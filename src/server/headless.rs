@@ -7296,6 +7296,50 @@ next_tab = ""
     }
 
     #[test]
+    fn explicit_color_scheme_report_wins_over_osc11_inference() {
+        let mut server = test_headless_server();
+        server.app.state.theme_runtime.auto_switch = true;
+        server.app.state.theme_runtime.dark_name = "catppuccin".to_string();
+        server.app.state.theme_runtime.light_name = "catppuccin-latte".to_string();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: crate::raw_input::GHOSTTY_COLOR_SCHEME_LIGHT_REPORT.to_vec(),
+        }));
+        assert_eq!(
+            server.clients[&1].host_terminal_appearance,
+            Some(crate::terminal_theme::HostAppearance::Light)
+        );
+        assert!(server.clients[&1].host_terminal_appearance_explicit);
+        assert_eq!(server.app.state.theme_name, "catppuccin-latte");
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec(),
+        }));
+        assert_eq!(
+            server.clients[&1].host_terminal_appearance,
+            Some(crate::terminal_theme::HostAppearance::Light)
+        );
+        assert!(server.clients[&1].host_terminal_appearance_explicit);
+        assert_eq!(server.app.state.theme_name, "catppuccin-latte");
+    }
+
+    #[test]
     fn color_scheme_change_event_is_inert_on_server() {
         let mut server = test_headless_server();
         let initial_theme = crate::terminal_theme::TerminalTheme {

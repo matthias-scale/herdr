@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use crossterm::event::{
@@ -59,6 +59,7 @@ struct ClientLoopConfig {
     host_cursor: crate::config::HostCursorModeConfig,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
+    host_terminal_theme_poll_interval: Duration,
     #[cfg(unix)]
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 }
@@ -91,6 +92,33 @@ struct ClientState {
     repaint_pending: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostTerminalAppearanceQuerySchedule {
+    interval: Duration,
+    next_poll_at: Instant,
+}
+
+impl HostTerminalAppearanceQuerySchedule {
+    fn new(interval: Duration, now: Instant) -> Self {
+        Self {
+            interval,
+            next_poll_at: now + interval,
+        }
+    }
+
+    fn mark_query_sent(&mut self, now: Instant) {
+        self.next_poll_at = now + self.interval;
+    }
+
+    fn poll_due(&mut self, now: Instant) -> bool {
+        if now < self.next_poll_at {
+            return false;
+        }
+        self.mark_query_sent(now);
+        true
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1137,6 +1165,7 @@ fn run_client_with_mode(
         host_cursor,
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
+        host_terminal_theme_poll_interval: loaded_config.config.theme.auto_switch_poll_interval(),
         #[cfg(unix)]
         remote_image_paste_key,
     };
@@ -1316,6 +1345,8 @@ async fn run_client_loop(
     // Spawn the stdin reader thread.
     let will_query_host_terminal_theme =
         state.attach_escape.is_none() && should_query_host_terminal_theme();
+    let host_color_query_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stdin_host_color_query_generation = host_color_query_generation.clone();
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
@@ -1324,12 +1355,18 @@ async fn run_client_loop(
             stdin_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
+            stdin_host_color_query_generation,
             stdin_mouse_capture_active,
         );
     });
 
+    let mut appearance_query_schedule = HostTerminalAppearanceQuerySchedule::new(
+        config.host_terminal_theme_poll_interval,
+        Instant::now(),
+    );
     if will_query_host_terminal_theme {
         query_host_terminal_theme();
+        appearance_query_schedule.mark_query_sent(Instant::now());
     }
 
     // Spawn the resize poller thread.
@@ -1423,8 +1460,18 @@ async fn run_client_loop(
                     ) {
                         state.request_repaint();
                     }
-                    if crate::raw_input::events_require_host_terminal_theme_query(&events) {
+                    if will_query_host_terminal_theme
+                        && crate::raw_input::events_require_host_terminal_theme_query(&events)
+                    {
+                        host_color_query_generation.fetch_add(1, Ordering::AcqRel);
                         query_host_terminal_theme();
+                        appearance_query_schedule.mark_query_sent(Instant::now());
+                    } else if will_query_host_terminal_theme
+                        && crate::raw_input::events_require_host_terminal_appearance_query(&events)
+                    {
+                        host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+                        query_host_terminal_appearance();
+                        appearance_query_schedule.mark_query_sent(Instant::now());
                     }
                     data
                 };
@@ -1502,6 +1549,11 @@ async fn run_client_loop(
             }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
+                if will_query_host_terminal_theme {
+                    host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+                    query_host_terminal_appearance();
+                    appearance_query_schedule.mark_query_sent(Instant::now());
+                }
                 // Resizing invalidates the host-side blit baseline.
                 state.request_repaint();
                 let msg = ClientMessage::Resize {
@@ -1625,7 +1677,14 @@ async fn run_client_loop(
                     "server closed connection",
                 )));
             }
-            ClientLoopEvent::Timer => {}
+            ClientLoopEvent::Timer => {
+                if will_query_host_terminal_theme
+                    && appearance_query_schedule.poll_due(Instant::now())
+                {
+                    host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+                    query_host_terminal_appearance();
+                }
+            }
         }
     }
 
@@ -2101,7 +2160,7 @@ fn current_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u3
     )
 }
 
-/// Reports polled changes and signalled resizes that return to the same size.
+/// Reports polled changes and terminal wake signals, including resumes.
 fn resize_report_required(
     signalled: bool,
     new_size: (u16, u16, u32, u32),
@@ -2154,6 +2213,10 @@ fn query_host_terminal_theme() {
     let _ = write_host_terminal_theme_query(io::stdout());
 }
 
+fn query_host_terminal_appearance() {
+    let _ = write_host_terminal_appearance_query(io::stdout());
+}
+
 fn should_query_host_terminal_theme() -> bool {
     !cfg!(windows)
 }
@@ -2161,6 +2224,11 @@ fn should_query_host_terminal_theme() -> bool {
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
     let query = crate::terminal_theme::host_terminal_theme_query_sequence();
     writer.write_all(query.as_bytes())?;
+    writer.flush()
+}
+
+fn write_host_terminal_appearance_query(mut writer: impl io::Write) -> io::Result<()> {
+    writer.write_all(crate::terminal_theme::HOST_APPEARANCE_QUERY_SEQUENCE.as_bytes())?;
     writer.flush()
 }
 
@@ -2451,6 +2519,28 @@ mod tests {
     }
 
     #[test]
+    fn write_host_terminal_appearance_query_emits_only_osc11() {
+        let mut output = Vec::new();
+        write_host_terminal_appearance_query(&mut output).unwrap();
+        assert_eq!(
+            output,
+            crate::terminal_theme::HOST_APPEARANCE_QUERY_SEQUENCE.as_bytes()
+        );
+    }
+
+    #[test]
+    fn appearance_query_schedule_waits_for_interval_and_rearms() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(60);
+        let mut schedule = HostTerminalAppearanceQuerySchedule::new(interval, now);
+
+        assert!(!schedule.poll_due(now + Duration::from_secs(59)));
+        assert!(schedule.poll_due(now + interval));
+        assert!(!schedule.poll_due(now + interval));
+        assert!(schedule.poll_due(now + interval + interval));
+    }
+
+    #[test]
     fn write_host_color_scheme_report_mode_emits_mode_sequences() {
         let mut output = Vec::new();
         write_host_color_scheme_report_mode(&mut output, true).unwrap();
@@ -2473,6 +2563,13 @@ mod tests {
         assert!(crate::raw_input::events_require_host_terminal_theme_query(
             &events
         ));
+    }
+
+    #[test]
+    fn focus_gain_requests_host_appearance_query() {
+        let events = crate::raw_input::parse_raw_input_bytes_sync(b"\x1b[I");
+
+        assert!(crate::raw_input::events_require_host_terminal_appearance_query(&events));
     }
 
     #[test]
