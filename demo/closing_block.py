@@ -135,9 +135,10 @@ def parse(text: str) -> ClosingBlock:
 
     if start is not None and block.declared_blocking != 0:
         for m in _ITEM_RE.finditer(text, start):
-            block.items.append(
-                Item(int(m.group("idx")), m.group("label"), m.group("body").strip())
-            )
+            # Items read "1. **Gate** — <text>"; drop the leading separator so
+            # the gate text stands alone as a status line.
+            body = m.group("body").strip().lstrip("-—–:").strip()
+            block.items.append(Item(int(m.group("idx")), m.group("label"), body))
 
     agents = None
     for agents in _AGENTS_RE.finditer(text):
