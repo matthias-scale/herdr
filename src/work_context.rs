@@ -5,12 +5,17 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_PREVIEW_URLS: usize = 8;
+pub const MAX_MISSIVE_URLS: usize = 4;
+
+/// Missive conversations are always served from this single host.
+const MISSIVE_HOST: &str = "mail.missiveapp.com";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkLinkKind {
     Ticket,
     PullRequest,
     Preview,
+    Missive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +35,8 @@ pub struct PaneWorkContext {
     pub pr_urls: Vec<String>,
     #[serde(default)]
     pub preview_urls: Vec<String>,
+    #[serde(default)]
+    pub missive_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,7 +95,30 @@ pub(crate) fn work_link_candidates(context: &PaneWorkContext) -> Vec<WorkLinkCan
         }
     }
 
+    for raw_url in &context.missive_urls {
+        let Some(url) = normalize_missive_url(raw_url).ok() else {
+            continue;
+        };
+        if seen_urls.insert(url.clone()) {
+            candidates.push(WorkLinkCandidate {
+                kind: WorkLinkKind::Missive,
+                label: missive_link_label(&url),
+                copy_value: url.clone(),
+                url,
+            });
+        }
+    }
+
     candidates
+}
+
+/// Missive URLs are long and repetitive, so the panel shows the conversation
+/// segment rather than the whole hash route.
+fn missive_link_label(url: &str) -> String {
+    url.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(|segment| format!("missive/{segment}"))
+        .unwrap_or_else(|| url.to_string())
 }
 
 impl PaneWorkContext {
@@ -97,6 +127,7 @@ impl PaneWorkContext {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
             preview_urls: normalize_preview_urls(self.preview_urls)?,
+            missive_urls: normalize_missive_urls(self.missive_urls)?,
             branch: normalize_optional_text("branch", self.branch)?,
             work_title: normalize_optional_text("work title", self.work_title)?,
         })
@@ -231,6 +262,7 @@ impl PaneWorkContextState {
         };
         let mut manual = tiers.manual.normalized()?;
         manual.preview_urls.clear();
+        manual.missive_urls.clear();
         let hook_turn = tiers.hook_turn.normalized()?;
         let git_observation = tiers.git_observation.normalized()?;
         let restored_fallback = tiers.restored_fallback.normalized()?;
@@ -361,6 +393,15 @@ impl PaneWorkContextState {
             ])
             .into_iter()
             .take(MAX_PREVIEW_URLS)
+            .collect(),
+            missive_urls: stable_merge([
+                &self.manual.missive_urls,
+                &self.hook_turn.missive_urls,
+                &self.git_observation.missive_urls,
+                &self.restored_fallback.missive_urls,
+            ])
+            .into_iter()
+            .take(MAX_MISSIVE_URLS)
             .collect(),
             branch: first_present([
                 self.manual.branch.as_ref(),
@@ -495,6 +536,80 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
     urls
 }
 
+pub fn extract_missive_urls(text: &str) -> Vec<String> {
+    let prefix = format!("https://{MISSIVE_HOST}");
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    for (start, _) in text.match_indices(prefix.as_str()) {
+        if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
+            continue;
+        }
+        let candidate = text[start..]
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        let Ok(url) = normalize_missive_url(candidate) else {
+            continue;
+        };
+        if seen.insert(url.clone()) {
+            urls.push(url);
+            if urls.len() == MAX_MISSIVE_URLS {
+                break;
+            }
+        }
+    }
+    urls
+}
+
+pub fn normalize_missive_urls<I, S>(urls: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for url in urls {
+        let url = normalize_missive_url(url.as_ref())?;
+        if seen.insert(url.clone()) {
+            normalized.push(url);
+            if normalized.len() == MAX_MISSIVE_URLS {
+                break;
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+/// Missive conversation routes carry a hash path, so unlike preview URLs the
+/// path and fragment are significant and must survive normalization.
+fn normalize_missive_url(raw: &str) -> Result<String, String> {
+    const MAX_URL_BYTES: usize = 256;
+
+    let trimmed = raw.trim().trim_end_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '.' | '\'' | '"'
+        )
+    });
+    let invalid = || format!("invalid Missive URL: {raw}");
+    let Some(rest) = trimmed
+        .strip_prefix("https://")
+        .and_then(|rest| rest.strip_prefix(MISSIVE_HOST))
+    else {
+        return Err(invalid());
+    };
+    if !rest.starts_with('/') && !rest.starts_with('#') {
+        return Err(invalid());
+    }
+    if trimmed.len() > MAX_URL_BYTES
+        || trimmed.chars().any(char::is_control)
+        || trimmed.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(invalid());
+    }
+    Ok(format!("https://{MISSIVE_HOST}{rest}"))
+}
+
 pub(crate) fn hook_turn_context(
     work_title: Option<String>,
     branch: Option<&str>,
@@ -514,6 +629,7 @@ pub(crate) fn hook_turn_context(
         ticket_ids: normalize_ticket_ids(ticket_ids)?,
         pr_urls: prompt_context.pr_urls,
         preview_urls: prompt_context.preview_urls,
+        missive_urls: prompt_context.missive_urls,
         branch: None,
         work_title,
     })
@@ -803,6 +919,108 @@ mod tests {
     }
 
     #[test]
+    fn missive_urls_are_extracted_with_their_hash_route_and_bounded() {
+        let text = concat!(
+            "see https://mail.missiveapp.com/#inbox/conversations/abc123, ",
+            "https://mail.missiveapp.com/#inbox/conversations/abc123 ",
+            "https://mail.missiveapp.com/#custom/team/conversations/def456 ",
+            "https://mail.missiveapp.com ",
+            "https://evil.example.com/#inbox/conversations/zzz ",
+            "xhttps://mail.missiveapp.com/#inbox/conversations/prefixed"
+        );
+
+        assert_eq!(
+            extract_missive_urls(text),
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/abc123",
+                "https://mail.missiveapp.com/#custom/team/conversations/def456",
+            ]
+        );
+
+        let many = (0..MAX_MISSIVE_URLS + 2)
+            .map(|index| format!("https://mail.missiveapp.com/#inbox/conversations/c{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(extract_missive_urls(&many).len(), MAX_MISSIVE_URLS);
+        assert_eq!(
+            normalize_missive_urls(
+                (0..MAX_MISSIVE_URLS + 2).map(|index| format!(
+                    "https://mail.missiveapp.com/#inbox/conversations/c{index}"
+                ))
+            )
+            .unwrap()
+            .len(),
+            MAX_MISSIVE_URLS
+        );
+        assert!(normalize_missive_urls(["https://mail.missiveapp.com"]).is_err());
+        assert!(normalize_missive_urls(["https://mail.missiveapp.com.evil.test/#x"]).is_err());
+    }
+
+    #[test]
+    fn missive_links_follow_previews_and_copy_the_full_url() {
+        let candidates = work_link_candidates(&PaneWorkContext {
+            preview_urls: vec!["https://preview-1.vercel.app".into()],
+            missive_urls: vec![
+                "https://mail.missiveapp.com/#inbox/conversations/abc123".into(),
+                "not-a-missive-url".into(),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            candidates.iter().map(|c| c.kind).collect::<Vec<_>>(),
+            vec![WorkLinkKind::Preview, WorkLinkKind::Missive]
+        );
+        let missive = candidates.last().expect("missive candidate");
+        assert_eq!(missive.label, "missive/abc123");
+        assert_eq!(
+            missive.copy_value,
+            "https://mail.missiveapp.com/#inbox/conversations/abc123"
+        );
+        assert_eq!(missive.url, missive.copy_value);
+    }
+
+    #[test]
+    fn missive_urls_merge_across_tiers_and_never_persist_as_manual() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/hook".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/git".into()],
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.effective().missive_urls,
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/hook",
+                "https://mail.missiveapp.com/#inbox/conversations/git",
+            ]
+        );
+
+        let restored = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    missive_urls: vec![
+                        "https://mail.missiveapp.com/#inbox/conversations/manual".into()
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert!(restored.effective().missive_urls.is_empty());
+    }
+
+    #[test]
     fn ac26_work_link_candidates_are_ordered_and_defensively_canonicalized() {
         let candidates = work_link_candidates(&PaneWorkContext {
             ticket_ids: vec!["mat-7".into(), "SCA-8".into()],
@@ -965,6 +1183,7 @@ mod tests {
                     ticket_ids: vec!["MAT-1".into()],
                     pr_urls: vec!["https://github.com/o/r/pull/2".into()],
                     preview_urls: Vec::new(),
+                    missive_urls: Vec::new(),
                     branch: Some("main".into()),
                     work_title: Some("Initial".into()),
                 },
@@ -1102,6 +1321,7 @@ mod tests {
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/2".into()],
             preview_urls: Vec::new(),
+            missive_urls: Vec::new(),
             branch: Some("old-branch".into()),
             work_title: Some("Old title".into()),
         })
