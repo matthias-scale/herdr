@@ -1429,6 +1429,7 @@ mod tests {
         assert!(framer.flush_timeout().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_host_color_reply_does_not_create_visible_input() {
         let host_color_query_generation = AtomicU64::new(0);
