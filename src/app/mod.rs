@@ -133,6 +133,7 @@ pub struct App {
     pub(crate) git_work_context_refresh_in_flight:
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) git_work_context_refresh_due_after_in_flight: bool,
+    pub(crate) git_work_context_rotation: usize,
     pub(crate) last_git_work_context_refresh_generation: u64,
     pub(crate) last_applied_git_work_context_refresh_generation: u64,
     pub(crate) next_git_work_context_refresh: Instant,
@@ -815,6 +816,7 @@ impl App {
             git_status_cache: HashMap::new(),
             git_work_context_refresh_in_flight: None,
             git_work_context_refresh_due_after_in_flight: false,
+            git_work_context_rotation: 0,
             last_git_work_context_refresh_generation: 0,
             last_applied_git_work_context_refresh_generation: 0,
             next_git_work_context_refresh: Instant::now(),

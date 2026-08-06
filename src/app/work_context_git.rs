@@ -11,6 +11,11 @@ use crate::work_context::{extract_pr_urls, extract_preview_urls, extract_ticket_
 
 pub(crate) const WORK_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const WORK_CONTEXT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+// Each pane gets its own probe budget so one slow repository cannot consume the
+// whole batch and leave every later pane without links. The batch ceiling still
+// bounds a refresh that would otherwise walk many slow repositories back to back.
+pub(crate) const WORK_CONTEXT_TARGET_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const WORK_CONTEXT_BATCH_TIMEOUT: Duration = Duration::from_secs(20);
 // Cache GitHub metadata for repeated refresh requests within a short window.
 pub(crate) const WORK_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -100,10 +105,16 @@ impl App {
 
         self.next_git_work_context_refresh = now + WORK_CONTEXT_REFRESH_INTERVAL;
         self.prune_git_work_context_state();
-        let targets = self.git_work_context_targets();
+        let mut targets = self.git_work_context_targets();
         if targets.is_empty() {
             return;
         }
+        // The batch budget can run out before the last target is probed, so start
+        // from a different pane each cycle. Without this the same tail panes would
+        // be the ones dropped every time.
+        let rotation = self.git_work_context_rotation % targets.len();
+        targets.rotate_left(rotation);
+        self.git_work_context_rotation = self.git_work_context_rotation.wrapping_add(1);
 
         self.last_git_work_context_refresh_generation = self
             .last_git_work_context_refresh_generation
@@ -114,6 +125,7 @@ impl App {
             generation,
             deadline,
         });
+        let batch_deadline = now + WORK_CONTEXT_BATCH_TIMEOUT;
 
         let event_tx = self.event_tx.clone();
         let cache = self.git_work_context_cache.clone();
@@ -127,8 +139,8 @@ impl App {
                     targets,
                     cache,
                     cache_now,
-                    deadline,
-                    deadline,
+                    batch_deadline,
+                    batch_deadline,
                     &git_program,
                     &gh_program,
                 );
@@ -314,10 +326,14 @@ fn refresh_git_work_contexts(
     let mut discovered = HashMap::<PathBuf, Option<GitWorkContextInput>>::new();
 
     for target in targets {
+        // Clamp to the batch ceiling so the per-target budget can extend a probe
+        // but never outlive the refresh as a whole.
+        let target_git_deadline = (Instant::now() + WORK_CONTEXT_TARGET_TIMEOUT).min(git_deadline);
+        let target_gh_deadline = (Instant::now() + WORK_CONTEXT_TARGET_TIMEOUT).min(gh_deadline);
         let input = if let Some(input) = discovered.get(&target.cwd) {
             input.clone()
         } else {
-            let input = discover_git_input(&target.cwd, git_deadline, git_program);
+            let input = discover_git_input(&target.cwd, target_git_deadline, git_program);
             discovered.insert(target.cwd.clone(), input.clone());
             input
         };
@@ -336,8 +352,12 @@ fn refresh_git_work_contexts(
                 }) {
                     entry.context.clone()
                 } else {
-                    let context =
-                        git_work_context_for_branch(branch, repo_root, gh_deadline, gh_program);
+                    let context = git_work_context_for_branch(
+                        branch,
+                        repo_root,
+                        target_gh_deadline,
+                        gh_program,
+                    );
                     let entry = GitWorkContextCacheEntry {
                         context: context.clone(),
                         cached_at: now,
@@ -659,6 +679,62 @@ mod tests {
             assert!(output.observations[0].context.pr_urls.is_empty());
             assert!(output.observations[0].context.preview_urls.is_empty());
         }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_repository_does_not_starve_later_panes_in_the_same_batch() {
+        let dir = fixture_dir("batch-starvation");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let slow_repo = dir.join("slow");
+        let fast_repo = dir.join("fast");
+        std::fs::create_dir(&slow_repo).expect("create slow repo fixture");
+        std::fs::create_dir(&fast_repo).expect("create fast repo fixture");
+
+        write_executable(
+            &git,
+            // git is invoked as `git -C <cwd> ...`, so the target directory is $2.
+            "#!/bin/sh\nroot=$2\ncase \"$*\" in\n  *'rev-parse --show-toplevel'*) printf '%s\\n' \"$root\" ;;\n  *'symbolic-ref --quiet --short HEAD'*) printf '%s\\n' \"feat/MAT-1-$(basename \"$root\")\" ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        // The slow repository outlives both its own per-target budget and, under a
+        // single shared deadline, the whole batch.
+        write_executable(
+            &gh,
+            "#!/bin/sh\ncase \"$(pwd -P)\" in\n  *slow*) sleep 6 ;;\nesac\nprintf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/2\"}'\n",
+        );
+
+        let output = refresh_git_work_contexts(
+            vec![
+                GitWorkContextTarget {
+                    pane_id: PaneId::from_raw(1),
+                    cwd: slow_repo.clone(),
+                },
+                GitWorkContextTarget {
+                    pane_id: PaneId::from_raw(2),
+                    cwd: fast_repo.clone(),
+                },
+            ],
+            HashMap::new(),
+            Instant::now(),
+            Instant::now() + Duration::from_secs(3),
+            Instant::now() + Duration::from_secs(3),
+            &git,
+            &gh,
+        );
+
+        let fast = output
+            .observations
+            .iter()
+            .find(|observation| observation.pane_id == PaneId::from_raw(2))
+            .expect("observation for the fast pane");
+        assert_eq!(
+            fast.context.pr_urls,
+            vec!["https://github.com/o/r/pull/2".to_string()],
+            "the later pane must still get its PR link after a slow repository"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
