@@ -66,7 +66,9 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
 }
 
 fn sound_playback_disabled_by_env() -> bool {
-    std::env::var_os(DISABLE_SOUND_ENV).is_some() || std::env::var_os("NEXTEST").is_some()
+    cfg!(test)
+        || std::env::var_os(DISABLE_SOUND_ENV).is_some()
+        || std::env::var_os("NEXTEST").is_some()
 }
 
 fn play_file(path: &Path) -> Result<(), String> {
@@ -331,6 +333,11 @@ fn player_error(player: AudioPlayer, output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_playback_is_disabled_in_test_builds() {
+        assert!(sound_playback_disabled_by_env());
+    }
 
     #[test]
     fn temp_sound_paths_are_unique() {
