@@ -2,11 +2,14 @@
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::layout::{Position, Rect, Size};
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 use crate::app::state::AppState;
 use crate::app::Mode;
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
+use crate::render_signal::RenderSignal;
 use crate::terminal::TerminalRuntimeRegistry;
 
 /// Per-client render baseline for the negotiated render encoding.
@@ -308,6 +311,43 @@ pub(crate) fn render_virtual_with_runtime_registry(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    render_virtual_with_runtime_registry_inner(
+        app_state,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+        None,
+    )
+}
+
+pub(crate) fn render_virtual_with_runtime_registry_and_handles(
+    app_state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    render_notify: &Arc<Notify>,
+    render_dirty: &Arc<RenderSignal>,
+) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    render_virtual_with_runtime_registry_inner(
+        app_state,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+        Some((render_notify, render_dirty)),
+    )
+}
+
+fn render_virtual_with_runtime_registry_inner(
+    app_state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
+) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     let popup_visible = app_state.popup_pane.is_some();
     let pre_compute_suppresses_focused_terminal_cursor =
         !popup_visible && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
@@ -325,7 +365,17 @@ pub(crate) fn render_virtual_with_runtime_registry(
 
     terminal
         .draw(|frame| {
-            crate::ui::render_with_runtime_registry(app_state, terminal_runtimes, frame);
+            if let Some((render_notify, render_dirty)) = render_handles {
+                crate::ui::render_with_runtime_registry_and_handles(
+                    app_state,
+                    terminal_runtimes,
+                    frame,
+                    render_notify,
+                    render_dirty,
+                );
+            } else {
+                crate::ui::render_with_runtime_registry(app_state, terminal_runtimes, frame);
+            }
         })
         .expect("render to TestBackend should never fail");
 

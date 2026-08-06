@@ -14,10 +14,13 @@ use ratatui::{
     Frame,
 };
 use serde::Deserialize;
+use tokio::sync::Notify;
 
+use super::text::display_width;
 use super::widgets::render_panel_shell;
 use crate::{
     app::{state::InfoPanelLinkRow, AppState},
+    render_signal::RenderSignal,
     terminal::{TerminalId, TerminalState},
     work_context::{work_link_candidates, WorkLinkKind},
 };
@@ -27,6 +30,8 @@ const INFO_PANEL_WIDTH: u16 = 36;
 const INFO_PANEL_MIN_MAIN_WIDTH: u16 = 44;
 const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_USAGE_FILES: usize = 64;
+const MAX_USAGE_DIRECTORIES: usize = 256;
+const MAX_USAGE_ENTRIES: usize = 4096;
 const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
 const USAGE_WINDOW_MINUTES: [(u64, &str); 2] = [(300, "5h"), (10080, "week")];
 
@@ -148,7 +153,7 @@ struct UsageSnapshot {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ProviderUsage {
     windows: Vec<UsageWindow>,
-    credits: Option<String>,
+    credits: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,20 +197,25 @@ fn parse_codex_record(line: &str) -> Option<ProviderUsage> {
     windows.sort_unstable_by_key(|window| window.window_minutes);
     windows.dedup_by_key(|window| window.window_minutes);
 
-    let credits =
-        raw.credits
-            .and_then(|credits| credits.balance)
-            .and_then(|balance| match balance {
-                serde_json::Value::String(balance) if !balance.is_empty() => Some(balance),
-                serde_json::Value::Number(balance) => Some(balance.to_string()),
-                _ => None,
-            });
+    let credits = raw
+        .credits
+        .and_then(|credits| credits.balance)
+        .and_then(parse_numeric_value);
 
     if windows.is_empty() {
         None
     } else {
         Some(ProviderUsage { windows, credits })
     }
+}
+
+fn parse_numeric_value(value: serde_json::Value) -> Option<f64> {
+    let number = match value {
+        serde_json::Value::Number(number) => number.as_f64()?,
+        serde_json::Value::String(value) => value.parse().ok()?,
+        _ => return None,
+    };
+    number.is_finite().then_some(number)
 }
 
 fn parse_usage_window(raw: RawUsageWindow) -> Option<UsageWindow> {
@@ -233,43 +243,55 @@ fn usage_window(usage: &ProviderUsage, minutes: u64) -> Option<&UsageWindow> {
 }
 
 fn recent_jsonl_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
-    fn collect(
-        root: &Path,
-        depth: usize,
-        max_files: usize,
-        files: &mut Vec<(SystemTime, PathBuf)>,
-    ) {
-        let Ok(entries) = fs::read_dir(root) else {
-            return;
+    if max_files == 0 {
+        return Vec::new();
+    }
+
+    let root_mtime = fs::metadata(root)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH);
+    let mut directories = vec![(root_mtime, root.to_path_buf(), 0usize)];
+    let mut visited_directories = 0usize;
+    let mut visited_entries = 0usize;
+    let mut files = Vec::new();
+
+    while let Some((_, directory, depth)) = directories.pop() {
+        if visited_directories >= MAX_USAGE_DIRECTORIES || visited_entries >= MAX_USAGE_ENTRIES {
+            break;
+        }
+        visited_directories = visited_directories.saturating_add(1);
+
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
         };
-        for entry in entries.flatten() {
+        let remaining_entries = MAX_USAGE_ENTRIES.saturating_sub(visited_entries);
+        let mut child_directories = Vec::new();
+        for entry in entries.flatten().take(remaining_entries) {
+            visited_entries = visited_entries.saturating_add(1);
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
             if file_type.is_dir() && depth < 4 {
-                collect(&path, depth + 1, max_files, files);
+                child_directories.push((modified, path, depth.saturating_add(1)));
             } else if file_type.is_file()
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "jsonl")
             {
-                let modified = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(UNIX_EPOCH);
                 files.push((modified, path));
                 files.sort_unstable_by(|left, right| right.0.cmp(&left.0));
                 files.truncate(max_files);
             }
         }
+        child_directories.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        directories.extend(child_directories.into_iter().rev());
     }
 
-    if max_files == 0 {
-        return Vec::new();
-    }
-    let mut files = Vec::new();
-    collect(root, 0, max_files, &mut files);
     files.into_iter().map(|(_, path)| path).collect()
 }
 
@@ -312,7 +334,7 @@ fn load_codex_usage() -> ProviderUsage {
         .unwrap_or_default()
 }
 
-fn load_usage_snapshot() -> UsageSnapshot {
+fn load_usage_snapshot() -> Option<UsageSnapshot> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -323,12 +345,12 @@ fn load_usage_snapshot() -> UsageSnapshot {
     } else {
         codex.windows.clear();
     }
-    UsageSnapshot {
+    Some(UsageSnapshot {
         codex,
         // Claude Code's local project logs on this machine do not contain a
         // usable quota field, and no non-credential local source is available.
         claude: ProviderUsage::default(),
-    }
+    })
 }
 
 struct UsageCacheState {
@@ -379,6 +401,26 @@ impl UsageCache {
         state.refresh_in_progress = false;
     }
 
+    fn publish_refresh(
+        &self,
+        now: Instant,
+        snapshot: UsageSnapshot,
+        render_notify: &Notify,
+        render_dirty: &RenderSignal,
+    ) {
+        self.finish_refresh(now, snapshot);
+        render_dirty.request_generic();
+        render_notify.notify_one();
+    }
+
+    fn cancel_refresh(&self, now: Instant) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.last_refresh = Some(now);
+        state.refresh_in_progress = false;
+    }
+
     fn snapshot(&self) -> UsageSnapshot {
         self.state
             .lock()
@@ -386,7 +428,11 @@ impl UsageCache {
             .unwrap_or_default()
     }
 
-    fn request_refresh(cache: &Arc<Self>) {
+    fn request_refresh(
+        cache: &Arc<Self>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) {
         if !cache.begin_refresh(Instant::now()) {
             return;
         }
@@ -394,12 +440,16 @@ impl UsageCache {
         if std::thread::Builder::new()
             .name("herdr-usage-refresh".to_string())
             .spawn(move || {
-                let snapshot = load_usage_snapshot();
-                cache_for_thread.finish_refresh(Instant::now(), snapshot);
+                let now = Instant::now();
+                let Some(snapshot) = load_usage_snapshot() else {
+                    cache_for_thread.cancel_refresh(now);
+                    return;
+                };
+                cache_for_thread.publish_refresh(now, snapshot, &render_notify, &render_dirty);
             })
             .is_err()
         {
-            cache.finish_refresh(Instant::now(), UsageSnapshot::default());
+            cache.cancel_refresh(Instant::now());
         }
     }
 
@@ -418,10 +468,12 @@ impl UsageCache {
     }
 }
 
-fn usage_snapshot() -> UsageSnapshot {
+fn usage_snapshot(render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>) -> UsageSnapshot {
     static CACHE: OnceLock<Arc<UsageCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Arc::new(UsageCache::new(USAGE_REFRESH_INTERVAL)));
-    UsageCache::request_refresh(cache);
+    if let Some((render_notify, render_dirty)) = render_handles {
+        UsageCache::request_refresh(cache, Arc::clone(render_notify), Arc::clone(render_dirty));
+    }
     cache.snapshot()
 }
 
@@ -444,13 +496,36 @@ fn render_usage_line(
     }
 }
 
+fn usage_window_text(window_label: &str, window: &UsageWindow, width: usize) -> String {
+    let left = (100.0 - window.used_percent).max(0.0);
+    let reset = usage_reset_label(window.resets_at);
+    let full = format!(
+        "{window_label} {left:.0}% left · {:.0}% used · {reset}",
+        window.used_percent
+    );
+    if display_width(&full) <= width {
+        return full;
+    }
+
+    let compact = format!(
+        "{window_label} {left:.0}% left · {:.0}% used",
+        window.used_percent
+    );
+    if display_width(&compact) <= width {
+        return compact;
+    }
+
+    format!("{window_label} {left:.0}% left")
+}
+
 fn render_subscription_usage(
     app: &AppState,
     frame: &mut Frame,
     layout: &InfoPanelLayout,
     start: usize,
+    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) {
-    let usage = usage_snapshot();
+    let usage = usage_snapshot(render_handles);
     if let Some(row) = layout.line(start) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -480,12 +555,10 @@ fn render_subscription_usage(
         for (window_index, (minutes, window_label)) in USAGE_WINDOW_MINUTES.iter().enumerate() {
             let text = usage_window(provider, *minutes)
                 .map(|window| {
-                    format!(
-                        "{window_label} {:.0}% left · {:.0}% used · {}",
-                        (100.0 - window.used_percent).max(0.0),
-                        window.used_percent,
-                        usage_reset_label(window.resets_at)
-                    )
+                    let width = layout
+                        .line(provider_start.saturating_add(1 + window_index))
+                        .map_or(0, |row| usize::from(row.width));
+                    usage_window_text(window_label, window, width)
                 })
                 .unwrap_or_else(|| format!("{window_label} — · —"));
             render_usage_line(
@@ -501,8 +574,8 @@ fn render_subscription_usage(
                 layout.line(provider_start.saturating_add(3)),
                 provider
                     .credits
-                    .as_deref()
-                    .map(|balance| format!("credits: {balance}"))
+                    .as_ref()
+                    .map(|balance| format!("credits: {balance:.2}"))
                     .unwrap_or_else(|| "credits: —".to_string()),
                 &app.palette,
             );
@@ -510,7 +583,12 @@ fn render_subscription_usage(
     }
 }
 
-pub(super) fn render_info_panel(app: &AppState, frame: &mut Frame, area: Rect) {
+pub(super) fn render_info_panel(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
+) {
     let Some(inner) = render_panel_shell(frame, area, app.palette.accent, app.palette.panel_bg)
     else {
         return;
@@ -590,7 +668,13 @@ pub(super) fn render_info_panel(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     if app.show_subscription_usage {
-        render_subscription_usage(app, frame, &layout, footer_start.saturating_add(2));
+        render_subscription_usage(
+            app,
+            frame,
+            &layout,
+            footer_start.saturating_add(2),
+            render_handles,
+        );
     }
 
     // Keep each link as one screen row so its hit target matches the rendered
@@ -618,7 +702,17 @@ mod tests {
         assert_eq!(usage.windows.len(), 1);
         assert_eq!(usage.windows[0].window_minutes, 10080);
         assert_eq!(usage.windows[0].used_percent, 31.0);
-        assert_eq!(usage.credits.as_deref(), Some("1927.95"));
+        assert_eq!(usage.credits, Some(1927.95));
+    }
+
+    #[test]
+    fn rejects_non_numeric_credit_balance() {
+        let usage = parse_codex_record(&codex_record(
+            r#"{"primary":{"used_percent":31.0,"window_minutes":10080,"resets_at":1786537158},"credits":{"balance":"private quota"}}"#,
+        ))
+        .expect("valid Codex usage record");
+
+        assert_eq!(usage.credits, None);
     }
 
     #[test]
@@ -686,6 +780,84 @@ mod tests {
     }
 
     #[test]
+    fn usage_cache_publishes_a_snapshot_and_requests_a_render() {
+        let cache = UsageCache::new(Duration::from_secs(60));
+        let started = Instant::now();
+        assert!(cache.begin_refresh(started));
+        let render_notify = Notify::new();
+        let render_dirty = RenderSignal::new();
+        let snapshot = UsageSnapshot {
+            codex: ProviderUsage {
+                credits: Some(12.5),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+
+        cache.publish_refresh(started, snapshot.clone(), &render_notify, &render_dirty);
+
+        assert_eq!(cache.snapshot(), snapshot);
+        assert!(render_dirty.is_pending());
+    }
+
+    #[test]
+    fn usage_cache_keeps_the_previous_snapshot_when_refresh_is_cancelled() {
+        let cache = UsageCache::new(Duration::from_secs(60));
+        let started = Instant::now();
+        let snapshot = UsageSnapshot {
+            codex: ProviderUsage {
+                credits: Some(12.5),
+                ..ProviderUsage::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        assert!(cache.begin_refresh(started));
+        cache.finish_refresh(started, snapshot.clone());
+        assert!(cache.begin_refresh(started + Duration::from_secs(60)));
+        cache.cancel_refresh(started + Duration::from_secs(60));
+
+        assert_eq!(cache.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn usage_rows_fit_minimum_and_full_panel_widths() {
+        let window = UsageWindow {
+            used_percent: 31.0,
+            window_minutes: 10080,
+            resets_at: 11 * 3_600 + 59 * 60,
+        };
+        let minimum_panel = panel_width_for_main(INFO_PANEL_MIN_MAIN_WIDTH + INFO_PANEL_MIN_WIDTH)
+            .expect("minimum panel width");
+        let full_panel = panel_width_for_main(INFO_PANEL_MIN_MAIN_WIDTH + INFO_PANEL_WIDTH)
+            .expect("full panel width");
+        let minimum_inner = usize::from(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .inner(Rect::new(0, 0, minimum_panel, 1))
+                .width,
+        );
+        let full_inner = usize::from(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .inner(Rect::new(0, 0, full_panel, 1))
+                .width,
+        );
+
+        assert_eq!(minimum_panel, INFO_PANEL_MIN_WIDTH);
+        assert_eq!(full_panel, INFO_PANEL_WIDTH);
+        assert_eq!(
+            usage_window_text("week", &window, minimum_inner),
+            "week 69% left · 31% used"
+        );
+        assert_eq!(
+            usage_window_text("week", &window, full_inner),
+            "week 69% left · 31% used · 11:59Z"
+        );
+        assert!(display_width(&usage_window_text("week", &window, minimum_inner)) <= minimum_inner);
+        assert!(display_width(&usage_window_text("week", &window, full_inner)) <= full_inner);
+    }
+
+    #[test]
     fn info_panel_link_rows_follow_shared_candidate_order() {
         let mut app = AppState::test_new();
         app.workspaces
@@ -721,7 +893,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
-            .draw(|frame| render_info_panel(&app, frame, area))
+            .draw(|frame| render_info_panel(&app, frame, area, None))
             .unwrap();
         for (row, label) in rows.iter().zip([
             "MAT-1",

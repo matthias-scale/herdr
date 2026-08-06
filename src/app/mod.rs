@@ -1172,10 +1172,12 @@ impl App {
                             area,
                         );
                     }
-                    crate::ui::render_with_runtime_registry(
+                    crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,
                         frame,
+                        &self.render_notify,
+                        &self.render_dirty,
                     );
                 })?;
                 self.status_metrics_visible =

@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
     Frame,
 };
+use tokio::sync::Notify;
 
 mod dialogs;
 mod info_panel;
@@ -96,6 +99,7 @@ pub(crate) use self::{
         WorkspaceListEntry,
     },
 };
+use crate::render_signal::RenderSignal;
 
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
@@ -474,6 +478,30 @@ pub fn render_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, None);
+}
+
+pub(crate) fn render_with_runtime_registry_and_handles(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    render_notify: &Arc<Notify>,
+    render_dirty: &Arc<RenderSignal>,
+) {
+    render_with_runtime_registry_inner(
+        app,
+        terminal_runtimes,
+        frame,
+        Some((render_notify, render_dirty)),
+    );
+}
+
+fn render_with_runtime_registry_inner(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
+) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 
@@ -496,7 +524,7 @@ pub fn render_with_runtime_registry(
     }
 
     if app.view.info_panel_rect.width > 0 {
-        render_info_panel(app, frame, app.view.info_panel_rect);
+        render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
