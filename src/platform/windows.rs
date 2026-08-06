@@ -431,7 +431,10 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
 }
 
 pub(crate) fn foreground_process_job(child_pid: u32) -> Option<ForegroundJob> {
-    let entries = snapshot_processes();
+    // Called for every pane on each foreground refresh, so it must share the
+    // snapshot cache with the other per-pane probes rather than walking every
+    // process on the system once per pane.
+    let entries = cached_foreground_processes();
     select_pane_foreground_process_job(child_pid, &entries)
 }
 
