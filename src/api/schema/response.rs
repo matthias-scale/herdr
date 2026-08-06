@@ -87,6 +87,9 @@ pub enum ResponseResult {
     TabInfo {
         tab: TabInfo,
     },
+    TabPrio {
+        prio: super::tabs::TabPrioResult,
+    },
     TabCreated {
         tab: TabInfo,
         root_pane: PaneInfo,

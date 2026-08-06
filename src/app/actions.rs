@@ -12,7 +12,7 @@ use crate::layout::PaneId;
 use crate::layout::{find_in_direction, NavDirection};
 use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
-use crate::workspace::WorkspaceGitStatus;
+use crate::workspace::{TabPrioAction, WorkspaceGitStatus};
 
 use super::api_helpers::pane_agent_status;
 use super::state::{
@@ -263,6 +263,19 @@ pub struct PaneStateUpdate {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    pub(crate) fn apply_tab_prio(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+        action: TabPrioAction,
+    ) -> Option<bool> {
+        self.workspaces
+            .get_mut(ws_idx)?
+            .tabs
+            .get_mut(tab_idx)
+            .map(|tab| tab.apply_prio(action))
+    }
+
     pub(crate) fn current_pane_focus_target(&self) -> Option<PaneFocusTarget> {
         let ws_idx = self.active?;
         let ws = self.workspaces.get(ws_idx)?;

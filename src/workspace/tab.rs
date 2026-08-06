@@ -45,6 +45,12 @@ pub(crate) enum TabDisplayProjection {
     Fallback(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabPrioAction {
+    Toggle,
+    Set(bool),
+}
+
 impl TabDisplayProjection {
     pub(crate) fn full_label(&self) -> String {
         match self {
@@ -331,12 +337,22 @@ impl Tab {
         self.name_origin = TabNameOrigin::Structural;
     }
 
-    pub fn set_prio(&mut self, prio: bool) {
-        self.prio = prio;
+    pub(crate) fn apply_prio(&mut self, action: TabPrioAction) -> bool {
+        let prio = match action {
+            TabPrioAction::Toggle => return self.toggle_prio(),
+            TabPrioAction::Set(prio) => prio,
+        };
+        self.set_prio(prio)
     }
 
-    pub fn toggle_prio(&mut self) {
-        self.set_prio(!self.prio);
+    pub fn set_prio(&mut self, prio: bool) -> bool {
+        let changed = self.prio != prio;
+        self.prio = prio;
+        changed
+    }
+
+    pub fn toggle_prio(&mut self) -> bool {
+        self.set_prio(!self.prio)
     }
 
     pub fn set_user_custom_name(&mut self, name: String) {

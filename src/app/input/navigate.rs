@@ -2105,15 +2105,9 @@ fn toggle_tab_prio(state: &mut AppState, context: ActionContext) -> bool {
     else {
         return false;
     };
-    let Some(tab) = state
-        .workspaces
-        .get_mut(ws_idx)
-        .and_then(|ws| ws.tabs.get_mut(tab_idx))
-    else {
-        return false;
-    };
-    tab.toggle_prio();
-    true
+    state
+        .apply_tab_prio(ws_idx, tab_idx, crate::workspace::TabPrioAction::Toggle)
+        .is_some()
 }
 
 #[cfg(test)]
