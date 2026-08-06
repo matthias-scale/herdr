@@ -354,9 +354,12 @@ pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
 }
 
 pub(crate) fn prio_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
-    sidebar_thread_entries(app)
+    let entries = sidebar_thread_entries(app);
+    let tab_entries = aggregate_tab_entries(&entries);
+    entries
         .into_iter()
         .filter(|entry| entry.prio && entry.tab_first_pane)
+        .filter_map(|entry| tab_entries.get(&(entry.ws_idx, entry.tab_idx)).cloned())
         .collect()
 }
 
@@ -527,6 +530,65 @@ fn tab_lifecycle_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
+fn aggregate_tab_entries(
+    entries: &[AgentPanelEntry],
+) -> std::collections::HashMap<(usize, usize), AgentPanelEntry> {
+    let mut aggregated =
+        std::collections::HashMap::<(usize, usize), (AgentPanelEntry, bool, bool, bool)>::new();
+
+    for entry in entries {
+        let key = (entry.ws_idx, entry.tab_idx);
+        let candidate = (entry.state, entry.seen);
+        aggregated
+            .entry(key)
+            .and_modify(|(tab_entry, mixed_agents, has_agent, has_current_agent)| {
+                if tab_lifecycle_priority(candidate.0, candidate.1)
+                    > tab_lifecycle_priority(tab_entry.state, tab_entry.seen)
+                {
+                    tab_entry.state = candidate.0;
+                    tab_entry.seen = candidate.1;
+                }
+                tab_entry.activity_at = match (tab_entry.activity_at, entry.activity_at) {
+                    (Some(current), Some(candidate)) => Some(current.max(candidate)),
+                    (current, candidate) => current.or(candidate),
+                };
+                tab_entry.background_job_count =
+                    match (tab_entry.background_job_count, entry.background_job_count) {
+                        (Some(current), Some(candidate)) => Some(current.saturating_add(candidate)),
+                        (current, candidate) => current.or(candidate),
+                    };
+                if !*mixed_agents {
+                    match (tab_entry.agent_context, entry.agent_context) {
+                        (Some(current), Some(candidate)) if current != candidate => {
+                            tab_entry.agent_context = None;
+                            *mixed_agents = true;
+                        }
+                        (None, Some(candidate)) => tab_entry.agent_context = Some(candidate),
+                        _ => {}
+                    }
+                }
+                *has_agent |= entry.has_agent;
+                *has_current_agent |= entry.agent.is_some();
+            })
+            .or_insert_with(|| (entry.clone(), false, entry.has_agent, entry.agent.is_some()));
+    }
+
+    aggregated
+        .into_iter()
+        .map(
+            |(key, (mut entry, mixed_agents, has_agent, has_current_agent))| {
+                let agent_context = (!mixed_agents).then_some(entry.agent_context).flatten();
+                entry.agent = (has_current_agent && !mixed_agents)
+                    .then_some(agent_context)
+                    .flatten();
+                entry.agent_context = agent_context;
+                entry.has_agent = has_agent;
+                (key, entry)
+            },
+        )
+        .collect()
+}
+
 pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
@@ -643,101 +705,17 @@ fn sidebar_rows_inner(
                 let Some(entries) = agents_by_workspace.remove(&member_idx) else {
                     continue;
                 };
-                let tab_states = entries.iter().fold(
-                    std::collections::HashMap::<
-                        usize,
-                        (
-                            AgentState,
-                            bool,
-                            Option<std::time::Instant>,
-                            Option<u16>,
-                            Option<Agent>,
-                            bool,
-                            bool,
-                            bool,
-                        ),
-                    >::new(),
-                    |mut states, entry| {
-                        let candidate = (entry.state, entry.seen);
-                        states
-                            .entry(entry.tab_idx)
-                            .and_modify(|state| {
-                                if tab_lifecycle_priority(candidate.0, candidate.1)
-                                    > tab_lifecycle_priority(state.0, state.1)
-                                {
-                                    state.0 = candidate.0;
-                                    state.1 = candidate.1;
-                                }
-                                state.2 = match (state.2, entry.activity_at) {
-                                    (Some(current), Some(candidate)) => {
-                                        Some(current.max(candidate))
-                                    }
-                                    (current, candidate) => current.or(candidate),
-                                };
-                                state.3 = match (state.3, entry.background_job_count) {
-                                    (Some(current), Some(candidate)) => {
-                                        Some(current.saturating_add(candidate))
-                                    }
-                                    (current, candidate) => current.or(candidate),
-                                };
-                                if !state.5 {
-                                    match (state.4, entry.agent_context) {
-                                        (Some(current), Some(candidate))
-                                            if current != candidate =>
-                                        {
-                                            state.4 = None;
-                                            state.5 = true;
-                                        }
-                                        (None, Some(candidate)) => state.4 = Some(candidate),
-                                        _ => {}
-                                    }
-                                }
-                                state.6 |= entry.has_agent;
-                                state.7 |= entry.agent.is_some();
-                            })
-                            .or_insert((
-                                candidate.0,
-                                candidate.1,
-                                entry.activity_at,
-                                entry.background_job_count,
-                                entry.agent_context,
-                                false,
-                                entry.has_agent,
-                                entry.agent.is_some(),
-                            ));
-                        states
-                    },
-                );
+                let tab_entries = aggregate_tab_entries(&entries);
                 let mut current_tab = None;
                 for entry in entries {
-                    let tab = entry.tab_idx;
+                    let tab = (entry.ws_idx, entry.tab_idx);
                     if current_tab != Some(tab) {
-                        let mut tab_entry = entry.clone();
-                        if let Some((
-                            state,
-                            seen,
-                            activity_at,
-                            background_job_count,
-                            agent,
-                            mixed_agents,
-                            has_agent,
-                            has_current_agent,
-                        )) = tab_states.get(&tab)
-                        {
-                            tab_entry.state = *state;
-                            tab_entry.seen = *seen;
-                            tab_entry.activity_at = *activity_at;
-                            tab_entry.background_job_count = *background_job_count;
-                            tab_entry.agent = (!mixed_agents && *has_current_agent)
-                                .then_some(*agent)
-                                .flatten();
-                            tab_entry.agent_context = (!mixed_agents).then_some(*agent).flatten();
-                            tab_entry.has_agent = *has_agent;
+                        if let Some(tab_entry) = tab_entries.get(&tab).cloned() {
+                            rows.push(SidebarRow::Tab {
+                                entry: Box::new(tab_entry),
+                                depth,
+                            });
                         }
-                        rows.push(SidebarRow::Tab {
-                            entry: Box::new(tab_entry),
-                            depth,
-                        });
                         current_tab = Some(tab);
                     }
                 }
@@ -4869,6 +4847,103 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].background_job_count, Some(3));
+    }
+
+    #[test]
+    fn prio_panel_aggregates_state_activity_and_jobs_across_tab_panes() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].prio = true;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let started = std::time::Instant::now();
+        let blocked_at = started + std::time::Duration::from_secs(5);
+        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Idle,
+                false,
+                true,
+                false,
+                false,
+                started + std::time::Duration::from_secs(1),
+            );
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .background_job_count = Some(1);
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .seen = true;
+
+        let second_terminal = app.workspaces[0].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Blocked,
+                true,
+                false,
+                false,
+                false,
+                blocked_at,
+            );
+        app.terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .background_job_count = Some(2);
+        app.view_observed_at = blocked_at + std::time::Duration::from_secs(60);
+        app.reconcile_sidebar_presentation();
+
+        let sidebar_tab = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("sidebar tab row");
+        let prio_tab = prio_panel_entries(&app)
+            .into_iter()
+            .find(|entry| entry.ws_idx == 0 && entry.tab_idx == 0)
+            .expect("PRIO tab row");
+
+        assert_eq!(prio_tab.state, AgentState::Blocked);
+        assert_eq!(prio_tab.activity_at, sidebar_tab.activity_at);
+        assert_eq!(
+            prio_tab.background_job_count,
+            sidebar_tab.background_job_count
+        );
+        assert_eq!(prio_tab.background_job_count, Some(3));
+        assert_eq!(
+            tab_row_layout(&prio_tab, app.view_observed_at, 80, 1, &app.palette).activity_age,
+            tab_row_layout(&sidebar_tab, app.view_observed_at, 80, 1, &app.palette).activity_age
+        );
     }
 
     #[test]
