@@ -134,6 +134,7 @@ enum HostTerminalQuery {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostTerminalQueryTrigger {
+    #[cfg_attr(windows, allow(dead_code))]
     Input {
         requires_theme: bool,
         requires_appearance: bool,

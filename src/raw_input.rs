@@ -539,6 +539,7 @@ pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent])
         .any(|event| matches!(event, RawInputEvent::HostColorSchemeChanged(_)))
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn events_require_host_terminal_appearance_query(events: &[RawInputEvent]) -> bool {
     events
         .iter()
