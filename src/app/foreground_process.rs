@@ -158,7 +158,9 @@ impl crate::app::App {
         generation: u64,
         observations: Vec<ForegroundProcessObservation>,
     ) -> bool {
-        if generation <= self.last_applied_foreground_process_refresh_generation {
+        if generation <= self.last_applied_foreground_process_refresh_generation
+            || generation != self.last_foreground_process_refresh_generation
+        {
             return false;
         }
 
@@ -307,6 +309,7 @@ mod tests {
     #[test]
     fn late_foreground_process_refresh_applies_process_name() {
         let (mut app, pane_id, terminal_id) = app_with_test_pane("late-foreground");
+        app.last_foreground_process_refresh_generation = 1;
         app.foreground_process_refresh_in_flight = Some(ForegroundProcessRefreshInFlight {
             generation: 1,
             deadline: Instant::now() - Duration::from_millis(1),
@@ -342,15 +345,19 @@ mod tests {
             .clone()
             .expect("first foreground refresh in flight");
 
+        // Push the schedule out so the deadline sweep clears the in-flight record
+        // without issuing a successor. That is the interleaving the late-result
+        // repair exists for: the record is gone, but nothing has superseded the
+        // generation, so its results are still the freshest data available.
+        app.next_foreground_process_refresh = first_refresh.deadline + Duration::from_secs(60);
         app.start_foreground_process_refresh_if_due(
             first_refresh.deadline + Duration::from_millis(1),
         );
-        let second_generation = app
-            .foreground_process_refresh_in_flight
-            .as_ref()
-            .expect("second foreground refresh in flight")
-            .generation;
-        assert_eq!(second_generation, first_refresh.generation + 1);
+        assert!(app.foreground_process_refresh_in_flight.is_none());
+        assert_eq!(
+            app.last_foreground_process_refresh_generation,
+            first_refresh.generation
+        );
 
         assert!(app.handle_foreground_processes_refreshed(
             first_refresh.generation,
@@ -366,21 +373,7 @@ mod tests {
                 .as_deref(),
             Some("cargo")
         );
-        assert_eq!(
-            app.foreground_process_refresh_in_flight
-                .as_ref()
-                .map(|refresh| refresh.generation),
-            Some(second_generation)
-        );
 
-        assert!(app.handle_foreground_processes_refreshed(
-            second_generation,
-            vec![ForegroundProcessObservation {
-                pane_id,
-                shell_pid: None,
-                process_name: Some("rustc".into()),
-            }],
-        ));
         assert!(!app.handle_foreground_processes_refreshed(
             first_refresh.generation,
             vec![ForegroundProcessObservation {
@@ -393,8 +386,56 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .foreground_process_name
                 .as_deref(),
-            Some("rustc")
+            Some("cargo")
         );
+    }
+
+    #[test]
+    fn superseded_foreground_refresh_drops_result_before_successor() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("superseded-foreground");
+        let first_now = Instant::now();
+        app.next_foreground_process_refresh = first_now;
+        app.start_foreground_process_refresh_if_due(first_now);
+        let first_refresh = app
+            .foreground_process_refresh_in_flight
+            .clone()
+            .expect("first foreground refresh in flight");
+
+        let successor_now = first_refresh.deadline + Duration::from_millis(1);
+        app.next_foreground_process_refresh = successor_now;
+        app.start_foreground_process_refresh_if_due(successor_now);
+        let successor_generation = app
+            .foreground_process_refresh_in_flight
+            .as_ref()
+            .expect("successor foreground refresh in flight")
+            .generation;
+        assert_eq!(successor_generation, first_refresh.generation + 1);
+
+        assert!(!app.handle_foreground_processes_refreshed(
+            first_refresh.generation,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("stale-process".into()),
+            }],
+        ));
+        assert_eq!(
+            app.state.terminals[&terminal_id].foreground_process_name,
+            None
+        );
+        assert_eq!(
+            app.foreground_process_refresh_in_flight
+                .as_ref()
+                .map(|refresh| refresh.generation),
+            Some(successor_generation)
+        );
+
+        assert!(!app.handle_foreground_processes_refreshed(successor_generation, Vec::new(),));
+        assert_eq!(
+            app.last_applied_foreground_process_refresh_generation,
+            successor_generation
+        );
+        assert!(app.foreground_process_refresh_in_flight.is_none());
     }
 
     #[test]

@@ -150,7 +150,9 @@ impl App {
         cache_updates: Vec<(GitWorkContextCacheKey, GitWorkContextCacheEntry)>,
     ) -> bool {
         self.prune_git_work_context_state();
-        if generation <= self.last_applied_git_work_context_refresh_generation {
+        if generation <= self.last_applied_git_work_context_refresh_generation
+            || generation != self.last_git_work_context_refresh_generation
+        {
             return false;
         }
 
@@ -953,6 +955,91 @@ mod tests {
                 .git_observation
                 .pr_urls,
             vec!["https://github.com/o/r/pull/2"]
+        );
+    }
+
+    #[test]
+    fn superseded_git_refresh_drops_result_before_successor() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("superseded-git-context");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let cwd = app.state.terminals[&terminal_id].cwd.clone();
+        app.git_program_override = Some(PathBuf::from("herdr-test-missing-git"));
+
+        app.test_begin_git_work_context_refresh(1);
+        let first_refresh = app
+            .git_work_context_refresh_in_flight
+            .clone()
+            .expect("first git refresh in flight");
+
+        app.test_begin_git_work_context_refresh(2);
+        let successor_generation = app
+            .git_work_context_refresh_in_flight
+            .as_ref()
+            .expect("successor git refresh in flight")
+            .generation;
+        assert_eq!(successor_generation, first_refresh.generation + 1);
+
+        let key = GitWorkContextCacheKey {
+            repo_root: PathBuf::from("/superseded/repo"),
+            branch: "feat/superseded".into(),
+        };
+        let stale_context = crate::work_context::PaneWorkContext {
+            pr_urls: vec!["https://github.com/o/r/pull/7".into()],
+            branch: Some(key.branch.clone()),
+            ..crate::work_context::PaneWorkContext::default()
+        };
+        assert!(!app.handle_git_work_context_refreshed(
+            first_refresh.generation,
+            vec![GitWorkContextObservation {
+                pane_id,
+                input: GitWorkContextInput {
+                    cwd,
+                    repo_root: Some(key.repo_root.clone()),
+                    branch: Some(key.branch.clone()),
+                },
+                context: stale_context.clone(),
+            }],
+            vec![(
+                key.clone(),
+                GitWorkContextCacheEntry {
+                    context: stale_context,
+                    cached_at: Instant::now(),
+                },
+            )],
+        ));
+        assert!(app.state.terminals[&terminal_id]
+            .work_context
+            .snapshot_tiers()
+            .git_observation
+            .pr_urls
+            .is_empty());
+        assert!(app.git_work_context_cache.is_empty());
+        assert_eq!(
+            app.git_work_context_refresh_in_flight
+                .as_ref()
+                .map(|refresh| refresh.generation),
+            Some(successor_generation)
+        );
+
+        app.handle_git_work_context_refreshed(successor_generation, Vec::new(), Vec::new());
+        assert_eq!(
+            app.last_applied_git_work_context_refresh_generation,
+            successor_generation
         );
     }
 
