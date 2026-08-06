@@ -39,6 +39,8 @@ const MAX_CCUSAGE_OUTPUT_BYTES: usize = 512 * 1024;
 const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const USAGE_WINDOW_MINUTES: [(u64, &str); 2] = [(300, "5h"), (10080, "week")];
 const MAX_USAGE_AMOUNT: f64 = 1_000_000.0;
+const MAX_CLAUDE_REMAINING_MINUTES: u64 = 24 * 60;
+const MIN_USAGE_WAKEUP_DELAY: Duration = Duration::from_secs(1);
 
 pub(crate) fn panel_width_for_main(main_width: u16) -> Option<u16> {
     let available = main_width.saturating_sub(INFO_PANEL_MIN_MAIN_WIDTH);
@@ -176,7 +178,7 @@ struct ClaudeUsage {
 #[derive(Debug, Clone, PartialEq)]
 struct ClaudeUsageWindow {
     cost_usd: f64,
-    remaining_minutes: u64,
+    remaining_minutes: Option<u64>,
     resets_at: i64,
 }
 
@@ -271,6 +273,8 @@ fn parse_ccusage_output(output: &str, now: i64) -> Result<Option<ClaudeUsage>, (
         return Ok(Some(ClaudeUsage::default()));
     }
     let remaining_minutes = block.projection.ok_or(())?.remaining_minutes;
+    let remaining_minutes =
+        (remaining_minutes <= MAX_CLAUDE_REMAINING_MINUTES).then_some(remaining_minutes);
     Ok(Some(ClaudeUsage {
         five_hour: Some(ClaudeUsageWindow {
             cost_usd,
@@ -730,26 +734,36 @@ impl UsageCache {
         self.snapshot_at(current_unix_timestamp())
     }
 
-    fn snapshot_at(&self, now: Option<i64>) -> UsageSnapshot {
+    fn purge_expired_snapshot(&self, now: Option<i64>) -> bool {
         let Ok(mut state) = self.state.lock() else {
-            return UsageSnapshot::default();
+            return false;
         };
         let snapshot = filter_expired_usage_snapshot(state.snapshot.clone(), now);
         let changed = snapshot != state.snapshot;
         if changed {
-            state.snapshot = snapshot.clone();
+            state.snapshot = snapshot;
             state.last_wakeup = None;
         }
         drop(state);
         if changed {
             self.wakeup.notify_all();
         }
-        snapshot
+        changed
+    }
+
+    fn snapshot_at(&self, now: Option<i64>) -> UsageSnapshot {
+        self.purge_expired_snapshot(now);
+        let Ok(state) = self.state.lock() else {
+            return UsageSnapshot::default();
+        };
+        state.snapshot.clone()
     }
 
     fn next_wakeup_delay(&self, now: Instant) -> Duration {
+        let unix_now = current_unix_timestamp();
+        self.purge_expired_snapshot(unix_now);
         let Ok(state) = self.state.lock() else {
-            return self.refresh_interval;
+            return self.refresh_interval.max(MIN_USAGE_WAKEUP_DELAY);
         };
         let last_activity = match (state.last_refresh, state.last_wakeup) {
             (Some(last_refresh), Some(last_wakeup)) => Some(last_refresh.max(last_wakeup)),
@@ -760,7 +774,7 @@ impl UsageCache {
             self.refresh_interval
                 .saturating_sub(now.saturating_duration_since(last))
         });
-        if let Some(unix_now) = current_unix_timestamp() {
+        if let Some(unix_now) = unix_now {
             for resets_at in state
                 .snapshot
                 .codex
@@ -785,7 +799,7 @@ impl UsageCache {
                 delay = delay.min(expiry);
             }
         }
-        delay
+        delay.max(MIN_USAGE_WAKEUP_DELAY)
     }
 
     fn ensure_wakeup(
@@ -927,7 +941,10 @@ fn usage_window_text(window_label: &str, window: &UsageWindow, width: usize) -> 
     format!("{left:.0}%")
 }
 
-fn claude_remaining_text(minutes: u64) -> String {
+fn claude_remaining_text(minutes: Option<u64>) -> String {
+    let Some(minutes) = minutes else {
+        return "—".to_string();
+    };
     if minutes >= 24 * 60 {
         format!("{}d", minutes / (24 * 60))
     } else if minutes >= 60 {
@@ -939,26 +956,28 @@ fn claude_remaining_text(minutes: u64) -> String {
 
 fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
     let reset = usage_reset_label(window.resets_at);
+    let remaining_minutes = window
+        .remaining_minutes
+        .map_or_else(|| "—".to_string(), |minutes| format!("{minutes}m"));
+    let remaining_with_suffix = if window.remaining_minutes.is_some() {
+        format!("{remaining_minutes} left")
+    } else {
+        remaining_minutes.clone()
+    };
     let full = format!(
-        "5h ${:.2} · {}m left · {reset}",
-        window.cost_usd, window.remaining_minutes
+        "5h ${:.2} · {remaining_with_suffix} · {reset}",
+        window.cost_usd
     );
     if display_width(&full) <= width {
         return full;
     }
 
-    let compact = format!(
-        "5h ${:.2} · {}m · {reset}",
-        window.cost_usd, window.remaining_minutes
-    );
+    let compact = format!("5h ${:.2} · {remaining_minutes} · {reset}", window.cost_usd);
     if display_width(&compact) <= width {
         return compact;
     }
 
-    let tight = format!(
-        "${:.2} · {}m · {reset}",
-        window.cost_usd, window.remaining_minutes
-    );
+    let tight = format!("${:.2} · {remaining_minutes} · {reset}", window.cost_usd);
     if display_width(&tight) <= width {
         return tight;
     }
@@ -1220,7 +1239,7 @@ mod tests {
             claude: ClaudeUsage {
                 five_hour: Some(ClaudeUsageWindow {
                     cost_usd: 56.68,
-                    remaining_minutes: 66,
+                    remaining_minutes: Some(66),
                     resets_at,
                 }),
             },
@@ -1353,8 +1372,25 @@ mod tests {
         let window = usage.five_hour.expect("five-hour usage");
 
         assert_eq!(window.cost_usd, 56.68);
-        assert_eq!(window.remaining_minutes, 66);
+        assert_eq!(window.remaining_minutes, Some(66));
         assert_eq!(usage_reset_label(window.resets_at), "14:00Z");
+    }
+
+    #[test]
+    fn ccusage_bounds_implausible_remaining_minutes_to_dash() {
+        let usage = parse_ccusage_output(
+            r#"{"blocks":[{"isActive":true,"endTime":"2026-08-06T14:00:00.000Z","costUSD":1000000,"projection":{"remainingMinutes":18446744073709551615}}]}"#,
+            ccusage_now(),
+        )
+        .expect("valid ccusage JSON")
+        .expect("active ccusage block");
+        let window = usage.five_hour.expect("five-hour usage");
+
+        assert_eq!(window.cost_usd, MAX_USAGE_AMOUNT);
+        assert_eq!(window.remaining_minutes, None);
+        let rendered = claude_usage_text(&window, 24);
+        assert!(rendered.contains("$1000000"), "{rendered}");
+        assert!(rendered.contains('—'), "{rendered}");
     }
 
     #[test]
@@ -1486,7 +1522,7 @@ mod tests {
                 claude: ProviderRefresh::Fresh(ClaudeUsage {
                     five_hour: Some(ClaudeUsageWindow {
                         cost_usd: 1.23,
-                        remaining_minutes: 240,
+                        remaining_minutes: Some(240),
                         resets_at: now + 7200,
                     }),
                 }),
@@ -1562,6 +1598,21 @@ mod tests {
     }
 
     #[test]
+    fn usage_cache_purges_expired_snapshot_before_computing_wakeup_delay() {
+        let cache = UsageCache::new(Duration::from_secs(60));
+        let now = current_unix_timestamp().expect("current test timestamp");
+        let started = Instant::now();
+        assert!(cache.begin_refresh(started));
+        cache.finish_refresh(started, populated_usage_snapshot(now - 1));
+
+        let delay = cache.next_wakeup_delay(started);
+
+        let state = cache.state.lock().expect("usage cache state");
+        assert_eq!(state.snapshot, UsageSnapshot::default());
+        assert!(delay >= MIN_USAGE_WAKEUP_DELAY);
+    }
+
+    #[test]
     fn usage_cache_publishes_a_snapshot_and_requests_a_render() {
         let cache = UsageCache::new(Duration::from_secs(60));
         let started = Instant::now();
@@ -1628,7 +1679,7 @@ mod tests {
 
         let claude_window = ClaudeUsageWindow {
             cost_usd: 56.68,
-            remaining_minutes: 66,
+            remaining_minutes: Some(66),
             resets_at: 14 * 3_600,
         };
         assert_eq!(
@@ -1649,7 +1700,7 @@ mod tests {
     fn usage_rows_keep_quota_figures_at_narrow_realistic_widths() {
         let claude_window = ClaudeUsageWindow {
             cost_usd: 1234.56,
-            remaining_minutes: 10_080,
+            remaining_minutes: Some(MAX_CLAUDE_REMAINING_MINUTES),
             resets_at: parse_utc_timestamp("2026-08-06T23:59:00Z").expect("valid reset"),
         };
         let codex_window = UsageWindow {
@@ -1658,8 +1709,11 @@ mod tests {
             resets_at: claude_window.resets_at,
         };
 
-        assert_eq!(claude_remaining_text(10_080), "7d");
-        assert_eq!(claude_remaining_text(960), "16h");
+        assert_eq!(
+            claude_remaining_text(Some(MAX_CLAUDE_REMAINING_MINUTES)),
+            "1d"
+        );
+        assert_eq!(claude_remaining_text(Some(960)), "16h");
         for panel_width in [26usize, 36] {
             let inner_width = panel_width - 2;
             let claude = claude_usage_text(&claude_window, inner_width);
@@ -1668,7 +1722,7 @@ mod tests {
                 "{panel_width}: {claude}"
             );
             assert!(claude.contains("$1235") || claude.contains("$1234.56"));
-            assert!(claude.contains("7d") || claude.contains("10080m"));
+            assert!(claude.contains("1d") || claude.contains("1440m"));
 
             let codex = usage_window_text("week", &codex_window, inner_width);
             assert!(
@@ -1677,6 +1731,42 @@ mod tests {
             );
             assert!(codex.contains("100%"), "{panel_width}: {codex}");
             assert!(codex.contains("23:59Z"), "{panel_width}: {codex}");
+        }
+    }
+
+    #[test]
+    fn claude_usage_width_fallback_preserves_quota_for_adversarial_numbers() {
+        let invalid_remaining = parse_ccusage_output(
+            r#"{"blocks":[{"isActive":true,"endTime":"2026-08-06T14:00:00.000Z","costUSD":1000000,"projection":{"remainingMinutes":18446744073709551615}}]}"#,
+            ccusage_now(),
+        )
+        .expect("valid ccusage JSON")
+        .expect("active ccusage block")
+        .five_hour
+        .expect("five-hour usage");
+        let largest_plausible = ClaudeUsageWindow {
+            cost_usd: MAX_USAGE_AMOUNT,
+            remaining_minutes: Some(MAX_CLAUDE_REMAINING_MINUTES),
+            resets_at: parse_utc_timestamp("2026-08-06T23:59:00Z").expect("valid reset"),
+        };
+
+        for width in [24, 34] {
+            for window in [&invalid_remaining, &largest_plausible] {
+                let rendered = claude_usage_text(window, width);
+                assert!(
+                    display_width(&rendered) <= width,
+                    "width {width}: {rendered}"
+                );
+                assert!(rendered.contains("$1000000"), "width {width}: {rendered}");
+                if window.remaining_minutes.is_some() {
+                    assert!(
+                        rendered.contains("1d") || rendered.contains("1440m"),
+                        "width {width}: {rendered}"
+                    );
+                } else {
+                    assert!(rendered.contains('—'), "width {width}: {rendered}");
+                }
+            }
         }
     }
 
