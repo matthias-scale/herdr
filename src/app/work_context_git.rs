@@ -10,10 +10,11 @@ use crate::layout::PaneId;
 use crate::work_context::{extract_pr_urls, extract_preview_urls, extract_ticket_ids};
 
 pub(crate) const WORK_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-pub(crate) const WORK_CONTEXT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 // Each pane gets its own probe budget so one slow repository cannot consume the
 // whole batch and leave every later pane without links. The batch ceiling still
-// bounds a refresh that would otherwise walk many slow repositories back to back.
+// bounds a refresh that would otherwise walk many slow repositories back to back,
+// and it is also the in-flight lifetime: a shorter scheduler deadline would let a
+// successor supersede a worker that is still producing valid observations.
 pub(crate) const WORK_CONTEXT_TARGET_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const WORK_CONTEXT_BATCH_TIMEOUT: Duration = Duration::from_secs(20);
 // Cache GitHub metadata for repeated refresh requests within a short window.
@@ -120,12 +121,11 @@ impl App {
             .last_git_work_context_refresh_generation
             .wrapping_add(1);
         let generation = self.last_git_work_context_refresh_generation;
-        let deadline = now + WORK_CONTEXT_REFRESH_TIMEOUT;
+        let batch_deadline = now + WORK_CONTEXT_BATCH_TIMEOUT;
         self.git_work_context_refresh_in_flight = Some(GitWorkContextRefreshInFlight {
             generation,
-            deadline,
+            deadline: batch_deadline,
         });
-        let batch_deadline = now + WORK_CONTEXT_BATCH_TIMEOUT;
 
         let event_tx = self.event_tx.clone();
         let cache = self.git_work_context_cache.clone();
@@ -302,7 +302,7 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn test_begin_git_work_context_refresh(&mut self, generation: u64) {
-        let deadline = Instant::now() + WORK_CONTEXT_REFRESH_TIMEOUT;
+        let deadline = Instant::now() + WORK_CONTEXT_BATCH_TIMEOUT;
         self.last_git_work_context_refresh_generation = generation;
         self.git_work_context_refresh_in_flight = Some(GitWorkContextRefreshInFlight {
             generation,
@@ -958,6 +958,42 @@ mod tests {
                 .map(|refresh| refresh.generation),
             Some(2)
         );
+    }
+
+    #[test]
+    fn queued_request_does_not_supersede_a_worker_inside_its_batch_budget() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("budget")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.git_program_override = Some(PathBuf::from("herdr-test-missing-git"));
+        app.test_begin_git_work_context_refresh(1);
+        app.next_git_work_context_refresh = Instant::now() + WORK_CONTEXT_REFRESH_INTERVAL;
+
+        app.request_git_work_context_refresh(Instant::now());
+        assert!(app.git_work_context_refresh_due_after_in_flight);
+
+        // Far past a two-second scheduler deadline, but still inside the budget the
+        // worker was actually given. Superseding here would discard the observations
+        // that worker is still producing.
+        app.start_git_work_context_refresh_if_due(Instant::now() + Duration::from_secs(5));
+
+        assert_eq!(
+            app.git_work_context_refresh_in_flight
+                .as_ref()
+                .map(|refresh| refresh.generation),
+            Some(1),
+            "a queued request must not supersede a worker inside its batch budget"
+        );
+        assert_eq!(app.last_git_work_context_refresh_generation, 1);
+        assert!(app.git_work_context_refresh_due_after_in_flight);
     }
 
     #[test]
