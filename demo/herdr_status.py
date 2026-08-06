@@ -165,9 +165,13 @@ def report(
         "source": source,
         "applies_to_source": source,
         "tokens": tokens,
+        # Counts are noise in the sidebar. One gate or three, the action is the
+        # same -- go answer it; and running agents just mean "not done", which
+        # the plain working dot already says. The numbers still ride along in
+        # the `closing_*` tokens for anything that wants them.
         "state_labels": {
-            "blocked": f"gate ×{blocking}" if blocking else "blocked",
-            "working": f"{agents} agents" if agents else "working",
+            "blocked": "gate" if blocking else "blocked",
+            "working": "working",
         },
         "seq": seq,
     }
