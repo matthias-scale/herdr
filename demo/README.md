@@ -107,17 +107,57 @@ running server.
 **This works on stock herdr with no Rust change**, because reports go under
 `herdr:<agent>-closing-block` rather than the reserved `herdr:<agent>`.
 
-**Fork change** (`src/detect/mod.rs`): `is_closing_block_source` admits any
-`herdr:<agent>-closing-block` whose suffix names the agent it claims to speak
-for, so a new agent adopting the contract needs no herdr release. This is what
-stops the `❯` prompt box from taking the pane back to idle at turn end.
+**Live end-to-end against a real `claude` process** — the check that matters,
+and the one that initially failed:
+
+| Reported | herdr status | label |
+|---|---|---|
+| `blocking=0 agents=3` | `working` | `3 agents` |
+| `blocking=2 agents=2` + gate | `blocked` | `gate ×2` |
+| same, 3 detection ticks later | `blocked` | `gate ×2` |
+| same, after focusing the tab | `blocked` | `gate ×3` |
+| `blocking=0 agents=0` | `idle` | — |
+
+**Blocked persists across visiting the tab** for free: `src/ui/status.rs:380`
+and `src/ui/sidebar.rs:380` match `(AgentState::Blocked, _)`, ignoring `seen`.
+`seen` only separates idle from done. A gate therefore stays red until a later
+turn reports `blocking=0` — cleared by answering it, not by glancing at it.
+This is the same behaviour a real permission dialog has.
+
+**Fork change, part 1** (`src/detect/mod.rs`): `is_closing_block_source` admits
+any `herdr:<agent>-closing-block` whose suffix names the agent it claims to
+speak for, so a new agent adopting the contract needs no herdr release.
 `hook_authority_is_effective` still independently requires that agent's process
 to be present, so the shape match is not a trust hole.
+
+**Fork change, part 2** (`src/terminal/state.rs`) — necessary, and missed on the
+first pass. Part 1 alone armed a suppression that was never reachable: the
+report was accepted at the RPC edge and dropped inside `TerminalState`, while
+the caller still saw `{"type":"ok"}` because `handle_pane_report_agent`
+discards the mutation. Two gates rejected it, both keyed on session identity:
+
+1. `route_full_lifecycle_hook_report` requires an `AgentSessionRef`, but
+   `agent_resume::session_ref_from_report` mints one only for sources on the
+   `is_official_agent_source` allowlist. A closing-block source reports what the
+   agent *said*, not where to *resume* it, so its ref is always `None` — the
+   report fell through to a pending-replacement slot that nothing drains while
+   the agent stays continuously detected.
+2. `set_hook_authority_at` rejected it as an owner conflict on any pane where
+   the real agent had already announced itself under `herdr:<agent>`.
+
+Both now accept on process presence, the only guarantee this source claims.
+`accept_hook_report` still enforces per-source sequence monotonicity.
 
 Tests: `closing_block_source_matches_only_its_own_agent` (`src/detect/mod.rs`)
 and `closing_block_authority_outranks_visible_idle_prompt_box`
 (`src/terminal/state.rs`), the latter also asserting the authority does **not**
 outlive the agent process.
+
+The state.rs test originally passed a session ref the RPC can never produce and
+a session announcement under its own source, so it stayed green while the live
+path dropped every report. It now reports with `session_ref: None` against a
+pane already owned by `herdr:claude`, and was confirmed to **fail without the
+fix** before being accepted as a guard.
 
 `cargo fmt` clean, `cargo clippy --all-targets` clean. Full `cargo test`
 single-threaded, mine vs baseline: **13 failures on both sides, zero new**. The
@@ -144,8 +184,10 @@ already exited. Every key is now written every time.
 
 - **UI.** Blockers and running agents ride the existing single status field plus
   `state_labels`/tokens. Rendering them as separate sidebar columns is not built.
-- Verified against a synthetic pane and Rust unit tests, not against a live
-  `claude` process in a herdr pane end-to-end.
+- The `Stop` hook is not yet wired into `~/.claude/settings.json`, so the live
+  end-to-end run drove the contract by hand rather than from a real turn end.
+  Wiring it means adding a sibling hook — herdr overwrites its own managed
+  `herdr-agent-state.sh` on integration update.
 - The Codex adapter is verified against a synthesised `agent-turn-complete`
   payload, not a live `codex` turn. Codex already has a `notify` entry on this
   machine, so wiring it means chaining, not replacing.
