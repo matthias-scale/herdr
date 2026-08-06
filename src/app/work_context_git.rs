@@ -81,7 +81,6 @@ impl App {
     }
 
     pub(crate) fn start_git_work_context_refresh_if_due(&mut self, now: Instant) {
-        self.prune_git_work_context_state();
         if self
             .git_work_context_refresh_in_flight
             .as_ref()
@@ -97,6 +96,7 @@ impl App {
         }
 
         self.next_git_work_context_refresh = now + WORK_CONTEXT_REFRESH_INTERVAL;
+        self.prune_git_work_context_state();
         let targets = self.git_work_context_targets();
         if targets.is_empty() {
             return;
@@ -124,6 +124,7 @@ impl App {
                     targets,
                     cache,
                     cache_now,
+                    deadline,
                     deadline,
                     &git_program,
                     &gh_program,
@@ -157,12 +158,11 @@ impl App {
         }
 
         let now = Instant::now();
-        if now >= refresh.deadline {
-            self.git_work_context_refresh_in_flight = None;
-            self.next_git_work_context_refresh = now + WORK_CONTEXT_REFRESH_INTERVAL;
-            return false;
-        }
+        let overran_deadline = now >= refresh.deadline;
         self.git_work_context_refresh_in_flight = None;
+        if overran_deadline {
+            self.next_git_work_context_refresh = now + WORK_CONTEXT_REFRESH_INTERVAL;
+        }
         let refreshed_cache_keys: HashSet<_> =
             cache_updates.iter().map(|(key, _)| key.clone()).collect();
         for (key, entry) in cache_updates {
@@ -286,7 +286,8 @@ fn refresh_git_work_contexts(
     targets: Vec<GitWorkContextTarget>,
     cache: HashMap<GitWorkContextCacheKey, GitWorkContextCacheEntry>,
     now: Instant,
-    deadline: Instant,
+    git_deadline: Instant,
+    gh_deadline: Instant,
     git_program: &Path,
     gh_program: &Path,
 ) -> GitWorkContextRefreshOutput {
@@ -299,7 +300,7 @@ fn refresh_git_work_contexts(
         let input = if let Some(input) = discovered.get(&target.cwd) {
             input.clone()
         } else {
-            let input = discover_git_input(&target.cwd, deadline, git_program);
+            let input = discover_git_input(&target.cwd, git_deadline, git_program);
             discovered.insert(target.cwd.clone(), input.clone());
             input
         };
@@ -319,7 +320,7 @@ fn refresh_git_work_contexts(
                     entry.context.clone()
                 } else {
                     let context =
-                        git_work_context_for_branch(branch, repo_root, deadline, gh_program);
+                        git_work_context_for_branch(branch, repo_root, gh_deadline, gh_program);
                     let entry = GitWorkContextCacheEntry {
                         context: context.clone(),
                         cached_at: now,
@@ -541,6 +542,31 @@ mod tests {
             cache,
             now,
             deadline,
+            deadline,
+            git,
+            gh,
+        )
+    }
+
+    #[cfg(unix)]
+    fn refresh_one_with_deadlines(
+        git: &Path,
+        gh: &Path,
+        cwd: &Path,
+        cache: HashMap<GitWorkContextCacheKey, GitWorkContextCacheEntry>,
+        now: Instant,
+        git_deadline: Instant,
+        gh_deadline: Instant,
+    ) -> GitWorkContextRefreshOutput {
+        refresh_git_work_contexts(
+            vec![GitWorkContextTarget {
+                pane_id: PaneId::from_raw(1),
+                cwd: cwd.to_path_buf(),
+            }],
+            cache,
+            now,
+            git_deadline,
+            gh_deadline,
             git,
             gh,
         )
@@ -591,13 +617,22 @@ mod tests {
         std::fs::create_dir(&repo).expect("create repo fixture");
         fake_git(&git, &repo, "feat/SCA-44-test");
         write_executable(&gh_failure, "#!/bin/sh\nexit 7\n");
-        write_executable(&gh_timeout, "#!/bin/sh\nsleep 2\n");
+        write_executable(
+            &gh_timeout,
+            "#!/bin/sh\nsleep 2\nprintf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/timeout\"}'\n",
+        );
 
         let gh_missing = dir.join("missing-gh");
         for gh in [&gh_failure, &gh_timeout, &gh_missing] {
-            // The deadline covers two git subprocesses before gh is invoked; keep enough
-            // budget for process startup while still exercising gh's bounded timeout path.
-            let output = refresh_one(&git, gh, &repo, Instant::now() + Duration::from_millis(500));
+            let output = refresh_one_with_deadlines(
+                &git,
+                gh,
+                &repo,
+                HashMap::new(),
+                Instant::now(),
+                Instant::now() + Duration::from_secs(5),
+                Instant::now() + Duration::from_millis(500),
+            );
             assert_eq!(output.observations[0].context.ticket_ids, vec!["SCA-44"]);
             assert!(output.observations[0].context.pr_urls.is_empty());
             assert!(output.observations[0].context.preview_urls.is_empty());
@@ -688,7 +723,7 @@ mod tests {
             ),
         );
 
-        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(1));
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
         let context = &output.observations[0].context;
         assert_eq!(context.pr_urls, vec!["https://github.com/o/r/pull/7"]);
         assert_eq!(
@@ -697,6 +732,167 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn late_git_work_context_refresh_applies_observation_and_cache() {
+        let dir = fixture_dir("late-refresh");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let gh_invocations = dir.join("gh-invocations");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/MAT-1-late");
+        write_executable(
+            &gh,
+            &format!(
+                "#!/bin/sh\ncount=0\nif [ -f '{}' ]; then count=$(cat '{}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf '%s\\n' '{{\"url\":\"https://github.com/o/r/pull/9\"}}'\n",
+                gh_invocations.display(),
+                gh_invocations.display(),
+                gh_invocations.display(),
+            ),
+        );
+
+        let first_now = Instant::now();
+        let first = refresh_one_at(
+            &git,
+            &gh,
+            &repo,
+            HashMap::new(),
+            first_now,
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!(first.observations.len(), 1);
+        assert_eq!(first.cache_updates.len(), 1);
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("late-git-context");
+        workspace.identity_cwd = repo.clone();
+        workspace.cached_identity_cwd = repo.clone();
+        workspace.cached_git_status_key = repo.clone();
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+
+        let mut observation = first
+            .observations
+            .into_iter()
+            .next()
+            .expect("git observation");
+        observation.pane_id = pane_id;
+        let cache_updates = first.cache_updates;
+        app.test_begin_git_work_context_refresh(1);
+        app.git_work_context_refresh_in_flight
+            .as_mut()
+            .expect("git refresh in flight")
+            .deadline = Instant::now() - Duration::from_millis(1);
+
+        assert!(app.handle_git_work_context_refreshed(1, vec![observation], cache_updates));
+        let tiers = app.state.terminals[&terminal_id]
+            .work_context
+            .snapshot_tiers();
+        assert_eq!(
+            tiers.git_observation.pr_urls,
+            vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(app.git_work_context_cache.len(), 1);
+        assert!(app.git_work_context_refresh_in_flight.is_none());
+        assert!(app.next_git_work_context_refresh > Instant::now());
+
+        let second = refresh_one_at(
+            &git,
+            &gh,
+            &repo,
+            app.git_work_context_cache.clone(),
+            first_now + Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(second.cache_updates.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&gh_invocations).expect("read gh invocation count"),
+            "1"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn git_work_context_generation_mismatch_drops_observation_and_cache() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("stale-git-context");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let cwd = app.state.terminals[&terminal_id].cwd.clone();
+        app.test_begin_git_work_context_refresh(2);
+
+        let key = GitWorkContextCacheKey {
+            repo_root: PathBuf::from("/stale/repo"),
+            branch: "feat/SCA-2-stale".into(),
+        };
+        let context = crate::work_context::PaneWorkContext {
+            pr_urls: vec!["https://github.com/o/r/pull/10".into()],
+            branch: Some("feat/SCA-2-stale".into()),
+            ..crate::work_context::PaneWorkContext::default()
+        };
+        app.handle_git_work_context_refreshed(
+            1,
+            vec![GitWorkContextObservation {
+                pane_id,
+                input: GitWorkContextInput {
+                    cwd,
+                    repo_root: Some(key.repo_root.clone()),
+                    branch: Some(key.branch.clone()),
+                },
+                context: context.clone(),
+            }],
+            vec![(
+                key,
+                GitWorkContextCacheEntry {
+                    context,
+                    cached_at: Instant::now(),
+                },
+            )],
+        );
+
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .work_context
+                .snapshot_tiers()
+                .git_observation,
+            crate::work_context::PaneWorkContext::default()
+        );
+        assert!(app.git_work_context_cache.is_empty());
+        assert_eq!(
+            app.git_work_context_refresh_in_flight
+                .map(|refresh| refresh.generation),
+            Some(2)
+        );
     }
 
     #[test]
@@ -740,5 +936,38 @@ mod tests {
         assert!(!changed);
         assert!(!app.render_dirty.is_pending());
         assert!(app.session_save_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn not_due_git_work_context_refresh_does_not_query_runtime_cwd() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("git-context-not-due");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        let now = Instant::now();
+        app.next_git_work_context_refresh = now + WORK_CONTEXT_REFRESH_INTERVAL;
+        crate::terminal::TerminalRuntime::test_reset_cwd_query_count();
+
+        for _ in 0..64 {
+            app.start_git_work_context_refresh_if_due(now);
+        }
+
+        assert_eq!(crate::terminal::TerminalRuntime::test_cwd_query_count(), 0);
     }
 }

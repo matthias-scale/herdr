@@ -166,11 +166,10 @@ impl crate::app::App {
         }
 
         let now = Instant::now();
-        let deadline = refresh.deadline;
+        let overran_deadline = now >= refresh.deadline;
         self.foreground_process_refresh_in_flight = None;
-        if now >= deadline {
+        if overran_deadline {
             self.next_foreground_process_refresh = now + FOREGROUND_PROCESS_REFRESH_INTERVAL;
-            return false;
         }
 
         let mut changed = false;
@@ -275,5 +274,81 @@ mod tests {
         assert!(observations
             .iter()
             .all(|observation| observation.process_name.is_none()));
+    }
+
+    fn app_with_test_pane(name: &str) -> (crate::app::App, PaneId, crate::terminal::TerminalId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new(name);
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        (app, pane_id, terminal_id)
+    }
+
+    #[test]
+    fn late_foreground_process_refresh_applies_process_name() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("late-foreground");
+        app.foreground_process_refresh_in_flight = Some(ForegroundProcessRefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() - Duration::from_millis(1),
+        });
+
+        app.handle_foreground_processes_refreshed(
+            1,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("cargo".into()),
+            }],
+        );
+
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .foreground_process_name
+                .as_deref(),
+            Some("cargo")
+        );
+        assert!(app.foreground_process_refresh_in_flight.is_none());
+        assert!(app.next_foreground_process_refresh > Instant::now());
+    }
+
+    #[test]
+    fn foreground_process_generation_mismatch_drops_observations() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("stale-foreground");
+        app.foreground_process_refresh_in_flight = Some(ForegroundProcessRefreshInFlight {
+            generation: 2,
+            deadline: Instant::now() - Duration::from_millis(1),
+        });
+
+        app.handle_foreground_processes_refreshed(
+            1,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("stale-process".into()),
+            }],
+        );
+
+        assert_eq!(
+            app.state.terminals[&terminal_id].foreground_process_name,
+            None
+        );
+        assert_eq!(
+            app.foreground_process_refresh_in_flight
+                .map(|refresh| refresh.generation),
+            Some(2)
+        );
     }
 }
