@@ -1017,6 +1017,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: HashSet::new(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         let history = SessionHistorySnapshot {
             generation: Some("history-generation".into()),
@@ -1367,6 +1369,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1481,6 +1485,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1606,6 +1612,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1730,6 +1738,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2005,6 +2015,8 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            dock_width: None,
+            dock_collapsed: None,
         };
         (snapshot, history)
     }

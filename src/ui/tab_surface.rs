@@ -195,7 +195,7 @@ mod tests {
         crate::ui::compute_view(&mut app, full_area);
         let area = app.view.terminal_area;
         // Status bar occupies row 0; tab bar at y=1; terminal below.
-        assert_eq!(area, Rect::new(26, 2, 80, 18));
+        assert_eq!(area, Rect::new(26, 2, 79, 18));
         let surface = compute_tab_surface(
             &app,
             &TerminalRuntimeRegistry::new(),
@@ -325,8 +325,8 @@ mod tests {
         // Status bar occupies row 0 full-width; chrome starts at y=1.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 106, 1));
         assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 26, 19));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 80, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 79, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 79, 18));
         assert_eq!(app.view.pane_infos.len(), 2);
         assert!(!app.view.split_borders.is_empty());
         assert!(frame.cursor.is_some());

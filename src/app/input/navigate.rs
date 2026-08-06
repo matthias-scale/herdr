@@ -426,6 +426,19 @@ impl App {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::ToggleDock => {
+                self.state.dock_collapsed = !self.state.dock_collapsed;
+                self.state.mark_session_dirty();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::PreviousDockTab => {
+                self.state.dock_tab = self.state.dock_tab.previous();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::NextDockTab => {
+                self.state.dock_tab = self.state.dock_tab.next();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CyclePaneNext => {
                 self.cycle_pane_via_api(false);
                 leave_navigate_mode(&mut self.state);
@@ -1624,6 +1637,9 @@ pub(crate) enum NavigateAction {
     TogglePinTab,
     EnterResizeMode,
     ToggleSidebar,
+    ToggleDock,
+    PreviousDockTab,
+    NextDockTab,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -1786,6 +1802,9 @@ fn non_indexed_action_for_key(
         (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.toggle_dock, NavigateAction::ToggleDock),
+        (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
+        (&kb.next_dock_tab, NavigateAction::NextDockTab),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
@@ -2082,6 +2101,19 @@ pub(super) fn execute_navigate_action_in_context(
             state.sidebar_collapsed = !state.sidebar_collapsed;
             leave_navigate_mode(state);
         }
+        NavigateAction::ToggleDock => {
+            state.dock_collapsed = !state.dock_collapsed;
+            state.mark_session_dirty();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::PreviousDockTab => {
+            state.dock_tab = state.dock_tab.previous();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NextDockTab => {
+            state.dock_tab = state.dock_tab.next();
+            leave_navigate_mode(state);
+        }
         NavigateAction::CyclePaneNext => {
             state.cycle_pane(false);
             leave_navigate_mode(state);
@@ -2347,8 +2379,66 @@ mod tests {
     }
 
     #[test]
+    fn dock_key_actions_cycle_tabs_and_toggle_the_dock() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Shortcuts);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
+
+        state.dock_collapsed = true;
+        state.session_dirty = false;
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::ToggleDock,
+            ActionContext::Prefix,
+        );
+        assert!(!state.dock_collapsed);
+        assert!(state.session_dirty);
+    }
+
+    #[test]
     fn ac4_default_work_link_keybindings_map_to_distinct_prefix_actions() {
         let state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('e'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::ToggleDock)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('['), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::PreviousDockTab)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char(']'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::NextDockTab)
+        );
         assert_eq!(
             action_for_key(
                 &state,
