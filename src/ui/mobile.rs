@@ -129,7 +129,9 @@ fn mobile_sidebar_rows_start(app: &AppState, rows: &[SidebarRow]) -> usize {
 
 fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
     match row {
-        SidebarRow::Workspace { .. } | SidebarRow::Tab { .. } => 1,
+        SidebarRow::Workspace { .. }
+        | SidebarRow::Tab { .. }
+        | SidebarRow::SectionHeader { .. } => 1,
         SidebarRow::Agent { .. } => 2,
     }
 }
@@ -229,6 +231,11 @@ pub(crate) fn mobile_switcher_target_at(
     for entry in &rows {
         let row_height = mobile_sidebar_row_height(entry);
         if doc_row >= cursor && doc_row < cursor + row_height {
+            // A section header names a group; there is nothing behind it to
+            // open, so a tap on it is a tap on nothing.
+            if let SidebarRow::SectionHeader { .. } = entry {
+                return None;
+            }
             let on_title_line = doc_row == cursor;
             return Some(match entry {
                 SidebarRow::Workspace { ws_idx, .. } => {
@@ -265,7 +272,8 @@ pub(crate) fn mobile_switcher_target_at(
                             tab_idx: entry.tab_idx,
                         }
                     }
-                }
+                },
+                SidebarRow::SectionHeader { .. } => unreachable!("returned above"),
             });
         }
         cursor += row_height;
@@ -725,6 +733,20 @@ fn render_mobile_switcher_content(
                     title,
                     truncate_end(&mobile_agent_detail(entry), content.width as usize),
                     p.overlay0,
+                );
+            }
+            SidebarRow::SectionHeader { title } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("  {title}"),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                    )),
                 );
             }
             SidebarRow::Tab { entry, depth } => {
