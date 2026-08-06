@@ -24,6 +24,14 @@ use super::{
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
 };
 
+fn dock_body_contains(app: &AppState, column: u16, row: u16) -> bool {
+    let body = app.view.dock_body_rect;
+    column >= body.x
+        && column < body.x.saturating_add(body.width)
+        && row >= body.y
+        && row < body.y.saturating_add(body.height)
+}
+
 pub(super) enum MouseAction {
     NewWorkspace,
     Settings(SettingsAction),
@@ -982,6 +990,16 @@ impl AppState {
                         self.move_selected_workspace_by_visible_delta(1);
                     }
                 }
+            }
+            MouseEventKind::ScrollUp
+                if in_dock && dock_body_contains(self, mouse.column, mouse.row) =>
+            {
+                self.dock_scroll = self.dock_scroll.saturating_sub(3);
+            }
+            MouseEventKind::ScrollDown
+                if in_dock && dock_body_contains(self, mouse.column, mouse.row) =>
+            {
+                self.dock_scroll = self.dock_scroll.saturating_add(3);
             }
 
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {

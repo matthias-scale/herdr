@@ -52,13 +52,21 @@ pub(super) fn render_dock(app: &AppState, frame: &mut Frame) {
             );
         }
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "not implemented yet",
-            Style::default()
-                .fg(app.palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        ))),
-        app.view.dock_body_rect,
-    );
+    match app.dock_tab {
+        DockTab::Editor => frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "not implemented yet",
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ))),
+            app.view.dock_body_rect,
+        ),
+        DockTab::Shortcuts => {
+            super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)
+        }
+        DockTab::Context => {
+            super::dock_context::render_context(app, frame, app.view.dock_body_rect)
+        }
+    }
 }

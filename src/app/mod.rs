@@ -675,6 +675,7 @@ impl App {
             dock_width,
             dock_collapsed,
             dock_tab: state::DockTab::Editor,
+            dock_scroll: 0,
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
