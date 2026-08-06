@@ -8,8 +8,6 @@ use crate::{
 };
 
 struct PreparedPaneInput {
-    ws_idx: usize,
-    pane_id: crate::layout::PaneId,
     target: TerminalInputTarget,
     bytes: Bytes,
 }
@@ -55,7 +53,7 @@ impl App {
 
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let sent = self
-            .lookup_runtime_sender(input.ws_idx, input.pane_id)
+            .terminal_input_runtime(&input.target)
             .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok());
         sent.then_some(input.target)
     }
@@ -132,6 +130,20 @@ impl App {
                 "dropping modifier-only terminal key event instead of forwarding it to pane"
             );
             return None;
+        }
+
+        if let Some(terminal_id) = self.dock_editor_terminal_id() {
+            let rt = self.terminal_runtimes.get(&terminal_id)?;
+            rt.scroll_reset();
+            let bytes = rt.encode_terminal_key(key);
+            self.pressed_terminal_keys
+                .retain(|(id, _), _| *id != source_id);
+            self.suppressed_repeat_keys
+                .retain(|(id, _)| *id != source_id);
+            return Some(PreparedPaneInput {
+                target: TerminalInputTarget { terminal_id },
+                bytes: Bytes::from(bytes),
+            });
         }
 
         let ws_idx = self.state.active?;
@@ -227,8 +239,6 @@ impl App {
         }
 
         Some(PreparedPaneInput {
-            ws_idx,
-            pane_id,
             target: TerminalInputTarget { terminal_id },
             bytes: Bytes::from(bytes),
         })
@@ -273,9 +283,11 @@ impl App {
         let runtime = if self.state.popup_pane.is_some() {
             self.popup_runtime()
         } else if self.state.mode == Mode::Terminal {
-            self.state.active.and_then(|ws_idx| {
-                self.state
-                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            self.dock_editor_runtime().or_else(|| {
+                self.state.active.and_then(|ws_idx| {
+                    self.state
+                        .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+                })
             })
         } else {
             None
@@ -388,7 +400,7 @@ impl App {
         }
 
         let input = self.prepare_terminal_key_forward(crate::app::LOCAL_INPUT_SOURCE, key)?;
-        let sent = if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
+        let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
             runtime.send_bytes(input.bytes).await.is_ok()
         } else {
             false

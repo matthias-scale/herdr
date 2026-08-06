@@ -452,9 +452,11 @@ impl AppState {
                 }
                 if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
                     self.dock_tab = tab;
+                    self.dock_editor_focused = tab == crate::app::DockTab::Editor;
                     return None;
                 }
                 if in_dock {
+                    self.dock_editor_focused = self.dock_tab == crate::app::DockTab::Editor;
                     return None;
                 }
 
