@@ -133,6 +133,7 @@ pub struct App {
     pub(crate) git_work_context_refresh_in_flight:
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) last_git_work_context_refresh_generation: u64,
+    pub(crate) last_applied_git_work_context_refresh_generation: u64,
     pub(crate) next_git_work_context_refresh: Instant,
     pub(crate) git_work_context_cache: HashMap<
         work_context_git::GitWorkContextCacheKey,
@@ -143,6 +144,7 @@ pub struct App {
     pub(crate) foreground_process_refresh_in_flight:
         Option<foreground_process::ForegroundProcessRefreshInFlight>,
     pub(crate) last_foreground_process_refresh_generation: u64,
+    pub(crate) last_applied_foreground_process_refresh_generation: u64,
     pub(crate) next_foreground_process_refresh: Instant,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
@@ -812,11 +814,13 @@ impl App {
             git_status_cache: HashMap::new(),
             git_work_context_refresh_in_flight: None,
             last_git_work_context_refresh_generation: 0,
+            last_applied_git_work_context_refresh_generation: 0,
             next_git_work_context_refresh: Instant::now(),
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
             foreground_process_refresh_in_flight: None,
             last_foreground_process_refresh_generation: 0,
+            last_applied_foreground_process_refresh_generation: 0,
             next_foreground_process_refresh: Instant::now(),
             #[cfg(test)]
             git_program_override: None,

@@ -158,19 +158,26 @@ impl crate::app::App {
         generation: u64,
         observations: Vec<ForegroundProcessObservation>,
     ) -> bool {
-        let Some(refresh) = self.foreground_process_refresh_in_flight.as_ref() else {
-            return false;
-        };
-        if refresh.generation != generation {
+        if generation <= self.last_applied_foreground_process_refresh_generation {
             return false;
         }
 
         let now = Instant::now();
-        let overran_deadline = now >= refresh.deadline;
-        self.foreground_process_refresh_in_flight = None;
-        if overran_deadline {
-            self.next_foreground_process_refresh = now + FOREGROUND_PROCESS_REFRESH_INTERVAL;
+        if self
+            .foreground_process_refresh_in_flight
+            .as_ref()
+            .is_some_and(|refresh| refresh.generation == generation)
+        {
+            let overran_deadline = self
+                .foreground_process_refresh_in_flight
+                .as_ref()
+                .is_some_and(|refresh| now >= refresh.deadline);
+            self.foreground_process_refresh_in_flight = None;
+            if overran_deadline {
+                self.next_foreground_process_refresh = now + FOREGROUND_PROCESS_REFRESH_INTERVAL;
+            }
         }
+        self.last_applied_foreground_process_refresh_generation = generation;
 
         let mut changed = false;
         for observation in observations {
@@ -325,12 +332,79 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_expired_foreground_refresh_accepts_late_result_and_rejects_older_generation() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("scheduled-late-foreground");
+        let first_now = Instant::now();
+        app.next_foreground_process_refresh = first_now;
+        app.start_foreground_process_refresh_if_due(first_now);
+        let first_refresh = app
+            .foreground_process_refresh_in_flight
+            .clone()
+            .expect("first foreground refresh in flight");
+
+        app.start_foreground_process_refresh_if_due(
+            first_refresh.deadline + Duration::from_millis(1),
+        );
+        let second_generation = app
+            .foreground_process_refresh_in_flight
+            .as_ref()
+            .expect("second foreground refresh in flight")
+            .generation;
+        assert_eq!(second_generation, first_refresh.generation + 1);
+
+        assert!(app.handle_foreground_processes_refreshed(
+            first_refresh.generation,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("cargo".into()),
+            }],
+        ));
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .foreground_process_name
+                .as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            app.foreground_process_refresh_in_flight
+                .as_ref()
+                .map(|refresh| refresh.generation),
+            Some(second_generation)
+        );
+
+        assert!(app.handle_foreground_processes_refreshed(
+            second_generation,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("rustc".into()),
+            }],
+        ));
+        assert!(!app.handle_foreground_processes_refreshed(
+            first_refresh.generation,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("stale-process".into()),
+            }],
+        ));
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .foreground_process_name
+                .as_deref(),
+            Some("rustc")
+        );
+    }
+
+    #[test]
     fn foreground_process_generation_mismatch_drops_observations() {
         let (mut app, pane_id, terminal_id) = app_with_test_pane("stale-foreground");
         app.foreground_process_refresh_in_flight = Some(ForegroundProcessRefreshInFlight {
             generation: 2,
             deadline: Instant::now() - Duration::from_millis(1),
         });
+        app.last_applied_foreground_process_refresh_generation = 1;
 
         app.handle_foreground_processes_refreshed(
             1,
