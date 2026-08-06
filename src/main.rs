@@ -323,6 +323,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # New tabs can still be created with the configured keybinding.
 # hide_tab_bar_when_single_tab = false
 
+# Show local Codex and Claude Code subscription usage in the info panel.
+# show_subscription_usage = true
+
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"

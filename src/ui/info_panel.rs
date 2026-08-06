@@ -1,3 +1,11 @@
+use std::{
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -5,6 +13,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use serde::Deserialize;
 
 use super::widgets::render_panel_shell;
 use crate::{
@@ -16,6 +25,10 @@ use crate::{
 pub(crate) const INFO_PANEL_MIN_WIDTH: u16 = 26;
 const INFO_PANEL_WIDTH: u16 = 36;
 const INFO_PANEL_MIN_MAIN_WIDTH: u16 = 44;
+const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_USAGE_FILES: usize = 64;
+const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
+const USAGE_WINDOW_MINUTES: [(u64, &str); 2] = [(300, "5h"), (10080, "week")];
 
 pub(crate) fn panel_width_for_main(main_width: u16) -> Option<u16> {
     let available = main_width.saturating_sub(INFO_PANEL_MIN_MAIN_WIDTH);
@@ -126,6 +139,377 @@ fn link_prefix(kind: WorkLinkKind) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+struct UsageSnapshot {
+    codex: ProviderUsage,
+    claude: ProviderUsage,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ProviderUsage {
+    windows: Vec<UsageWindow>,
+    credits: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UsageWindow {
+    used_percent: f64,
+    window_minutes: u64,
+    resets_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRateLimits {
+    primary: Option<RawUsageWindow>,
+    secondary: Option<RawUsageWindow>,
+    credits: Option<RawCredits>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUsageWindow {
+    used_percent: f64,
+    window_minutes: u64,
+    resets_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCredits {
+    balance: Option<serde_json::Value>,
+}
+
+fn parse_codex_record(line: &str) -> Option<ProviderUsage> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let rate_limits = value
+        .get("payload")
+        .and_then(|payload| payload.get("rate_limits"))
+        .or_else(|| value.get("rate_limits"))?;
+    let raw: RawRateLimits = serde_json::from_value(rate_limits.clone()).ok()?;
+
+    let mut windows = [raw.primary, raw.secondary]
+        .into_iter()
+        .filter_map(|raw| raw.and_then(parse_usage_window))
+        .collect::<Vec<_>>();
+    windows.sort_unstable_by_key(|window| window.window_minutes);
+    windows.dedup_by_key(|window| window.window_minutes);
+
+    let credits =
+        raw.credits
+            .and_then(|credits| credits.balance)
+            .and_then(|balance| match balance {
+                serde_json::Value::String(balance) if !balance.is_empty() => Some(balance),
+                serde_json::Value::Number(balance) => Some(balance.to_string()),
+                _ => None,
+            });
+
+    if windows.is_empty() {
+        None
+    } else {
+        Some(ProviderUsage { windows, credits })
+    }
+}
+
+fn parse_usage_window(raw: RawUsageWindow) -> Option<UsageWindow> {
+    if !raw.used_percent.is_finite()
+        || !(0.0..=100.0).contains(&raw.used_percent)
+        || !USAGE_WINDOW_MINUTES
+            .iter()
+            .any(|(minutes, _)| *minutes == raw.window_minutes)
+        || raw.resets_at <= 0
+    {
+        return None;
+    }
+    Some(UsageWindow {
+        used_percent: raw.used_percent,
+        window_minutes: raw.window_minutes,
+        resets_at: raw.resets_at,
+    })
+}
+
+fn usage_window(usage: &ProviderUsage, minutes: u64) -> Option<&UsageWindow> {
+    usage
+        .windows
+        .iter()
+        .find(|window| window.window_minutes == minutes)
+}
+
+fn recent_jsonl_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
+    fn collect(
+        root: &Path,
+        depth: usize,
+        max_files: usize,
+        files: &mut Vec<(SystemTime, PathBuf)>,
+    ) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() && depth < 4 {
+                collect(&path, depth + 1, max_files, files);
+            } else if file_type.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            {
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(UNIX_EPOCH);
+                files.push((modified, path));
+                files.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+                files.truncate(max_files);
+            }
+        }
+    }
+
+    if max_files == 0 {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    collect(root, 0, max_files, &mut files);
+    files.into_iter().map(|(_, path)| path).collect()
+}
+
+fn read_file_tail(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(MAX_USAGE_FILE_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_USAGE_FILE_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    if start == 0 {
+        return Some(text.into_owned());
+    }
+    text.find('\n')
+        .map(|newline| text[newline.saturating_add(1)..].to_owned())
+}
+
+fn latest_codex_usage(path: &Path) -> Option<ProviderUsage> {
+    let contents = read_file_tail(path)?;
+    contents.lines().filter_map(parse_codex_record).last()
+}
+
+fn home_path(directory: &str) -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .map(|home| home.join(directory))
+}
+
+fn load_codex_usage() -> ProviderUsage {
+    let Some(root) = home_path(".codex/sessions") else {
+        return ProviderUsage::default();
+    };
+    recent_jsonl_files(&root, MAX_USAGE_FILES)
+        .into_iter()
+        .find_map(|path| latest_codex_usage(&path))
+        .unwrap_or_default()
+}
+
+fn load_usage_snapshot() -> UsageSnapshot {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
+    let mut codex = load_codex_usage();
+    if let Some(now) = now {
+        codex.windows.retain(|window| window.resets_at > now);
+    } else {
+        codex.windows.clear();
+    }
+    UsageSnapshot {
+        codex,
+        // Claude Code's local project logs on this machine do not contain a
+        // usable quota field, and no non-credential local source is available.
+        claude: ProviderUsage::default(),
+    }
+}
+
+struct UsageCacheState {
+    snapshot: UsageSnapshot,
+    last_refresh: Option<Instant>,
+    refresh_in_progress: bool,
+}
+
+struct UsageCache {
+    state: Mutex<UsageCacheState>,
+    refresh_interval: Duration,
+}
+
+impl UsageCache {
+    fn new(refresh_interval: Duration) -> Self {
+        Self {
+            state: Mutex::new(UsageCacheState {
+                snapshot: UsageSnapshot::default(),
+                last_refresh: None,
+                refresh_in_progress: false,
+            }),
+            refresh_interval,
+        }
+    }
+
+    fn begin_refresh(&self, now: Instant) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.refresh_in_progress
+            || state.last_refresh.is_some_and(|last| {
+                now.checked_duration_since(last)
+                    .is_some_and(|elapsed| elapsed < self.refresh_interval)
+            })
+        {
+            return false;
+        }
+        state.refresh_in_progress = true;
+        true
+    }
+
+    fn finish_refresh(&self, now: Instant, snapshot: UsageSnapshot) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.snapshot = snapshot;
+        state.last_refresh = Some(now);
+        state.refresh_in_progress = false;
+    }
+
+    fn snapshot(&self) -> UsageSnapshot {
+        self.state
+            .lock()
+            .map(|state| state.snapshot.clone())
+            .unwrap_or_default()
+    }
+
+    fn request_refresh(cache: &Arc<Self>) {
+        if !cache.begin_refresh(Instant::now()) {
+            return;
+        }
+        let cache_for_thread = Arc::clone(cache);
+        if std::thread::Builder::new()
+            .name("herdr-usage-refresh".to_string())
+            .spawn(move || {
+                let snapshot = load_usage_snapshot();
+                cache_for_thread.finish_refresh(Instant::now(), snapshot);
+            })
+            .is_err()
+        {
+            cache.finish_refresh(Instant::now(), UsageSnapshot::default());
+        }
+    }
+
+    #[cfg(test)]
+    fn refresh_if_due<F>(&self, now: Instant, loader: F) -> UsageSnapshot
+    where
+        F: FnOnce() -> UsageSnapshot,
+    {
+        if self.begin_refresh(now) {
+            let snapshot = loader();
+            self.finish_refresh(now, snapshot.clone());
+            snapshot
+        } else {
+            self.snapshot()
+        }
+    }
+}
+
+fn usage_snapshot() -> UsageSnapshot {
+    static CACHE: OnceLock<Arc<UsageCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Arc::new(UsageCache::new(USAGE_REFRESH_INTERVAL)));
+    UsageCache::request_refresh(cache);
+    cache.snapshot()
+}
+
+fn usage_reset_label(resets_at: i64) -> String {
+    let seconds = resets_at.rem_euclid(86_400);
+    format!("{:02}:{:02}Z", seconds / 3_600, (seconds % 3_600) / 60)
+}
+
+fn render_usage_line(
+    frame: &mut Frame,
+    row: Option<Rect>,
+    text: String,
+    palette: &crate::app::state::Palette,
+) {
+    if let Some(row) = row {
+        frame.render_widget(
+            Paragraph::new(Span::styled(text, Style::default().fg(palette.text))),
+            row,
+        );
+    }
+}
+
+fn render_subscription_usage(
+    app: &AppState,
+    frame: &mut Frame,
+    layout: &InfoPanelLayout,
+    start: usize,
+) {
+    let usage = usage_snapshot();
+    if let Some(row) = layout.line(start) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "SUBSCRIPTION USAGE",
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            row,
+        );
+    }
+
+    let providers = [("CODEX", &usage.codex), ("CLAUDE CODE", &usage.claude)];
+    for (provider_index, (label, provider)) in providers.into_iter().enumerate() {
+        let provider_start = start.saturating_add(1 + provider_index.saturating_mul(4));
+        if let Some(row) = layout.line(provider_start) {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                row,
+            );
+        }
+        for (window_index, (minutes, window_label)) in USAGE_WINDOW_MINUTES.iter().enumerate() {
+            let text = usage_window(provider, *minutes)
+                .map(|window| {
+                    format!(
+                        "{window_label} {:.0}% left · {:.0}% used · {}",
+                        (100.0 - window.used_percent).max(0.0),
+                        window.used_percent,
+                        usage_reset_label(window.resets_at)
+                    )
+                })
+                .unwrap_or_else(|| format!("{window_label} — · —"));
+            render_usage_line(
+                frame,
+                layout.line(provider_start.saturating_add(1 + window_index)),
+                text,
+                &app.palette,
+            );
+        }
+        if provider_index == 0 {
+            render_usage_line(
+                frame,
+                layout.line(provider_start.saturating_add(3)),
+                provider
+                    .credits
+                    .as_deref()
+                    .map(|balance| format!("credits: {balance}"))
+                    .unwrap_or_else(|| "credits: —".to_string()),
+                &app.palette,
+            );
+        }
+    }
+}
+
 pub(super) fn render_info_panel(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(inner) = render_panel_shell(frame, area, app.palette.accent, app.palette.panel_bg)
     else {
@@ -205,6 +589,10 @@ pub(super) fn render_info_panel(app: &AppState, frame: &mut Frame, area: Rect) {
         );
     }
 
+    if app.show_subscription_usage {
+        render_subscription_usage(app, frame, &layout, footer_start.saturating_add(2));
+    }
+
     // Keep each link as one screen row so its hit target matches the rendered
     // numbering even when a URL is longer than the desktop panel.
 }
@@ -214,6 +602,88 @@ mod tests {
     use super::*;
     use crate::{app::state::AppState, work_context::PaneWorkContextPatch};
     use ratatui::{backend::TestBackend, Terminal};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn codex_record(rate_limits: &str) -> String {
+        format!(r#"{{"payload":{{"rate_limits":{rate_limits}}}}}"#)
+    }
+
+    #[test]
+    fn parses_valid_codex_record_and_credit_balance() {
+        let usage = parse_codex_record(&codex_record(
+            r#"{"primary":{"used_percent":31.0,"window_minutes":10080,"resets_at":1786537158},"credits":{"has_credits":true,"unlimited":false,"balance":"1927.95"}}"#,
+        ))
+        .expect("valid Codex usage record");
+
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].window_minutes, 10080);
+        assert_eq!(usage.windows[0].used_percent, 31.0);
+        assert_eq!(usage.credits.as_deref(), Some("1927.95"));
+    }
+
+    #[test]
+    fn ignores_codex_record_without_rate_limits() {
+        assert_eq!(
+            parse_codex_record(r#"{"payload":{"type":"token_count"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn ignores_malformed_codex_record() {
+        assert_eq!(parse_codex_record("not json"), None);
+    }
+
+    #[test]
+    fn parses_codex_five_hour_and_weekly_windows() {
+        let usage = parse_codex_record(&codex_record(
+            r#"{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1786537158},"secondary":{"used_percent":87.0,"window_minutes":10080,"resets_at":1786617158}}"#,
+        ))
+        .expect("valid Codex usage record");
+
+        assert_eq!(
+            usage
+                .windows
+                .iter()
+                .map(|window| window.window_minutes)
+                .collect::<Vec<_>>(),
+            vec![300, 10080]
+        );
+    }
+
+    #[test]
+    fn parses_codex_record_without_credits() {
+        let usage = parse_codex_record(&codex_record(
+            r#"{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1786537158}}"#,
+        ))
+        .expect("valid Codex usage record");
+
+        assert_eq!(usage.credits, None);
+    }
+
+    #[test]
+    fn usage_cache_does_not_rescan_within_refresh_interval() {
+        let cache = UsageCache::new(Duration::from_secs(60));
+        let scans = AtomicUsize::new(0);
+        let started = Instant::now();
+        let loader = || {
+            scans.fetch_add(1, Ordering::Relaxed);
+            UsageSnapshot::default()
+        };
+
+        cache.refresh_if_due(started, loader);
+        cache.refresh_if_due(started + Duration::from_secs(59), || {
+            scans.fetch_add(1, Ordering::Relaxed);
+            UsageSnapshot::default()
+        });
+        assert_eq!(scans.load(Ordering::Relaxed), 1);
+
+        cache.refresh_if_due(started + Duration::from_secs(60), || {
+            scans.fetch_add(1, Ordering::Relaxed);
+            UsageSnapshot::default()
+        });
+        assert_eq!(scans.load(Ordering::Relaxed), 2);
+    }
 
     #[test]
     fn info_panel_link_rows_follow_shared_candidate_order() {

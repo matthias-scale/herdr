@@ -897,6 +897,8 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
+    /// Show local Codex and Claude Code subscription usage in the info panel. Default: true.
+    pub show_subscription_usage: bool,
     /// Full-width top status row.
     pub status_bar: StatusBarConfig,
     /// Legacy indexed-Agent projection ordering. The visible sidebar remains canonical.
@@ -1114,6 +1116,7 @@ impl Default for UiConfig {
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             sidebar: SidebarConfig::default(),
@@ -1367,6 +1370,7 @@ agent_panel_scope = "current"
         assert!(default_config.ui.pane_gaps);
         assert!(!default_config.ui.show_agent_labels_on_pane_borders);
         assert!(!default_config.ui.hide_tab_bar_when_single_tab);
+        assert!(default_config.ui.show_subscription_usage);
 
         let toml = r#"
 [ui]
@@ -1374,12 +1378,14 @@ pane_borders = false
 pane_gaps = true
 show_agent_labels_on_pane_borders = true
 hide_tab_bar_when_single_tab = true
+show_subscription_usage = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.pane_borders);
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
         assert!(config.ui.hide_tab_bar_when_single_tab);
+        assert!(!config.ui.show_subscription_usage);
     }
 
     #[test]
