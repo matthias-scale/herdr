@@ -80,6 +80,7 @@ pub(crate) fn request_from_turn_start(
         ticket_ids: crate::work_context::extract_ticket_ids(prompt),
         pr_urls: crate::work_context::extract_pr_urls(prompt),
         preview_urls: crate::work_context::extract_preview_urls(prompt),
+        missive_urls: crate::work_context::extract_missive_urls(prompt),
         branch: None,
         work_title: title.clone(),
     };
@@ -584,6 +585,26 @@ mod tests {
         assert_eq!(
             request.work_context.expect("work context").preview_urls,
             vec!["https://demo-preview.vercel.app"]
+        );
+    }
+
+    #[test]
+    fn turn_hook_extracts_missive_conversation_links_from_the_prompt() {
+        let request = request_from_turn_start(
+            WorkTitleProvider::Codex,
+            Some("w1:p1"),
+            r#"{
+                "hook_event_name":"UserPromptSubmit",
+                "session_id":"session-missive",
+                "prompt":"Reply in https://mail.missiveapp.com/#inbox/conversations/abc123 and ignore https://mail.missiveapp.com"
+            }"#,
+            47,
+        )
+        .expect("guarded turn hook should produce metadata");
+
+        assert_eq!(
+            request.work_context.expect("work context").missive_urls,
+            vec!["https://mail.missiveapp.com/#inbox/conversations/abc123"]
         );
     }
 
