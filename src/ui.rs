@@ -10,6 +10,10 @@ use tokio::sync::Notify;
 
 mod dialogs;
 mod dock;
+#[path = "ui/dock/context.rs"]
+mod dock_context;
+#[path = "ui/dock/shortcuts.rs"]
+mod dock_shortcuts;
 mod info_panel;
 mod keybind_help;
 mod menus;
