@@ -2988,6 +2988,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
+    #[test]
+    fn api_rename_enter_keeps_auto_name_when_live_label_changes() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let tab = &app.state.workspaces[0].tabs[0];
+        let terminal_id = tab
+            .terminal_id(tab.layout.focused())
+            .cloned()
+            .expect("focused terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .agent_name = Some("claude".into());
+
+        super::super::modal::open_rename_active_tab(&mut app.state, false);
+        assert_eq!(app.state.name_input, "claude");
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .agent_name = Some("codex".into());
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(
+            app.state.workspaces[0].tabs[0].custom_name.is_none(),
+            "an unedited Enter must not pin the stale prefill as a user name"
+        );
+    }
+
     #[tokio::test]
     async fn new_workspace_prompt_saves_custom_name_atomically() {
         let cwd = unique_temp_path("workspace-custom-name");
