@@ -89,6 +89,38 @@ pub(super) fn agent_rows(
         .collect()
 }
 
+/// The worklist groups answer one question -- which agent, and where -- so they
+/// ignore the configured multi-row template and render one fixed line: state
+/// dot, the thread's own title, then the space it lives in. The provider is
+/// deliberately absent: whether it is claude or codex tells you nothing about
+/// which gate to open next.
+pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
+    let title = entry
+        .terminal_title_stripped
+        .clone()
+        .or_else(|| entry.terminal_title.clone())
+        .or_else(|| entry.pane_label.clone())
+        .or_else(|| entry.primary_tab_label.clone());
+    let mut row = vec![ResolvedToken::new(
+        ResolvedTokenKind::StateIcon,
+        SidebarTokenStyle::default(),
+    )];
+    if let Some(title) = title {
+        row.push(ResolvedToken::new(
+            ResolvedTokenKind::Tab(title),
+            SidebarTokenStyle::default(),
+        ));
+    }
+    // The space rides in the secondary channel (`Pane`) rather than `Workspace`:
+    // the kinds pick the colour here, and the space is context behind the title,
+    // not the thing you are reading.
+    row.push(ResolvedToken::new(
+        ResolvedTokenKind::Pane(entry.primary_label.clone()),
+        SidebarTokenStyle::default(),
+    ));
+    vec![row]
+}
+
 #[allow(dead_code)]
 pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
@@ -213,6 +245,38 @@ mod tests {
             vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
                 "pi".into()
             ))]
+        );
+    }
+
+    #[test]
+    fn worklist_rows_are_one_line_of_title_and_space_without_the_provider() {
+        let mut entry = entry();
+        entry.terminal_title_stripped = Some("Review herdr context enrichment".into());
+        entry.agent_label = Some("codex".into());
+
+        let rows = worklist_row(&entry);
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab(
+                    "Review herdr context enrichment".into()
+                )),
+                ResolvedToken::unstyled(ResolvedTokenKind::Pane("repo".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_titleless_worklist_row_still_says_where_it_lives() {
+        let rows = worklist_row(&entry());
+        assert_eq!(
+            rows,
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Pane("repo".into())),
+            ]]
         );
     }
 
