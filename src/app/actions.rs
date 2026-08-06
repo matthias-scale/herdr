@@ -3075,6 +3075,7 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
+            AppEvent::ForegroundProcessesRefreshed { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),

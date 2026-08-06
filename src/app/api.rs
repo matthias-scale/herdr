@@ -79,6 +79,10 @@ impl App {
                 observations,
                 cache_updates,
             } => self.handle_git_work_context_refreshed(generation, observations, cache_updates),
+            AppEvent::ForegroundProcessesRefreshed {
+                generation,
+                observations,
+            } => self.handle_foreground_processes_refreshed(generation, observations),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -185,6 +189,15 @@ impl App {
         } = ev
         {
             self.handle_git_work_context_refreshed(generation, observations, cache_updates);
+            return;
+        }
+
+        if let AppEvent::ForegroundProcessesRefreshed {
+            generation,
+            observations,
+        } = ev
+        {
+            self.handle_foreground_processes_refreshed(generation, observations);
             return;
         }
 

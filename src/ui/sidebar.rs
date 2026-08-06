@@ -61,6 +61,7 @@ pub(super) struct TabRowLayout {
     pub show_state_label: bool,
     pub title: String,
     pub agent_suffix: Option<String>,
+    pub foreground_process: Option<String>,
     pub background_jobs: Option<String>,
     pub activity_age: Option<String>,
 }
@@ -151,6 +152,30 @@ pub(super) fn tab_row_layout(
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
+    let mut foreground_process = entry
+        .foreground_process_name
+        .as_deref()
+        .map(|name| format!(" · {name}"));
+    if let Some(process) = foreground_process.as_mut() {
+        let process_budget = width.saturating_sub(
+            prefix_width
+                + prio_width
+                + full_status_width
+                + agent_suffix_width
+                + background_width
+                + activity_width
+                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH,
+        );
+        if process_budget < display_width(" · ") + 1 {
+            foreground_process = None;
+        } else {
+            *process = truncate_end(process, process_budget.min(display_width(process)));
+        }
+    }
+    let foreground_process_width = foreground_process
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
     let show_state_label = width
         > prefix_width
             + prio_width
@@ -167,6 +192,7 @@ pub(super) fn tab_row_layout(
         + prio_width
         + status_width
         + agent_suffix_width
+        + foreground_process_width
         + background_width
         + activity_width;
     let title = truncate_end(tab_title, width.saturating_sub(fixed_width));
@@ -176,6 +202,7 @@ pub(super) fn tab_row_layout(
         show_state_label,
         title,
         agent_suffix,
+        foreground_process,
         background_jobs,
         activity_age,
     }
@@ -211,6 +238,7 @@ pub(crate) struct AgentPanelEntry {
     pub agent_label: Option<String>,
     pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
+    pub foreground_process_name: Option<String>,
     /// Current or most recently exited provider, used only to detect
     /// ambiguous multi-pane rollups. Rendering still uses `agent` so an exited
     /// provider never leaves a stale suffix on a single-pane row.
@@ -380,6 +408,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_label: Some(detail.agent_label),
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
+                        foreground_process_name: detail.foreground_process_name,
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         prio,
@@ -2073,6 +2102,12 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
     if let Some(agent_suffix) = layout.agent_suffix {
         spans.push(Span::styled(agent_suffix, Style::default().fg(p.overlay1)));
     }
+    if let Some(foreground_process) = layout.foreground_process {
+        spans.push(Span::styled(
+            foreground_process,
+            Style::default().fg(p.overlay0),
+        ));
+    }
     if let Some(background_jobs) = layout.background_jobs {
         spans.push(Span::styled(
             background_jobs,
@@ -3668,6 +3703,102 @@ row_gap = 1
         );
         assert!(rendered.contains("· pi"), "{rendered:?}");
         assert!(!rendered.contains("--"), "{rendered:?}");
+    }
+
+    #[test]
+    fn expanded_tab_row_renders_cached_foreground_process_name() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.workspaces[0].tabs[0].custom_name = Some("release ticket".into());
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("cargo".into());
+
+        let area = Rect::new(0, 0, 60, 12);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = &compute_tab_card_areas(&app, area)[0];
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+
+        assert!(rendered.contains("cargo"), "{rendered:?}");
+        assert!(rendered.contains("release ticket"), "{rendered:?}");
+    }
+
+    #[test]
+    fn shell_only_foreground_cache_renders_no_extra_process() {
+        let app = app_with_agents(&["one"]);
+        let area = Rect::new(0, 0, 60, 12);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = &compute_tab_card_areas(&app, area)[0];
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+
+        assert!(!rendered.contains("zsh"), "{rendered:?}");
+        assert!(!rendered.contains("cargo"), "{rendered:?}");
+    }
+
+    #[test]
+    fn foreground_process_is_dropped_before_existing_tab_details() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("ticket".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("cargo".into());
+        let entry = sidebar_thread_entries(&app).remove(0);
+
+        let layout = tab_row_layout(&entry, app.view_observed_at, 24, 1, &app.palette);
+
+        assert!(layout.foreground_process.is_none());
+        assert!(layout.agent_suffix.is_some());
+        assert!(display_width(&layout.title) >= TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH);
+    }
+
+    #[test]
+    fn long_foreground_process_name_is_truncated_to_its_budget() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("foreground-process-name".into());
+        let entry = sidebar_thread_entries(&app).remove(0);
+
+        let layout = tab_row_layout(&entry, app.view_observed_at, 32, 1, &app.palette);
+        let process = layout
+            .foreground_process
+            .expect("process should fit partially");
+
+        assert_ne!(process, " · foreground-process-name");
+        let used_width = 1
+            + layout
+                .state
+                .as_deref()
+                .map(|state| display_width(state) + 2 + display_width("●") + 3)
+                .unwrap_or_default()
+            + display_width(&layout.title)
+            + layout
+                .agent_suffix
+                .as_deref()
+                .map(display_width)
+                .unwrap_or_default()
+            + display_width(&process);
+        assert!(used_width <= 32, "used width: {used_width}");
     }
 
     #[test]

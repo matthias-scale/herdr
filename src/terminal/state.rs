@@ -281,6 +281,8 @@ pub struct TerminalState {
     /// Provider-reported background jobs owned by this agent thread. `None`
     /// means the provider does not expose a supported count.
     pub background_job_count: Option<u16>,
+    /// Last background observation of the pane's distinct foreground process.
+    pub(crate) foreground_process_name: Option<String>,
     pub last_agent_state_change_seq: Option<u64>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
@@ -320,6 +322,7 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             background_job_count: None,
+            foreground_process_name: None,
             last_agent_state_change_seq: None,
             agent_active_since: None,
             agent_last_active_at: None,
@@ -409,6 +412,14 @@ impl TerminalState {
         }
         self.background_job_count = count;
         self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn set_foreground_process_name(&mut self, name: Option<String>) -> bool {
+        if self.foreground_process_name == name {
+            return false;
+        }
+        self.foreground_process_name = name;
         true
     }
 

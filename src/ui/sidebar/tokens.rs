@@ -175,6 +175,7 @@ mod tests {
             agent: Some(crate::detect::Agent::Pi),
             agent_context: Some(crate::detect::Agent::Pi),
             has_agent: true,
+            foreground_process_name: None,
             prio: false,
             state: AgentState::Working,
             background_job_count: None,

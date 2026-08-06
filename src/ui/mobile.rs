@@ -750,6 +750,12 @@ fn render_mobile_switcher_content(
                         Style::default().fg(p.overlay1).bg(bg),
                     ));
                 }
+                if let Some(foreground_process) = layout.foreground_process {
+                    spans.push(Span::styled(
+                        foreground_process,
+                        Style::default().fg(p.overlay0).bg(bg),
+                    ));
+                }
                 if let Some(background_jobs) = layout.background_jobs {
                     spans.push(Span::styled(
                         background_jobs,
@@ -1312,6 +1318,7 @@ mod tests {
             agent: agent_label.and_then(crate::detect::parse_agent_label),
             agent_context: agent_label.and_then(crate::detect::parse_agent_label),
             has_agent: agent_label.is_some(),
+            foreground_process_name: None,
             prio: false,
             state: AgentState::Idle,
             background_job_count: None,

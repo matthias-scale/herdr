@@ -12,6 +12,7 @@ mod api;
 mod api_helpers;
 mod config_io;
 mod creation;
+pub(crate) mod foreground_process;
 mod git_refresh;
 mod ids;
 mod input;
@@ -137,6 +138,10 @@ pub struct App {
         HashMap<work_context_git::GitWorkContextCacheKey, crate::work_context::PaneWorkContext>,
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
+    pub(crate) foreground_process_refresh_in_flight:
+        Option<foreground_process::ForegroundProcessRefreshInFlight>,
+    pub(crate) last_foreground_process_refresh_generation: u64,
+    pub(crate) next_foreground_process_refresh: Instant,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
@@ -807,6 +812,9 @@ impl App {
             next_git_work_context_refresh: Instant::now(),
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
+            foreground_process_refresh_in_flight: None,
+            last_foreground_process_refresh_generation: 0,
+            next_foreground_process_refresh: Instant::now(),
             #[cfg(test)]
             git_program_override: None,
             pending_api_worktree_creates: HashMap::new(),

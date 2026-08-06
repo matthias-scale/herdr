@@ -159,6 +159,11 @@ pub enum AppEvent {
             crate::work_context::PaneWorkContext,
         )>,
     },
+    /// Background foreground-process observations completed for live panes.
+    ForegroundProcessesRefreshed {
+        generation: u64,
+        observations: Vec<crate::app::foreground_process::ForegroundProcessObservation>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,
