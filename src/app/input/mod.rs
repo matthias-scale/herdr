@@ -219,6 +219,11 @@ impl App {
             return;
         }
 
+        if let Some(runtime) = self.dock_editor_runtime() {
+            let _ = runtime.send_paste(text).await;
+            return;
+        }
+
         if let Some(ws_idx) = self.state.active {
             let pane_id = self
                 .state
@@ -663,6 +668,7 @@ impl App {
             return;
         };
 
+        self.state.dock_editor_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }

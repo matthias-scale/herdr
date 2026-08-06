@@ -1063,6 +1063,8 @@ impl HeadlessServer {
                 area,
             );
         }
+        self.app.ensure_dock_editor();
+        self.app.resize_dock_editor();
 
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
@@ -4112,6 +4114,8 @@ impl HeadlessServer {
 
     fn render_and_stream(&mut self) {
         let full_started = crate::render_prof::timer();
+        self.app.ensure_dock_editor();
+        self.app.resize_dock_editor();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 
         if render_targets.is_empty() {
