@@ -1252,24 +1252,39 @@ pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {
     Rect::new(panel.x.saturating_add(1), panel.y, 1, 1)
 }
 
+fn prio_panel_body(panel: Rect) -> Rect {
+    Rect::new(
+        panel.x,
+        panel.y.saturating_add(PRIO_PANEL_HEADER_ROWS),
+        panel.width,
+        panel.height.saturating_sub(PRIO_PANEL_HEADER_ROWS),
+    )
+}
+
+fn prio_panel_entry_row_count(entry_count: usize, body_height: u16) -> usize {
+    let available_rows = usize::from(body_height);
+    if entry_count > available_rows {
+        available_rows.saturating_sub(1)
+    } else {
+        entry_count
+    }
+}
+
 pub(crate) fn compute_prio_panel_row_areas(
     app: &AppState,
     area: Rect,
 ) -> Vec<crate::app::state::PrioPanelRowArea> {
     let (_, panel) = expanded_sidebar_sections_for_app(app, area);
-    let body = Rect::new(
-        panel.x,
-        panel.y.saturating_add(PRIO_PANEL_HEADER_ROWS),
-        panel.width,
-        panel.height.saturating_sub(PRIO_PANEL_HEADER_ROWS),
-    );
+    let body = prio_panel_body(panel);
     if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
 
-    prio_panel_entries(app, None)
+    let entries = prio_panel_entries(app, None);
+    let row_count = prio_panel_entry_row_count(entries.len(), body.height);
+    entries
         .into_iter()
-        .take(usize::from(body.height))
+        .take(row_count)
         .enumerate()
         .map(|(row, entry)| crate::app::state::PrioPanelRowArea {
             ws_idx: entry.ws_idx,
@@ -1603,8 +1618,9 @@ fn render_prio_panel(
         return;
     }
 
+    let body = prio_panel_body(panel);
     let rows = compute_prio_panel_row_areas(app, sidebar_area);
-    for row in rows {
+    for row in &rows {
         let Some(entry) = entries
             .iter()
             .find(|entry| entry.ws_idx == row.ws_idx && entry.tab_idx == row.tab_idx)
@@ -1612,6 +1628,19 @@ fn render_prio_panel(
             continue;
         };
         render_prio_panel_row(app, frame, entry, row.rect);
+    }
+    if rows.len() < entries.len() && body.width > 0 && body.height > 0 {
+        let indicator = Rect::new(
+            body.x,
+            body.y.saturating_add(rows.len() as u16),
+            body.width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(format!("  +{} more", entries.len() - rows.len()))
+                .style(Style::default().fg(p.overlay0)),
+            indicator,
+        );
     }
 }
 
@@ -2770,6 +2799,43 @@ mod tests {
             workspace.tabs[0].set_prio(true);
         }
         assert_eq!(prio_panel_rect(&many_entries, area).height, 8);
+    }
+
+    #[test]
+    fn overflowing_prio_panel_shows_indicator_and_matches_hit_test_rows() {
+        let mut app = app_with_agents(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ]);
+        for workspace in &mut app.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        let area = Rect::new(0, 0, 40, 16);
+        let entries = prio_panel_entries(&app, None);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        let panel = prio_panel_rect(&app, area);
+        let body = Rect::new(
+            panel.x,
+            panel.y + PRIO_PANEL_HEADER_ROWS,
+            panel.width,
+            panel.height - PRIO_PANEL_HEADER_ROWS,
+        );
+        assert_eq!(entries.len(), 10);
+        assert_eq!(rows.len(), usize::from(body.height) - 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let indicator_row = body.y + body.height - 1;
+        assert!(
+            row_text(buffer, indicator_row, body.width).contains("+4 more"),
+            "{buffer:?}"
+        );
+        let rendered_entry_rows = (body.y..indicator_row)
+            .filter(|row| !row_text(buffer, *row, body.width).is_empty())
+            .count();
+        assert_eq!(rendered_entry_rows, rows.len());
     }
 
     #[test]
