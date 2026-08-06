@@ -362,6 +362,7 @@ pub struct Keybinds {
     pub split_up: ActionKeybinds,
     pub close_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
+    pub toggle_pin_tab: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
@@ -538,6 +539,7 @@ impl Config {
             split_up: empty_action!(),
             close_pane: empty_action!(),
             zoom: empty_action!(),
+            toggle_pin_tab: empty_action!(),
             resize_mode: empty_action!(),
             toggle_sidebar: empty_action!(),
             toggle_info_panel: empty_action!(),
@@ -693,6 +695,7 @@ impl Config {
             apply_action!(keybinds.split_up, split_up, source);
             apply_action!(keybinds.close_pane, close_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
+            apply_action!(keybinds.toggle_pin_tab, toggle_pin_tab, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
