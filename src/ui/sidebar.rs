@@ -835,7 +835,7 @@ fn sidebar_rows_inner(
         })
         .cloned()
         .collect();
-    let mut push_group = |rows: &mut Vec<SidebarRow>, title, group: Vec<AgentPanelEntry>| {
+    let push_group = |rows: &mut Vec<SidebarRow>, title, group: Vec<AgentPanelEntry>| {
         if group.is_empty() {
             return;
         }

@@ -2052,8 +2052,10 @@ impl AppState {
         })
     }
 
-    /// Flip the active tab's pin. The API handler is the production path; this
-    /// serves the headless dispatch that has no client to send through.
+    /// Flip the active tab's pin without an API round trip. `tab.pin` is the
+    /// production path, exactly as `pane.zoom` is for `toggle_zoom` below; this
+    /// exists for the test-only navigate dispatch, which has no client.
+    #[cfg(test)]
     pub(crate) fn toggle_pin_active_tab(&mut self) {
         let Some(ws_idx) = self.active else {
             return;
