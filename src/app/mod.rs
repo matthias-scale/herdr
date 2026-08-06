@@ -610,6 +610,7 @@ impl App {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
+            rename_tab_prefill: None,
             release_notes: None,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {

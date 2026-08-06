@@ -397,10 +397,13 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_tab_prefill = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
-        state.name_input = ws
+        let prefill = ws
             .active_tab_display_name_from(&state.terminals)
             .unwrap_or_else(|| (ws.active_tab + 1).to_string());
+        state.rename_tab_prefill = Some(prefill.clone());
+        state.name_input = prefill;
         state.name_input_replace_on_type = replace_on_type;
         state.mode = Mode::RenameTab;
     }
@@ -535,12 +538,17 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 }
                 Mode::RenameTab => {
                     if let Some(ws_idx) = state.active {
+                        let prefill = state.rename_tab_prefill.take();
                         if let Some(ws) = state.workspaces.get_mut(ws_idx) {
                             let workspace_id = ws.id.clone();
                             let active_tab = ws.active_tab;
-                            let current_name = ws
-                                .tab_display_name_from(&state.terminals, active_tab)
-                                .unwrap_or_else(|| (active_tab + 1).to_string());
+                            // Compare against what the modal was opened with, not a freshly
+                            // derived label: the live label can advance while the modal is open,
+                            // and an unedited Enter must stay a no-op.
+                            let current_name = prefill.unwrap_or_else(|| {
+                                ws.tab_display_name_from(&state.terminals, active_tab)
+                                    .unwrap_or_else(|| (active_tab + 1).to_string())
+                            });
                             let keep_auto_name = ws
                                 .tabs
                                 .get(active_tab)
@@ -1061,9 +1069,12 @@ impl App {
                     return;
                 };
                 let tab_idx = self.state.workspaces[ws_idx].active_tab;
-                let current_name = self.state.workspaces[ws_idx]
-                    .tab_display_name_from(&self.state.terminals, tab_idx)
-                    .unwrap_or_else(|| (tab_idx + 1).to_string());
+                // See `apply_rename_action`: the prefill is the baseline, not the live label.
+                let current_name = self.state.rename_tab_prefill.take().unwrap_or_else(|| {
+                    self.state.workspaces[ws_idx]
+                        .tab_display_name_from(&self.state.terminals, tab_idx)
+                        .unwrap_or_else(|| (tab_idx + 1).to_string())
+                });
                 let keep_auto_name = self.state.workspaces[ws_idx]
                     .tabs
                     .get(tab_idx)
@@ -1370,6 +1381,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_tab_prefill = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     leave_modal(state);
@@ -2073,6 +2085,44 @@ mod tests {
 
         open_new_tab_dialog(&mut state);
         assert_eq!(state.name_input, "2");
+    }
+
+    #[test]
+    fn unedited_rename_enter_stays_a_no_op_when_the_live_label_changes() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.ensure_test_terminals();
+        let tab = &state.workspaces[0].tabs[0];
+        let terminal_id = tab
+            .terminal_id(tab.layout.focused())
+            .cloned()
+            .expect("focused terminal");
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .agent_name = Some("claude".into());
+
+        open_rename_active_tab(&mut state, false);
+        assert_eq!(state.name_input, "claude");
+
+        // The agent advances while the modal is open; the user never touches the input.
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .agent_name = Some("codex".into());
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(
+            state.workspaces[0].tabs[0].custom_name.is_none(),
+            "an unedited Enter must not pin the stale prefill as a user name"
+        );
+        assert!(state.rename_tab_prefill.is_none());
     }
 
     #[test]
