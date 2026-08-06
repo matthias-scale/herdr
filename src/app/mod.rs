@@ -695,6 +695,9 @@ impl App {
             dock_collapsed,
             dock_tab: state::DockTab::Editor,
             dock_scroll: 0,
+            dock_editor_focused: false,
+            dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_errors: std::collections::HashMap::new(),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
@@ -1243,6 +1246,8 @@ impl App {
                             area,
                         );
                     }
+                    self.ensure_dock_editor();
+                    self.resize_dock_editor();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,
