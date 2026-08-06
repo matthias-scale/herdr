@@ -69,6 +69,10 @@ impl TabDisplayProjection {
                 .join(TAB_DISPLAY_SEPARATOR),
         }
     }
+
+    pub(crate) fn leads_with_agent_component(&self) -> bool {
+        matches!(self, Self::Derived { agent: Some(_), .. })
+    }
 }
 
 impl TabNameOrigin {

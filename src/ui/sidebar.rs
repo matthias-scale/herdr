@@ -37,14 +37,6 @@ pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
 
 fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
     let title = title.trim().to_ascii_lowercase();
-    // A derived projection already leads with the agent, so compare against the
-    // first component too — otherwise "Claude · Fix billing" still earns a " · cc"
-    // suffix and names the agent twice.
-    let leading = title
-        .split(crate::workspace::TAB_DISPLAY_SEPARATOR)
-        .next()
-        .unwrap_or_default()
-        .trim();
     let provider = match entry.agent {
         Some(Agent::Codex) => Some("codex"),
         Some(Agent::Claude) => Some("claude"),
@@ -57,10 +49,7 @@ fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
         .into_iter()
         .chain(entry.agent_kind_label.as_deref())
         .chain(provider)
-        .any(|identity| {
-            let identity = identity.trim();
-            identity.eq_ignore_ascii_case(&title) || identity.eq_ignore_ascii_case(leading)
-        })
+        .any(|identity| identity.trim().eq_ignore_ascii_case(&title))
 }
 
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
@@ -108,10 +97,11 @@ pub(super) fn tab_row_layout(
         .primary_tab_label
         .as_deref()
         .unwrap_or(DEFAULT_THREAD_TITLE);
-    let agent_suffix = (!title_repeats_agent_identity(entry, tab_title))
-        .then(|| tab_agent_suffix(entry.agent))
-        .flatten()
-        .map(|suffix| format!(" · {suffix}"));
+    let agent_suffix = (!entry.tab_label_leads_with_agent
+        && !title_repeats_agent_identity(entry, tab_title))
+    .then(|| tab_agent_suffix(entry.agent))
+    .flatten()
+    .map(|suffix| format!(" · {suffix}"));
     let agent_suffix_width = agent_suffix
         .as_deref()
         .map(display_width)
@@ -249,6 +239,7 @@ pub(crate) struct AgentPanelEntry {
     pub pane_id: crate::layout::PaneId,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
+    pub tab_label_leads_with_agent: bool,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
@@ -459,8 +450,11 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
-                    let thread_title = ws
-                        .tab_display_projection(&app.terminals, detail.tab_idx)
+                    let projection = ws.tab_display_projection(&app.terminals, detail.tab_idx);
+                    let tab_label_leads_with_agent = projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.leads_with_agent_component());
+                    let thread_title = projection
                         .map(|projection| projection.full_label())
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
                     AgentPanelEntry {
@@ -469,6 +463,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: thread_title,
+                        tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
                         terminal_title_stripped: detail.terminal_title_stripped,
@@ -2528,6 +2523,7 @@ mod tests {
             pane_id: crate::layout::PaneId::alloc(),
             primary_label: "workspace".into(),
             primary_tab_label: Some("tab".into()),
+            tab_label_leads_with_agent: false,
             pane_label: None,
             terminal_title: None,
             terminal_title_stripped: None,
@@ -4229,6 +4225,67 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert!(
             !rendered.contains("Fix billing · pi"),
             "sidebar repeated the agent identity: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn split_tab_sidebar_and_tab_bar_share_agent_title_projection() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let root_pane = workspace.tabs[0].root_pane;
+        let focused_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let root_terminal = app.workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&root_terminal)
+            .expect("root terminal")
+            .detected_agent = Some(Agent::Pi);
+
+        let focused_terminal = app.workspaces[0].tabs[0].panes[&focused_pane]
+            .attached_terminal_id
+            .clone();
+        let focused = app
+            .terminals
+            .get_mut(&focused_terminal)
+            .expect("focused terminal");
+        focused.detected_agent = Some(Agent::Pi);
+        focused.agent_name = Some("Reviewer".into());
+        focused.set_terminal_title(Some("Fix billing".into()));
+        app.reconcile_sidebar_presentation();
+
+        let sidebar_entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("split tab sidebar row");
+        assert!(sidebar_entry.tab_label_leads_with_agent);
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+        let tab_bar_label = crate::ui::tabs::tab_chrome_label(
+            &app.workspaces[0],
+            &app.terminals,
+            0,
+            usize::from(area.width),
+        );
+
+        assert_eq!(tab_bar_label, "Reviewer · Fix billing");
+        assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
+        assert!(
+            !rendered.contains("Reviewer · Fix billing · pi"),
+            "{rendered:?}"
         );
     }
 
