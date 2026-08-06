@@ -55,6 +55,9 @@ pub(super) fn render_shortcuts(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let lines = shortcut_lines(app);
     let viewport = area.height as usize;
+    // Measured twice on purpose: a scrollbar costs a column, and losing that column
+    // rewraps the text into more rows -- so the first pass only decides whether the
+    // bar appears, and the second measures the width the text actually gets.
     let initial_rows = wrapped_line_count(&lines, area.width);
     let needs_scrollbar = initial_rows > viewport && area.width > 1;
     let text_width = if needs_scrollbar {
