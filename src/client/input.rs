@@ -17,13 +17,11 @@ use std::sync::Arc;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
 use tokio::sync::mpsc;
 
-use super::{ClientLoopEvent, HostTerminalQueryState};
+use super::ClientLoopEvent;
 
 #[cfg(any(windows, test))]
 mod windows_vti;
@@ -43,7 +41,6 @@ pub fn stdin_reader_loop(
     host_color_query_sent: bool,
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_mouse_capture_active: Arc<AtomicBool>,
-    host_terminal_query_state: Arc<HostTerminalQueryState>,
 ) {
     #[cfg(windows)]
     {
@@ -51,7 +48,6 @@ pub fn stdin_reader_loop(
             host_color_query_sent,
             host_color_query_generation,
             host_mouse_capture_active,
-            host_terminal_query_state,
         );
         windows_stdin_reader_loop(event_tx, should_quit);
     }
@@ -63,7 +59,6 @@ pub fn stdin_reader_loop(
         host_color_query_sent,
         host_color_query_generation,
         host_mouse_capture_active,
-        host_terminal_query_state,
     );
 }
 
@@ -74,7 +69,6 @@ fn unix_stdin_reader_loop(
     host_color_query_sent: bool,
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_mouse_capture_active: Arc<AtomicBool>,
-    host_terminal_query_state: Arc<HostTerminalQueryState>,
 ) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -88,11 +82,6 @@ fn unix_stdin_reader_loop(
     let mut pending_palette = Vec::new();
 
     while !should_quit.load(Ordering::Acquire) {
-        match stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS) {
-            Some(true) => {}
-            Some(false) => continue,
-            None => break,
-        }
         framer.sync_host_color_query_generation(
             &mut seen_query_generation,
             &host_color_query_generation,
@@ -108,9 +97,8 @@ fn unix_stdin_reader_loop(
                     framer.push(&scratch[..n]),
                     &event_tx,
                     &mut pending_palette,
-                    &host_terminal_query_state,
                 ) {
-                    break;
+                    return;
                 }
 
                 let timeout_ms = idle_flush_timeout_ms(
@@ -121,17 +109,10 @@ fn unix_stdin_reader_loop(
                     let had_pending = framer.has_pending_input();
                     let chunks = framer.flush_timeout();
                     let held_escape = had_pending && chunks.is_empty();
-                    if !send_unix_input_chunks(
-                        chunks,
-                        &event_tx,
-                        &mut pending_palette,
-                        &host_terminal_query_state,
-                    ) || !flush_unix_palette_input(
-                        &event_tx,
-                        &mut pending_palette,
-                        &host_terminal_query_state,
-                    ) {
-                        break;
+                    if !send_unix_input_chunks(chunks, &event_tx, &mut pending_palette)
+                        || !flush_unix_palette_input(&event_tx, &mut pending_palette)
+                    {
+                        return;
                     }
                     if held_escape
                         && stdin_read_ready(
@@ -142,10 +123,9 @@ fn unix_stdin_reader_loop(
                             framer.flush_timeout(),
                             &event_tx,
                             &mut pending_palette,
-                            &host_terminal_query_state,
                         )
                     {
-                        break;
+                        return;
                     }
                 }
             }
@@ -157,11 +137,6 @@ fn unix_stdin_reader_loop(
             }
         }
     }
-
-    if host_terminal_query_state.is_draining() {
-        drain_host_terminal_input(&mut reader);
-        host_terminal_query_state.mark_drain_finished();
-    }
 }
 
 #[cfg(unix)]
@@ -169,42 +144,25 @@ fn send_unix_input_chunks(
     chunks: Vec<Vec<u8>>,
     event_tx: &mpsc::Sender<ClientLoopEvent>,
     pending_palette: &mut Vec<Vec<u8>>,
-    host_terminal_query_state: &HostTerminalQueryState,
 ) -> bool {
-    if host_terminal_query_state.is_draining() {
-        pending_palette.clear();
-        return true;
-    }
-
     for data in chunks {
-        if host_terminal_query_state.is_draining() {
-            pending_palette.clear();
-            return true;
-        }
         let palette_response = std::str::from_utf8(&data)
             .ok()
             .and_then(crate::terminal_theme::parse_palette_color_response)
             .is_some();
         if palette_response {
-            host_terminal_query_state.reply_received();
             pending_palette.push(data);
-            if pending_palette.len() == 256
-                && !flush_unix_palette_input(event_tx, pending_palette, host_terminal_query_state)
+            if pending_palette.len() == 256 && !flush_unix_palette_input(event_tx, pending_palette)
             {
                 return false;
             }
             continue;
         }
-        let default_color_kind = std::str::from_utf8(&data)
+        let default_color_response = std::str::from_utf8(&data)
             .ok()
             .and_then(crate::terminal_theme::parse_default_color_response)
-            .map(|(kind, _)| kind);
-        if default_color_kind.is_some() {
-            host_terminal_query_state.reply_received();
-        }
-        if default_color_kind.is_none()
-            && !flush_unix_palette_input(event_tx, pending_palette, host_terminal_query_state)
-        {
+            .is_some();
+        if !default_color_response && !flush_unix_palette_input(event_tx, pending_palette) {
             return false;
         }
         if event_tx
@@ -221,43 +179,14 @@ fn send_unix_input_chunks(
 fn flush_unix_palette_input(
     event_tx: &mpsc::Sender<ClientLoopEvent>,
     pending_palette: &mut Vec<Vec<u8>>,
-    host_terminal_query_state: &HostTerminalQueryState,
 ) -> bool {
     if pending_palette.is_empty() {
-        return true;
-    }
-    if host_terminal_query_state.is_draining() {
-        pending_palette.clear();
         return true;
     }
     let data = std::mem::take(pending_palette).concat();
     event_tx
         .blocking_send(ClientLoopEvent::StdinInput(data))
         .is_ok()
-}
-
-#[cfg(unix)]
-fn drain_host_terminal_input<R: Read + AsRawFd>(reader: &mut R) {
-    let deadline = Instant::now() + super::HOST_TERMINAL_QUERY_DRAIN_TIMEOUT;
-    let mut scratch = [0u8; 4096];
-
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return;
-        }
-        let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
-        match poll_read_ready(reader.as_raw_fd(), timeout_ms) {
-            Some(false) | None => return,
-            Some(true) => match reader.read(&mut scratch) {
-                Ok(0) => return,
-                Ok(_) => {}
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                Err(_) => return,
-            },
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -553,26 +482,9 @@ mod tests {
     }
 
     #[test]
-    fn host_terminal_drain_is_bounded_when_no_reply_arrives() {
-        use std::os::unix::net::UnixStream;
-
-        let (mut reader, _writer) = UnixStream::pair().unwrap();
-        let started = Instant::now();
-
-        drain_host_terminal_input(&mut reader);
-
-        assert!(
-            started.elapsed() < Duration::from_millis(200),
-            "drain exceeded bounded timeout: {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[test]
     fn palette_replies_are_forwarded_as_one_input_batch() {
         let (tx, mut rx) = mpsc::channel(4);
         let mut pending = Vec::new();
-        let host_terminal_query_state = HostTerminalQueryState::new(true);
         assert!(send_unix_input_chunks(
             vec![
                 b"\x1b]4;0;rgb:1111/2222/3333\x1b\\".to_vec(),
@@ -580,15 +492,10 @@ mod tests {
             ],
             &tx,
             &mut pending,
-            &host_terminal_query_state,
         ));
         assert!(rx.try_recv().is_err());
 
-        assert!(flush_unix_palette_input(
-            &tx,
-            &mut pending,
-            &host_terminal_query_state,
-        ));
+        assert!(flush_unix_palette_input(&tx, &mut pending));
         let ClientLoopEvent::StdinInput(data) = rx.try_recv().unwrap() else {
             panic!("expected palette input batch");
         };
