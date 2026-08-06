@@ -468,7 +468,28 @@ pub(crate) enum SidebarRow {
 /// omitted entirely when empty, which is the common case.
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
 pub(crate) const AGENTS_SECTION_TITLE: &str = "Agents";
+pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
+
+/// Only the group that demands action is coloured. Pinned and Spaces are
+/// organisation, not urgency, so they stay in the muted chrome tone.
+fn section_header_color(title: &str, p: &Palette) -> ratatui::style::Color {
+    if title == BLOCKED_SECTION_TITLE {
+        p.red
+    } else {
+        p.overlay0
+    }
+}
+
+/// A pin is per tab, while a sidebar row is per agent pane, so every pane of a
+/// pinned tab is pinned. Out-of-range indices simply are not pinned -- a stale
+/// entry must never panic the whole sidebar.
+fn tab_is_pinned(app: &AppState, ws_idx: usize, tab_idx: usize) -> bool {
+    app.workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.tabs.get(tab_idx))
+        .is_some_and(|tab| tab.pinned)
+}
 
 pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
     sidebar_rows_inner(app, None, false)
@@ -544,14 +565,29 @@ fn sidebar_rows_inner(
         .filter(|entry| entry.state == AgentState::Blocked)
         .cloned()
         .collect();
-    if !blocked.is_empty() {
-        rows.push(SidebarRow::SectionHeader {
-            title: BLOCKED_SECTION_TITLE,
-        });
-        rows.extend(blocked.into_iter().map(|entry| SidebarRow::Agent {
+    // A pinned tab that is also blocked appears once, under Blocked: the gate
+    // is the more urgent fact, and listing a row twice above the tree would
+    // make the groups read as a queue you have to de-duplicate by eye.
+    let pinned: Vec<AgentPanelEntry> = agents
+        .iter()
+        .filter(|entry| {
+            entry.state != AgentState::Blocked && tab_is_pinned(app, entry.ws_idx, entry.tab_idx)
+        })
+        .cloned()
+        .collect();
+    let mut push_group = |rows: &mut Vec<SidebarRow>, title, group: Vec<AgentPanelEntry>| {
+        if group.is_empty() {
+            return;
+        }
+        rows.push(SidebarRow::SectionHeader { title });
+        rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
             entry: Box::new(entry),
             depth: 0,
         }));
+    };
+    push_group(&mut rows, BLOCKED_SECTION_TITLE, blocked);
+    push_group(&mut rows, PINNED_SECTION_TITLE, pinned);
+    if !rows.is_empty() {
         rows.push(SidebarRow::SectionHeader {
             title: SPACES_SECTION_TITLE,
         });
@@ -1345,11 +1381,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         "─".repeat(usize::from(ws_area.width)),
-                        Style::default().fg(if *title == BLOCKED_SECTION_TITLE {
-                            p.red
-                        } else {
-                            p.overlay0
-                        }),
+                        Style::default().fg(section_header_color(title, p)),
                     ))),
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
@@ -3974,6 +4006,50 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "the tree below must not grow further headers: {shape:?}"
         );
         assert!(shape[4..].iter().any(|(kind, _)| *kind == "workspace"));
+    }
+
+    #[test]
+    fn pinned_tabs_group_below_blocked_and_above_the_tree() {
+        let mut app = priority_app_with_states(&[
+            AgentState::Working,
+            AgentState::Blocked,
+            AgentState::Idle,
+        ]);
+        // ws0 is merely pinned; ws1 is pinned *and* blocked.
+        app.workspaces[0].tabs[0].pinned = true;
+        app.workspaces[1].tabs[0].pinned = true;
+
+        let shape = priority_row_shape(&app);
+        assert_eq!(
+            shape[..5],
+            [
+                ("section", BLOCKED_SECTION_TITLE.to_string()),
+                ("agent", "ws1".to_string()),
+                ("section", PINNED_SECTION_TITLE.to_string()),
+                ("agent", "ws0".to_string()),
+                ("section", SPACES_SECTION_TITLE.to_string()),
+            ],
+            "a pinned-and-blocked tab is listed once, under Blocked: {shape:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_pinned_or_blocked_costs_no_header_rows() {
+        let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
+        app.workspaces[0].tabs[0].pinned = true;
+        assert!(
+            sidebar_rows(&app)
+                .iter()
+                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
+            "a pin alone must be enough to open the group"
+        );
+        app.workspaces[0].tabs[0].pinned = false;
+        assert!(
+            !sidebar_rows(&app)
+                .iter()
+                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
+            "with nothing pinned or blocked the sidebar is byte-for-byte what it was"
+        );
     }
 
     #[test]

@@ -1505,6 +1505,9 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    /// A click landed on a tab's pin glyph. Drained by the app loop, which is
+    /// the layer that owns the API client the mutation has to travel through.
+    pub request_pin_toggle: Option<(usize, usize)>,
     pub request_new_linked_worktree: Option<usize>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
@@ -2034,6 +2037,7 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,

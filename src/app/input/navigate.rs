@@ -396,6 +396,10 @@ impl App {
                 self.zoom_focused_pane_via_api();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::TogglePinTab => {
+                self.toggle_pin_active_tab_via_api();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::EnterResizeMode => self.state.mode = Mode::Resize,
             NavigateAction::ToggleSidebar => {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
@@ -822,6 +826,30 @@ impl App {
                 mode: crate::api::schema::PaneZoomMode::Toggle,
             },
         );
+    }
+
+    /// Pin or unpin whichever tab is in front. Takes an explicit index so the
+    /// same path serves both the keybinding (active tab) and a click on some
+    /// other tab's pin glyph.
+    pub(crate) fn toggle_pin_tab_via_api(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return;
+        };
+        self.runtime_tab_pin(
+            "tui.tab.pin",
+            crate::api::schema::TabPinParams {
+                tab_id,
+                mode: crate::api::schema::TabPinMode::Toggle,
+            },
+        );
+    }
+
+    pub(crate) fn toggle_pin_active_tab_via_api(&mut self) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let tab_idx = self.state.workspaces[ws_idx].active_tab;
+        self.toggle_pin_tab_via_api(ws_idx, tab_idx);
     }
 
     pub(crate) fn set_split_ratio_via_api(&mut self, path: Vec<bool>, ratio: f32) {
@@ -1563,6 +1591,7 @@ pub(crate) enum NavigateAction {
     EditScrollback,
     CopyMode,
     Zoom,
+    TogglePinTab,
     EnterResizeMode,
     ToggleSidebar,
     CyclePaneNext,
@@ -1721,6 +1750,7 @@ fn non_indexed_action_for_key(
         (&kb.split_up, NavigateAction::SplitUp),
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.zoom, NavigateAction::Zoom),
+        (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
@@ -1991,6 +2021,12 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
         NavigateAction::Zoom => {
             state.toggle_zoom();
+            leave_navigate_mode(state);
+        }
+        // Headless/test dispatch has no API client, so it flips the flag it
+        // would otherwise have asked the server to flip.
+        NavigateAction::TogglePinTab => {
+            state.toggle_pin_active_tab();
             leave_navigate_mode(state);
         }
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,

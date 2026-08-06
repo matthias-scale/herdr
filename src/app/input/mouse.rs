@@ -486,6 +486,13 @@ impl AppState {
                     self.scroll_tabs_right();
                     return None;
                 }
+                if let (Some(ws_idx), Some(tab_idx)) = (
+                    self.active,
+                    self.tab_pin_glyph_at(mouse.column, mouse.row),
+                ) {
+                    self.request_pin_toggle = Some((ws_idx, tab_idx));
+                    return None;
+                }
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
@@ -1228,6 +1235,15 @@ impl AppState {
                     && col < area.x + area.width)
                     .then_some(idx)
             })
+    }
+
+    /// The pin glyph is the tab cell's leading pad column. Keeping it to that
+    /// one column means a click anywhere else on the tab still does what it
+    /// always did: focus the tab.
+    pub(super) fn tab_pin_glyph_at(&self, col: u16, row: u16) -> Option<usize> {
+        let idx = self.tab_at(col, row)?;
+        let rect = self.view.tab_hit_areas.get(idx)?;
+        (rect.width > 1 && col == rect.x).then_some(idx)
     }
 
     pub(super) fn on_tab_bar(&self, col: u16, row: u16) -> bool {

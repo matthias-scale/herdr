@@ -31,6 +31,24 @@ pub struct TabRenameParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabPinParams {
+    pub tab_id: String,
+    #[serde(default)]
+    pub mode: TabPinMode,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TabPinMode {
+    #[default]
+    Toggle,
+    Pin,
+    Unpin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabMoveParams {
     pub tab_id: String,
     pub insert_index: usize,
