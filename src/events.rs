@@ -156,7 +156,7 @@ pub enum AppEvent {
         observations: Vec<crate::app::work_context_git::GitWorkContextObservation>,
         cache_updates: Vec<(
             crate::app::work_context_git::GitWorkContextCacheKey,
-            crate::work_context::PaneWorkContext,
+            crate::app::work_context_git::GitWorkContextCacheEntry,
         )>,
     },
     /// Background foreground-process observations completed for live panes.

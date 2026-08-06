@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,9 @@ use crate::work_context::{extract_pr_urls, extract_preview_urls, extract_ticket_
 
 pub(crate) const WORK_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const WORK_CONTEXT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+// Refresh GitHub metadata often enough to surface newly opened PRs promptly while
+// avoiding a gh call on every five-second work-context refresh.
+pub(crate) const WORK_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitWorkContextRefreshInFlight {
@@ -22,6 +25,12 @@ pub(crate) struct GitWorkContextRefreshInFlight {
 pub(crate) struct GitWorkContextCacheKey {
     pub(crate) repo_root: PathBuf,
     pub(crate) branch: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GitWorkContextCacheEntry {
+    pub(crate) context: crate::work_context::PaneWorkContext,
+    pub(crate) cached_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,7 +56,7 @@ struct GitWorkContextTarget {
 #[derive(Debug)]
 struct GitWorkContextRefreshOutput {
     observations: Vec<GitWorkContextObservation>,
-    cache_updates: Vec<(GitWorkContextCacheKey, crate::work_context::PaneWorkContext)>,
+    cache_updates: Vec<(GitWorkContextCacheKey, GitWorkContextCacheEntry)>,
 }
 
 impl App {
@@ -72,6 +81,7 @@ impl App {
     }
 
     pub(crate) fn start_git_work_context_refresh_if_due(&mut self, now: Instant) {
+        self.prune_git_work_context_state();
         if self
             .git_work_context_refresh_in_flight
             .as_ref()
@@ -106,11 +116,18 @@ impl App {
         let cache = self.git_work_context_cache.clone();
         let git_program = self.git_work_context_program();
         let gh_program = Self::gh_program();
+        let cache_now = Instant::now();
         let _ = std::thread::Builder::new()
             .name("herdr-work-context-git".into())
             .spawn(move || {
-                let output =
-                    refresh_git_work_contexts(targets, cache, deadline, &git_program, &gh_program);
+                let output = refresh_git_work_contexts(
+                    targets,
+                    cache,
+                    cache_now,
+                    deadline,
+                    &git_program,
+                    &gh_program,
+                );
                 let _ = event_tx.blocking_send(AppEvent::GitWorkContextRefreshed {
                     generation,
                     observations: output.observations,
@@ -129,8 +146,9 @@ impl App {
         &mut self,
         generation: u64,
         observations: Vec<GitWorkContextObservation>,
-        cache_updates: Vec<(GitWorkContextCacheKey, crate::work_context::PaneWorkContext)>,
+        cache_updates: Vec<(GitWorkContextCacheKey, GitWorkContextCacheEntry)>,
     ) -> bool {
+        self.prune_git_work_context_state();
         let Some(refresh) = self.git_work_context_refresh_in_flight.as_ref() else {
             return false;
         };
@@ -145,8 +163,10 @@ impl App {
             return false;
         }
         self.git_work_context_refresh_in_flight = None;
-        for (key, context) in cache_updates {
-            self.git_work_context_cache.insert(key, context);
+        let refreshed_cache_keys: HashSet<_> =
+            cache_updates.iter().map(|(key, _)| key.clone()).collect();
+        for (key, entry) in cache_updates {
+            self.git_work_context_cache.insert(key, entry);
         }
 
         let mut changed = false;
@@ -182,7 +202,12 @@ impl App {
                 continue;
             }
 
-            if self.git_work_context_inputs.get(&observation.pane_id) == Some(&observation.input) {
+            let cache_refreshed = cache_key(&observation.input)
+                .is_some_and(|key| refreshed_cache_keys.contains(&key));
+            if !cache_refreshed
+                && self.git_work_context_inputs.get(&observation.pane_id)
+                    == Some(&observation.input)
+            {
                 continue;
             }
 
@@ -203,6 +228,8 @@ impl App {
             self.schedule_session_save();
             self.emit_pane_updated(ws_idx, observation.pane_id);
         }
+
+        self.prune_git_work_context_state();
 
         if changed {
             self.render_dirty.request_generic();
@@ -226,6 +253,24 @@ impl App {
             .collect()
     }
 
+    fn prune_git_work_context_state(&mut self) {
+        let active_panes: HashSet<_> = self
+            .git_work_context_targets()
+            .into_iter()
+            .map(|target| target.pane_id)
+            .collect();
+        self.git_work_context_inputs
+            .retain(|pane_id, _| active_panes.contains(pane_id));
+
+        let active_cache_keys: HashSet<_> = self
+            .git_work_context_inputs
+            .values()
+            .filter_map(cache_key)
+            .collect();
+        self.git_work_context_cache
+            .retain(|key, _| active_cache_keys.contains(key));
+    }
+
     #[cfg(test)]
     pub(crate) fn test_begin_git_work_context_refresh(&mut self, generation: u64) {
         let deadline = Instant::now() + WORK_CONTEXT_REFRESH_TIMEOUT;
@@ -239,7 +284,8 @@ impl App {
 
 fn refresh_git_work_contexts(
     targets: Vec<GitWorkContextTarget>,
-    cache: HashMap<GitWorkContextCacheKey, crate::work_context::PaneWorkContext>,
+    cache: HashMap<GitWorkContextCacheKey, GitWorkContextCacheEntry>,
+    now: Instant,
     deadline: Instant,
     git_program: &Path,
     gh_program: &Path,
@@ -267,13 +313,19 @@ fn refresh_git_work_contexts(
                     repo_root: repo_root.clone(),
                     branch: branch.clone(),
                 };
-                if let Some(context) = cache.get(&key) {
-                    context.clone()
+                if let Some(entry) = cache.get(&key).filter(|entry| {
+                    now.saturating_duration_since(entry.cached_at) < WORK_CONTEXT_CACHE_TTL
+                }) {
+                    entry.context.clone()
                 } else {
                     let context =
                         git_work_context_for_branch(branch, repo_root, deadline, gh_program);
-                    cache_updates.push((key.clone(), context.clone()));
-                    cache.insert(key, context.clone());
+                    let entry = GitWorkContextCacheEntry {
+                        context: context.clone(),
+                        cached_at: now,
+                    };
+                    cache_updates.push((key.clone(), entry.clone()));
+                    cache.insert(key, entry);
                     context
                 }
             }
@@ -291,6 +343,13 @@ fn refresh_git_work_contexts(
         observations,
         cache_updates,
     }
+}
+
+fn cache_key(input: &GitWorkContextInput) -> Option<GitWorkContextCacheKey> {
+    Some(GitWorkContextCacheKey {
+        repo_root: input.repo_root.clone()?,
+        branch: input.branch.clone()?,
+    })
 }
 
 fn discover_git_input(
@@ -462,12 +521,25 @@ mod tests {
         cwd: &Path,
         deadline: Instant,
     ) -> GitWorkContextRefreshOutput {
+        refresh_one_at(git, gh, cwd, HashMap::new(), Instant::now(), deadline)
+    }
+
+    #[cfg(unix)]
+    fn refresh_one_at(
+        git: &Path,
+        gh: &Path,
+        cwd: &Path,
+        cache: HashMap<GitWorkContextCacheKey, GitWorkContextCacheEntry>,
+        now: Instant,
+        deadline: Instant,
+    ) -> GitWorkContextRefreshOutput {
         refresh_git_work_contexts(
             vec![GitWorkContextTarget {
                 pane_id: PaneId::from_raw(1),
                 cwd: cwd.to_path_buf(),
             }],
-            HashMap::new(),
+            cache,
+            now,
             deadline,
             git,
             gh,
@@ -530,6 +602,67 @@ mod tests {
             assert!(output.observations[0].context.pr_urls.is_empty());
             assert!(output.observations[0].context.preview_urls.is_empty());
         }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_cache_rechecks_gh_while_fresh_cache_is_reused() {
+        let dir = fixture_dir("cache-ttl");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let marker = dir.join("pr-open");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/MAT-1-cache");
+        write_executable(
+            &gh,
+            &format!(
+                "#!/bin/sh\nif [ -f '{}' ]; then printf '%s\\n' '{{\"url\":\"https://github.com/o/r/pull/8\"}}'; else exit 1; fi\n",
+                marker.display()
+            ),
+        );
+
+        let first_now = Instant::now();
+        let first = refresh_one_at(
+            &git,
+            &gh,
+            &repo,
+            HashMap::new(),
+            first_now,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(first.observations[0].context.pr_urls.is_empty());
+        assert_eq!(first.cache_updates.len(), 1);
+        let cache: HashMap<GitWorkContextCacheKey, GitWorkContextCacheEntry> =
+            first.cache_updates.iter().cloned().collect();
+
+        std::fs::write(&marker, "open").expect("mark PR as opened");
+        let within_ttl = refresh_one_at(
+            &git,
+            &gh,
+            &repo,
+            cache.clone(),
+            first_now + WORK_CONTEXT_CACHE_TTL - Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(within_ttl.observations[0].context.pr_urls.is_empty());
+        assert!(within_ttl.cache_updates.is_empty());
+
+        let expired = refresh_one_at(
+            &git,
+            &gh,
+            &repo,
+            cache,
+            first_now + WORK_CONTEXT_CACHE_TTL + Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert_eq!(
+            expired.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/8"]
+        );
+        assert_eq!(expired.cache_updates.len(), 1);
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -134,8 +134,10 @@ pub struct App {
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) last_git_work_context_refresh_generation: u64,
     pub(crate) next_git_work_context_refresh: Instant,
-    pub(crate) git_work_context_cache:
-        HashMap<work_context_git::GitWorkContextCacheKey, crate::work_context::PaneWorkContext>,
+    pub(crate) git_work_context_cache: HashMap<
+        work_context_git::GitWorkContextCacheKey,
+        work_context_git::GitWorkContextCacheEntry,
+    >,
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
     pub(crate) foreground_process_refresh_in_flight:
