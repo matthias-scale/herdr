@@ -1650,11 +1650,17 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
     let prefix = "  ";
     let state_icon = state_dot(entry.state, entry.seen, p);
     let workspace = entry.primary_label.as_str();
-    let agent = entry
-        .agent_kind_label
-        .as_deref()
-        .or(entry.agent_label.as_deref())
-        .or_else(|| tab_agent_suffix(entry.agent))
+    // The tab label already opens with the agent when the projection derived it, so
+    // appending the provider here would repeat it in the same row.
+    let agent = (!entry.tab_label_leads_with_agent)
+        .then(|| {
+            entry
+                .agent_kind_label
+                .as_deref()
+                .or(entry.agent_label.as_deref())
+                .or_else(|| tab_agent_suffix(entry.agent))
+        })
+        .flatten()
         .map(|label| format!(" · {label}"));
 
     let mut spans = Vec::new();
@@ -4353,6 +4359,51 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             !rendered.contains("Reviewer · Fix billing · pi"),
             "{rendered:?}"
         );
+    }
+
+    #[test]
+    fn prio_row_omits_the_provider_when_the_tab_label_already_leads_with_it() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let focused_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].set_prio(true);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let focused_terminal = app.workspaces[0].tabs[0].panes[&focused_pane]
+            .attached_terminal_id
+            .clone();
+        let focused = app
+            .terminals
+            .get_mut(&focused_terminal)
+            .expect("focused terminal");
+        focused.detected_agent = Some(Agent::Pi);
+        focused.agent_name = Some("Reviewer".into());
+        focused.set_terminal_title(Some("Fix billing".into()));
+        app.reconcile_sidebar_presentation();
+
+        let entry = prio_panel_entries(&app, None)
+            .into_iter()
+            .next()
+            .expect("prio entry");
+        assert!(entry.tab_label_leads_with_agent);
+
+        let area = Rect::new(0, 0, 60, 16);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        assert_eq!(rows.len(), 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
+
+        assert!(
+            rendered.contains("Reviewer · Fix billing · one"),
+            "{rendered:?}"
+        );
+        assert!(!rendered.contains("one · "), "{rendered:?}");
     }
 
     #[test]
