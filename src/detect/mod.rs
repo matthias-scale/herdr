@@ -386,6 +386,14 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
             | ("herdr:opencode", "opencode")
             | ("herdr:kilo", "kilo")
             | ("herdr:kimi", "kimi")
+            // Closing-block reporter (Claude Code `Stop` hook). Screen scraping
+            // sees Claude's `❯` prompt box the instant a turn ends and calls the
+            // pane idle (manifests/claude.toml `live_prompt_box`, priority 950),
+            // which is right about the harness and wrong about the work: agents
+            // may still be running, or a Gate may be waiting on a human. The
+            // hook knows both, so it owns lifecycle for this source.
+            | ("herdr:claude-closing-block", "claude")
+            | ("herdr:codex-closing-block", "codex")
     )
 }
 
