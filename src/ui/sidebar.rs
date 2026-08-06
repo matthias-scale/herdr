@@ -1110,7 +1110,9 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
             .get(*ws_idx)
             .map(|workspace| workspace_row_height_in_body(app, workspace, *indented, body_height))
             .unwrap_or(0),
-        SidebarRow::Agent { entry, .. } => agent_entry_height_in_body(app, entry, body_height),
+        SidebarRow::Agent { entry, depth } => {
+            agent_entry_height_in_body_at(app, entry, body_height, *depth)
+        }
         SidebarRow::Tab { .. } | SidebarRow::SectionHeader { .. } => 1,
     }
 }
@@ -1266,6 +1268,20 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
     ))
 }
 
+/// Depth 0 means the row sits in a worklist group rather than in the tree, and
+/// those two want different shapes: the tree keeps the configured template, the
+/// worklist collapses to one line.
+fn resolved_agent_rows_at(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    depth: u16,
+) -> Vec<Vec<ResolvedToken>> {
+    if depth == 0 {
+        return tokens::worklist_row(entry);
+    }
+    resolved_agent_rows(app, entry)
+}
+
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
@@ -1278,15 +1294,27 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
     tokens::agent_rows(&app.sidebar_agents, entry, label)
 }
 
+#[cfg(test)]
 pub(crate) fn agent_entry_height_in_body(
     app: &AppState,
     entry: &AgentPanelEntry,
     body_height: u16,
 ) -> u16 {
-    (resolved_agent_rows(app, entry)
+    agent_entry_height_in_body_at(app, entry, body_height, 1)
+}
+
+/// A worklist row is one line and owns no tab header -- it is a pointer into
+/// the tree, not a copy of the tree's structure.
+fn agent_entry_height_in_body_at(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    body_height: u16,
+    depth: u16,
+) -> u16 {
+    (resolved_agent_rows_at(app, entry, depth)
         .len()
         .max(1)
-        .saturating_add(usize::from(entry.tab_first_pane))
+        .saturating_add(usize::from(entry.tab_first_pane && depth > 0))
         .min(u16::MAX as usize) as u16)
         .min(body_height)
 }
@@ -1339,8 +1367,8 @@ pub(crate) fn compute_sidebar_row_areas(
                     indented: *indented,
                 });
             }
-            SidebarRow::Agent { entry, .. } => {
-                let row_height = agent_entry_height_in_body(app, entry, body.height);
+            SidebarRow::Agent { entry, depth } => {
+                let row_height = agent_entry_height_in_body_at(app, entry, body.height, *depth);
                 if row_y.saturating_add(row_height) > body_bottom {
                     break;
                 }
@@ -1349,6 +1377,7 @@ pub(crate) fn compute_sidebar_row_areas(
                     tab_idx: entry.tab_idx,
                     pane_id: entry.pane_id,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
+                    row_idx: entry_idx,
                 });
             }
             SidebarRow::Tab { .. } | SidebarRow::SectionHeader { .. } => {}
@@ -2465,14 +2494,8 @@ fn render_workspace_list(
         render_tab_card(app, frame, &card);
     }
     for card in agent_cards {
-        let Some((entry, depth)) = row_entries.iter().find_map(|row| match row {
-            SidebarRow::Agent { entry, depth }
-                if entry.ws_idx == card.ws_idx
-                    && entry.tab_idx == card.tab_idx
-                    && entry.pane_id == card.pane_id =>
-            {
-                Some((entry, *depth))
-            }
+        let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
+            SidebarRow::Agent { entry, depth } => Some((entry, *depth)),
             _ => None,
         }) else {
             continue;
@@ -2606,7 +2629,7 @@ fn render_agent_card(
 ) {
     let p = &app.palette;
     let label_color = state_label_color(detail.state, detail.seen, p);
-    let rows = resolved_agent_rows(app, detail);
+    let rows = resolved_agent_rows_at(app, detail, depth);
     let header_height = 0;
     let height = (rows.len().max(1) as u16)
         .saturating_add(header_height)
