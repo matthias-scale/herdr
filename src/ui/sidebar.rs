@@ -23,7 +23,9 @@ const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
-const TAB_PRIO_FIELD_WIDTH: usize = 2;
+pub(crate) const TAB_PRIO_FIELD_WIDTH: usize = 2;
+pub(crate) const TAB_INFO_FIELD_WIDTH: usize = 2;
+pub(crate) const TAB_INFO_MARKER: &str = "↗";
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
@@ -66,6 +68,17 @@ pub(super) struct TabRowLayout {
     pub activity_age: Option<String>,
 }
 
+/// The prio cell is reserved on every row so its click target never moves; the info cell only
+/// costs width on rows that actually carry work-context links, because on a narrow sidebar an
+/// unconditional second cell pushes the activity age off the row entirely.
+pub(crate) fn tab_info_cell_width(entry: &AgentPanelEntry) -> usize {
+    if entry.has_work_context_links {
+        TAB_INFO_FIELD_WIDTH
+    } else {
+        0
+    }
+}
+
 pub(super) fn tab_row_layout(
     entry: &AgentPanelEntry,
     now: std::time::Instant,
@@ -92,7 +105,7 @@ pub(super) fn tab_row_layout(
         .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
         .unwrap_or_default();
     let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
-    let prio_width = if entry.prio { TAB_PRIO_FIELD_WIDTH } else { 0 };
+    let tab_gutter_width = TAB_PRIO_FIELD_WIDTH + tab_info_cell_width(entry);
     let tab_title = entry
         .primary_tab_label
         .as_deref()
@@ -132,7 +145,7 @@ pub(super) fn tab_row_layout(
     if let Some(process) = foreground_process.as_mut() {
         let process_budget = width.saturating_sub(
             prefix_width
-                + prio_width
+                + tab_gutter_width
                 + full_status_width
                 + agent_suffix_width
                 + background_width
@@ -152,7 +165,7 @@ pub(super) fn tab_row_layout(
     if activity_age.as_deref().is_some_and(|label| {
         width
             < prefix_width
-                + prio_width
+                + tab_gutter_width
                 + full_status_width
                 + agent_suffix_width
                 + foreground_process_width
@@ -169,7 +182,7 @@ pub(super) fn tab_row_layout(
         .unwrap_or_default();
     if width
         < prefix_width
-            + prio_width
+            + tab_gutter_width
             + full_status_width
             + agent_suffix_width
             + foreground_process_width
@@ -185,7 +198,7 @@ pub(super) fn tab_row_layout(
         .unwrap_or_default();
     let show_state_label = width
         > prefix_width
-            + prio_width
+            + tab_gutter_width
             + full_status_width
             + agent_suffix_width
             + background_width
@@ -196,7 +209,7 @@ pub(super) fn tab_row_layout(
         dot_status_width
     };
     let fixed_width = prefix_width
-        + prio_width
+        + tab_gutter_width
         + status_width
         + agent_suffix_width
         + foreground_process_width
@@ -256,6 +269,7 @@ pub(crate) struct AgentPanelEntry {
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
     pub prio: bool,
+    pub has_work_context_links: bool,
     pub state: AgentState,
     pub background_job_count: Option<u16>,
     pub seen: bool,
@@ -450,6 +464,17 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    let has_work_context_links = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .and_then(|tab| tab.terminal_id(detail.pane_id))
+                        .and_then(|terminal_id| app.terminals.get(terminal_id))
+                        .is_some_and(|terminal| {
+                            !crate::work_context::work_link_candidates(
+                                terminal.effective_work_context(),
+                            )
+                            .is_empty()
+                        });
                     let projection = ws.tab_display_projection(&app.terminals, detail.tab_idx);
                     let tab_label_leads_with_agent = projection
                         .as_ref()
@@ -474,6 +499,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         prio,
+                        has_work_context_links,
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
@@ -1204,11 +1230,12 @@ pub(crate) fn compute_tab_card_areas(
         if y.saturating_add(height) > body.y.saturating_add(body.height) {
             break;
         }
-        if let SidebarRow::Tab { entry, .. } = row {
+        if let SidebarRow::Tab { entry, depth } = row {
             out.push(crate::app::state::TabCardArea {
                 ws_idx: entry.ws_idx,
                 tab_idx: entry.tab_idx,
                 pane_id: entry.pane_id,
+                depth: *depth,
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
@@ -1243,6 +1270,28 @@ pub(crate) fn workspace_agent_chevron_rect(
         return Rect::default();
     }
     Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
+}
+
+fn tab_gutter_rect(card: &crate::app::state::TabCardArea, offset: u16) -> Rect {
+    let prefix_width = card.depth.saturating_mul(3).saturating_add(1);
+    let x = card
+        .rect
+        .x
+        .saturating_add(prefix_width)
+        .saturating_add(offset);
+    if card.rect.height == 0 || x < card.rect.x || x >= card.rect.x.saturating_add(card.rect.width)
+    {
+        return Rect::default();
+    }
+    Rect::new(x, card.rect.y, 1, 1)
+}
+
+pub(crate) fn tab_prio_rect(card: &crate::app::state::TabCardArea) -> Rect {
+    tab_gutter_rect(card, 0)
+}
+
+pub(crate) fn tab_info_rect(card: &crate::app::state::TabCardArea) -> Rect {
+    tab_gutter_rect(card, TAB_PRIO_FIELD_WIDTH as u16)
 }
 
 pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {
@@ -2188,9 +2237,23 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         p,
     );
     let mut spans = vec![Span::raw(prefix)];
-    if entry.prio {
-        spans.push(Span::styled("●", Style::default().fg(p.peach)));
-        spans.push(Span::raw(" "));
+    let prio_marker = if entry.prio { "●" } else { "·" };
+    let prio_style = if entry.prio {
+        Style::default().fg(p.peach)
+    } else {
+        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+    };
+    spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
+    if tab_info_cell_width(&entry) > 0 {
+        let info_marker = if crate::ui::info_panel_affordance_available(app) {
+            TAB_INFO_MARKER
+        } else {
+            " "
+        };
+        spans.extend([
+            Span::styled(info_marker, Style::default().fg(p.accent)),
+            Span::raw(" "),
+        ]);
     }
     if let Some(state) = layout.state.as_deref() {
         let state_icon = state_dot(entry.state, entry.seen, p);
@@ -2541,6 +2604,22 @@ mod tests {
         app
     }
 
+    fn add_work_link(app: &mut AppState, ws_idx: usize) {
+        let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0]
+            .terminal_id(pane_id)
+            .expect("test pane terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                ..Default::default()
+            })
+            .expect("valid test work context");
+    }
+
     fn aggregation_entry(
         state: AgentState,
         seen: bool,
@@ -2569,6 +2648,7 @@ mod tests {
             agent_context: None,
             has_agent: true,
             prio: true,
+            has_work_context_links: false,
             state,
             background_job_count: None,
             seen,
@@ -2892,7 +2972,7 @@ mod tests {
     }
 
     #[test]
-    fn unflagged_tab_keeps_title_column_and_has_no_peach_prio_dot() {
+    fn tab_gutter_keeps_title_column_stable_for_prio_state() {
         let app = app_with_agents(&["one", "two"]);
         let area = Rect::new(0, 0, 40, 20);
         let card = compute_tab_card_areas(&app, area)[0].clone();
@@ -2943,15 +3023,104 @@ mod tests {
                     })
             })
             .expect("flagged title should be visible");
-        assert_eq!(
-            flagged_title_start,
-            title_start + TAB_PRIO_FIELD_WIDTH as u16
-        );
+        assert_eq!(flagged_title_start, title_start,);
         assert_ne!(
             buffer.cell((card.rect.x + 4, card.rect.y)).unwrap().fg,
             app.palette.peach
         );
+        assert_eq!(
+            buffer
+                .cell((card.rect.x + 4, card.rect.y))
+                .expect("unflagged PRIO cell")
+                .symbol(),
+            "·"
+        );
         assert!(row_text(buffer, card.rect.y, 39).contains(title));
+    }
+
+    #[test]
+    fn desktop_tab_gutters_render_prio_for_every_row_and_info_only_for_linked_panes() {
+        let mut app = app_with_agents(&["one", "two"]);
+        add_work_link(&mut app, 0);
+        app.view.terminal_area = Rect::new(40, 0, 80, 20);
+        let area = Rect::new(0, 0, 40, 20);
+        let cards = compute_tab_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first_prio = crate::ui::tab_prio_rect(&cards[0]);
+        let first_info = crate::ui::tab_info_rect(&cards[0]);
+        let second_prio = crate::ui::tab_prio_rect(&cards[1]);
+        let second_info = crate::ui::tab_info_rect(&cards[1]);
+        assert_eq!(
+            buffer.cell((first_prio.x, first_prio.y)).unwrap().symbol(),
+            "·"
+        );
+        assert_eq!(
+            buffer
+                .cell((second_prio.x, second_prio.y))
+                .unwrap()
+                .symbol(),
+            "·"
+        );
+        assert_eq!(
+            buffer.cell((first_info.x, first_info.y)).unwrap().symbol(),
+            "↗"
+        );
+        // A pane without links reserves no info cell at all, so the row content starts two
+        // columns earlier and that column must never carry the affordance marker.
+        assert_ne!(
+            buffer
+                .cell((second_info.x, second_info.y))
+                .unwrap()
+                .symbol(),
+            "↗"
+        );
+        let linked = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.ws_idx == 0)
+            .expect("linked entry");
+        let unlinked = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.ws_idx == 1)
+            .expect("unlinked entry");
+        assert!(linked.has_work_context_links);
+        assert!(!unlinked.has_work_context_links);
+        assert_eq!(tab_info_cell_width(&linked), TAB_INFO_FIELD_WIDTH);
+        assert_eq!(tab_info_cell_width(&unlinked), 0);
+    }
+
+    #[test]
+    fn tab_row_title_budget_reserves_the_info_cell_only_for_linked_panes() {
+        let mut app = app_with_agents(&["one", "two"]);
+        app.workspaces[0].tabs[0].custom_name = Some("abcdefghij".into());
+        app.workspaces[1].tabs[0].custom_name = Some("abcdefghij".into());
+        add_work_link(&mut app, 0);
+        let entries = sidebar_thread_entries(&app);
+        let linked = entries
+            .iter()
+            .find(|entry| entry.ws_idx == 0)
+            .expect("linked entry");
+        let unlinked = entries
+            .iter()
+            .find(|entry| entry.ws_idx == 1)
+            .expect("unlinked entry");
+
+        let linked_layout = tab_row_layout(linked, app.view_observed_at, 18, 4, &app.palette);
+        let unlinked_layout = tab_row_layout(unlinked, app.view_observed_at, 18, 4, &app.palette);
+
+        assert!(
+            display_width(&linked_layout.title)
+                <= 18 - 4 - TAB_PRIO_FIELD_WIDTH - TAB_INFO_FIELD_WIDTH
+        );
+        assert_eq!(
+            display_width(&unlinked_layout.title),
+            display_width(&linked_layout.title) + TAB_INFO_FIELD_WIDTH,
+            "an unlinked row must spend the info cell's width on its title instead"
+        );
     }
 
     #[test]
@@ -3951,7 +4120,12 @@ row_gap = 1
         assert!(rendered.ends_with("1m ago"), "{rendered:?}");
         assert!(!rendered.contains("idle"), "{rendered:?}");
         assert!(!rendered.contains("done"), "{rendered:?}");
-        assert!(!rendered.contains(" · Review release"), "{rendered:?}");
+        // The gutter's own prio marker is the only thing allowed before the title; nothing may be
+        // interposed between it and the title.
+        assert!(
+            rendered.trim_start().starts_with("· Review release"),
+            "{rendered:?}"
+        );
     }
 
     #[test]
@@ -5508,7 +5682,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             } else {
                 assert!(rendered.contains("working"), "{rendered:?}");
                 assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
-                assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+                // The always-reserved prio cell costs two columns, so at 38 the activity age is
+                // the field that yields; the status label, title, provider and job count stay.
+                assert!(!rendered.contains("ago"), "{rendered:?}");
             }
         }
     }

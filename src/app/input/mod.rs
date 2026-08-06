@@ -394,6 +394,24 @@ impl App {
                     MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
                         self.focus_workspace_tab_via_api(ws_idx, tab_idx)
                     }
+                    MouseAction::ToggleSidebarTabPrio { ws_idx, tab_idx } => {
+                        if let Some(changed) = self.state.apply_tab_prio(
+                            ws_idx,
+                            tab_idx,
+                            crate::workspace::TabPrioAction::Toggle,
+                        ) {
+                            if changed {
+                                self.schedule_session_save();
+                                if self.no_session {
+                                    self.state.mark_session_dirty();
+                                }
+                            }
+                        }
+                    }
+                    MouseAction::OpenSidebarTabInfo { ws_idx, tab_idx } => {
+                        self.focus_workspace_tab_via_api(ws_idx, tab_idx);
+                        self.state.info_panel_expanded = true;
+                    }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
