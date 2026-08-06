@@ -295,7 +295,7 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
 }
 
 fn expanded_sidebar_sections_for_app(app: &AppState, area: Rect) -> (Rect, Rect) {
-    let entries = prio_panel_entries(app);
+    let entries = prio_panel_entries(app, None);
     let panel_collapsed = app.prio_panel_collapsed || entries.is_empty();
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
@@ -353,8 +353,18 @@ pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_sidebar_thread_entries_with_runtimes(app, None)
 }
 
-pub(crate) fn prio_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
-    let entries = sidebar_thread_entries(app);
+pub(crate) fn prio_panel_entries(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelEntry> {
+    let entries = match terminal_runtimes {
+        Some(terminal_runtimes) => sidebar_thread_entries_from(app, terminal_runtimes),
+        None => sidebar_thread_entries(app),
+    };
+    prio_panel_entries_from_entries(entries)
+}
+
+fn prio_panel_entries_from_entries(entries: Vec<AgentPanelEntry>) -> Vec<AgentPanelEntry> {
     let tab_entries = aggregate_tab_entries(&entries);
     entries
         .into_iter()
@@ -533,50 +543,81 @@ fn tab_lifecycle_priority(state: AgentState, seen: bool) -> u8 {
 fn aggregate_tab_entries(
     entries: &[AgentPanelEntry],
 ) -> std::collections::HashMap<(usize, usize), AgentPanelEntry> {
-    let mut aggregated =
-        std::collections::HashMap::<(usize, usize), (AgentPanelEntry, bool, bool, bool)>::new();
+    let mut aggregated = std::collections::HashMap::<
+        (usize, usize),
+        (AgentPanelEntry, bool, bool, bool, Option<String>),
+    >::new();
 
     for entry in entries {
         let key = (entry.ws_idx, entry.tab_idx);
         let candidate = (entry.state, entry.seen);
         aggregated
             .entry(key)
-            .and_modify(|(tab_entry, mixed_agents, has_agent, has_current_agent)| {
-                if tab_lifecycle_priority(candidate.0, candidate.1)
-                    > tab_lifecycle_priority(tab_entry.state, tab_entry.seen)
-                {
-                    tab_entry.state = candidate.0;
-                    tab_entry.seen = candidate.1;
-                }
-                tab_entry.activity_at = match (tab_entry.activity_at, entry.activity_at) {
-                    (Some(current), Some(candidate)) => Some(current.max(candidate)),
-                    (current, candidate) => current.or(candidate),
-                };
-                tab_entry.background_job_count =
-                    match (tab_entry.background_job_count, entry.background_job_count) {
-                        (Some(current), Some(candidate)) => Some(current.saturating_add(candidate)),
+            .and_modify(
+                |(
+                    tab_entry,
+                    mixed_agents,
+                    has_agent,
+                    has_current_agent,
+                    first_foreground_process_name,
+                )| {
+                    if first_foreground_process_name.is_none() {
+                        *first_foreground_process_name = entry.foreground_process_name.clone();
+                    }
+                    if tab_entry.foreground_process_name.is_none() {
+                        tab_entry.foreground_process_name = first_foreground_process_name.clone();
+                    }
+                    if tab_lifecycle_priority(candidate.0, candidate.1)
+                        > tab_lifecycle_priority(tab_entry.state, tab_entry.seen)
+                    {
+                        tab_entry.state = candidate.0;
+                        tab_entry.seen = candidate.1;
+                        tab_entry.state_labels = entry.state_labels.clone();
+                        tab_entry.foreground_process_name = entry
+                            .foreground_process_name
+                            .clone()
+                            .or_else(|| first_foreground_process_name.clone());
+                    }
+                    tab_entry.activity_at = match (tab_entry.activity_at, entry.activity_at) {
+                        (Some(current), Some(candidate)) => Some(current.max(candidate)),
                         (current, candidate) => current.or(candidate),
                     };
-                if !*mixed_agents {
-                    match (tab_entry.agent_context, entry.agent_context) {
-                        (Some(current), Some(candidate)) if current != candidate => {
-                            tab_entry.agent_context = None;
-                            *mixed_agents = true;
+                    tab_entry.background_job_count =
+                        match (tab_entry.background_job_count, entry.background_job_count) {
+                            (Some(current), Some(candidate)) => {
+                                Some(current.saturating_add(candidate))
+                            }
+                            (current, candidate) => current.or(candidate),
+                        };
+                    if !*mixed_agents {
+                        match (tab_entry.agent_context, entry.agent_context) {
+                            (Some(current), Some(candidate)) if current != candidate => {
+                                tab_entry.agent_context = None;
+                                *mixed_agents = true;
+                            }
+                            (None, Some(candidate)) => tab_entry.agent_context = Some(candidate),
+                            _ => {}
                         }
-                        (None, Some(candidate)) => tab_entry.agent_context = Some(candidate),
-                        _ => {}
                     }
-                }
-                *has_agent |= entry.has_agent;
-                *has_current_agent |= entry.agent.is_some();
-            })
-            .or_insert_with(|| (entry.clone(), false, entry.has_agent, entry.agent.is_some()));
+                    *has_agent |= entry.has_agent;
+                    *has_current_agent |= entry.agent.is_some();
+                },
+            )
+            .or_insert_with(|| {
+                (
+                    entry.clone(),
+                    false,
+                    entry.has_agent,
+                    entry.agent.is_some(),
+                    entry.foreground_process_name.clone(),
+                )
+            });
     }
 
     aggregated
         .into_iter()
         .map(
-            |(key, (mut entry, mixed_agents, has_agent, has_current_agent))| {
+            |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _))| {
                 let agent_context = (!mixed_agents).then_some(entry.agent_context).flatten();
                 entry.agent = (has_current_agent && !mixed_agents)
                     .then_some(agent_context)
@@ -1220,7 +1261,7 @@ pub(crate) fn compute_prio_panel_row_areas(
         return Vec::new();
     }
 
-    prio_panel_entries(app)
+    prio_panel_entries(app, None)
         .into_iter()
         .take(usize::from(body.height))
         .enumerate()
@@ -1520,17 +1561,23 @@ pub(super) fn render_sidebar(
 
     let (ws_area, panel_area) = expanded_sidebar_sections_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_prio_panel(app, frame, panel_area, area);
+    render_prio_panel(app, terminal_runtimes, frame, panel_area, area);
     render_sidebar_header(app, frame, area, p);
 }
 
-fn render_prio_panel(app: &AppState, frame: &mut Frame, panel: Rect, sidebar_area: Rect) {
+fn render_prio_panel(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    panel: Rect,
+    sidebar_area: Rect,
+) {
     if panel.width == 0 || panel.height == 0 {
         return;
     }
 
     let p = &app.palette;
-    let entries = prio_panel_entries(app);
+    let entries = prio_panel_entries(app, Some(terminal_runtimes));
     let expanded = !app.prio_panel_collapsed && !entries.is_empty();
     let chevron = if expanded { "▾" } else { "▸" };
     frame.render_widget(
@@ -2453,6 +2500,44 @@ mod tests {
         app
     }
 
+    fn aggregation_entry(
+        state: AgentState,
+        seen: bool,
+        foreground_process_name: Option<&str>,
+        state_label: &str,
+    ) -> AgentPanelEntry {
+        let mut state_labels = std::collections::HashMap::new();
+        state_labels.insert(
+            agent_panel_status_key(state, seen).to_string(),
+            state_label.to_string(),
+        );
+        AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::alloc(),
+            primary_label: "workspace".into(),
+            primary_tab_label: Some("tab".into()),
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_label: None,
+            agent_kind_label: None,
+            agent: None,
+            foreground_process_name: foreground_process_name.map(str::to_string),
+            agent_context: None,
+            has_agent: true,
+            prio: true,
+            state,
+            background_job_count: None,
+            seen,
+            last_agent_state_change_seq: None,
+            activity_at: None,
+            state_labels,
+            tokens: std::collections::HashMap::new(),
+            tab_first_pane: false,
+        }
+    }
+
     fn row_kinds(app: &AppState) -> Vec<(char, usize)> {
         sidebar_rows(app)
             .into_iter()
@@ -2544,6 +2629,117 @@ mod tests {
         assert!(rendered.contains("review auth"), "{rendered:?}");
         assert!(rendered.contains("two"), "{rendered:?}");
         assert!(rendered.contains("●"), "{rendered:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prio_panel_uses_runtime_workspace_label_like_sidebar() {
+        let mut app = app_with_agents(&["stale"]);
+        let stale_cwd = std::env::temp_dir().join(format!(
+            "herdr-prio-stale-{}-{}",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        ));
+        let live_cwd = std::env::temp_dir().join(format!(
+            "herdr-prio-live-{}-{}",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&stale_cwd).expect("create stale cwd");
+        std::fs::create_dir_all(&live_cwd).expect("create live cwd");
+
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .expect("root terminal")
+            .clone();
+        app.workspaces[0].custom_name = None;
+        app.workspaces[0].identity_cwd = stale_cwd.clone();
+        app.workspaces[0].cached_identity_cwd = stale_cwd.clone();
+        app.workspaces[0].cached_auto_label = "stale".into();
+        app.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd.clone();
+        app.workspaces[0].tabs[0].set_prio(true);
+
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            pane_id,
+            24,
+            80,
+            live_cwd.clone(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("spawn test runtime");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd() != Some(live_cwd.clone()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let runtime_cwd = runtime.cwd().expect("runtime cwd");
+        assert_eq!(
+            runtime_cwd.file_name(),
+            live_cwd.file_name(),
+            "runtime should retain the live cwd fixture"
+        );
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+        let sidebar_entry = sidebar_thread_entries_from(&app, &runtimes)
+            .into_iter()
+            .next()
+            .expect("sidebar entry");
+        let prio_entry = prio_panel_entries(&app, Some(&runtimes))
+            .into_iter()
+            .next()
+            .expect("PRIO entry");
+
+        assert_eq!(prio_entry.primary_label, sidebar_entry.primary_label);
+        assert_eq!(
+            prio_entry.primary_label,
+            runtime_cwd
+                .file_name()
+                .expect("live cwd filename")
+                .to_string_lossy()
+        );
+        assert_ne!(
+            prio_entry.primary_label,
+            sidebar_thread_entries(&app)[0].primary_label
+        );
+
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(stale_cwd);
+        let _ = std::fs::remove_dir_all(live_cwd);
+    }
+
+    #[test]
+    fn tab_aggregation_uses_winner_labels_and_process_fallback() {
+        let winner = aggregation_entry(AgentState::Working, false, Some("cargo"), "winner working");
+        let first = aggregation_entry(AgentState::Idle, true, Some("zsh"), "first idle");
+        let aggregated = aggregate_tab_entries(&[first, winner])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+
+        assert_eq!(aggregated.state, AgentState::Working);
+        assert_eq!(
+            aggregated.state_labels.get("working").map(String::as_str),
+            Some("winner working")
+        );
+        assert_eq!(aggregated.foreground_process_name.as_deref(), Some("cargo"));
+
+        let winner_without_process =
+            aggregation_entry(AgentState::Working, false, None, "winner working");
+        let first_with_process =
+            aggregation_entry(AgentState::Idle, true, Some("zsh"), "first idle");
+        let fallback = aggregate_tab_entries(&[first_with_process, winner_without_process])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+        assert_eq!(fallback.foreground_process_name.as_deref(), Some("zsh"));
     }
 
     #[test]
@@ -4928,7 +5124,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .expect("sidebar tab row");
-        let prio_tab = prio_panel_entries(&app)
+        let prio_tab = prio_panel_entries(&app, None)
             .into_iter()
             .find(|entry| entry.ws_idx == 0 && entry.tab_idx == 0)
             .expect("PRIO tab row");
