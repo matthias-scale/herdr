@@ -3923,6 +3923,65 @@ mod tests {
     }
 
     #[test]
+    fn mobile_prio_gutter_click_toggles_through_dispatch_and_keeps_the_switcher_open() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert_ne!(
+            app.state.mode,
+            Mode::Terminal,
+            "the switcher should be open for this test"
+        );
+
+        // Locate the cell through the same projection the renderer uses, then drive the real
+        // dispatch path: both of its columns must toggle prio and leave the switcher open.
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let tab_row = viewport.y
+            + crate::ui::mobile_switcher_workspace_doc_range(&app.state, 0)
+                .expect("workspace row")
+                .start as u16
+            + 1;
+        let prio_col = (viewport.x..viewport.x + viewport.width)
+            .find(|col| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, *col, tab_row),
+                    Some(crate::ui::MobileSwitcherTarget::SidebarTabPrio { .. })
+                )
+            })
+            .expect("a prio cell on the tab row");
+        let switcher_mode = app.state.mode;
+
+        for column in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
+            let before = app.state.workspaces[0].tabs[0].prio;
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                prio_col + column,
+                tab_row,
+            ));
+            assert_eq!(
+                app.state.workspaces[0].tabs[0].prio, !before,
+                "column {column} must toggle prio through handle_mouse"
+            );
+            assert!(app.state.session_dirty, "the toggle must be persisted");
+            assert_eq!(
+                app.state.mode, switcher_mode,
+                "column {column} must not dismiss the switcher"
+            );
+        }
+    }
+
+    #[test]
     fn ac4_mobile_sidebar_tab_click_preserves_tabs_focused_pane() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");
