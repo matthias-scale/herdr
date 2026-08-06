@@ -106,10 +106,48 @@ pub struct Tab {
 impl Tab {
     /// Agent CLIs often set the terminal title to the current directory; that
     /// location label duplicates the workspace and hides the useful work title.
+    ///
+    /// Codex composes both: `codex — ~/.herdr-test` is neither the bare cwd nor
+    /// a real session title, and rendering it produces `codex · codex —
+    /// ~/.herdr-test`. A title whose every segment merely restates the agent or
+    /// the location is therefore rejected too.
     fn is_informative_terminal_title(terminal: &TerminalState, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        if !Self::is_novel_title_segment(terminal, title) {
+            return false;
+        }
+
+        let segments = title
+            .split(['—', '–', '·', '|'])
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.len() > 1
+            && !segments
+                .iter()
+                .any(|segment| Self::is_novel_title_segment(terminal, segment))
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// True when `title` says something the tab bar does not already show from
+    /// the pane's agent name or working directory.
+    fn is_novel_title_segment(terminal: &TerminalState, title: &str) -> bool {
         let title = title.trim();
         let cwd = terminal.cwd.to_string_lossy();
         let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
+
+        if terminal.agent_name.as_deref().is_some_and(same_text)
+            || terminal.effective_agent_label().is_some_and(same_text)
+        {
+            return false;
+        }
 
         if terminal
             .cwd

@@ -630,6 +630,87 @@ mod tests {
     }
 
     #[test]
+    fn tab_info_label_rejects_composed_agent_and_cwd_titles_for_all_separators() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("HOME").expect("test environment should define HOME"),
+        );
+        let cwd = home.join(".herdr-test");
+
+        for separator in ['—', '–', '·', '|'] {
+            let (mut app, terminal_id) = title_test_app();
+            let title = format!("codex {separator} ~/.herdr-test");
+            configure_title_test_terminal(
+                &mut app,
+                &terminal_id,
+                cwd.clone(),
+                &title,
+                Some("Write Poem"),
+            );
+
+            let label = app.tab_info(0, 0).unwrap().label;
+            assert_eq!(label, "codex · Write Poem", "title: {title:?}");
+            assert!(!label.contains("codex · codex"), "title: {title:?}");
+        }
+    }
+
+    #[test]
+    fn tab_info_label_keeps_composed_title_with_novel_segment() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("HOME").expect("test environment should define HOME"),
+        );
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            home.join(".herdr-test"),
+            "codex — Write Poem",
+            Some("Fallback title"),
+        );
+
+        assert_eq!(
+            app.tab_info(0, 0).unwrap().label,
+            "codex · codex — Write Poem"
+        );
+    }
+
+    #[test]
+    fn tab_info_label_rejects_composed_agent_and_cwd_title_case_insensitively() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("HOME").expect("test environment should define HOME"),
+        );
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            home.join(".herdr-test"),
+            "CODEX — ~/.HERDR-TEST",
+            Some("Write Poem"),
+        );
+
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+    }
+
+    #[test]
+    fn tab_info_label_rejects_empty_terminal_titles() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("HOME").expect("test environment should define HOME"),
+        );
+
+        for title in ["", "   "] {
+            let (mut app, terminal_id) = title_test_app();
+            configure_title_test_terminal(
+                &mut app,
+                &terminal_id,
+                home.join(".herdr-test"),
+                title,
+                Some("Write Poem"),
+            );
+
+            assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+        }
+    }
+
+    #[test]
     fn tab_info_label_keeps_distinct_terminal_title_ahead_of_work_title() {
         let (mut app, terminal_id) = title_test_app();
         configure_title_test_terminal(
