@@ -920,7 +920,13 @@ impl TerminalState {
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
         }
-        let owner_conflicts = self.current_session_owner_conflicts(&source, &agent_label);
+        // A closing-block source claims no resume session, so it cannot contend
+        // for the pane's session identity — that stays owned by the agent's own
+        // integration (`herdr:claude`). Without this exemption the status report
+        // is rejected here on every pane where the real agent has already
+        // announced itself, which is every pane that matters.
+        let owner_conflicts = !crate::detect::is_closing_block_source(&source, &agent_label)
+            && self.current_session_owner_conflicts(&source, &agent_label);
         let foreground_takeover_allowed = owner_conflicts
             && self.foreground_agent_confirms_hook_authority_takeover(
                 &source,
@@ -1158,6 +1164,23 @@ impl TerminalState {
                     .as_ref()
                     .is_none_or(|incoming| incoming == anchored)
             });
+        // A closing-block source reports what the agent just said, not where to
+        // resume it, so it never carries an `AgentSessionRef`
+        // (`agent_resume::session_ref_from_report` mints one only for official
+        // sources). Every path below admits a report by anchoring it to a
+        // session, so without this arm the report is unreachable: it falls to
+        // the `session_ref` bail-out and is stored as a pending replacement that
+        // nothing ever drains while the agent stays continuously detected.
+        //
+        // Presence of the agent's own process in the pane is the entire guard
+        // this source claims (see `detect::is_closing_block_source`), and
+        // `accept_hook_report` still enforces per-source sequence monotonicity
+        // downstream, so accepting on presence alone loses no protection.
+        if process_present && crate::detect::is_closing_block_source(source, agent_label) {
+            return FullLifecycleHookReportRoute::Accept {
+                reanchor_sequence: false,
+            };
+        }
         if let Some(suppressed) = self.suppressed_full_lifecycle_hook_reports.get(source) {
             if suppressed.agent_label != agent_label {
                 return FullLifecycleHookReportRoute::Ignore;
@@ -3634,20 +3657,27 @@ mod tests {
         // full-lifecycle source must satisfy.
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
-        // The Stop hook's session must be announced before its reports count.
+        // The pane's session identity is already owned by claude's own
+        // integration, as it is on any pane running a real agent. The
+        // closing-block source must report *alongside* that owner, not fight it.
         terminal.set_agent_session_ref_for_session_start(
-            "herdr:claude-closing-block".into(),
+            "herdr:claude".into(),
             "claude".into(),
-            crate::agent_resume::AgentSessionRef::path(session_path.clone()),
+            crate::agent_resume::AgentSessionRef::path(session_path),
             Some(999),
             Some("startup".into()),
         );
+
+        // Exactly what the RPC produces: no session ref. `session_ref_from_report`
+        // mints one only for official sources, so a closing-block report always
+        // arrives with `None`. An earlier version of this test passed `Some(..)`
+        // here and stayed green while the live path silently dropped every report.
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
             AgentState::Blocked,
             Some("Gate 1: merge #30".into()),
-            crate::agent_resume::AgentSessionRef::path(session_path),
+            None,
             Some(1000),
             now,
         );
