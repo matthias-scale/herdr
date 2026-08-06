@@ -129,7 +129,29 @@ fn render_editor_message(app: &AppState, frame: &mut Frame, area: Rect, message:
 }
 
 impl App {
+    /// Sessions are keyed by the agent pane they follow, so a closed agent leaves
+    /// its editor behind with nothing left to reach it: no focus can select the
+    /// key again, and the PTY would outlive the session it belonged to.
+    pub(crate) fn reap_orphaned_dock_editors(&mut self) {
+        let orphaned: Vec<PaneId> = self
+            .state
+            .dock_editor_sessions
+            .keys()
+            .copied()
+            .filter(|pane_id| self.find_pane(*pane_id).is_none())
+            .collect();
+        for agent_pane_id in orphaned {
+            if let Some(session) = self.state.dock_editor_sessions.remove(&agent_pane_id) {
+                if let Some(runtime) = self.terminal_runtimes.remove(&session.terminal_id) {
+                    runtime.shutdown();
+                }
+            }
+            self.state.dock_editor_errors.remove(&agent_pane_id);
+        }
+    }
+
     pub(crate) fn ensure_dock_editor(&mut self) {
+        self.reap_orphaned_dock_editors();
         if self.state.dock_collapsed || self.state.dock_tab != DockTab::Editor {
             return;
         }
@@ -308,6 +330,35 @@ fn parse_editor_command(command: &str) -> Option<Vec<String>> {
 mod tests {
     use super::*;
     use crate::{app::state::DockEditorSession, detect::Agent};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_the_agent_shuts_down_the_editor_it_was_keyed_to() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let closed_agent_pane_id = PaneId::alloc();
+        let editor_terminal_id = TerminalId::alloc();
+        app.state.dock_editor_sessions.insert(
+            closed_agent_pane_id,
+            DockEditorSession {
+                pane_id: PaneId::alloc(),
+                terminal_id: editor_terminal_id.clone(),
+            },
+        );
+        app.terminal_runtimes.insert(
+            editor_terminal_id.clone(),
+            TerminalRuntime::test_with_screen_bytes(10, 2, b"EDITOR"),
+        );
+
+        app.reap_orphaned_dock_editors();
+
+        assert!(app.state.dock_editor_sessions.is_empty());
+        assert!(app.terminal_runtimes.get(&editor_terminal_id).is_none());
+    }
 
     #[test]
     fn editor_command_parser_preserves_quoted_arguments() {
