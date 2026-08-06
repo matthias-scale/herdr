@@ -45,6 +45,10 @@ pub(crate) enum MobileSwitcherTarget {
         ws_idx: usize,
         tab_idx: usize,
     },
+    SidebarTabPrio {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     Agent {
         ws_idx: usize,
         tab_idx: usize,
@@ -242,10 +246,21 @@ pub(crate) fn mobile_switcher_target_at(
                     tab_idx: entry.tab_idx,
                     pane_id: entry.pane_id,
                 },
-                SidebarRow::Tab { entry, .. } => MobileSwitcherTarget::SidebarTab {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                },
+                SidebarRow::Tab { entry, depth } => {
+                    let indent_width = 2usize.saturating_add(usize::from(*depth) * 3);
+                    let prio_col = content.x.saturating_add(indent_width as u16);
+                    if on_title_line && col == prio_col {
+                        MobileSwitcherTarget::SidebarTabPrio {
+                            ws_idx: entry.ws_idx,
+                            tab_idx: entry.tab_idx,
+                        }
+                    } else {
+                        MobileSwitcherTarget::SidebarTab {
+                            ws_idx: entry.ws_idx,
+                            tab_idx: entry.tab_idx,
+                        }
+                    }
+                }
             });
         }
         cursor += row_height;
@@ -724,9 +739,20 @@ fn render_mobile_switcher_content(
                     app.status_indicators,
                 );
                 let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
-                if entry.prio {
-                    spans.push(Span::styled("●", Style::default().fg(p.peach).bg(bg)));
-                    spans.push(Span::styled(" ", Style::default().bg(bg)));
+                let prio_marker = if entry.prio { "●" } else { "·" };
+                let prio_style = if entry.prio {
+                    Style::default().fg(p.peach)
+                } else {
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+                };
+                spans.extend([
+                    Span::styled(prio_marker, prio_style.bg(bg)),
+                    Span::styled(" ", Style::default().bg(bg)),
+                ]);
+                // Mobile has no info panel, so the cell is always blank — but it must occupy the
+                // same width the desktop layout budgeted, and only on the rows that reserve it.
+                if crate::ui::sidebar::tab_info_cell_width(entry) > 0 {
+                    spans.push(Span::styled("  ", Style::default().bg(bg)));
                 }
                 if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) =
@@ -1385,6 +1411,7 @@ mod tests {
             has_agent: agent_label.is_some(),
             foreground_process_name: None,
             prio: false,
+            has_work_context_links: false,
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,
@@ -1622,6 +1649,83 @@ mod tests {
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 1
+            })
+        );
+    }
+
+    #[test]
+    fn mobile_tab_gutter_matches_desktop_cell_order_and_hits_prio_only() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-gutters")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Navigate;
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 16);
+        app.reconcile_sidebar_presentation();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 18),
+                )
+            })
+            .unwrap();
+
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let content = inset_for_left_scrollbar(viewport);
+        let tab_row = viewport.y
+            + mobile_switcher_workspace_doc_range(&app, 0)
+                .expect("workspace row")
+                .start as u16
+            + 1;
+        let prio_col = content.x + 5;
+        let info_col = prio_col + crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(prio_col, tab_row)].symbol(),
+            "·"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(prio_col + 1, tab_row)].symbol(),
+            " "
+        );
+        // Mobile mirrors the desktop cell order, and an unlinked row reserves no info cell — the
+        // row content resumes immediately after the prio cell.
+        assert_eq!(
+            crate::ui::sidebar::tab_info_cell_width(
+                crate::ui::sidebar_rows(&app)
+                    .iter()
+                    .find_map(|row| match row {
+                        crate::ui::SidebarRow::Tab { entry, .. } => Some(entry),
+                        _ => None,
+                    })
+                    .expect("tab entry")
+            ),
+            0
+        );
+        assert_ne!(
+            terminal.backend().buffer()[(info_col, tab_row)].symbol(),
+            " "
+        );
+        assert_eq!(
+            mobile_switcher_target_at(&app, prio_col, tab_row),
+            Some(MobileSwitcherTarget::SidebarTabPrio {
+                ws_idx: 0,
+                tab_idx: 0
+            })
+        );
+        assert_eq!(
+            mobile_switcher_target_at(&app, prio_col + 1, tab_row),
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 0,
+                tab_idx: 0
             })
         );
     }
@@ -1970,24 +2074,24 @@ mod tests {
             .collect::<Vec<_>>();
         let first = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("Fir… · cx  2 >_"))
+            .position(|row| row.contains("working") && row.contains("First ta… · cx  2 >_"))
             .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
         let second = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("Second ta… · cx"))
+            .position(|row| row.contains("working") && row.contains("Second … · cx"))
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
-        assert!(rows[first].find("working").unwrap() < rows[first].find("Fir…").unwrap());
+        assert!(rows[first].find("working").unwrap() < rows[first].find("First ta…").unwrap());
         assert!(
-            rows[first].contains("Fir… · cx  2 >_"),
+            rows[first].contains("First ta… · cx  2 >_"),
             "mobile tab row must place the provider suffix and badge after its title: {:?}",
             rows[first]
         );
         assert!(
-            rows[second].contains("Second ta… · cx"),
+            rows[second].contains("Second … · cx"),
             "mobile tab row must show the provider suffix: {:?}",
             rows[second]
         );
-        assert!(rows[second].find("working").unwrap() < rows[second].find("Second ta…").unwrap());
+        assert!(rows[second].find("working").unwrap() < rows[second].find("Second …").unwrap());
         assert_eq!(
             second,
             first + 1,
@@ -2066,7 +2170,9 @@ mod tests {
             } else {
                 assert!(rendered.contains("working"), "{rendered:?}");
                 assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
-                assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+                // The always-reserved prio cell costs two columns, so at 38 the activity age is
+                // the field that yields; the status label, title, provider and job count stay.
+                assert!(!rendered.contains("ago"), "{rendered:?}");
             }
         }
     }
@@ -2187,7 +2293,12 @@ mod tests {
 
         assert!(!row.contains("idle"), "{row:?}");
         assert!(!row.contains("done"), "{row:?}");
-        assert!(!row.contains(" · Review release"), "{row:?}");
+        // The gutter's own prio marker is the only thing allowed before the title.
+        assert!(
+            row.trim_start_matches(['▌', ' '])
+                .starts_with("· Review release"),
+            "{row:?}"
+        );
     }
 
     #[test]

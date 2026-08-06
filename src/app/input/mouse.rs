@@ -37,6 +37,14 @@ pub(super) enum MouseAction {
         ws_idx: usize,
         tab_idx: usize,
     },
+    ToggleSidebarTabPrio {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
+    OpenSidebarTabInfo {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -591,6 +599,18 @@ impl AppState {
                             start_row: mouse.row,
                         });
                         return None;
+                    }
+
+                    if let Some((ws_idx, tab_idx)) =
+                        self.tab_prio_target_at(mouse.column, mouse.row)
+                    {
+                        return Some(MouseAction::ToggleSidebarTabPrio { ws_idx, tab_idx });
+                    }
+
+                    if let Some((ws_idx, tab_idx)) =
+                        self.tab_info_target_at(mouse.column, mouse.row)
+                    {
+                        return Some(MouseAction::OpenSidebarTabInfo { ws_idx, tab_idx });
                     }
 
                     if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
@@ -1154,6 +1174,12 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::SidebarTab { ws_idx, tab_idx }) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
+            }
+            Some(crate::ui::MobileSwitcherTarget::SidebarTabPrio { ws_idx, tab_idx }) => {
+                return MobileMouseResult::Action(MouseAction::ToggleSidebarTabPrio {
+                    ws_idx,
+                    tab_idx,
+                });
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
@@ -1915,6 +1941,110 @@ mod tests {
                 tab_idx: 0
             })
         ));
+    }
+
+    fn add_test_work_link(app: &mut crate::app::App, ws_idx: usize) {
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[ws_idx].tabs[0]
+            .terminal_id(pane_id)
+            .expect("test pane terminal")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                ..Default::default()
+            })
+            .expect("valid test work context");
+    }
+
+    #[test]
+    fn sidebar_prio_gutter_toggles_target_tab_without_focusing_it() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = crate::ui::tab_prio_rect(&cards[1]);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x,
+            target.y,
+        ));
+
+        assert!(app.state.workspaces[1].tabs[0].prio);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert!(app.state.session_dirty);
+    }
+
+    #[test]
+    fn sidebar_tab_click_outside_gutters_still_focuses_the_tab() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let title_column = cards[1].rect.x.saturating_add(8);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            title_column,
+            cards[1].rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
+        assert!(!app.state.workspaces[1].tabs[0].prio);
+    }
+
+    #[test]
+    fn sidebar_info_gutter_focuses_tab_and_opens_panel_for_linked_pane() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        add_test_work_link(&mut app, 1);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = crate::ui::tab_info_rect(&cards[1]);
+        assert!(crate::ui::info_panel_affordance_available(&app.state));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x,
+            target.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
+        assert!(app.state.info_panel_expanded);
+    }
+
+    #[test]
+    fn sidebar_info_gutter_is_not_a_target_without_work_links() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let card = &crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)[0];
+        let target = crate::ui::tab_info_rect(card);
+
+        assert_eq!(
+            app.state.tab_info_target_at(target.x, target.y),
+            None,
+            "a no-link pane must leave the info gutter inert"
+        );
     }
 
     #[test]
