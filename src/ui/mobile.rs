@@ -249,7 +249,12 @@ pub(crate) fn mobile_switcher_target_at(
                 SidebarRow::Tab { entry, depth } => {
                     let indent_width = 2usize.saturating_add(usize::from(*depth) * 3);
                     let prio_col = content.x.saturating_add(indent_width as u16);
-                    if on_title_line && col == prio_col {
+                    // The cell is two columns wide (marker plus spacer); both must toggle, or the
+                    // spacer silently focuses the tab and closes the switcher instead.
+                    let prio_end = prio_col
+                        .saturating_add(crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16)
+                        .min(content.x.saturating_add(content.width));
+                    if on_title_line && (prio_col..prio_end).contains(&col) {
                         MobileSwitcherTarget::SidebarTabPrio {
                             ws_idx: entry.ws_idx,
                             tab_idx: entry.tab_idx,
@@ -1721,12 +1726,26 @@ mod tests {
                 tab_idx: 0
             })
         );
+        // The spacer belongs to the cell: clicking it must toggle prio, not focus the tab and
+        // dismiss the switcher.
         assert_eq!(
             mobile_switcher_target_at(&app, prio_col + 1, tab_row),
-            Some(MobileSwitcherTarget::SidebarTab {
+            Some(MobileSwitcherTarget::SidebarTabPrio {
                 ws_idx: 0,
                 tab_idx: 0
             })
+        );
+        assert_eq!(
+            mobile_switcher_target_at(
+                &app,
+                prio_col + crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16,
+                tab_row
+            ),
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 0,
+                tab_idx: 0
+            }),
+            "the column after the cell must still focus the tab"
         );
     }
 

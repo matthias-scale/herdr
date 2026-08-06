@@ -2048,6 +2048,90 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_gutter_cells_act_on_their_trailing_spacer_column_too() {
+        for offset in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+            app.state.ensure_test_terminals();
+            add_test_work_link(&mut app, 1);
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.reconcile_sidebar_presentation();
+            let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+            let prio = crate::ui::tab_prio_rect(&cards[1]);
+            let info = crate::ui::tab_info_rect(&cards[1]);
+            assert_eq!(prio.width, crate::ui::TAB_PRIO_FIELD_WIDTH as u16);
+            assert_eq!(info.width, crate::ui::TAB_INFO_FIELD_WIDTH as u16);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                prio.x + offset,
+                prio.y,
+            ));
+            assert!(
+                app.state.workspaces[1].tabs[0].prio,
+                "prio column {offset} of the cell must toggle, not focus"
+            );
+            assert_eq!(app.state.active, Some(0), "prio must not focus the tab");
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                info.x + offset,
+                info.y,
+            ));
+            assert!(
+                app.state.info_panel_expanded,
+                "info column {offset} of the cell must open the panel"
+            );
+            assert_eq!(app.state.active, Some(1));
+        }
+    }
+
+    #[test]
+    fn sidebar_info_gutter_tracks_the_tabs_focused_pane_not_its_first() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("split");
+        let root = workspace.tabs[0].root_pane;
+        let focused = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        assert_ne!(root, focused);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Link the root pane while the split pane holds focus: the panel would open on the split
+        // pane and show nothing, so the affordance must stay inert.
+        let root_terminal = app.state.workspaces[0].terminal_id(root).cloned().unwrap();
+        app.state
+            .terminals
+            .get_mut(&root_terminal)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                ..Default::default()
+            })
+            .expect("valid test work context");
+        app.state.reconcile_sidebar_presentation();
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), focused);
+        let card = &crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)[0];
+        let target = crate::ui::tab_info_rect(card);
+        assert_eq!(
+            app.state.tab_info_target_at(target.x, target.y),
+            None,
+            "an unlinked focused pane must leave the info gutter inert"
+        );
+
+        // Focusing the linked pane must hand the affordance back.
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.reconcile_sidebar_presentation();
+        assert!(
+            app.state.tab_info_target_at(target.x, target.y).is_some(),
+            "the focused pane's links must drive the affordance"
+        );
+    }
+
+    #[test]
     fn ac26_info_panel_link_click_copies_without_opening() {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
