@@ -62,6 +62,12 @@ pub(crate) struct PopupPaneState {
     pub height: Option<crate::popup_size::PopupSize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockEditorSession {
+    pub pane_id: PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -1623,6 +1629,9 @@ pub struct AppState {
     pub dock_width: u16,
     pub dock_collapsed: bool,
     pub dock_tab: DockTab,
+    pub(crate) dock_editor_focused: bool,
+    pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
+    pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -2172,6 +2181,9 @@ impl AppState {
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
             dock_tab: DockTab::Editor,
+            dock_editor_focused: false,
+            dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_errors: std::collections::HashMap::new(),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,

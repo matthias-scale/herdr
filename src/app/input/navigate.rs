@@ -412,10 +412,16 @@ impl App {
             }
             NavigateAction::PreviousDockTab => {
                 self.state.dock_tab = self.state.dock_tab.previous();
+                if self.state.dock_tab == crate::app::DockTab::Editor {
+                    self.state.dock_editor_focused = true;
+                }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NextDockTab => {
                 self.state.dock_tab = self.state.dock_tab.next();
+                if self.state.dock_tab == crate::app::DockTab::Editor {
+                    self.state.dock_editor_focused = true;
+                }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::CyclePaneNext => {
@@ -2060,10 +2066,16 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::PreviousDockTab => {
             state.dock_tab = state.dock_tab.previous();
+            if state.dock_tab == crate::app::DockTab::Editor {
+                state.dock_editor_focused = true;
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::NextDockTab => {
             state.dock_tab = state.dock_tab.next();
+            if state.dock_tab == crate::app::DockTab::Editor {
+                state.dock_editor_focused = true;
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {

@@ -6,8 +6,17 @@ use ratatui::{
 };
 
 use crate::app::{AppState, DockTab};
+use crate::terminal::TerminalRuntimeRegistry;
 
-pub(super) fn render_dock(app: &AppState, frame: &mut Frame) {
+mod editor;
+
+pub(crate) use editor::{dock_editor_cursor, dock_editor_has_focus};
+
+pub(super) fn render_dock(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+) {
     let area = app.view.dock_rect;
     if area.width == 0 || area.height == 0 {
         return;
@@ -52,13 +61,16 @@ pub(super) fn render_dock(app: &AppState, frame: &mut Frame) {
             );
         }
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "not implemented yet",
-            Style::default()
-                .fg(app.palette.overlay0)
-                .add_modifier(Modifier::DIM),
-        ))),
-        app.view.dock_body_rect,
-    );
+    match app.dock_tab {
+        DockTab::Editor => editor::render_editor_body(app, terminal_runtimes, frame),
+        DockTab::Shortcuts | DockTab::Context => frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "not implemented yet",
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ))),
+            app.view.dock_body_rect,
+        ),
+    }
 }

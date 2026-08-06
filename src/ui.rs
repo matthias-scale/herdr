@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
-mod dock;
+pub(crate) mod dock;
 mod info_panel;
 mod keybind_help;
 mod menus;
@@ -578,7 +578,7 @@ pub fn render_with_runtime_registry(
         render_info_panel(app, frame, app.view.info_panel_rect);
     }
     if app.view.layout != ViewLayout::Mobile {
-        render_dock(app, frame);
+        render_dock(app, terminal_runtimes, frame);
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
@@ -917,7 +917,7 @@ mod tests {
         for tab in crate::app::DockTab::ALL {
             assert!(screen.contains(tab.label()), "missing {} in {screen:?}", tab.label());
         }
-        assert!(screen.contains("not implemented yet"));
+        assert!(screen.contains("focus an agent first"));
     }
 
     #[tokio::test]
