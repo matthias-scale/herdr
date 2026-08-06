@@ -11,7 +11,6 @@ use std::{
 };
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// Extra time granted to pipe readers after the subprocess tree has been killed:
 /// enough for the kernel to deliver EOF, short enough to stay bounded.
 const READER_JOIN_GRACE: Duration = Duration::from_millis(250);
@@ -37,10 +36,9 @@ pub(crate) fn curl_command() -> Command {
 /// before job assignment without `CREATE_SUSPENDED`, so a descendant created in that window is
 /// not job-contained: Windows containment is best-effort whole-tree containment. On successful
 /// return, dropping the Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates any
-/// still-live associated descendants. That scoping is intentional for the current read-only
-/// Git callers.
+/// still-live associated descendants.
 pub(crate) fn output_with_deadline(command: Command, deadline: Instant) -> io::Result<Output> {
-    output_with_deadline_inner(command, deadline, DEFAULT_MAX_OUTPUT_BYTES)
+    output_with_deadline_inner(command, deadline, None)
 }
 
 pub(crate) fn output_with_deadline_limited(
@@ -48,13 +46,13 @@ pub(crate) fn output_with_deadline_limited(
     deadline: Instant,
     max_output_bytes: usize,
 ) -> io::Result<Output> {
-    output_with_deadline_inner(command, deadline, max_output_bytes)
+    output_with_deadline_inner(command, deadline, Some(max_output_bytes))
 }
 
 fn output_with_deadline_inner(
     mut command: Command,
     deadline: Instant,
-    max_output_bytes: usize,
+    max_output_bytes: Option<usize>,
 ) -> io::Result<Output> {
     if Instant::now() >= deadline {
         return Err(io::Error::new(
@@ -95,18 +93,28 @@ fn output_with_deadline_inner(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("subprocess stderr pipe was unavailable after spawn"))?;
-    let output_limit = Arc::new(OutputReadLimit::new(max_output_bytes));
+    let output_limit =
+        max_output_bytes.map(|max_output_bytes| Arc::new(OutputReadLimit::new(max_output_bytes)));
     let stdout_reader = thread::spawn({
-        let limit = Arc::clone(&output_limit);
-        move || read_limited(stdout, limit)
+        let output_limit = output_limit.clone();
+        move || match output_limit {
+            Some(limit) => read_limited(stdout, limit),
+            None => read_all(stdout),
+        }
     });
     let stderr_reader = thread::spawn({
-        let limit = Arc::clone(&output_limit);
-        move || read_limited(stderr, limit)
+        let output_limit = output_limit.clone();
+        move || match output_limit {
+            Some(limit) => read_limited(stderr, limit),
+            None => read_all(stderr),
+        }
     });
 
     let status = loop {
-        if output_limit.exceeded.load(Ordering::Acquire) {
+        if output_limit
+            .as_ref()
+            .is_some_and(|limit| limit.exceeded.load(Ordering::Acquire))
+        {
             let terminate_result = terminate_and_reap(&mut child, &process_tree);
             let _ = drain_readers(
                 stdout_reader,
@@ -315,6 +323,12 @@ impl OutputReadLimit {
             exceeded: AtomicBool::new(false),
         }
     }
+}
+
+fn read_all(mut pipe: impl Read) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    pipe.read_to_end(&mut output)?;
+    Ok(output)
 }
 
 fn read_limited(mut pipe: impl Read, limit: Arc<OutputReadLimit>) -> io::Result<Vec<u8>> {

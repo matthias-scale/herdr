@@ -443,11 +443,17 @@ fn home_path(directory: &str) -> Option<PathBuf> {
         .map(|home| home.join(directory))
 }
 
-fn load_codex_usage() -> Option<ProviderUsage> {
-    let root = home_path(".codex/sessions")?;
-    recent_jsonl_files(&root, MAX_USAGE_FILES)
+fn load_codex_usage() -> ProviderRefresh<ProviderUsage> {
+    let Some(root) = home_path(".codex/sessions") else {
+        return ProviderRefresh::Failed;
+    };
+    let Some(usage) = recent_jsonl_files(&root, MAX_USAGE_FILES)
         .into_iter()
         .find_map(|path| latest_codex_usage(&path))
+    else {
+        return ProviderRefresh::Failed;
+    };
+    ProviderRefresh::Fresh(usage)
 }
 
 fn filter_expired_codex_usage(mut usage: ProviderUsage, now: Option<i64>) -> ProviderUsage {
@@ -458,6 +464,17 @@ fn filter_expired_codex_usage(mut usage: ProviderUsage, now: Option<i64>) -> Pro
     }
     if usage.windows.is_empty() {
         usage.credits = None;
+    }
+    usage
+}
+
+fn filter_expired_claude_usage(mut usage: ClaudeUsage, now: Option<i64>) -> ClaudeUsage {
+    if usage
+        .five_hour
+        .as_ref()
+        .is_none_or(|window| now.is_none_or(|now| window.resets_at <= now))
+    {
+        usage.five_hour = None;
     }
     usage
 }
@@ -528,51 +545,91 @@ fn resolve_ccusage() -> Option<PathBuf> {
     CCUSAGE_PATH.get_or_init(discover_ccusage).clone()
 }
 
-fn load_claude_usage() -> Result<Option<ClaudeUsage>, ()> {
+fn load_claude_usage() -> ProviderRefresh<ClaudeUsage> {
     let Some(binary) = resolve_ccusage() else {
-        return Ok(None);
+        return ProviderRefresh::Failed;
     };
     let mut command = crate::noninteractive_process::command(binary);
     command.args(["blocks", "--active", "--json"]);
-    let output = crate::noninteractive_process::output_with_deadline_limited(
+    let output = match crate::noninteractive_process::output_with_deadline_limited(
         command,
         Instant::now() + CCUSAGE_TIMEOUT,
         MAX_CCUSAGE_OUTPUT_BYTES,
-    )
-    .map_err(|_| ())?;
+    ) {
+        Ok(output) => output,
+        Err(_) => return ProviderRefresh::Failed,
+    };
     if !output.status.success() {
-        return Err(());
+        return ProviderRefresh::Failed;
     }
-    let output = String::from_utf8(output.stdout).map_err(|_| ())?;
-    let now = SystemTime::now()
+    let output = match String::from_utf8(output.stdout) {
+        Ok(output) => output,
+        Err(_) => return ProviderRefresh::Failed,
+    };
+    let Some(now) = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        .ok_or(())?;
-    parse_ccusage_output(&output, now)
+    else {
+        return ProviderRefresh::Failed;
+    };
+    match parse_ccusage_output(&output, now) {
+        Ok(Some(usage)) => ProviderRefresh::Fresh(usage),
+        Ok(None) => ProviderRefresh::Empty,
+        Err(()) => ProviderRefresh::Failed,
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+enum ProviderRefresh<T> {
+    Fresh(T),
+    Empty,
+    #[default]
+    Failed,
 }
 
 #[derive(Debug, Default)]
 struct UsageRefresh {
-    codex: Option<ProviderUsage>,
-    claude: Option<ClaudeUsage>,
+    codex: ProviderRefresh<ProviderUsage>,
+    claude: ProviderRefresh<ClaudeUsage>,
 }
 
-fn merge_usage_refresh(previous: &UsageSnapshot, refresh: UsageRefresh) -> UsageSnapshot {
+fn merge_usage_refresh(
+    previous: &UsageSnapshot,
+    refresh: UsageRefresh,
+    now: Option<i64>,
+) -> UsageSnapshot {
     UsageSnapshot {
-        codex: refresh.codex.unwrap_or_else(|| previous.codex.clone()),
-        claude: refresh.claude.unwrap_or_else(|| previous.claude.clone()),
+        codex: match refresh.codex {
+            ProviderRefresh::Fresh(usage) => usage,
+            ProviderRefresh::Empty => ProviderUsage::default(),
+            ProviderRefresh::Failed => filter_expired_codex_usage(previous.codex.clone(), now),
+        },
+        claude: match refresh.claude {
+            ProviderRefresh::Fresh(usage) => usage,
+            ProviderRefresh::Empty => ClaudeUsage::default(),
+            ProviderRefresh::Failed => filter_expired_claude_usage(previous.claude.clone(), now),
+        },
     }
 }
 
-fn load_usage_snapshot(previous: &UsageSnapshot) -> UsageSnapshot {
-    let now = SystemTime::now()
+fn current_unix_timestamp() -> Option<i64> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
-    let codex = load_codex_usage().map(|usage| filter_expired_codex_usage(usage, now));
-    let claude = load_claude_usage().ok().flatten();
-    merge_usage_refresh(previous, UsageRefresh { codex, claude })
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+}
+
+fn load_usage_snapshot(previous: &UsageSnapshot) -> UsageSnapshot {
+    let now = current_unix_timestamp();
+    let codex = match load_codex_usage() {
+        ProviderRefresh::Fresh(usage) => {
+            ProviderRefresh::Fresh(filter_expired_codex_usage(usage, now))
+        }
+        refresh => refresh,
+    };
+    let claude = load_claude_usage();
+    merge_usage_refresh(previous, UsageRefresh { codex, claude }, now)
 }
 
 struct UsageCacheState {
@@ -680,7 +737,7 @@ impl UsageCache {
     {
         if self.begin_refresh(now) {
             let previous = self.snapshot();
-            let snapshot = merge_usage_refresh(&previous, loader());
+            let snapshot = merge_usage_refresh(&previous, loader(), current_unix_timestamp());
             self.finish_refresh(now, snapshot.clone());
             snapshot
         } else {
@@ -729,14 +786,19 @@ fn usage_window_text(window_label: &str, window: &UsageWindow, width: usize) -> 
     }
 
     let compact = format!(
-        "{window_label} {left:.0}% left · {:.0}% used",
+        "{window_label} {left:.0}% · {:.0}% · {reset}",
         window.used_percent
     );
     if display_width(&compact) <= width {
         return compact;
     }
 
-    format!("{window_label} {left:.0}% left")
+    let tight = format!("{left:.0}% · {:.0}% · {reset}", window.used_percent);
+    if display_width(&tight) <= width {
+        return tight;
+    }
+
+    reset
 }
 
 fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
@@ -750,14 +812,22 @@ fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
     }
 
     let compact = format!(
-        "5h ${:.2} · {}m left",
+        "5h ${:.2} · {}m · {reset}",
         window.cost_usd, window.remaining_minutes
     );
     if display_width(&compact) <= width {
         return compact;
     }
 
-    format!("5h ${:.2}", window.cost_usd)
+    let tight = format!(
+        "${:.2} · {}m · {reset}",
+        window.cost_usd, window.remaining_minutes
+    );
+    if display_width(&tight) <= width {
+        return tight;
+    }
+
+    reset
 }
 
 fn credits_text(balance: f64, width: usize) -> String {
@@ -977,6 +1047,26 @@ mod tests {
         parse_utc_timestamp("2026-08-06T12:00:00Z").expect("valid test timestamp")
     }
 
+    fn populated_usage_snapshot(resets_at: i64) -> UsageSnapshot {
+        UsageSnapshot {
+            codex: ProviderUsage {
+                windows: vec![UsageWindow {
+                    used_percent: 31.0,
+                    window_minutes: 10080,
+                    resets_at,
+                }],
+                credits: Some(12.5),
+            },
+            claude: ClaudeUsage {
+                five_hour: Some(ClaudeUsageWindow {
+                    cost_usd: 56.68,
+                    remaining_minutes: 66,
+                    resets_at,
+                }),
+            },
+        }
+    }
+
     #[test]
     fn parses_valid_codex_record_and_credit_balance() {
         let usage = parse_codex_record(&codex_record(
@@ -1168,33 +1258,85 @@ mod tests {
     }
 
     #[test]
-    fn usage_refresh_retains_each_provider_when_the_cycle_has_no_data() {
-        let cache = UsageCache::new(Duration::from_secs(60));
-        let started = Instant::now();
-        let snapshot = UsageSnapshot {
-            codex: ProviderUsage {
-                windows: vec![UsageWindow {
-                    used_percent: 31.0,
-                    window_minutes: 10080,
-                    resets_at: ccusage_now() + 3600,
-                }],
-                credits: Some(12.5),
-            },
-            claude: ClaudeUsage {
-                five_hour: Some(ClaudeUsageWindow {
-                    cost_usd: 56.68,
-                    remaining_minutes: 66,
-                    resets_at: ccusage_now() + 3600,
+    fn usage_refresh_replaces_fresh_data() {
+        let now = ccusage_now();
+        let previous = populated_usage_snapshot(now + 3600);
+        let refreshed = merge_usage_refresh(
+            &previous,
+            UsageRefresh {
+                codex: ProviderRefresh::Fresh(ProviderUsage {
+                    windows: vec![UsageWindow {
+                        used_percent: 12.0,
+                        window_minutes: 300,
+                        resets_at: now + 7200,
+                    }],
+                    credits: Some(8.5),
+                }),
+                claude: ProviderRefresh::Fresh(ClaudeUsage {
+                    five_hour: Some(ClaudeUsageWindow {
+                        cost_usd: 1.23,
+                        remaining_minutes: 240,
+                        resets_at: now + 7200,
+                    }),
                 }),
             },
-        };
-        cache.finish_refresh(started, snapshot.clone());
+            Some(now),
+        );
 
-        let refreshed = cache.refresh_if_due(started + Duration::from_secs(60), || {
-            UsageRefresh::default()
-        });
+        assert_eq!(refreshed.codex.windows[0].used_percent, 12.0);
+        assert_eq!(refreshed.codex.credits, Some(8.5));
+        assert_eq!(refreshed.claude.five_hour.unwrap().cost_usd, 1.23);
+    }
 
-        assert_eq!(refreshed, snapshot);
+    #[test]
+    fn usage_refresh_clears_each_provider_when_refresh_succeeds_without_active_data() {
+        let now = ccusage_now();
+        let previous = populated_usage_snapshot(now + 3600);
+
+        let refreshed = merge_usage_refresh(
+            &previous,
+            UsageRefresh {
+                codex: ProviderRefresh::Empty,
+                claude: ProviderRefresh::Empty,
+            },
+            Some(now),
+        );
+
+        assert_eq!(refreshed, UsageSnapshot::default());
+    }
+
+    #[test]
+    fn usage_refresh_retains_failed_provider_data_until_its_deadline() {
+        let now = ccusage_now();
+        let previous = populated_usage_snapshot(now + 3600);
+
+        let refreshed = merge_usage_refresh(
+            &previous,
+            UsageRefresh {
+                codex: ProviderRefresh::Failed,
+                claude: ProviderRefresh::Failed,
+            },
+            Some(now),
+        );
+
+        assert_eq!(refreshed, previous);
+    }
+
+    #[test]
+    fn usage_refresh_drops_failed_provider_data_after_its_deadline() {
+        let now = ccusage_now();
+        let previous = populated_usage_snapshot(now - 1);
+
+        let refreshed = merge_usage_refresh(
+            &previous,
+            UsageRefresh {
+                codex: ProviderRefresh::Failed,
+                claude: ProviderRefresh::Failed,
+            },
+            Some(now),
+        );
+
+        assert_eq!(refreshed, UsageSnapshot::default());
     }
 
     #[test]
@@ -1265,7 +1407,7 @@ mod tests {
         assert_eq!(full_panel, INFO_PANEL_WIDTH);
         assert_eq!(
             usage_window_text("week", &window, minimum_inner),
-            "week 69% left · 31% used"
+            "week 69% · 31% · 11:59Z"
         );
         assert_eq!(
             usage_window_text("week", &window, full_inner),
@@ -1281,7 +1423,7 @@ mod tests {
         };
         assert_eq!(
             claude_usage_text(&claude_window, minimum_inner),
-            "5h $56.68 · 66m left"
+            "5h $56.68 · 66m · 14:00Z"
         );
         assert_eq!(
             claude_usage_text(&claude_window, full_inner),
