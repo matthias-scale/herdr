@@ -563,6 +563,7 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            collapsed_sidebar_groups: std::collections::HashSet::new(),
             view_observed_at: Instant::now(),
             status_metrics: None,
             status_git_cwd: None,

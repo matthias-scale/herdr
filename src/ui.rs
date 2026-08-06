@@ -61,6 +61,9 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
+pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
+#[cfg(test)]
+pub(crate) use self::sidebar::BLOCKED_SECTION_TITLE;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};

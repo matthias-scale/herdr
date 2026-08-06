@@ -599,6 +599,12 @@ impl AppState {
                         self.toggle_workspace_agent_disclosure(card.ws_idx);
                         return None;
                     }
+                    // Headers are tested before spaces: a header row owns its
+                    // whole width, so anywhere on it folds the group.
+                    if let Some(title) = self.sidebar_section_header_at(mouse.row) {
+                        self.toggle_sidebar_group(title);
+                        return None;
+                    }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,
