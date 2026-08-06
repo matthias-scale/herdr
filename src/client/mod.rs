@@ -17,7 +17,7 @@ mod input;
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -92,6 +92,134 @@ struct ClientState {
     repaint_pending: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+}
+
+const HOST_TERMINAL_QUERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Tracks replies that can still arrive after a host-terminal query was sent.
+///
+/// The generation counter tells the stdin framer to classify replies as host
+/// color data. This separate counter tracks the number of individual replies
+/// still expected, so teardown does not mistake "a query was sent" for "a
+/// reply is still pending".
+struct HostTerminalQueryState {
+    enabled: bool,
+    pending_replies: AtomicU64,
+    draining: AtomicBool,
+    drain_finished: AtomicBool,
+    drain_wait: Mutex<()>,
+    drain_complete: Condvar,
+    stdin_reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl HostTerminalQueryState {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            pending_replies: AtomicU64::new(0),
+            draining: AtomicBool::new(false),
+            drain_finished: AtomicBool::new(false),
+            drain_wait: Mutex::new(()),
+            drain_complete: Condvar::new(),
+            stdin_reader: Mutex::new(None),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn query_sent(&self, query: HostTerminalQuery) {
+        if self.enabled {
+            let expected_replies = match query {
+                // OSC 10 + OSC 11 + OSC 4 for all 256 palette entries.
+                HostTerminalQuery::Theme => 258,
+                HostTerminalQuery::Appearance => 1,
+            };
+            self.pending_replies
+                .fetch_add(expected_replies, Ordering::AcqRel);
+        }
+    }
+
+    fn reply_received(&self) {
+        if self.enabled {
+            let _ =
+                self.pending_replies
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                        pending.checked_sub(1)
+                    });
+        }
+    }
+
+    fn has_outstanding_replies(&self) -> bool {
+        self.enabled && self.pending_replies.load(Ordering::Acquire) != 0
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    fn begin_drain(&self) {
+        if !self.enabled {
+            return;
+        }
+
+        // Set this before should_quit so any bytes racing with teardown are
+        // absorbed by the stdin reader rather than sent to the server.
+        self.draining.store(true, Ordering::Release);
+        if !self.has_outstanding_replies() {
+            self.drain_finished.store(true, Ordering::Release);
+            self.drain_complete.notify_all();
+        }
+    }
+
+    fn mark_drain_finished(&self) {
+        self.drain_finished.store(true, Ordering::Release);
+        self.drain_complete.notify_all();
+    }
+
+    fn set_stdin_reader(&self, handle: std::thread::JoinHandle<()>) {
+        if let Ok(mut reader) = self.stdin_reader.lock() {
+            *reader = Some(handle);
+        }
+    }
+
+    fn join_stdin_reader_if_finished(&self) {
+        let Ok(mut reader) = self.stdin_reader.lock() else {
+            return;
+        };
+        let Some(handle) = reader.take() else {
+            return;
+        };
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+    }
+
+    fn wait_for_drain(&self) {
+        if !self.has_outstanding_replies() {
+            return;
+        }
+
+        let Ok(lock) = self.drain_wait.lock() else {
+            return;
+        };
+        let _ =
+            self.drain_complete
+                .wait_timeout_while(lock, HOST_TERMINAL_QUERY_DRAIN_TIMEOUT, |()| {
+                    !self.drain_finished.load(Ordering::Acquire)
+                });
+    }
+}
+
+fn teardown_host_terminal_queries(
+    host_terminal_query_state: &HostTerminalQueryState,
+    should_quit: &AtomicBool,
+) {
+    host_terminal_query_state.begin_drain();
+    should_quit.store(true, Ordering::Release);
+    host_terminal_query_state.wait_for_drain();
+    host_terminal_query_state.join_stdin_reader_if_finished();
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +305,7 @@ fn emit_host_terminal_query(
     query: HostTerminalQuery,
     appearance_query_schedule: &mut HostTerminalAppearanceQuerySchedule,
     host_color_query_generation: &AtomicU64,
+    host_terminal_query_state: &HostTerminalQueryState,
 ) -> bool {
     if !appearance_query_schedule.enabled {
         return false;
@@ -185,6 +314,9 @@ fn emit_host_terminal_query(
     // Publish before writing: the stdin reader must classify a reply as
     // terminal color data before the terminal can answer the query.
     host_color_query_generation.fetch_add(1, Ordering::AcqRel);
+    // Record the expected replies before writing for the same reason: a fast
+    // terminal can answer before the write call returns.
+    host_terminal_query_state.query_sent(query);
     match query {
         HostTerminalQuery::Theme => query_host_terminal_theme(),
         HostTerminalQuery::Appearance => query_host_terminal_appearance(),
@@ -1292,6 +1424,9 @@ fn run_client_with_mode(
     // Now set up the terminal. This must happen AFTER the handshake succeeds,
     // so we don't leave the terminal in raw mode if the server rejects us.
     let direct_attach = attach_escape.is_some();
+    let host_terminal_query_state = Arc::new(HostTerminalQueryState::new(
+        host_terminal_queries_enabled(direct_attach, should_query_host_terminal_theme()),
+    ));
     let terminal_guard = if direct_attach {
         setup_direct_attach_terminal()
     } else {
@@ -1307,8 +1442,12 @@ fn run_client_with_mode(
     let panic_resets_host_color_scheme_reports = terminal_guard.reset_host_color_scheme_reports;
     #[cfg(windows)]
     let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
+    let panic_host_terminal_query_state = host_terminal_query_state.clone();
+    let panic_should_quit = Arc::new(AtomicBool::new(false));
+    let panic_quit_flag = panic_should_quit.clone();
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        teardown_host_terminal_queries(&panic_host_terminal_query_state, &panic_quit_flag);
         restore_terminal_state(
             panic_resets_modify_other_keys,
             panic_resets_host_color_scheme_reports,
@@ -1324,7 +1463,7 @@ fn run_client_with_mode(
         .build()
         .map_err(io::Error::other)?;
 
-    let should_quit = Arc::new(AtomicBool::new(false));
+    let should_quit = panic_should_quit;
 
     // Install Ctrl+C handler.
     let quit_flag = should_quit.clone();
@@ -1337,15 +1476,17 @@ fn run_client_with_mode(
             stream,
             cols,
             rows,
-            should_quit,
+            should_quit.clone(),
             loop_config,
             negotiated_encoding,
             attach_escape,
+            host_terminal_query_state.clone(),
         )
         .await
     });
 
     // Restore the terminal before printing any final status message.
+    teardown_host_terminal_queries(&host_terminal_query_state, &should_quit);
     drop(terminal_guard);
 
     if let Err(err) = result {
@@ -1385,6 +1526,7 @@ async fn run_client_loop(
     config: ClientLoopConfig,
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
+    host_terminal_query_state: Arc<HostTerminalQueryState>,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
@@ -1419,20 +1561,28 @@ async fn run_client_loop(
         state.attach_escape.is_some(),
         should_query_host_terminal_theme(),
     );
+    debug_assert_eq!(
+        will_query_host_terminal_theme,
+        host_terminal_query_state.enabled(),
+        "client host query state must match client mode"
+    );
     let host_color_query_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let stdin_host_color_query_generation = host_color_query_generation.clone();
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
-    std::thread::spawn(move || {
+    let stdin_host_terminal_query_state = host_terminal_query_state.clone();
+    let stdin_reader = std::thread::spawn(move || {
         input::stdin_reader_loop(
             stdin_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
             stdin_host_color_query_generation,
             stdin_mouse_capture_active,
+            stdin_host_terminal_query_state,
         );
     });
+    host_terminal_query_state.set_stdin_reader(stdin_reader);
 
     let mut appearance_query_schedule = HostTerminalAppearanceQuerySchedule::new(
         will_query_host_terminal_theme,
@@ -1443,6 +1593,7 @@ async fn run_client_loop(
         HostTerminalQuery::Theme,
         &mut appearance_query_schedule,
         &host_color_query_generation,
+        &host_terminal_query_state,
     );
 
     // Spawn the resize poller thread.
@@ -1559,6 +1710,7 @@ async fn run_client_loop(
                             query,
                             &mut appearance_query_schedule,
                             &host_color_query_generation,
+                            &host_terminal_query_state,
                         );
                     }
                     data
@@ -1646,6 +1798,7 @@ async fn run_client_loop(
                         query,
                         &mut appearance_query_schedule,
                         &host_color_query_generation,
+                        &host_terminal_query_state,
                     );
                 }
                 // Resizing invalidates the host-side blit baseline.
@@ -1793,6 +1946,7 @@ async fn run_client_loop(
                     query,
                     &mut appearance_query_schedule,
                     &host_color_query_generation,
+                    &host_terminal_query_state,
                 );
             }
         }
@@ -2749,8 +2903,14 @@ mod tests {
 
             assert_eq!(query, None, "{condition} resize must not query");
             let generation = AtomicU64::new(0);
+            let host_terminal_query_state = HostTerminalQueryState::new(enabled);
             if let Some(query) = query {
-                assert!(emit_host_terminal_query(query, &mut schedule, &generation,));
+                assert!(emit_host_terminal_query(
+                    query,
+                    &mut schedule,
+                    &generation,
+                    &host_terminal_query_state,
+                ));
             }
             assert_eq!(generation.load(Ordering::Acquire), 0);
         }
@@ -2776,14 +2936,49 @@ mod tests {
             None
         );
         let generation = AtomicU64::new(0);
+        let host_terminal_query_state = HostTerminalQueryState::new(true);
         if let Some(query) = host_terminal_query_for_iteration(
             deadline_due,
             &schedule,
             HostTerminalQueryTrigger::ServerDisconnected,
         ) {
-            assert!(emit_host_terminal_query(query, &mut schedule, &generation,));
+            assert!(emit_host_terminal_query(
+                query,
+                &mut schedule,
+                &generation,
+                &host_terminal_query_state,
+            ));
         }
         assert_eq!(generation.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn disabled_host_query_teardown_skips_drain() {
+        let host_terminal_query_state = HostTerminalQueryState::new(false);
+        host_terminal_query_state.query_sent(HostTerminalQuery::Theme);
+        let should_quit = AtomicBool::new(false);
+        let started = Instant::now();
+
+        teardown_host_terminal_queries(&host_terminal_query_state, &should_quit);
+
+        assert!(should_quit.load(Ordering::Acquire));
+        assert!(!host_terminal_query_state.is_draining());
+        assert!(started.elapsed() < HOST_TERMINAL_QUERY_DRAIN_TIMEOUT);
+    }
+
+    #[test]
+    fn host_query_state_clears_after_all_expected_replies() {
+        let host_terminal_query_state = HostTerminalQueryState::new(true);
+        host_terminal_query_state.query_sent(HostTerminalQuery::Theme);
+
+        assert!(host_terminal_query_state.has_outstanding_replies());
+        for _ in 0..257 {
+            host_terminal_query_state.reply_received();
+        }
+        assert!(host_terminal_query_state.has_outstanding_replies());
+
+        host_terminal_query_state.reply_received();
+        assert!(!host_terminal_query_state.has_outstanding_replies());
     }
 
     #[test]
