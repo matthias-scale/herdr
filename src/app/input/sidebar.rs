@@ -245,7 +245,9 @@ impl AppState {
             .get(idx)
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
-                crate::ui::SidebarRow::Agent { .. } | crate::ui::SidebarRow::Tab { .. } => None,
+                crate::ui::SidebarRow::Agent { .. }
+                | crate::ui::SidebarRow::Tab { .. }
+                | crate::ui::SidebarRow::SectionHeader { .. } => None,
             })
     }
 
@@ -264,7 +266,8 @@ impl AppState {
             .get(row_idx)
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
-                crate::ui::SidebarRow::Workspace { .. } => None,
+                crate::ui::SidebarRow::Workspace { .. }
+                | crate::ui::SidebarRow::SectionHeader { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
