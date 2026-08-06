@@ -749,12 +749,6 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
-          "key": "ui.show_subscription_usage",
-          "type": "boolean",
-          "default": "true",
-          "description": "Show local Codex and Claude Code subscription usage in the info panel."
-        },
-        {
           "key": "ui.status_bar.enabled",
           "type": "boolean",
           "default": "true",
