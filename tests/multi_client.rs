@@ -273,16 +273,29 @@ fn create_workspace_and_root_pane(socket_path: &Path, label: &str) -> (String, S
     (workspace_id, pane_id)
 }
 
-fn report_idle_agent(socket_path: &Path, pane_id: &str) {
+fn rename_tab(socket_path: &Path, tab_id: &str, label: &str) {
     let response = send_json_request(
         socket_path,
         &format!(
-            r#"{{"id":"report_agent","method":"pane.report_agent","params":{{"pane_id":"{pane_id}","agent":"pi","state":"idle","source":"multi-client-test"}}}}"#
+            "{{\"id\":\"tab_rename\",\"method\":\"tab.rename\",\"params\":{{\"tab_id\":\"{tab_id}\",\"label\":\"{label}\"}}}}"
         ),
     );
     assert!(
         response.get("error").is_none(),
-        "pane.report_agent should succeed: {response}"
+        "tab.rename should succeed: {response}"
+    );
+}
+
+fn create_named_tab(socket_path: &Path, workspace_id: &str, label: &str) {
+    let response = send_json_request(
+        socket_path,
+        &format!(
+            "{{\"id\":\"tab_create\",\"method\":\"tab.create\",\"params\":{{\"workspace_id\":\"{workspace_id}\",\"focus\":false,\"label\":\"{label}\"}}}}"
+        ),
+    );
+    assert!(
+        response.get("error").is_none(),
+        "tab.create should succeed: {response}"
     );
 }
 
@@ -760,13 +773,11 @@ fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
     frame_text(frame).contains(needle)
 }
 
-fn agent_panel_starts_with(frame: &FrameWire, agent_label: &str) -> bool {
+fn tab_bar_starts_after(frame: &FrameWire, visible_label: &str, hidden_label: &str) -> bool {
     frame_text(frame)
         .lines()
-        // The fork's flattened Spaces sidebar has no separate `agents`
-        // section header; its first agent row is the panel boundary.
-        .find(|line| line.contains("agent-"))
-        .is_some_and(|line| line.contains(agent_label))
+        .nth(1)
+        .is_some_and(|line| line.contains(visible_label) && !line.contains(hidden_label))
 }
 
 #[test]
@@ -850,7 +861,7 @@ fn multi_client_effective_size_shrinks_when_smaller_client_joins() {
 }
 
 #[test]
-fn non_foreground_client_render_preserves_agent_panel_scroll() {
+fn non_foreground_render_preserves_interactive_tab_scroll() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -862,57 +873,48 @@ fn non_foreground_client_render_preserves_agent_panel_scroll() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    for index in 1..=23 {
-        let (_, pane_id) =
-            create_workspace_and_root_pane(&api_socket, &format!("agent-{index:02}"));
-        report_idle_agent(&api_socket, &pane_id);
+    let (workspace_id, _) = create_workspace_and_root_pane(&api_socket, "tab-scroll");
+    let workspace = send_json_request(
+        &api_socket,
+        &format!(
+            "{{\"id\":\"workspace_get\",\"method\":\"workspace.get\",\"params\":{{\"workspace_id\":\"{workspace_id}\"}}}}"
+        ),
+    );
+    let initial_tab_id = workspace
+        .pointer("/result/workspace/active_tab_id")
+        .and_then(Value::as_str)
+        .expect("workspace.get should return the initial tab id")
+        .to_owned();
+    rename_tab(&api_socket, &initial_tab_id, "tab-01");
+    for index in 2..=12 {
+        create_named_tab(&api_socket, &workspace_id, &format!("tab-{index:02}"));
     }
 
-    let mut setup_client = connect_raw_client(&client_socket, 106, 40);
-    assert!(wait_for_frame(&mut setup_client, Duration::from_secs(2)));
-    drain_server_messages(&mut setup_client, Duration::from_millis(250));
-
-    let wheel_down = b"\x1b[<65;10;30M";
-    send_client_input(&mut setup_client, &wheel_down.repeat(20));
-    let (reached_bottom, setup_frames) = wait_for_frame_matching_with_snapshots(
-        &mut setup_client,
-        Duration::from_secs(3),
-        |frame| agent_panel_starts_with(frame, "agent-11"),
-    )
-    .expect("setup frame decoding should succeed");
-    assert!(
-        reached_bottom,
-        "40-row client should scroll the agent panel to its final page; frames:\n{}",
-        setup_frames.join("\n--- frame ---\n")
-    );
-    send_client_detach(&mut setup_client);
-    drop(setup_client);
-
-    let mut tall_background = connect_raw_client(&client_socket, 106, 64);
-    assert!(wait_for_frame(&mut tall_background, Duration::from_secs(2)));
-    let mut probe = connect_raw_client(&client_socket, 106, 40);
-    let (started_at_tall_limit, initial_frames) =
-        wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            agent_panel_starts_with(frame, "agent-01")
+    let mut wide_background = connect_raw_client(&client_socket, 240, 40);
+    assert!(wait_for_frame(&mut wide_background, Duration::from_secs(2)));
+    let mut interactive = connect_raw_client(&client_socket, 80, 40);
+    let (started_at_first_tab, initial_frames) =
+        wait_for_frame_matching_with_snapshots(&mut interactive, Duration::from_secs(3), |frame| {
+            tab_bar_starts_after(frame, "tab-01", "tab-12")
         })
-        .expect("initial probe frame decoding should succeed");
+        .expect("initial tab frame decoding should succeed");
     assert!(
-        started_at_tall_limit,
-        "tall client should normalize the shared scroll before the probe attaches; frames:\n{}",
+        started_at_first_tab,
+        "interactive client should start at the first tab; frames:\n{}",
         initial_frames.join("\n--- frame ---\n")
     );
-    drain_server_messages(&mut probe, Duration::from_millis(250));
 
-    send_client_input(&mut probe, wheel_down);
-    let (scrolled, probe_frames) =
-        wait_for_frame_matching_with_snapshots(&mut probe, Duration::from_secs(3), |frame| {
-            agent_panel_starts_with(frame, "agent-02")
+    // At 80 columns the tab bar's right scroll button is x=75, y=1 (zero-based).
+    send_client_input(&mut interactive, b"\x1b[<0;76;2M");
+    let (scrolled, interactive_frames) =
+        wait_for_frame_matching_with_snapshots(&mut interactive, Duration::from_secs(3), |frame| {
+            tab_bar_starts_after(frame, "tab-02", "tab-01")
         })
-        .expect("probe frame decoding should succeed");
+        .expect("tab-scroll frame decoding should succeed");
     assert!(
         scrolled,
-        "background client projection must not undo the foreground wheel event; frames:\n{}",
-        probe_frames.join("\n--- frame ---\n")
+        "interactive client should scroll to tab-02; frames:\n{}",
+        interactive_frames.join("\n--- frame ---\n")
     );
 
     cleanup_spawned_herdr(server, base);
