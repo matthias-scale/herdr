@@ -33,6 +33,7 @@ const MAX_USAGE_FILES: usize = 64;
 const MAX_USAGE_DIRECTORIES: usize = 256;
 const MAX_USAGE_ENTRIES: usize = 4096;
 const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
+const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const USAGE_WINDOW_MINUTES: [(u64, &str); 2] = [(300, "5h"), (10080, "week")];
 
 pub(crate) fn panel_width_for_main(main_width: u16) -> Option<u16> {
@@ -147,7 +148,7 @@ fn link_prefix(kind: WorkLinkKind) -> &'static str {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct UsageSnapshot {
     codex: ProviderUsage,
-    claude: ProviderUsage,
+    claude: ClaudeUsage,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -160,6 +161,18 @@ struct ProviderUsage {
 struct UsageWindow {
     used_percent: f64,
     window_minutes: u64,
+    resets_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ClaudeUsage {
+    five_hour: Option<ClaudeUsageWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClaudeUsageWindow {
+    cost_usd: f64,
+    remaining_minutes: u64,
     resets_at: i64,
 }
 
@@ -180,6 +193,28 @@ struct RawUsageWindow {
 #[derive(Debug, Deserialize)]
 struct RawCredits {
     balance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCcusageResponse {
+    blocks: Vec<RawCcusageBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCcusageBlock {
+    #[serde(rename = "isActive")]
+    is_active: bool,
+    #[serde(rename = "endTime")]
+    end_time: Option<String>,
+    #[serde(rename = "costUSD")]
+    cost_usd: Option<f64>,
+    projection: Option<RawCcusageProjection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCcusageProjection {
+    #[serde(rename = "remainingMinutes")]
+    remaining_minutes: u64,
 }
 
 fn parse_codex_record(line: &str) -> Option<ProviderUsage> {
@@ -216,6 +251,80 @@ fn parse_numeric_value(value: serde_json::Value) -> Option<f64> {
         _ => return None,
     };
     number.is_finite().then_some(number)
+}
+
+fn parse_ccusage_output(output: &str) -> Result<Option<ClaudeUsage>, ()> {
+    let response: RawCcusageResponse = serde_json::from_str(output).map_err(|_| ())?;
+    let Some(block) = response.blocks.into_iter().find(|block| block.is_active) else {
+        return Ok(None);
+    };
+    let cost_usd = block.cost_usd.filter(|cost| cost.is_finite()).ok_or(())?;
+    let resets_at = parse_utc_timestamp(block.end_time.as_deref().ok_or(())?).ok_or(())?;
+    let remaining_minutes = block.projection.ok_or(())?.remaining_minutes;
+    Ok(Some(ClaudeUsage {
+        five_hour: Some(ClaudeUsageWindow {
+            cost_usd,
+            remaining_minutes,
+            resets_at,
+        }),
+    }))
+}
+
+fn parse_utc_timestamp(value: &str) -> Option<i64> {
+    let value = value.strip_suffix('Z')?;
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<i64>().ok()?;
+    let day = date_parts.next()?.parse::<i64>().ok()?;
+    if date_parts.next().is_some() || !(1..=12).contains(&month) {
+        return None;
+    }
+    let seconds = time.split(':').collect::<Vec<_>>();
+    if seconds.len() != 3 {
+        return None;
+    }
+    let hour = seconds[0].parse::<i64>().ok()?;
+    let minute = seconds[1].parse::<i64>().ok()?;
+    let second = seconds[2]
+        .split_once('.')
+        .map_or(seconds[2], |(whole, _)| whole)
+        .parse::<i64>()
+        .ok()?;
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
+        return None;
+    }
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days_in_month).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    days.checked_mul(86_400)?.checked_add(
+        hour.checked_mul(3_600)?
+            .checked_add(minute.checked_mul(60)?)?
+            .checked_add(second)?,
+    )
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    let adjusted_year = year.checked_sub(i64::from(month <= 2))?;
+    let era = if adjusted_year >= 0 {
+        adjusted_year / 400
+    } else {
+        adjusted_year.checked_sub(399)? / 400
+    };
+    let year_of_era = adjusted_year.checked_sub(era.checked_mul(400)?)?;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era.checked_mul(146_097)?
+        .checked_add(day_of_era)?
+        .checked_sub(719_468)
 }
 
 fn parse_usage_window(raw: RawUsageWindow) -> Option<UsageWindow> {
@@ -334,6 +443,78 @@ fn load_codex_usage() -> ProviderUsage {
         .unwrap_or_default()
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn resolve_ccusage() -> Option<PathBuf> {
+    let path_candidate = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join("ccusage"))
+        .find(|path| is_executable_file(path));
+    if path_candidate.is_some() {
+        return path_candidate;
+    }
+
+    let mut fallback_candidates = home_path(".local/state/fnm_multishells")
+        .into_iter()
+        .flat_map(|root| {
+            fs::read_dir(root)
+                .into_iter()
+                .flat_map(|entries| entries.flatten())
+                .filter_map(|entry| {
+                    entry
+                        .file_type()
+                        .ok()
+                        .filter(|file_type| file_type.is_dir())
+                        .map(|_| entry.path().join("bin/ccusage"))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    fallback_candidates.push(home_path(".local/bin/ccusage")?);
+    fallback_candidates.sort_unstable();
+    fallback_candidates
+        .into_iter()
+        .find(|path| is_executable_file(path))
+}
+
+fn load_claude_usage() -> Result<ClaudeUsage, ()> {
+    let Some(binary) = resolve_ccusage() else {
+        return Ok(ClaudeUsage::default());
+    };
+    let mut command = crate::noninteractive_process::command(binary);
+    command.args(["blocks", "--active", "--json"]);
+    let output = crate::noninteractive_process::output_with_deadline(
+        command,
+        Instant::now() + CCUSAGE_TIMEOUT,
+    )
+    .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    let output = String::from_utf8(output.stdout).map_err(|_| ())?;
+    parse_ccusage_output(&output)
+        .map(|usage| usage.unwrap_or_default())
+        .map_err(|_| ())
+}
+
 fn load_usage_snapshot() -> Option<UsageSnapshot> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -345,12 +526,8 @@ fn load_usage_snapshot() -> Option<UsageSnapshot> {
     } else {
         codex.windows.clear();
     }
-    Some(UsageSnapshot {
-        codex,
-        // Claude Code's local project logs on this machine do not contain a
-        // usable quota field, and no non-credential local source is available.
-        claude: ProviderUsage::default(),
-    })
+    let claude = load_claude_usage().ok()?;
+    Some(UsageSnapshot { codex, claude })
 }
 
 struct UsageCacheState {
@@ -518,6 +695,27 @@ fn usage_window_text(window_label: &str, window: &UsageWindow, width: usize) -> 
     format!("{window_label} {left:.0}% left")
 }
 
+fn claude_usage_text(window: &ClaudeUsageWindow, width: usize) -> String {
+    let reset = usage_reset_label(window.resets_at);
+    let full = format!(
+        "5h ${:.2} · {}m left · {reset}",
+        window.cost_usd, window.remaining_minutes
+    );
+    if display_width(&full) <= width {
+        return full;
+    }
+
+    let compact = format!(
+        "5h ${:.2} · {}m left",
+        window.cost_usd, window.remaining_minutes
+    );
+    if display_width(&compact) <= width {
+        return compact;
+    }
+
+    format!("5h ${:.2}", window.cost_usd)
+}
+
 fn render_subscription_usage(
     app: &AppState,
     frame: &mut Frame,
@@ -538,8 +736,7 @@ fn render_subscription_usage(
         );
     }
 
-    let providers = [("CODEX", &usage.codex), ("CLAUDE CODE", &usage.claude)];
-    for (provider_index, (label, provider)) in providers.into_iter().enumerate() {
+    for (provider_index, label) in ["CODEX", "CLAUDE CODE"].into_iter().enumerate() {
         let provider_start = start.saturating_add(1 + provider_index.saturating_mul(4));
         if let Some(row) = layout.line(provider_start) {
             frame.render_widget(
@@ -552,31 +749,54 @@ fn render_subscription_usage(
                 row,
             );
         }
-        for (window_index, (minutes, window_label)) in USAGE_WINDOW_MINUTES.iter().enumerate() {
-            let text = usage_window(provider, *minutes)
-                .map(|window| {
-                    let width = layout
-                        .line(provider_start.saturating_add(1 + window_index))
-                        .map_or(0, |row| usize::from(row.width));
-                    usage_window_text(window_label, window, width)
-                })
-                .unwrap_or_else(|| format!("{window_label} — · —"));
-            render_usage_line(
-                frame,
-                layout.line(provider_start.saturating_add(1 + window_index)),
-                text,
-                &app.palette,
-            );
-        }
         if provider_index == 0 {
+            for (window_index, (minutes, window_label)) in USAGE_WINDOW_MINUTES.iter().enumerate() {
+                let text = usage_window(&usage.codex, *minutes)
+                    .map(|window| {
+                        let width = layout
+                            .line(provider_start.saturating_add(1 + window_index))
+                            .map_or(0, |row| usize::from(row.width));
+                        usage_window_text(window_label, window, width)
+                    })
+                    .unwrap_or_else(|| format!("{window_label} — · —"));
+                render_usage_line(
+                    frame,
+                    layout.line(provider_start.saturating_add(1 + window_index)),
+                    text,
+                    &app.palette,
+                );
+            }
             render_usage_line(
                 frame,
                 layout.line(provider_start.saturating_add(3)),
-                provider
+                usage
+                    .codex
                     .credits
                     .as_ref()
                     .map(|balance| format!("credits: {balance:.2}"))
                     .unwrap_or_else(|| "credits: —".to_string()),
+                &app.palette,
+            );
+        } else {
+            let width = layout
+                .line(provider_start.saturating_add(1))
+                .map_or(0, |row| usize::from(row.width));
+            let text = usage
+                .claude
+                .five_hour
+                .as_ref()
+                .map(|window| claude_usage_text(window, width))
+                .unwrap_or_else(|| "5h — · —".to_string());
+            render_usage_line(
+                frame,
+                layout.line(provider_start.saturating_add(1)),
+                text,
+                &app.palette,
+            );
+            render_usage_line(
+                frame,
+                layout.line(provider_start.saturating_add(2)),
+                "week — · —".to_string(),
                 &app.palette,
             );
         }
@@ -726,6 +946,65 @@ mod tests {
     #[test]
     fn ignores_malformed_codex_record() {
         assert_eq!(parse_codex_record("not json"), None);
+    }
+
+    #[test]
+    fn parses_ccusage_active_block() {
+        let usage = parse_ccusage_output(
+            r#"{
+                "blocks": [
+                    {"isActive": false},
+                    {
+                        "isActive": true,
+                        "endTime": "2026-08-06T14:00:00.000Z",
+                        "totalTokens": 71580953,
+                        "costUSD": 56.68,
+                        "burnRate": {"costPerHour": 15.06},
+                        "projection": {
+                            "totalTokens": 92373740,
+                            "totalCost": 73.15,
+                            "remainingMinutes": 66
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .expect("valid ccusage JSON")
+        .expect("active ccusage block");
+        let window = usage.five_hour.expect("five-hour usage");
+
+        assert_eq!(window.cost_usd, 56.68);
+        assert_eq!(window.remaining_minutes, 66);
+        assert_eq!(usage_reset_label(window.resets_at), "14:00Z");
+    }
+
+    #[test]
+    fn ccusage_without_an_active_block_degrades_to_none() {
+        assert_eq!(
+            parse_ccusage_output(r#"{"blocks":[{"isActive":false}]}"#).expect("valid ccusage JSON"),
+            None
+        );
+    }
+
+    #[test]
+    fn ccusage_empty_blocks_degrade_to_none() {
+        assert_eq!(
+            parse_ccusage_output(r#"{"blocks":[]}"#).expect("valid ccusage JSON"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_ccusage_json() {
+        assert!(parse_ccusage_output("not json").is_err());
+    }
+
+    #[test]
+    fn rejects_ccusage_active_block_without_projection() {
+        assert!(parse_ccusage_output(
+            r#"{"blocks":[{"isActive":true,"endTime":"2026-08-06T14:00:00.000Z","costUSD":56.68}]}"#,
+        )
+        .is_err());
     }
 
     #[test]
