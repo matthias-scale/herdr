@@ -1330,7 +1330,9 @@ mod tests {
                                 ticket_ids: vec!["MAT-12".into()],
                                 pr_urls: vec!["https://github.com/o/r/pull/3".into()],
                                 preview_urls: Vec::new(),
-                                missive_urls: Vec::new(),
+                                missive_urls: vec![
+                                    "https://mail.missiveapp.com/#inbox/conversations/c1".into(),
+                                ],
                                 branch: Some("feat/context".into()),
                                 work_title: Some("Restore context".into()),
                             },
@@ -1393,7 +1395,7 @@ mod tests {
                 ticket_ids: vec!["MAT-12".into()],
                 pr_urls: vec!["https://github.com/o/r/pull/3".into()],
                 preview_urls: Vec::new(),
-                missive_urls: Vec::new(),
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/c1".into(),],
                 branch: Some("feat/context".into()),
                 work_title: Some("Restore context".into()),
             }
