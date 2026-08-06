@@ -735,7 +735,7 @@ fn render_mobile_switcher_content(
                     p.overlay0,
                 );
             }
-            SidebarRow::SectionHeader { title } => {
+            SidebarRow::SectionHeader { title, .. } => {
                 render_one_line_item(
                     frame,
                     viewport,
