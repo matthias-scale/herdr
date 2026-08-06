@@ -999,16 +999,17 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.git_program_override = Some(PathBuf::from("herdr-test-missing-git"));
-        app.test_begin_git_work_context_refresh(1);
-        app.next_git_work_context_refresh = Instant::now() + WORK_CONTEXT_REFRESH_INTERVAL;
+        let first_now = Instant::now();
+        app.next_git_work_context_refresh = first_now;
+        app.start_git_work_context_refresh_if_due(first_now);
 
-        app.request_git_work_context_refresh(Instant::now());
+        app.request_git_work_context_refresh(first_now);
         assert!(app.git_work_context_refresh_due_after_in_flight);
 
         // Far past a two-second scheduler deadline, but still inside the budget the
         // worker was actually given. Superseding here would discard the observations
         // that worker is still producing.
-        app.start_git_work_context_refresh_if_due(Instant::now() + Duration::from_secs(5));
+        app.start_git_work_context_refresh_if_due(first_now + Duration::from_secs(5));
 
         assert_eq!(
             app.git_work_context_refresh_in_flight
