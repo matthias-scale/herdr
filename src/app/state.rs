@@ -653,6 +653,10 @@ pub struct AgentCardArea {
     pub tab_idx: usize,
     pub pane_id: PaneId,
     pub rect: Rect,
+    /// Index into the sidebar rows this frame. A blocked pane owns two rows --
+    /// one in its group, one in the tree -- so the ids alone cannot say which
+    /// of the two a card came from.
+    pub row_idx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

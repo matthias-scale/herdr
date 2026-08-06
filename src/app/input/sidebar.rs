@@ -822,6 +822,7 @@ mod tests {
             tab_idx: 0,
             pane_id: second_pane,
             rect: first_row,
+            row_idx: 0,
         }];
 
         assert_eq!(app.state.tab_target_at(first_row.y), Some((0, 0)));
