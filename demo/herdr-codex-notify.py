@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from closing_block import parse  # noqa: E402
-from herdr_status import report  # noqa: E402
+from herdr_status import mirror_path, report  # noqa: E402
 
 # Codex has used both spellings across versions.
 TURN_DONE = {"agent-turn-complete", "agent_turn_complete", "turn-ended", "turn_ended"}
@@ -44,6 +44,37 @@ def load_payload(argv: list[str]) -> dict:
         except (ValueError, OSError):
             pass
     return {}
+
+
+def title_from(payload: dict, pane_id: str) -> str | None:
+    """A stable session name for the pane, since codex ships none.
+
+    Codex's own resume picker previews the first user message, so use the same
+    thing -- but only the *first* one. `input-messages` is per turn, so
+    re-deriving every turn would rename the pane on every prompt. The first
+    title wins and is kept in the mirror for the rest of the session.
+    """
+    try:
+        with open(mirror_path(pane_id), encoding="utf-8") as fh:
+            existing = json.load(fh).get("title")
+        if isinstance(existing, str) and existing:
+            return existing
+    except (OSError, ValueError, AttributeError):
+        pass
+
+    messages = payload.get("input-messages") or payload.get("input_messages") or []
+    if not isinstance(messages, list):
+        return None
+    # Last message, not first: the injected AGENTS.md / permissions preamble is
+    # prepended, so the human's actual prompt is at the end.
+    for msg in reversed(messages):
+        text = msg if isinstance(msg, str) else ""
+        for line in text.splitlines():
+            line = line.strip().lstrip("#").strip()
+            if not line or line.startswith("<") or line.lower().startswith("agents.md"):
+                continue
+            return line[:80]
+    return None
 
 
 def main() -> int:
@@ -70,6 +101,7 @@ def main() -> int:
         gates=[i.text for i in block.items if i.blocking],
         agent_names=block.agents,
         session_id=payload.get("turn-id") or payload.get("turn_id"),
+        title=title_from(payload, os.environ["HERDR_PANE_ID"]),
     )
     if os.environ.get("HERDR_CLOSING_BLOCK_DEBUG"):
         print(json.dumps(outcome["payload"]), file=sys.stderr)

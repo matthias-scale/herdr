@@ -104,6 +104,7 @@ def report(
     agent_names: list[str] | None = None,
     session_id: str | None = None,
     session_path: str | None = None,
+    title: str | None = None,
     pane_id: str | None = None,
     sock_path: str | None = None,
 ) -> dict:
@@ -125,6 +126,8 @@ def report(
         "gates": gates,
         "agent_names": agent_names,
     }
+    if title:
+        payload["title"] = title
 
     outcome = {"payload": payload, "mirror": None, "socket": False}
     if pane_id:
@@ -159,6 +162,11 @@ def report(
         "closing_idle": "1" if state == "idle" else "0",
         "closing_agent_names": "; ".join(agent_names)[:200],
         "closing_gates": "; ".join(gates)[:200],
+        # Codex publishes no session name -- its OSC title is just the cwd, and
+        # its rollout files carry no title either (the resume picker previews
+        # the first user message). So the agent that has one supplies it here.
+        # Render with a `$session_title` token in `rows_by_agent`.
+        "session_title": (title or "")[:120],
     }
     meta_params = {
         "pane_id": pane_id,
