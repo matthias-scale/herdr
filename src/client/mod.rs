@@ -1245,7 +1245,6 @@ fn run_client_with_mode(
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
         host_terminal_theme_poll_interval: loaded_config.config.theme.auto_switch_poll_interval(),
-        #[cfg(unix)]
         remote_image_paste_key,
     };
 
