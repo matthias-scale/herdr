@@ -880,7 +880,7 @@ mod tests {
             now.duration_since(deadline)
         };
         assert!(
-            delta <= Duration::from_millis(100),
+            delta <= std::time::Duration::from_millis(100),
             "deadline {deadline:?} should be close to the requested refresh time {now:?}"
         );
     }
