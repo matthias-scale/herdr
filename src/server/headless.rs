@@ -1174,6 +1174,8 @@ impl HeadlessServer {
             self.app.state.sidebar_width,
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
+            self.app.state.dock_width,
+            self.app.state.dock_collapsed,
         );
 
         let mut handoff_entries = Vec::new();
@@ -8080,7 +8082,7 @@ next_tab = ""
 
         // Full-width status bar occupies row 0; terminal chrome starts at y=1 (tab bar)
         // and the terminal surface at y=2.
-        let foreground_terminal_area = Rect::new(26, 2, 94, 38);
+        let foreground_terminal_area = Rect::new(26, 2, 93, 38);
         let expected_pane_size = (
             foreground_terminal_area.height,
             foreground_terminal_area.width.saturating_sub(1),

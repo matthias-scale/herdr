@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
+mod dock;
 mod info_panel;
 mod keybind_help;
 mod menus;
@@ -28,6 +29,7 @@ use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
+use self::dock::render_dock;
 use self::info_panel::{compute_link_rows, panel_width_for_main, render_info_panel};
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
@@ -116,6 +118,11 @@ use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
+pub(crate) const DOCK_COLLAPSED_WIDTH: u16 = 1;
+pub(crate) const DOCK_DEFAULT_WIDTH: u16 = 32;
+pub(crate) const DOCK_MIN_WIDTH: u16 = 18;
+pub(crate) const DOCK_MAX_WIDTH: u16 = 48;
+pub(crate) const DOCK_MIN_TERMINAL_WIDTH: u16 = 10;
 
 /// Compute view geometry and reconcile pane sizes.
 /// Called before render to separate mutation from drawing.
@@ -250,8 +257,24 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(body_area);
+    let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
+    let dock_w = if app.dock_collapsed {
+        DOCK_COLLAPSED_WIDTH
+    } else if available_after_sidebar < DOCK_MIN_WIDTH + DOCK_MIN_TERMINAL_WIDTH {
+        app.dock_collapsed = true;
+        DOCK_COLLAPSED_WIDTH
+    } else {
+        app.dock_width
+            .clamp(DOCK_MIN_WIDTH, DOCK_MAX_WIDTH)
+            .min(available_after_sidebar.saturating_sub(DOCK_MIN_TERMINAL_WIDTH))
+    };
+
+    let [sidebar_area, main_area, dock_area] = Layout::horizontal([
+        Constraint::Length(sidebar_w),
+        Constraint::Min(1),
+        Constraint::Length(dock_w),
+    ])
+    .areas(body_area);
 
     let (content_area, info_panel_rect) = if app.info_panel_expanded {
         if let Some(panel_width) = panel_width_for_main(main_area.width) {
@@ -350,6 +373,8 @@ fn compute_view_internal(
     };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
+    let (dock_handle_rect, dock_divider_rect, dock_tab_bar_rect, dock_tab_hit_areas, dock_body_rect) =
+        dock_geometry(dock_area, app.dock_collapsed);
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
@@ -375,6 +400,12 @@ fn compute_view_internal(
         toast_hit_area,
         pane_infos,
         split_borders,
+        dock_rect: dock_area,
+        dock_handle_rect,
+        dock_divider_rect,
+        dock_tab_bar_rect,
+        dock_tab_hit_areas,
+        dock_body_rect,
     };
     app.sync_copy_mode_search_geometry();
 }
@@ -383,6 +414,45 @@ fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
     is_mobile_width(area, app.mobile_width_threshold)
         || (app.status_bar_enabled
             && usize::from(area.width) < status::minimum_required_status_width(app))
+}
+
+fn dock_geometry(
+    area: Rect,
+    collapsed: bool,
+) -> (Rect, Rect, Rect, Vec<Rect>, Rect) {
+    if area.width == 0 || area.height == 0 {
+        return (
+            Rect::default(),
+            Rect::default(),
+            Rect::default(),
+            Vec::new(),
+            Rect::default(),
+        );
+    }
+
+    let handle = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
+    if collapsed || area.width < 3 || area.height < 2 {
+        return (
+            area,
+            handle,
+            Rect::default(),
+            Vec::new(),
+            Rect::default(),
+        );
+    }
+
+    let divider = Rect::new(area.x, area.y, 1, area.height);
+    let content = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
+    let [tab_bar, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
+    let [editor, shortcuts, context] = Layout::horizontal([
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ])
+    .areas(tab_bar);
+    let tab_hit_areas = vec![editor, shortcuts, context];
+    (area, handle, divider, tab_hit_areas, body)
 }
 
 pub(crate) fn status_bar_is_renderable(app: &AppState, area: Rect) -> bool {
@@ -453,6 +523,12 @@ fn compute_mobile_view(
         toast_hit_area,
         pane_infos,
         split_borders,
+        dock_rect: Rect::default(),
+        dock_handle_rect: Rect::default(),
+        dock_divider_rect: Rect::default(),
+        dock_tab_bar_rect: Rect::default(),
+        dock_tab_hit_areas: Vec::new(),
+        dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {
         if let Some(active) = app.take_pending_workspace_reveal() {
@@ -500,6 +576,9 @@ pub fn render_with_runtime_registry(
 
     if app.view.info_panel_rect.width > 0 {
         render_info_panel(app, frame, app.view.info_panel_rect);
+    }
+    if app.view.layout != ViewLayout::Mobile {
+        render_dock(app, frame);
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
@@ -766,6 +845,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_collapsed_dock_leaves_the_layout_exactly_as_it_was() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 80, 20);
+
+        compute_view(&mut app, area);
+
+        let body = Rect::new(0, 1, 80, 19);
+        let [sidebar, old_main] =
+            Layout::horizontal([Constraint::Length(26), Constraint::Min(1)]).areas(body);
+        let [old_tab_bar, old_terminal] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(old_main);
+
+        assert!(app.dock_collapsed);
+        assert_eq!(app.view.sidebar_rect, sidebar);
+        assert_eq!(app.view.tab_bar_rect.x, old_tab_bar.x);
+        assert_eq!(app.view.tab_bar_rect.y, old_tab_bar.y);
+        assert_eq!(app.view.tab_bar_rect.height, old_tab_bar.height);
+        assert_eq!(app.view.tab_bar_rect.width + DOCK_COLLAPSED_WIDTH, old_tab_bar.width);
+        assert_eq!(app.view.terminal_area.x, old_terminal.x);
+        assert_eq!(app.view.terminal_area.y, old_terminal.y);
+        assert_eq!(app.view.terminal_area.height, old_terminal.height);
+        assert_eq!(app.view.terminal_area.width + DOCK_COLLAPSED_WIDTH, old_terminal.width);
+        assert_eq!(app.view.dock_rect, Rect::new(79, 1, 1, 19));
+        assert_eq!(app.view.dock_handle_rect, app.view.dock_rect);
+    }
+
+    #[test]
+    fn a_small_terminal_refuses_to_open_the_dock_before_clipping_the_terminal() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.mobile_width_threshold = 0;
+        app.status_bar_enabled = false;
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 45, 12));
+
+        assert!(app.dock_collapsed);
+        assert_eq!(app.view.dock_rect.width, DOCK_COLLAPSED_WIDTH);
+        assert!(app.view.terminal_area.width >= 1);
+    }
+
+    #[test]
+    fn an_open_dock_exposes_three_named_tabs_and_a_body_area() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 120, 20);
+
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert_eq!(app.view.dock_tab_hit_areas.len(), 3);
+        assert!(app.view.dock_body_rect.height > 0);
+        for tab in crate::app::DockTab::ALL {
+            assert!(screen.contains(tab.label()), "missing {} in {screen:?}", tab.label());
+        }
+        assert!(screen.contains("not implemented yet"));
+    }
+
     #[tokio::test]
     async fn focused_pane_cursor_wins_during_terminal_render() {
         let mut app = crate::app::state::AppState::test_new();
@@ -925,7 +1079,7 @@ mod tests {
         // Full-width status bar occupies row 0; chrome starts at y=1.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(single_tab_terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(single_tab_terminal_area, Rect::new(26, 1, 53, 19));
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
 
@@ -933,8 +1087,8 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 53, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 53, 18));
         assert_eq!(app.view.tab_hit_areas.len(), 2);
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.width > 0));
         assert!(app.view.new_tab_hit_area.width > 0);
@@ -979,8 +1133,8 @@ mod tests {
         let two_tab_size =
             app.workspaces[1].tabs[background_tab].runtimes[&two_tab_pane].current_size();
         // Status bar reserves one full-width row; single-tab workspaces reclaim the tab bar.
-        assert_eq!(one_tab_size, (19, 53));
-        assert_eq!(two_tab_size, (18, 53));
+        assert_eq!(one_tab_size, (19, 52));
+        assert_eq!(two_tab_size, (18, 52));
     }
 
     #[tokio::test]
@@ -1096,8 +1250,8 @@ mod tests {
         // Status bar is full-width on row 0; sidebar/tabs/terminal sit below.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
         assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 0, 19));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 80, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 80, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 79, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 79, 18));
         assert!(app.view.workspace_card_areas.is_empty());
 
         let backend = TestBackend::new(80, 20);
@@ -1778,6 +1932,9 @@ mod tests {
         assert!(panes
             .iter()
             .any(|(key, label)| key == "prefix+l" && label.as_ref() == "focus pane right"));
+        assert!(panes
+            .iter()
+            .any(|(key, label)| key == "prefix+shift+e" && label.as_ref() == "toggle dock"));
     }
 
     #[test]

@@ -192,8 +192,13 @@ impl AppState {
             && mouse.column < sidebar.x + sidebar.width
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
+        let dock = self.view.dock_rect;
+        let in_dock = mouse.column >= dock.x
+            && mouse.column < dock.x.saturating_add(dock.width)
+            && mouse.row >= dock.y
+            && mouse.row < dock.y.saturating_add(dock.height);
 
-        if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
+        if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar || in_dock) {
             return None;
         }
 
@@ -425,6 +430,26 @@ impl AppState {
                     return None;
                 }
 
+                if self.on_dock_divider(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::DockDivider,
+                    });
+                    self.set_manual_dock_width(mouse.column);
+                    return None;
+                }
+                if self.on_dock_toggle(mouse.column, mouse.row) {
+                    self.dock_collapsed = !self.dock_collapsed;
+                    self.mark_session_dirty();
+                    return None;
+                }
+                if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
+                    self.dock_tab = tab;
+                    return None;
+                }
+                if in_dock {
+                    return None;
+                }
+
                 if self.on_sidebar_divider(mouse.column, mouse.row) {
                     self.drag = Some(DragState {
                         target: DragTarget::SidebarDivider,
@@ -433,7 +458,7 @@ impl AppState {
                     return None;
                 }
 
-                if !in_sidebar {
+                if !in_sidebar && !in_dock {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         let grab_offset = match border.direction {
                             Direction::Horizontal => border.pos.saturating_sub(mouse.column),
@@ -761,6 +786,9 @@ impl AppState {
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
                         }
+                        DragTarget::DockDivider => {
+                            self.set_manual_dock_width(mouse.column);
+                        }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
@@ -877,7 +905,7 @@ impl AppState {
             }
 
             MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Drag(MouseButton::Middle)
-                if !in_sidebar =>
+                if !in_sidebar && !in_dock =>
             {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                     let _ = self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
@@ -913,16 +941,18 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if !in_sidebar && self.scroll_selection_with_wheel(terminal_runtimes, mouse) => {}
+                if !in_sidebar
+                    && !in_dock
+                    && self.scroll_selection_with_wheel(terminal_runtimes, mouse) => {}
 
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar && !in_dock => {
                 self.selection = None;
                 self.selection_autoscroll = None;
                 self.handle_terminal_wheel(terminal_runtimes, mouse);
             }
 
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
-                if self.mode == Mode::Terminal && !in_sidebar =>
+                if self.mode == Mode::Terminal && !in_sidebar && !in_dock =>
             {
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
@@ -961,7 +991,7 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Moved if self.mode == Mode::Terminal && !in_sidebar => {
+            MouseEventKind::Moved if self.mode == Mode::Terminal && !in_sidebar && !in_dock => {
                 if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     let _ = self.forward_pane_mouse_motion(terminal_runtimes, &info, mouse);
                 }
@@ -1036,7 +1066,7 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Down(MouseButton::Right) if !in_sidebar => {
+            MouseEventKind::Down(MouseButton::Right) if !in_sidebar && !in_dock => {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                     let ws_idx = self.active?;
                     let tab_idx = self
@@ -1183,6 +1213,7 @@ impl AppState {
                 .status_bar_rect
                 .union(self.view.sidebar_rect)
                 .union(self.view.terminal_area)
+                .union(self.view.dock_rect)
         }
     }
 
@@ -1869,6 +1900,66 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    #[test]
+    fn clicking_the_dock_handle_toggles_it_without_touching_pane_focus() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = true;
+        app.state.view.dock_rect = Rect::new(79, 0, 1, 20);
+        app.state.view.dock_handle_rect = app.state.view.dock_rect;
+        let focused_before = app
+            .state
+            .active
+            .and_then(|idx| app.state.workspaces.get(idx))
+            .and_then(Workspace::focused_pane_id);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 5));
+
+        assert!(!app.state.dock_collapsed);
+        let focused_after = app
+            .state
+            .active
+            .and_then(|idx| app.state.workspaces.get(idx))
+            .and_then(Workspace::focused_pane_id);
+        assert_eq!(focused_after, focused_before);
+    }
+
+    #[test]
+    fn clicking_a_dock_tab_selects_only_that_dock_tab() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.view.dock_rect = Rect::new(80, 0, 20, 20);
+        app.state.view.dock_handle_rect = Rect::new(99, 0, 1, 20);
+        app.state.view.dock_tab_hit_areas = vec![
+            Rect::new(81, 0, 6, 1),
+            Rect::new(87, 0, 6, 1),
+            Rect::new(93, 0, 6, 1),
+        ];
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 88, 0));
+
+        assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+    }
+
+    #[test]
+    fn dragging_the_dock_divider_resizes_and_persists_the_width() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_width = 30;
+        app.state.view.terminal_area = Rect::new(0, 0, 50, 20);
+        app.state.view.dock_rect = Rect::new(50, 0, 30, 20);
+        app.state.view.dock_divider_rect = Rect::new(50, 0, 1, 20);
+        app.state.view.dock_handle_rect = Rect::new(79, 0, 1, 20);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 50, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 55, 5));
+
+        assert_eq!(app.state.dock_width, 25);
+        assert!(app.state.session_dirty);
     }
 
     #[test]

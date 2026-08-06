@@ -57,7 +57,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::events::AppEvent;
 
-pub use state::{AppState, Mode, ToastKind, ViewState};
+pub use state::{AppState, DockTab, Mode, ToastKind, ViewState};
 
 pub(crate) fn load_plugin_manifest(
     path: &str,
@@ -135,6 +135,7 @@ pub struct App {
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
+    pub(crate) last_dock_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
     pub(crate) next_resize_poll: Instant,
@@ -414,6 +415,8 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            dock_width,
+            dock_collapsed,
         ) = if no_session {
             (
                 Vec::new(),
@@ -423,6 +426,8 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                crate::ui::DOCK_DEFAULT_WIDTH,
+                true,
             )
         } else if let Some(snap) = crate::persist::load() {
             let history = config
@@ -459,6 +464,8 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.dock_width.unwrap_or(crate::ui::DOCK_DEFAULT_WIDTH),
+                    snap.dock_collapsed.unwrap_or(true),
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -476,6 +483,8 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.dock_width.unwrap_or(crate::ui::DOCK_DEFAULT_WIDTH),
+                    snap.dock_collapsed.unwrap_or(true),
                 )
             }
         } else {
@@ -487,6 +496,8 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                crate::ui::DOCK_DEFAULT_WIDTH,
+                true,
             )
         };
 
@@ -633,6 +644,12 @@ impl App {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                dock_rect: Rect::default(),
+                dock_handle_rect: Rect::default(),
+                dock_divider_rect: Rect::default(),
+                dock_tab_bar_rect: Rect::default(),
+                dock_tab_hit_areas: Vec::new(),
+                dock_body_rect: Rect::default(),
             },
             drag: None,
             workspace_press: None,
@@ -655,6 +672,9 @@ impl App {
             sidebar_width,
             sidebar_min_width,
             sidebar_max_width,
+            dock_width,
+            dock_collapsed,
+            dock_tab: state::DockTab::Editor,
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
@@ -795,6 +815,7 @@ impl App {
             pending_api_worktree_remove_paths: HashMap::new(),
             next_api_worktree_operation_id: 1,
             last_sidebar_divider_click: None,
+            last_dock_divider_click: None,
             last_pane_click: None,
             pending_url_click_sources: HashSet::new(),
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
@@ -893,6 +914,12 @@ impl App {
         }
         if let Some(split) = snapshot.sidebar_section_split {
             app.state.sidebar_section_split = split;
+        }
+        if let Some(width) = snapshot.dock_width {
+            app.state.dock_width = width;
+        }
+        if let Some(collapsed) = snapshot.dock_collapsed {
+            app.state.dock_collapsed = collapsed;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
         app.state.mode = if app.state.active.is_some() {

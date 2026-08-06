@@ -29,6 +29,10 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub dock_width: Option<u16>,
+    #[serde(default)]
+    pub dock_collapsed: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -209,6 +213,10 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    dock_width: Option<u16>,
+    #[serde(default)]
+    dock_collapsed: Option<bool>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -225,6 +233,8 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        dock_width: raw.dock_width,
+        dock_collapsed: raw.dock_collapsed,
     })
 }
 
@@ -287,6 +297,8 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    dock_width: u16,
+    dock_collapsed: bool,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -300,6 +312,8 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        dock_width: Some(dock_width),
+        dock_collapsed: Some(dock_collapsed),
     }
 }
 
@@ -587,6 +601,8 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            state.dock_width,
+            state.dock_collapsed,
         )
     }
 
@@ -652,6 +668,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            dock_width: None,
+            dock_collapsed: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -1126,6 +1144,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            dock_width: None,
+            dock_collapsed: None,
             version: SNAPSHOT_VERSION,
         };
 
@@ -1194,6 +1214,8 @@ mod tests {
 
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
+        assert_eq!(restored.dock_width, None);
+        assert_eq!(restored.dock_collapsed, None);
     }
 
     #[test]
@@ -1272,6 +1294,8 @@ mod tests {
     #[test]
     fn capture_contract_tracks_workspace_and_tab_names_and_active_tab() {
         let mut state = state_with_workspaces(&["one"]);
+        state.dock_width = 37;
+        state.dock_collapsed = false;
         state.workspaces[0].set_custom_name("renamed-workspace".into());
         let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
         state.workspaces[0].switch_tab(second_tab);
@@ -1283,6 +1307,8 @@ mod tests {
         assert_eq!(workspace.active_tab, second_tab);
         assert_eq!(workspace.tabs[0].custom_name.as_deref(), Some("main"));
         assert_eq!(workspace.tabs[1].custom_name.as_deref(), Some("logs"));
+        assert_eq!(snapshot.dock_width, Some(37));
+        assert_eq!(snapshot.dock_collapsed, Some(false));
     }
 
     #[test]
@@ -1701,6 +1727,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            dock_width: None,
+            dock_collapsed: None,
         };
 
         let json = serde_json::to_string(&snap).unwrap();
