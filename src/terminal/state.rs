@@ -3556,6 +3556,70 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Working);
     }
 
+    /// The closing-block reporter must outrank the screen scraper.
+    ///
+    /// When a Claude turn ends, `manifests/claude.toml` `live_prompt_box` sees the
+    /// `❯` box and calls the pane idle. That is right about the harness and wrong
+    /// about the work: agents may still be running, or a Gate may be waiting on a
+    /// human. The `Stop` hook knows both, so its report has to win.
+    #[test]
+    fn closing_block_authority_outranks_visible_idle_prompt_box() {
+        let mut terminal = test_terminal();
+        let session_path = test_session_path("closing-block.jsonl");
+        let now = Instant::now();
+
+        // A real claude process is in the pane -- the precondition every
+        // full-lifecycle source must satisfy.
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        // The Stop hook's session must be announced before its reports count.
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::path(session_path.clone()),
+            Some(999),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            Some("Gate 1: merge #30".into()),
+            crate::agent_resume::AgentSessionRef::path(session_path),
+            Some(1000),
+            now,
+        );
+
+        // Screen scraping now reports the idle prompt box. It must not win.
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_millis(1),
+        );
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(
+            terminal.state,
+            AgentState::Blocked,
+            "visible idle prompt box must not clear a reported Gate"
+        );
+
+        // And once the process is gone, the stale authority must not outlive it.
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            true,
+            now + Duration::from_millis(2),
+        );
+        assert_ne!(terminal.state, AgentState::Blocked);
+    }
+
     #[test]
     fn rapid_restart_replays_reports_that_arrive_before_process_evidence() {
         let mut terminal = test_terminal();
