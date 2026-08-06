@@ -124,6 +124,73 @@ CASES = [
 ]
 
 
+def run_codex_notify(pane_id: str, text: str) -> str:
+    """Invoke the Codex notify handler exactly as codex would: one JSON argv."""
+    arg = json.dumps({"type": "agent-turn-complete", "turn-id": "t1",
+                      "last-assistant-message": text})
+    env = dict(os.environ, HERDR_ENV="1", HERDR_PANE_ID=pane_id,
+               HERDR_CLOSING_BLOCK_DEBUG="1")
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "herdr-codex-notify.py"), arg],
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    return proc.stderr.strip()
+
+
+def run_cli(pane_id: str, agent: str, blocking: int, agents: int) -> str:
+    """The one-liner any other coding agent would call from its turn-end hook."""
+    env = dict(os.environ, HERDR_ENV="1", HERDR_PANE_ID=pane_id)
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "herdr-status"), "--agent", agent,
+         "--blocking", str(blocking), "--agents", str(agents), "--json"],
+        capture_output=True, text=True, env=env, timeout=10, stdin=subprocess.DEVNULL,
+    )
+    return proc.stdout.strip()
+
+
+def check_mirror(pane_id: str, want_blocking: int, want_agents: int) -> bool:
+    """The durable JSON mirror must match what was pushed."""
+    sys.path.insert(0, HERE)
+    from herdr_status import mirror_path  # noqa: PLC0415
+
+    path = mirror_path(pane_id)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"      mirror UNREADABLE at {path}: {exc}")
+        return False
+    ok = body.get("blocking") == want_blocking and body.get("agents") == want_agents
+    print(f"      mirror       : {path}")
+    print(f"                     {json.dumps(body)[:160]}")
+    return ok
+
+
+def cross_agent_phase(pane_id: str) -> int:
+    """Same contract, three different entry points."""
+    print("=== cross-agent entry points ===\n")
+    failures = 0
+
+    dbg = run_codex_notify(pane_id, fx.BLOCKING_GATE)
+    time.sleep(0.4)
+    got = read_state(pane_id)
+    ok = got["agent_status"] == "blocked" and check_mirror(pane_id, 2, 2)
+    failures += 0 if ok else 1
+    print(f"{'PASS' if ok else 'FAIL'}  codex notify -> blocked")
+    print(f"      handler      : {dbg or '(nothing)'}")
+    print(f"      herdr status : {got['agent_status']} (expected blocked)\n")
+
+    out = run_cli(pane_id, "opencode", blocking=0, agents=4)
+    time.sleep(0.4)
+    got = read_state(pane_id)
+    ok = got["agent_status"] == "working" and check_mirror(pane_id, 0, 4)
+    failures += 0 if ok else 1
+    print(f"{'PASS' if ok else 'FAIL'}  bare CLI (opencode) -> working")
+    print(f"      cli          : {out[:160] or '(nothing)'}")
+    print(f"      herdr status : {got['agent_status']} (expected working)\n")
+    return failures
+
+
 def main() -> int:
     pane_id = sys.argv[2] if len(sys.argv) > 2 else first_pane_id()
     print(f"pane: {pane_id}\n")
@@ -145,6 +212,7 @@ def main() -> int:
         if bad:
             print(f"      TOKEN MISMATCH (got, want): {bad}")
         print()
+    failures += cross_agent_phase(pane_id)
     print("ALL PASS" if not failures else f"{failures} FAILED")
     return 1 if failures else 0
 

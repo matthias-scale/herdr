@@ -386,15 +386,29 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
             | ("herdr:opencode", "opencode")
             | ("herdr:kilo", "kilo")
             | ("herdr:kimi", "kimi")
-            // Closing-block reporter (Claude Code `Stop` hook). Screen scraping
-            // sees Claude's `❯` prompt box the instant a turn ends and calls the
-            // pane idle (manifests/claude.toml `live_prompt_box`, priority 950),
-            // which is right about the harness and wrong about the work: agents
-            // may still be running, or a Gate may be waiting on a human. The
-            // hook knows both, so it owns lifecycle for this source.
-            | ("herdr:claude-closing-block", "claude")
-            | ("herdr:codex-closing-block", "codex")
-    )
+    ) || is_closing_block_source(source, agent_label)
+}
+
+/// Turn-end status reported by an agent's own hook, under `herdr:<agent>-closing-block`.
+///
+/// Screen scraping sees Claude's `❯` prompt box the instant a turn ends and
+/// calls the pane idle (`manifests/claude.toml` `live_prompt_box`, priority
+/// 950). That is right about the harness and wrong about the work: agents may
+/// still be running, or a gate may be waiting on a human. The hook knows both,
+/// so it owns lifecycle for its own source.
+///
+/// Matched by shape rather than an allowlist so any agent adopting the contract
+/// works without a herdr release. The source must still name the agent it
+/// claims to speak for, and `hook_authority_is_effective` independently
+/// requires that agent's process to be present in the pane.
+pub(crate) fn is_closing_block_source(source: &str, agent_label: &str) -> bool {
+    if agent_label.is_empty() {
+        return false;
+    }
+    source
+        .strip_prefix("herdr:")
+        .and_then(|rest| rest.strip_suffix("-closing-block"))
+        .is_some_and(|claimed| claimed == agent_label)
 }
 
 pub(crate) fn session_identity_only_integration(source: &str, agent_label: &str) -> bool {
@@ -735,6 +749,42 @@ fn is_python_runtime(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn closing_block_source_matches_only_its_own_agent() {
+        use super::{full_lifecycle_hook_authority, is_closing_block_source};
+        assert!(is_closing_block_source(
+            "herdr:claude-closing-block",
+            "claude"
+        ));
+        assert!(is_closing_block_source(
+            "herdr:codex-closing-block",
+            "codex"
+        ));
+        assert!(is_closing_block_source(
+            "herdr:opencode-closing-block",
+            "opencode"
+        ));
+        assert!(full_lifecycle_hook_authority(
+            "herdr:claude-closing-block",
+            "claude"
+        ));
+
+        // A source may not speak for an agent it does not name.
+        assert!(!is_closing_block_source(
+            "herdr:claude-closing-block",
+            "codex"
+        ));
+        assert!(!is_closing_block_source(
+            "herdr:evil-closing-block",
+            "claude"
+        ));
+        assert!(!is_closing_block_source("claude-closing-block", "claude"));
+        assert!(!is_closing_block_source("herdr:claude", "claude"));
+        assert!(!is_closing_block_source("herdr:-closing-block", ""));
+        // Reserved native sources keep their existing meaning.
+        assert!(!full_lifecycle_hook_authority("herdr:claude", "claude"));
+    }
     use super::*;
 
     fn foreground_process(
