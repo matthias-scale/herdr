@@ -37,6 +37,14 @@ pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
 
 fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
     let title = title.trim().to_ascii_lowercase();
+    // A derived projection already leads with the agent, so compare against the
+    // first component too — otherwise "Claude · Fix billing" still earns a " · cc"
+    // suffix and names the agent twice.
+    let leading = title
+        .split(crate::workspace::TAB_DISPLAY_SEPARATOR)
+        .next()
+        .unwrap_or_default()
+        .trim();
     let provider = match entry.agent {
         Some(Agent::Codex) => Some("codex"),
         Some(Agent::Claude) => Some("claude"),
@@ -49,7 +57,10 @@ fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
         .into_iter()
         .chain(entry.agent_kind_label.as_deref())
         .chain(provider)
-        .any(|identity| identity.trim().eq_ignore_ascii_case(&title))
+        .any(|identity| {
+            let identity = identity.trim();
+            identity.eq_ignore_ascii_case(&title) || identity.eq_ignore_ascii_case(leading)
+        })
 }
 
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
@@ -4186,6 +4197,42 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     }
 
     #[test]
+    fn sidebar_and_tab_bar_render_the_same_agent_title() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("Fix billing".into()));
+
+        let area = Rect::new(0, 0, 60, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+
+        let tab_bar_label = crate::ui::tabs::tab_chrome_label(
+            &app.workspaces[0],
+            &app.terminals,
+            0,
+            usize::from(area.width),
+        );
+        assert_eq!(tab_bar_label, "pi · Fix billing");
+        assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
+        // The projection already names the agent, so the sidebar must not append
+        // the provider chip on top of it.
+        assert!(
+            !rendered.contains("Fix billing · pi"),
+            "sidebar repeated the agent identity: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn default_space_workspace_style_tracks_active_state() {
         let mut app = crate::app::state::AppState::test_new();
         app.palette = crate::app::state::Palette::one_light();
@@ -5874,7 +5921,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
         assert_eq!(layout.title, "codex · Codex");
         assert_eq!(layout.state.as_deref(), Some("working"));
-        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
+        // The derived projection already leads with the agent, so no provider chip.
+        assert_eq!(layout.agent_suffix.as_deref(), None);
 
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal
@@ -5888,6 +5936,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let layout = tab_row_layout(&entry, std::time::Instant::now(), 40, 2, &app.palette);
         assert_eq!(layout.title, "codex · manual pane");
         assert_eq!(layout.state.as_deref(), Some("working"));
-        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
+        assert_eq!(layout.agent_suffix.as_deref(), None);
     }
 }

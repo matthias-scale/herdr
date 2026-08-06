@@ -51,6 +51,9 @@ pub(crate) enum TabPrioAction {
     Set(bool),
 }
 
+/// Separator joining the components of a derived tab projection.
+pub(crate) const TAB_DISPLAY_SEPARATOR: &str = " · ";
+
 impl TabDisplayProjection {
     pub(crate) fn full_label(&self) -> String {
         match self {
@@ -63,7 +66,7 @@ impl TabDisplayProjection {
                 .into_iter()
                 .filter_map(|part| part.as_deref())
                 .collect::<Vec<_>>()
-                .join(" · "),
+                .join(TAB_DISPLAY_SEPARATOR),
         }
     }
 }
