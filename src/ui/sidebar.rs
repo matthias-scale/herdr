@@ -289,13 +289,50 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
 }
 
 fn expanded_sidebar_sections_for_app(app: &AppState, area: Rect) -> (Rect, Rect) {
-    let panel_collapsed = app.prio_panel_collapsed || prio_panel_entries(app).is_empty();
-    let split_ratio = if panel_collapsed {
-        f32::from(PRIO_PANEL_HEADER_ROWS) / f32::from(area.height.max(1))
+    let entries = prio_panel_entries(app);
+    let panel_collapsed = app.prio_panel_collapsed || entries.is_empty();
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height == 0 {
+        return (Rect::default(), Rect::default());
+    }
+
+    let entry_rows = entries.len().min(usize::from(u16::MAX)) as u16;
+    let minimum_panel_height = if panel_collapsed {
+        PRIO_PANEL_HEADER_ROWS
     } else {
-        app.sidebar_section_split
+        PRIO_PANEL_HEADER_ROWS.saturating_add(1)
     };
-    expanded_sidebar_sections(area, split_ratio)
+    let content_panel_height = if panel_collapsed {
+        PRIO_PANEL_HEADER_ROWS
+    } else {
+        PRIO_PANEL_HEADER_ROWS.saturating_add(entry_rows)
+    };
+    let split_ratio = if panel_collapsed {
+        f32::from(PRIO_PANEL_HEADER_ROWS) / f32::from(content.height)
+    } else {
+        app.sidebar_section_split.clamp(0.0, 1.0)
+    };
+    let split_panel_height = (f32::from(content.height) * split_ratio).floor() as u16;
+    let workspace_minimum = content
+        .height
+        .saturating_sub(MIN_WORKSPACE_LIST_ROWS)
+        .max(minimum_panel_height)
+        .min(content.height);
+    let panel_height = content_panel_height
+        .min(split_panel_height.max(minimum_panel_height))
+        .max(minimum_panel_height)
+        .min(workspace_minimum);
+    let list_height = content.height.saturating_sub(panel_height);
+
+    (
+        Rect::new(content.x, content.y, content.width, list_height),
+        Rect::new(
+            content.x,
+            content.y + list_height,
+            content.width,
+            panel_height,
+        ),
+    )
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -2523,6 +2560,29 @@ mod tests {
         assert!(rendered.contains("review auth"), "{rendered:?}");
         assert!(rendered.contains("two"), "{rendered:?}");
         assert!(rendered.contains("●"), "{rendered:?}");
+    }
+
+    #[test]
+    fn prio_panel_height_matches_content_until_split_cap() {
+        let area = Rect::new(0, 0, 40, 16);
+
+        let mut one_entry = app_with_agents(&["one"]);
+        one_entry.workspaces[0].tabs[0].set_prio(true);
+        assert_eq!(prio_panel_rect(&one_entry, area).height, 2);
+
+        let mut two_entries = app_with_agents(&["one", "two"]);
+        for workspace in &mut two_entries.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        assert_eq!(prio_panel_rect(&two_entries, area).height, 3);
+
+        let mut many_entries = app_with_agents(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ]);
+        for workspace in &mut many_entries.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        assert_eq!(prio_panel_rect(&many_entries, area).height, 8);
     }
 
     #[test]
