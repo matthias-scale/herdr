@@ -198,6 +198,16 @@ mod fallback;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
 
+/// Returns the process job used for the sidebar foreground-process label.
+///
+/// Windows has no terminal foreground process group, so its implementation
+/// adds a conservative plain-process fallback. Other platforms use their
+/// regular foreground job unchanged.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn foreground_process_job(child_pid: u32) -> Option<ForegroundJob> {
+    foreground_job(child_pid)
+}
+
 /// Cached native metrics for the full-width top status bar (tmux-parity).
 pub(crate) mod status_metrics;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

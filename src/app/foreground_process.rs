@@ -124,8 +124,11 @@ impl crate::app::App {
         let _ = std::thread::Builder::new()
             .name("herdr-foreground-process".into())
             .spawn(move || {
-                let observations =
-                    refresh_foreground_processes(&targets, deadline, crate::detect::foreground_job);
+                let observations = refresh_foreground_processes(
+                    &targets,
+                    deadline,
+                    crate::detect::foreground_process_job,
+                );
                 let _ =
                     event_tx.blocking_send(crate::events::AppEvent::ForegroundProcessesRefreshed {
                         generation,

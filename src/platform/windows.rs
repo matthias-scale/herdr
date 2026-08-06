@@ -430,6 +430,11 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     select_pane_foreground_job(child_pid, &entries)
 }
 
+pub(crate) fn foreground_process_job(child_pid: u32) -> Option<ForegroundJob> {
+    let entries = snapshot_processes();
+    select_pane_foreground_process_job(child_pid, &entries)
+}
+
 pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
     available_pane_shell_from_snapshot(child_pid, &snapshot_processes())
 }
@@ -501,6 +506,51 @@ fn select_pane_foreground_job(
             |entry| Some(foreground_job_from_entry(entry)),
         ),
     }
+}
+
+fn select_pane_foreground_process_job(
+    shell_pid: u32,
+    entries: &[WindowsProcessEntry],
+) -> Option<ForegroundJob> {
+    let selected = select_pane_foreground_job(shell_pid, entries)?;
+    if selected.process_group_id != shell_pid {
+        return Some(selected);
+    }
+
+    let descendants = descendant_entries(shell_pid, entries);
+    if descendants.iter().any(|entry| {
+        let job = foreground_job_from_entry(entry);
+        crate::detect::identify_agent_in_job(&job).is_some()
+    }) {
+        return None;
+    }
+
+    select_single_plain_descendant(shell_pid, &descendants, entries).map(foreground_job_from_entry)
+}
+
+fn select_single_plain_descendant<'a>(
+    shell_pid: u32,
+    descendants: &[&'a WindowsProcessEntry],
+    entries: &[WindowsProcessEntry],
+) -> Option<&'a WindowsProcessEntry> {
+    // A single rooted descendant chain gives us one clear command. If the
+    // descendants branch into unrelated processes, return no label instead of
+    // guessing which branch is foreground.
+    let parent_by_pid: HashMap<u32, u32> = entries
+        .iter()
+        .map(|entry| (entry.pid, entry.parent_pid))
+        .collect();
+    let plain_descendants = descendants
+        .iter()
+        .copied()
+        .filter(|entry| entry.pid != shell_pid && !super::is_pane_shell_process_name(&entry.name))
+        .collect::<Vec<_>>();
+
+    plain_descendants.iter().copied().find(|entry| {
+        plain_descendants.iter().all(|other| {
+            entry.pid == other.pid || process_is_ancestor(entry.pid, other.pid, &parent_by_pid)
+        })
+    })
 }
 
 fn foreground_job_from_entry(entry: &WindowsProcessEntry) -> ForegroundJob {
@@ -1738,6 +1788,52 @@ mod tests {
 
         assert_eq!(job.process_group_id, 10);
         assert_eq!(job.processes[0].name, "powershell.exe");
+    }
+
+    #[test]
+    fn windows_sidebar_process_tree_selects_plain_descendant() {
+        let entries = vec![
+            test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "git.exe", &["git.exe", "status"]),
+        ];
+
+        let job = super::select_pane_foreground_process_job(10, &entries).unwrap();
+
+        assert_eq!(
+            crate::app::foreground_process::process_name_for_job(10, &job).as_deref(),
+            Some("git.exe")
+        );
+    }
+
+    #[test]
+    fn windows_sidebar_process_tree_preserves_agent_selection() {
+        let entries = vec![
+            test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+        ];
+
+        let job = super::select_pane_foreground_process_job(10, &entries).unwrap();
+
+        assert_eq!(job.process_group_id, 20);
+        assert_eq!(job.processes[0].name, "codex.exe");
+    }
+
+    #[test]
+    fn windows_sidebar_process_tree_suppresses_bare_shell() {
+        let entries = vec![test_entry(10, 1, "powershell.exe", &["powershell.exe"])];
+
+        assert!(super::select_pane_foreground_process_job(10, &entries).is_none());
+    }
+
+    #[test]
+    fn windows_sidebar_process_tree_omits_unrelated_plain_descendants() {
+        let entries = vec![
+            test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "git.exe", &["git.exe", "status"]),
+            test_entry(30, 10, "npm.exe", &["npm.exe", "test"]),
+        ];
+
+        assert!(super::select_pane_foreground_process_job(10, &entries).is_none());
     }
 
     #[test]
