@@ -86,6 +86,16 @@ def test_absent_block_is_inert():
     assert b.herdr_state == "idle"
 
 
+def test_absent_block_reports_zero_counts_so_the_hook_can_send_it():
+    """Both turn-end hooks now report a blockless turn instead of staying
+    silent, which is only safe because an absent block reads as zero."""
+    b = parse("Just some prose with no closing block at all.")
+    assert b.blocking == 0
+    assert b.agents_running == 0
+    assert b.items == []
+    assert b.agents == []
+
+
 def test_last_marker_wins_when_body_quotes_an_earlier_one():
     text = "Earlier I wrote:\n\n**Nothing to act on.**\n\n" + BLOCKING_GATE
     b = parse(text)
