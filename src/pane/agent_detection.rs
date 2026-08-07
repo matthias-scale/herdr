@@ -11,6 +11,45 @@ pub(super) const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration =
     std::time::Duration::from_millis(800);
 pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(3);
+pub(super) const FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+#[derive(Debug, Default)]
+pub(super) struct FullLifecycleHookOutputRetirement {
+    authority_baseline_content_seq: Option<u64>,
+    last_content_seq: Option<u64>,
+    output_started_at: Option<std::time::Instant>,
+}
+
+impl FullLifecycleHookOutputRetirement {
+    pub(super) fn clear(&mut self) {
+        self.authority_baseline_content_seq = None;
+        self.last_content_seq = None;
+        self.output_started_at = None;
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        content_seq: u64,
+        authority_baseline_content_seq: u64,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
+        if self.authority_baseline_content_seq != Some(authority_baseline_content_seq) {
+            self.authority_baseline_content_seq = Some(authority_baseline_content_seq);
+            self.last_content_seq = Some(authority_baseline_content_seq);
+            self.output_started_at = None;
+        }
+
+        if self.last_content_seq != Some(content_seq) {
+            self.last_content_seq = Some(content_seq);
+            self.output_started_at.get_or_insert(now);
+        }
+
+        self.output_started_at.filter(|started_at| {
+            now.duration_since(*started_at) >= FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DetectionPublishState {
@@ -552,5 +591,55 @@ mod tests {
         mark_detection_content_changed(&seq);
 
         assert_eq!(seq.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn output_retires_a_hook_gate_after_the_grace_period() {
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+
+        assert_eq!(retirement.observe(4, 4, started), None);
+        assert_eq!(
+            retirement.observe(5, 4, started + std::time::Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            retirement.observe(
+                5,
+                4,
+                started
+                    + std::time::Duration::from_secs(1)
+                    + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE
+            ),
+            Some(started + std::time::Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn a_silent_hook_gate_does_not_expire() {
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+
+        assert_eq!(retirement.observe(4, 4, started), None);
+        assert_eq!(
+            retirement.observe(
+                4,
+                4,
+                started + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE * 3,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn output_before_the_first_detection_tick_starts_the_grace_period() {
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+
+        assert_eq!(retirement.observe(5, 4, started), None);
+        assert_eq!(
+            retirement.observe(5, 4, started + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE),
+            Some(started)
+        );
     }
 }

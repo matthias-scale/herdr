@@ -1649,8 +1649,12 @@ impl App {
         let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        let has_bytes = !params.text.is_empty();
         if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
             return encode_error(id, "pane_send_failed", err.to_string());
+        }
+        if has_bytes {
+            self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -1675,8 +1679,12 @@ impl App {
             Ok(bytes) => bytes,
             Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
         };
+        let has_bytes = !bytes.is_empty();
         if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
             return encode_error(id, "pane_send_failed", err.to_string());
+        }
+        if has_bytes {
+            self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -1762,16 +1770,30 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
-        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let encoded_keys = match encode_api_keys(runtime, &params.keys) {
-            Ok(encoded_keys) => encoded_keys,
-            Err(key) => return encode_error(id, "invalid_key", format!("unsupported key {key}")),
+        let encoded_keys = {
+            let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                return pane_not_found(id, &params.pane_id);
+            };
+            match encode_api_keys(runtime, &params.keys) {
+                Ok(encoded_keys) => encoded_keys,
+                Err(key) => {
+                    return encode_error(id, "invalid_key", format!("unsupported key {key}"));
+                }
+            }
         };
         for bytes in encoded_keys {
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            let has_bytes = !bytes.is_empty();
+            let send_result = {
+                let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+                    return pane_not_found(id, &params.pane_id);
+                };
+                runtime.try_send_bytes(Bytes::from(bytes))
+            };
+            if let Err(err) = send_result {
                 return encode_error(id, "pane_send_failed", err.to_string());
+            }
+            if has_bytes {
+                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }
         }
 
@@ -2445,6 +2467,67 @@ mod tests {
         assert_eq!(success.result, ResponseResult::Ok {});
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pane_write_apis_retire_a_blocked_hook_after_forwarding_bytes() {
+        let requests = [
+            crate::api::schema::Method::PaneSendText(PaneSendTextParams {
+                pane_id: String::new(),
+                text: "x".into(),
+            }),
+            crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id: String::new(),
+                keys: vec!["Enter".into()],
+            }),
+            crate::api::schema::Method::PaneSendInput(PaneSendInputParams {
+                pane_id: String::new(),
+                text: "x".into(),
+                keys: Vec::new(),
+            }),
+        ];
+
+        for (index, mut method) in requests.into_iter().enumerate() {
+            let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+            let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0]
+                .terminal_id(internal_pane_id)
+                .unwrap()
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+            terminal.set_hook_authority(
+                "herdr:codex-closing-block".into(),
+                "codex".into(),
+                AgentState::Blocked,
+                None,
+                Some(1),
+            );
+            assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Blocked);
+
+            match &mut method {
+                crate::api::schema::Method::PaneSendText(params) => {
+                    params.pane_id = pane_id.clone()
+                }
+                crate::api::schema::Method::PaneSendKeys(params) => {
+                    params.pane_id = pane_id.clone()
+                }
+                crate::api::schema::Method::PaneSendInput(params) => {
+                    params.pane_id = pane_id.clone()
+                }
+                _ => unreachable!(),
+            }
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: format!("req-{index}"),
+                method,
+            });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+            assert_eq!(success.result, ResponseResult::Ok {});
+            assert!(rx.try_recv().is_ok());
+            assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+            assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        }
     }
 
     #[tokio::test]
