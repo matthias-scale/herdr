@@ -167,6 +167,15 @@ fn context_lines(app: &AppState) -> Option<Vec<Line<'static>>> {
         field_line(app, "state", state),
         field_line(app, "cwd", terminal.cwd.display().to_string()),
         field_line(app, "worktree", worktree_label(workspace)),
+        field_line(
+            app,
+            "branch",
+            terminal
+                .effective_work_context()
+                .branch
+                .clone()
+                .unwrap_or_else(|| "—".to_string()),
+        ),
         field_line(app, "session", session_value(terminal)),
         field_line(app, "last update", last_update),
     ];
