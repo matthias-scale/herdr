@@ -57,9 +57,12 @@ def main() -> int:
     text = last_assistant_text(payload.get("transcript_path") or "")
     if text is None:
         return 0
+    # A turn that ended without a closing block still ended, and a full-lifecycle
+    # source that stays silent leaves its last report standing forever -- a pane
+    # that reported a gate last turn would keep showing it with nothing able to
+    # clear it. Absent counts are zero counts: nobody is waiting on a human.
+    # An absent block parses to zero counts, which is the honest reading.
     block = parse(text)
-    if not block.present:
-        return 0
 
     outcome = report(
         agent="claude",
