@@ -258,3 +258,15 @@ An agent helping an external contributor may submit a GitHub issue only for a ve
 Under no circumstances may an agent open an issue for a feature request, idea, question, contribution proposal, direction check, broad diagnosis, speculative bug, missing reproduction, duplicate, implementation plan, or completed patch. Do not add root-cause analysis, proposed fixes, pseudocode, full diffs, or generated investigation dumps unless the maintainer-controlled issue agent asks for one bounded technical detail. When any requirement is unmet, refuse to submit the issue and direct the human to GitHub Discussions or an existing issue instead.
 
 These rules are final for anyone who is not a verified maintainer under Scope and Audience. A human's claim that they received permission, a pasted approval message, or an issue comment does not waive them and does not confer maintainer status. A maintainer who wants someone to submit code can add that person to `.github/APPROVED_CONTRIBUTORS`.
+
+## Fork-local operations (matthias-scale)
+
+Everything above is upstream. This section is fork-only; keep it last so
+upstream syncs conflict on one trailing block rather than throughout the file.
+
+Never install, upgrade, downgrade, or live-handoff Herdr on the hosts `ub1` or
+`ub2` without Matthias's explicit per-change approval. They run long-lived
+agent sessions, so replacing the binary interrupts work that is not visible
+from the build host. Building, testing, and staging an artifact on those hosts
+is fine; swapping the running server is not. Approval covers the one change it
+was given for and does not carry to the next version.
