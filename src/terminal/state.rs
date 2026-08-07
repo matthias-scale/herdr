@@ -24,6 +24,7 @@ pub struct HookAuthority {
     pub message: Option<String>,
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    pub retired_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -992,6 +993,7 @@ impl TerminalState {
             message,
             reported_at: now,
             session_ref,
+            retired_at: None,
         });
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
@@ -1259,6 +1261,7 @@ impl TerminalState {
                     message: message.map(str::to_string),
                     reported_at,
                     session_ref: Some(session_ref),
+                    retired_at: None,
                 },
                 seq,
             });
@@ -1999,6 +2002,48 @@ impl TerminalState {
         })
     }
 
+    pub fn retire_blocked_full_lifecycle_hook_authority_at(
+        &mut self,
+        observed_at: Instant,
+    ) -> Option<TerminalStateMutation> {
+        let should_retire = self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.state == AgentState::Blocked
+                && authority.retired_at.is_none()
+                && authority.reported_at <= observed_at
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::full_lifecycle_hook_authority(
+                    &authority.source,
+                    &authority.agent_label,
+                )
+        });
+        if !should_retire {
+            return None;
+        }
+
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let Some(authority) = self.hook_authority.as_mut() else {
+            return None;
+        };
+        authority.retired_at = Some(observed_at);
+
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            hook_work_context_changed: false,
+            agent_released: false,
+        })
+    }
+
     pub fn release_agent_with_mutation(
         &mut self,
         source: &str,
@@ -2185,7 +2230,8 @@ impl TerminalState {
 
     fn live_full_lifecycle_hook_authority(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
-            self.hook_authority_is_effective(authority)
+            authority.retired_at.is_none()
+                && self.hook_authority_is_effective(authority)
                 && crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
                     &authority.agent_label,
@@ -2456,7 +2502,9 @@ impl TerminalState {
         } else {
             self.hook_authority
                 .as_ref()
-                .filter(|authority| self.hook_authority_is_effective(authority))
+                .filter(|authority| {
+                    authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
+                })
                 .map(|authority| authority.state)
                 .unwrap_or(self.fallback_state)
         };
@@ -4302,6 +4350,125 @@ mod tests {
 
         assert_eq!(terminal.state, AgentState::Blocked);
         assert!(terminal.hook_authority.is_some());
+    }
+
+    #[test]
+    fn activity_retires_a_blocked_hook_and_returns_to_screen_state() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            observed,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        let mutation = terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(
+                observed + std::time::Duration::from_secs(1),
+            )
+            .expect("activity should retire the blocked report");
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert!(terminal.hook_authority.is_some());
+        assert_eq!(
+            mutation
+                .effective_state_change
+                .expect("retirement changes the effective state")
+                .state,
+            AgentState::Idle
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed + std::time::Duration::from_secs(2),
+        );
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn a_silent_blocked_hook_remains_authoritative_without_activity() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed + std::time::Duration::from_secs(30),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
+    }
+
+    #[test]
+    fn a_fresh_hook_report_after_activity_retirement_is_honoured() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(
+                observed + std::time::Duration::from_secs(1),
+            )
+            .expect("first report should retire");
+
+        let fresh = terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(8),
+            observed + std::time::Duration::from_secs(2),
+        );
+
+        assert!(fresh.is_some());
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
     }
 
     #[test]

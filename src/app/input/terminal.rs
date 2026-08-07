@@ -54,9 +54,16 @@ impl App {
         }
 
         let input = self.prepare_terminal_key_forward(source_id, key)?;
+        let has_bytes = !input.bytes.is_empty();
         let sent = self
             .lookup_runtime_sender(input.ws_idx, input.pane_id)
             .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok());
+        if sent && has_bytes {
+            self.retire_blocked_hook_authority_for_terminal(
+                &input.target.terminal_id,
+                std::time::Instant::now(),
+            );
+        }
         sent.then_some(input.target)
     }
 
@@ -395,11 +402,18 @@ impl App {
         }
 
         let input = self.prepare_terminal_key_forward(crate::app::LOCAL_INPUT_SOURCE, key)?;
+        let has_bytes = !input.bytes.is_empty();
         let sent = if let Some(runtime) = self.lookup_runtime_sender(input.ws_idx, input.pane_id) {
             runtime.send_bytes(input.bytes).await.is_ok()
         } else {
             false
         };
+        if sent && has_bytes {
+            self.retire_blocked_hook_authority_for_terminal(
+                &input.target.terminal_id,
+                std::time::Instant::now(),
+            );
+        }
         sent.then_some(input.target)
     }
 }
@@ -1641,6 +1655,71 @@ mod tests {
         let bytes = rx.try_recv().unwrap();
         assert_eq!(bytes.as_ref(), b"\x1b\x7f");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_input_retires_a_blocked_hook_and_allows_screen_state() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            pane_infos[0].inner_rect.width,
+            pane_infos[0].inner_rect.height,
+        );
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Blocked
+        );
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"x");
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
+        assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Working,
+            );
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Working
+        );
     }
 
     fn app_with_plain_scrollback(
