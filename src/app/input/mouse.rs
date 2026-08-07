@@ -2285,6 +2285,26 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_click_on_real_geometry_selects_the_tab_instead_of_folding_the_dock() {
+        // The hand-placed rects above cannot catch a geometry mistake, and one shipped:
+        // the handle covered the whole open dock, so every click inside it toggled.
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let shortcuts = app.state.view.dock_tab_hit_areas[1];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            shortcuts.x + 1,
+            shortcuts.y,
+        ));
+
+        assert!(!app.state.dock_collapsed);
+        assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+    }
+
+    #[test]
     fn dragging_the_dock_divider_resizes_and_persists_the_width() {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
