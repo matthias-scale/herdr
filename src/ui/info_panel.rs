@@ -54,7 +54,7 @@ fn focused_terminal(app: &AppState) -> Option<&TerminalState> {
     app.terminals.get(terminal_id)
 }
 
-fn visible_candidates(terminal: &TerminalState) -> Vec<crate::work_context::WorkLinkCandidate> {
+pub(super) fn visible_candidates(terminal: &TerminalState) -> Vec<crate::work_context::WorkLinkCandidate> {
     let mut preview_seen = false;
     work_link_candidates(terminal.effective_work_context())
         .into_iter()
@@ -198,7 +198,7 @@ fn field_line(label: &str, value: &str, p: &crate::app::state::Palette) -> Line<
     ])
 }
 
-fn link_prefix(kind: WorkLinkKind) -> &'static str {
+pub(super) fn link_prefix(kind: WorkLinkKind) -> &'static str {
     match kind {
         WorkLinkKind::Ticket => "ticket",
         WorkLinkKind::PullRequest => "pr",
