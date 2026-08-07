@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
 use crate::{
-    app::AppState,
+    app::{state::InfoPanelLinkRow, AppState},
     terminal::{state::AgentMetadata, TerminalState},
 };
 
@@ -174,6 +174,92 @@ fn context_lines(app: &AppState) -> Option<Vec<Line<'static>>> {
     Some(lines)
 }
 
+/// The work links sit in their own block at the foot of the tab rather than in the
+/// scrolling field list above: a click has to land on a known row to copy the URL,
+/// and rows the paragraph wrapper reflowed cannot be located again from outside.
+fn split_off_links_area(area: Rect, link_count: usize) -> (Rect, Option<Rect>) {
+    if link_count == 0 || area.height < 4 {
+        return (area, None);
+    }
+    let wanted = u16::try_from(link_count.saturating_add(1))
+        .unwrap_or(u16::MAX)
+        .min(area.height / 2);
+    let fields_height = area.height.saturating_sub(wanted);
+    (
+        Rect::new(area.x, area.y, area.width, fields_height),
+        Some(Rect::new(
+            area.x,
+            area.y.saturating_add(fields_height),
+            area.width,
+            wanted,
+        )),
+    )
+}
+
+fn link_row_rects(links_area: Rect, link_count: usize) -> Vec<Rect> {
+    (0..link_count)
+        .map_while(|index| {
+            let y = links_area.y.saturating_add(1).checked_add(index as u16)?;
+            (y < links_area.y.saturating_add(links_area.height))
+                .then(|| Rect::new(links_area.x, y, links_area.width, 1))
+        })
+        .collect()
+}
+
+/// Registered with the same click-to-copy path the work-context panel uses, so a
+/// link in the dock copies exactly what the panel's copy would.
+pub(crate) fn context_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLinkRow> {
+    let Some((_, terminal)) = focused_terminal(app) else {
+        return Vec::new();
+    };
+    let candidates = super::info_panel::visible_candidates(terminal);
+    let (_, Some(links_area)) = split_off_links_area(area, candidates.len()) else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .zip(link_row_rects(links_area, usize::from(links_area.height)))
+        .map(|(candidate, rect)| InfoPanelLinkRow {
+            rect,
+            copy_value: candidate.copy_value,
+        })
+        .collect()
+}
+
+fn render_links(app: &AppState, frame: &mut Frame, links_area: Rect) {
+    let Some((_, terminal)) = focused_terminal(app) else {
+        return;
+    };
+    let candidates = super::info_panel::visible_candidates(terminal);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " WORK LINKS",
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(links_area.x, links_area.y, links_area.width, 1),
+    );
+    for (candidate, rect) in candidates
+        .iter()
+        .zip(link_row_rects(links_area, usize::from(links_area.height)))
+    {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!(" {}: ", super::info_panel::link_prefix(candidate.kind)),
+                    Style::default().fg(app.palette.overlay0),
+                ),
+                Span::styled(
+                    candidate.label.clone(),
+                    Style::default().fg(app.palette.text),
+                ),
+            ])),
+            rect,
+        );
+    }
+}
+
 pub(super) fn render_context(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -182,6 +268,13 @@ pub(super) fn render_context(app: &AppState, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(" no focused pane"), area);
         return;
     };
+    let link_count = focused_terminal(app)
+        .map(|(_, terminal)| super::info_panel::visible_candidates(terminal).len())
+        .unwrap_or(0);
+    let (area, links_area) = split_off_links_area(area, link_count);
+    if let Some(links_area) = links_area {
+        render_links(app, frame, links_area);
+    }
 
     let viewport = area.height as usize;
     let initial_rows = Paragraph::new(lines.clone())
