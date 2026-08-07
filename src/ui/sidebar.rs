@@ -2667,10 +2667,7 @@ fn render_agent_card(
         };
         let baseline_token_spans = resolve_tokens(content_width);
         let mut activity_field = None;
-        let token_spans = if row_index == 0
-            && depth > 0
-            && agent_activity_age_fits(app, detail, rect, depth)
-        {
+        let token_spans = if row_index == 0 && agent_activity_age_fits(app, detail, rect, depth) {
             let label =
                 crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);
             activity_field = Some(format!(" {label:>4}"));
@@ -2720,10 +2717,13 @@ fn agent_activity_age_fits(
     rect: Rect,
     depth: u16,
 ) -> bool {
-    let Some(resolved) = resolved_agent_rows(app, detail).into_iter().next() else {
+    // Measured against the row this depth actually paints: a worklist row is the
+    // one-line shape, and measuring the tree template instead would size the age
+    // field against text that never appears.
+    let Some(resolved) = resolved_agent_rows_at(app, detail, depth).into_iter().next() else {
         return false;
     };
-    let prefix_width = usize::from(depth) * 3 + usize::from(depth > 0);
+    let prefix_width = usize::from(depth.max(1)) * 3 + usize::from(depth > 0);
     let content_width = usize::from(rect.width).saturating_sub(prefix_width);
     if content_width < AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH {
         return false;
