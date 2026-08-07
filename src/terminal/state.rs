@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 // Effective state arbitration is intentionally centralized here. Full lifecycle
-// Herdr hook integrations are hook-authoritative while live; screen recovery
-// remains only for session-only/custom hook paths and fallback detection.
+// Herdr hook integrations are authoritative while live, except for settled
+// visible working evidence that can start a new turn after hook-reported idle.
 // Process-exit updates clear matching hook authority before recomputing state.
 
 use crate::detect::{Agent, AgentState};
@@ -261,6 +261,9 @@ pub struct TerminalState {
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
+    fallback_visible_working: bool,
+    fallback_visible_working_observed_at: Option<Instant>,
+    fallback_working_observed_at: Option<Instant>,
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
@@ -304,6 +307,9 @@ impl TerminalState {
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
+            fallback_visible_working: false,
+            fallback_visible_working_observed_at: None,
+            fallback_working_observed_at: None,
             fallback_observed_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
@@ -556,7 +562,7 @@ impl TerminalState {
         fallback_state: AgentState,
         visible_blocker: bool,
         _visible_idle: bool,
-        _visible_working: bool,
+        visible_working: bool,
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
@@ -566,6 +572,10 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        let visible_working_signal = visible_working && fallback_state == AgentState::Working;
+        self.fallback_visible_working = visible_working_signal;
+        self.fallback_visible_working_observed_at = visible_working_signal.then_some(now);
+        self.fallback_working_observed_at = (fallback_state == AgentState::Working).then_some(now);
         let newer_custom_authority = process_exited
             && self.hook_authority.as_ref().is_some_and(|authority| {
                 crate::detect::parse_agent_label(&authority.agent_label) == agent
@@ -2088,6 +2098,9 @@ impl TerminalState {
             self.detected_agent = None;
             self.fallback_state = AgentState::Unknown;
             self.fallback_visible_blocker = false;
+            self.fallback_visible_working = false;
+            self.fallback_visible_working_observed_at = None;
+            self.fallback_working_observed_at = None;
             self.fallback_observed_at = None;
             self.clear_agent_name();
         }
@@ -2226,6 +2239,47 @@ impl TerminalState {
                     && crate::detect::parse_agent_label(&authority.agent_label)
                         == self.detected_agent
             })
+    }
+
+    fn visible_working_overrides_idle_hook(&self) -> bool {
+        let Some(authority) = self.hook_authority.as_ref() else {
+            return false;
+        };
+        authority.retired_at.is_none()
+            && self.hook_authority_is_effective(authority)
+            && authority.state == AgentState::Idle
+            && crate::detect::parse_agent_label(&authority.agent_label) == self.detected_agent
+            && self.fallback_visible_working
+            && self
+                .fallback_visible_working_observed_at
+                .is_some_and(|observed_at| {
+                    // Reuse the detector's stable-signal interval so one frame
+                    // left over from the hook report cannot start a new turn.
+                    authority
+                        .reported_at
+                        .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                        .is_some_and(|settled_at| observed_at >= settled_at)
+                })
+    }
+
+    fn detected_working_overrides_idle_hook(&self) -> bool {
+        let Some(authority) = self.hook_authority.as_ref() else {
+            return false;
+        };
+        authority.retired_at.is_none()
+            && self.hook_authority_is_effective(authority)
+            && authority.state == AgentState::Idle
+            && crate::detect::parse_agent_label(&authority.agent_label) == self.detected_agent
+            && self
+                .fallback_working_observed_at
+                .is_some_and(|observed_at| {
+                    // The same settled interval covers output-promoted working
+                    // evidence, so a stale frame cannot start a new turn.
+                    authority
+                        .reported_at
+                        .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                        .is_some_and(|settled_at| observed_at >= settled_at)
+                })
     }
 
     fn live_full_lifecycle_hook_authority(&self) -> bool {
@@ -2414,6 +2468,9 @@ impl TerminalState {
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
+        self.fallback_visible_working = false;
+        self.fallback_visible_working_observed_at = None;
+        self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
@@ -2499,6 +2556,10 @@ impl TerminalState {
     ) -> Option<EffectiveStateChange> {
         let state = if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
+        } else if self.visible_working_overrides_idle_hook()
+            || self.detected_working_overrides_idle_hook()
+        {
+            AgentState::Working
         } else {
             self.hook_authority
                 .as_ref()
@@ -4624,6 +4685,90 @@ mod tests {
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(change.effective_state_change.is_none());
+    }
+
+    #[test]
+    fn settled_visible_working_overrides_full_lifecycle_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn unsettled_visible_working_does_not_override_full_lifecycle_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn settled_detected_working_overrides_full_lifecycle_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
     }
 
     #[test]
