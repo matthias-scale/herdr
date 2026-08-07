@@ -1965,6 +1965,52 @@ mod tests {
     }
 
     #[test]
+    fn a_work_link_in_the_context_tab_copies_the_same_value_the_panel_would() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Terminal;
+        app.state.workspaces = vec![Workspace::test_new("links")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-128".into()]),
+                ..Default::default()
+            })
+            .expect("work context");
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Context;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let link = app
+            .state
+            .view
+            .info_panel_link_rows
+            .first()
+            .expect("dock context link row")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            link.rect.x + 1,
+            link.rect.y,
+        ));
+
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"MAT-128")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
     fn a_tab_click_on_real_geometry_selects_the_tab_instead_of_folding_the_dock() {
         // The hand-placed rects above cannot catch a geometry mistake, and one shipped:
         // the handle covered the whole open dock, so every click inside it toggled.

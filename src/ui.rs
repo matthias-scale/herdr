@@ -397,10 +397,18 @@ fn compute_view_internal(
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
         terminal_area,
         info_panel_rect,
-        info_panel_link_rows: if info_panel_rect.width > 0 {
-            compute_link_rows(app, info_panel_rect)
-        } else {
-            Vec::new()
+        // Both surfaces feed one list because one click handler serves it: the panel
+        // and the dock's Context tab can be open at once, and each owns its own rows.
+        info_panel_link_rows: {
+            let mut rows = if info_panel_rect.width > 0 {
+                compute_link_rows(app, info_panel_rect)
+            } else {
+                Vec::new()
+            };
+            if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Context {
+                rows.extend(dock_context::context_link_rows(app, dock_body_rect));
+            }
+            rows
         },
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
