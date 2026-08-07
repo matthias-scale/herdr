@@ -125,7 +125,10 @@ const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
 pub(crate) const DOCK_COLLAPSED_WIDTH: u16 = 1;
 pub(crate) const DOCK_DEFAULT_WIDTH: u16 = 32;
 pub(crate) const DOCK_MIN_WIDTH: u16 = 18;
-pub(crate) const DOCK_MAX_WIDTH: u16 = 48;
+/// Generous because the dock holds an editor: the ceiling that matters is the one
+/// the layout already enforces -- the terminal keeps `DOCK_MIN_TERMINAL_WIDTH` no
+/// matter what is stored here.
+pub(crate) const DOCK_MAX_WIDTH: u16 = 160;
 pub(crate) const DOCK_MIN_TERMINAL_WIDTH: u16 = 10;
 
 /// Compute view geometry and reconcile pane sizes.
@@ -420,10 +423,9 @@ fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
             && usize::from(area.width) < status::minimum_required_status_width(app))
 }
 
-fn dock_geometry(
-    area: Rect,
-    collapsed: bool,
-) -> (Rect, Rect, Rect, Vec<Rect>, Rect) {
+/// Returns `(handle, divider, tab_bar, tab_hit_areas, body)`. Collapsed, the dock
+/// is nothing but its handle, so everything else comes back empty.
+fn dock_geometry(area: Rect, collapsed: bool) -> (Rect, Rect, Rect, Vec<Rect>, Rect) {
     if area.width == 0 || area.height == 0 {
         return (
             Rect::default(),
@@ -437,8 +439,8 @@ fn dock_geometry(
     let handle = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
     if collapsed || area.width < 3 || area.height < 2 {
         return (
-            area,
             handle,
+            Rect::default(),
             Rect::default(),
             Vec::new(),
             Rect::default(),
@@ -456,7 +458,7 @@ fn dock_geometry(
     ])
     .areas(tab_bar);
     let tab_hit_areas = vec![editor, shortcuts, context];
-    (area, handle, divider, tab_hit_areas, body)
+    (handle, divider, tab_bar, tab_hit_areas, body)
 }
 
 pub(crate) fn status_bar_is_renderable(app: &AppState, area: Rect) -> bool {
@@ -2024,3 +2026,4 @@ switch_workspace = "ctrl+1..9"
         assert_eq!(switch_workspace_key, "ctrl+1..9");
     }
 }
+
