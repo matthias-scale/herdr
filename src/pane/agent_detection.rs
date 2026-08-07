@@ -17,7 +17,7 @@ pub(super) const AGENT_PENDING_IDLE_CAP: std::time::Duration =
 /// hook reports idle directly and outranks this.
 pub(super) const AGENT_RECENT_OUTPUT_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(8);
-pub(super) const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration =
+pub(crate) const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration =
     std::time::Duration::from_millis(800);
 pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(3);

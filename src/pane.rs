@@ -38,6 +38,7 @@ mod state;
 mod terminal;
 mod xtgettcap;
 
+pub(crate) use self::agent_detection::STABLE_VISIBLE_SIGNAL_REFRESH;
 use self::agent_detection::{
     decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed, observe_agent_output,
@@ -434,6 +435,14 @@ fn should_skip_process_probe_for_lifecycle_authority(
         && input.suppressed_agent.is_none()
         && input.has_process_probe
         && !foreground_group_changed(input.foreground_pgid, input.last_foreground_pgid)
+}
+
+fn should_skip_screen_detection_for_lifecycle_authority(
+    full_lifecycle_authority_active: bool,
+    full_lifecycle_hook_blocked: bool,
+    process_exited: bool,
+) -> bool {
+    full_lifecycle_authority_active && full_lifecycle_hook_blocked && !process_exited
 }
 
 fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
@@ -907,7 +916,11 @@ fn spawn_basic_detection_task(
                 last_background_process_exited = Some(process_exited);
             }
 
-            if lifecycle_authority_active && !process_exited {
+            if should_skip_screen_detection_for_lifecycle_authority(
+                lifecycle_authority_active,
+                full_lifecycle_hook_blocked.load(Ordering::Acquire),
+                process_exited,
+            ) {
                 pending_idle.clear();
                 continue;
             }
@@ -2478,7 +2491,11 @@ impl PaneRuntime {
                         last_background_process_exited = Some(process_exited);
                     }
 
-                    if lifecycle_authority_active && !process_exited {
+                    if should_skip_screen_detection_for_lifecycle_authority(
+                        lifecycle_authority_active,
+                        full_lifecycle_hook_blocked_for_task.load(Ordering::Acquire),
+                        process_exited,
+                    ) {
                         pending_idle.clear();
                         continue;
                     }
@@ -4001,6 +4018,20 @@ mod tests {
                 foreground_pgid: Some(43),
                 ..process_probe_input()
             }
+        ));
+    }
+
+    #[test]
+    fn active_unblocked_lifecycle_authority_reads_the_screen() {
+        assert!(!should_skip_screen_detection_for_lifecycle_authority(
+            true, false, false
+        ));
+    }
+
+    #[test]
+    fn active_blocked_lifecycle_authority_skips_the_screen() {
+        assert!(should_skip_screen_detection_for_lifecycle_authority(
+            true, true, false
         ));
     }
 
