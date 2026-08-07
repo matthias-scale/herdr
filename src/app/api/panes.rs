@@ -1275,6 +1275,7 @@ impl App {
             message: params.message,
             seq: params.seq,
         });
+        self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1305,6 +1306,7 @@ impl App {
                 params.session_start_source,
             ),
         });
+        self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -5177,6 +5179,148 @@ mod tests {
             app.tab_info(workspace_idx, 0).unwrap().label,
             "codex · New session title"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_session_replacement_preserves_title_emitted_before_session_report() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        app.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
+            pane_id: internal_pane_id,
+            source: "herdr:codex".into(),
+            agent_label: "codex".into(),
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("session-a"),
+            session_start_source: Some("startup".into()),
+        });
+        app.terminal_runtimes
+            .values()
+            .next()
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]0;Old session title\x07");
+        assert!(app.sync_terminal_titles());
+
+        app.terminal_runtimes
+            .values()
+            .next()
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]0;Incoming session title\x07");
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "session-b".into(),
+            method: crate::api::schema::Method::PaneReportAgentSession(
+                PaneReportAgentSessionParams {
+                    pane_id: pane_id.clone(),
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    seq: Some(2),
+                    agent_session_id: Some("session-b".into()),
+                    agent_session_path: None,
+                    session_start_source: Some("startup".into()),
+                },
+            ),
+        });
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(
+            app.terminal_runtimes
+                .values()
+                .next()
+                .unwrap()
+                .terminal_title()
+                .as_deref(),
+            Some("Incoming session title")
+        );
+        let _ = app.sync_terminal_titles();
+        assert_eq!(
+            app.tab_info(workspace_idx, 0).unwrap().label,
+            "codex · Incoming session title"
+        );
+    }
+
+    #[test]
+    fn agent_session_replacement_emits_pane_updated_for_cleared_tokens() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+
+        let response = app.handle_pane_report_agent_session(
+            "session-a".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(1),
+                agent_session_id: Some("session-a".into()),
+                agent_session_path: None,
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let mut tokens = metadata_params(pane_id.clone());
+        tokens.source = "custom:codex-tokens".into();
+        tokens.agent = Some("codex".into());
+        tokens.applies_to_source = Some("herdr:codex".into());
+        tokens.agent_session_id = Some("session-a".into());
+        tokens.title = None;
+        tokens.tokens = std::collections::HashMap::from([("phase".into(), Some("old".into()))]);
+        tokens.seq = Some(1);
+        let response = app.handle_pane_report_metadata("old-tokens".into(), tokens);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id].metadata_tokens.values()["phase"],
+            "old"
+        );
+
+        let before = pane_updated_events(&app);
+        let response = app.handle_pane_report_agent_session(
+            "session-b".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(2),
+                agent_session_id: Some("session-b".into()),
+                agent_session_path: None,
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(pane_updated_events(&app), before + 1);
+        let (_, event) = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .rev()
+            .find(|(_, event)| event.event == EventKind::PaneUpdated)
+            .expect("replacement pane.updated event");
+        let EventData::PaneUpdated { pane } = event.data else {
+            panic!("expected pane.updated payload");
+        };
+        assert!(pane.tokens.is_empty());
     }
 
     #[test]

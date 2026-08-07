@@ -483,12 +483,14 @@ fn git_work_context_for_branch(
     let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) else {
         return context;
     };
-
-    if let Some(url) = value.get("url").and_then(Value::as_str) {
+    let Some(pr) = value.as_array().and_then(|prs| prs.first()) else {
+        return context;
+    };
+    if let Some(url) = pr.get("url").and_then(Value::as_str) {
         context.pr_urls = extract_pr_urls(url);
     }
     let mut preview_urls = Vec::new();
-    collect_preview_urls(&value, &mut preview_urls);
+    collect_preview_urls(pr, &mut preview_urls);
     context.preview_urls =
         crate::work_context::normalize_preview_urls(preview_urls).unwrap_or_default();
     context
@@ -497,11 +499,13 @@ fn git_work_context_for_branch(
 fn gh_pr_view_args(branch: &str) -> Vec<String> {
     [
         "pr",
-        "view",
-        "--",
+        "list",
+        "--head",
         branch,
         "--json",
         "url,statusCheckRollup",
+        "--limit",
+        "1",
     ]
     .into_iter()
     .map(str::to_string)
@@ -626,23 +630,6 @@ mod tests {
         assert_eq!(WORK_CONTEXT_REFRESH_INTERVAL, Duration::from_secs(60));
     }
 
-    #[test]
-    fn gh_pr_view_args_isolate_hostile_branch_selectors() {
-        for branch in ["27", "--repo=other/target"] {
-            assert_eq!(
-                gh_pr_view_args(branch),
-                vec![
-                    "pr",
-                    "view",
-                    "--",
-                    branch,
-                    "--json",
-                    "url,statusCheckRollup",
-                ]
-            );
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn branch_ticket_ids_reuse_shared_extractor() {
@@ -662,7 +649,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn gh_query_is_qualified_by_the_sampled_branch() {
+    fn gh_query_uses_flag_head_selector_and_parses_pr_list_array() {
         let dir = fixture_dir("branch-qualified-gh");
         let git = dir.join("git");
         let gh = dir.join("gh");
@@ -671,7 +658,58 @@ mod tests {
         fake_git(&git, &repo, "feat/MAT-27-branch-qualified");
         write_executable(
             &gh,
-            "#!/bin/sh\nif [ \"$4\" = \"feat/MAT-27-branch-qualified\" ]; then printf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/27\"}'; else exit 1; fi\n",
+            r#"#!/bin/sh
+set -- "$@"
+[ "$1" = pr ] || exit 2
+[ "$2" = list ] || exit 2
+shift 2
+after_separator=0
+expecting=
+head=
+json=
+limit=
+positionals=0
+for arg
+do
+    case "$arg" in
+        --head|--json|--limit)
+            [ "$after_separator" -eq 0 ] || exit 2
+            [ -z "$expecting" ] || exit 2
+            expecting="$arg"
+            ;;
+        --)
+            [ -z "$expecting" ] || exit 2
+            after_separator=1
+            ;;
+        --*)
+            [ "$after_separator" -eq 0 ] || exit 2
+            exit 2
+            ;;
+        *)
+            if [ -n "$expecting" ]; then
+                case "$arg" in --*) exit 2 ;; esac
+                case "$expecting" in
+                    --head) head="$arg" ;;
+                    --json) json="$arg" ;;
+                    --limit) limit="$arg" ;;
+                esac
+                expecting=
+            elif [ "$after_separator" -eq 1 ]; then
+                positionals=$((positionals + 1))
+                [ "$positionals" -le 1 ] || exit 2
+            else
+                exit 2
+            fi
+            ;;
+    esac
+done
+[ -z "$expecting" ] || exit 2
+[ "$positionals" -eq 0 ] || exit 2
+[ "$head" = feat/MAT-27-branch-qualified ] || exit 2
+[ "$json" = url,statusCheckRollup ] || exit 2
+[ "$limit" = 1 ] || exit 2
+printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]'
+"#,
         );
 
         let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
@@ -679,6 +717,26 @@ mod tests {
             output.observations[0].context.pr_urls,
             vec!["https://github.com/o/r/pull/27"]
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_empty_pr_list_keeps_branch_context() {
+        let dir = fixture_dir("empty-pr-list");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/MAT-28-no-pr");
+        write_executable(&gh, "#!/bin/sh\nprintf '%s\\n' '[]'\n");
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        let context = &output.observations[0].context;
+        assert_eq!(context.ticket_ids, vec!["MAT-28"]);
+        assert!(context.pr_urls.is_empty());
+        assert!(context.preview_urls.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -713,7 +771,7 @@ mod tests {
         write_executable(&gh_failure, "#!/bin/sh\nexit 7\n");
         write_executable(
             &gh_timeout,
-            "#!/bin/sh\nsleep 2\nprintf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/timeout\"}'\n",
+            "#!/bin/sh\nsleep 2\nprintf '%s\\n' '[{\"url\":\"https://github.com/o/r/pull/timeout\"}]'\n",
         );
 
         let gh_missing = dir.join("missing-gh");
@@ -755,7 +813,7 @@ mod tests {
         // single shared deadline, the whole batch.
         write_executable(
             &gh,
-            "#!/bin/sh\ncase \"$(pwd -P)\" in\n  *slow*) sleep 6 ;;\nesac\nprintf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/2\"}'\n",
+            "#!/bin/sh\ncase \"$(pwd -P)\" in\n  *slow*) sleep 6 ;;\nesac\nprintf '%s\\n' '[{\"url\":\"https://github.com/o/r/pull/2\"}]'\n",
         );
 
         let output = refresh_git_work_contexts(
@@ -804,7 +862,7 @@ mod tests {
         write_executable(
             &gh,
             &format!(
-                "#!/bin/sh\nif [ -f '{}' ]; then printf '%s\\n' '{{\"url\":\"https://github.com/o/r/pull/8\"}}'; else exit 1; fi\n",
+                "#!/bin/sh\nif [ -f '{}' ]; then printf '%s\\n' '[{{\"url\":\"https://github.com/o/r/pull/8\"}}]'; else exit 1; fi\n",
                 marker.display()
             ),
         );
@@ -868,7 +926,7 @@ mod tests {
         write_executable(
             &gh,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"url\":\"https://github.com/o/r/pull/7\",\"statusCheckRollup\":[{}]}}'\n",
+                "#!/bin/sh\nprintf '%s\\n' '[{{\"url\":\"https://github.com/o/r/pull/7\",\"statusCheckRollup\":[{}]}}]'\n",
                 checks
             ),
         );
@@ -897,7 +955,7 @@ mod tests {
         write_executable(
             &gh,
             &format!(
-                "#!/bin/sh\ncount=0\nif [ -f '{}' ]; then count=$(cat '{}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf '%s\\n' '{{\"url\":\"https://github.com/o/r/pull/9\"}}'\n",
+                "#!/bin/sh\ncount=0\nif [ -f '{}' ]; then count=$(cat '{}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf '%s\\n' '[{{\"url\":\"https://github.com/o/r/pull/9\"}}]'\n",
                 gh_invocations.display(),
                 gh_invocations.display(),
                 gh_invocations.display(),

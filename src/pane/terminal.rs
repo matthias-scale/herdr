@@ -480,9 +480,10 @@ impl PaneTerminal {
         self.ghostty.clear_agent_osc_state()
     }
 
-    pub fn clear_agent_osc_state_for_session_replacement(&self) {
+    pub fn clear_agent_osc_state_for_session_replacement(&self, preserve_title: bool) {
         if let Ok(mut core) = self.ghostty.core.lock() {
-            core.agent_osc_state.clear_for_session_replacement();
+            core.agent_osc_state
+                .clear_for_session_replacement(preserve_title);
         }
     }
 
