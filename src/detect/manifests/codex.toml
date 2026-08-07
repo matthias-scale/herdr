@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.08.02.1"
+version = "2026.08.07.1"
 min_engine_version = 2
-updated_at = "2026-08-02T00:00:00Z"
+updated_at = "2026-08-07T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -60,11 +60,10 @@ any = [
 id = "screen_working_fallback"
 state = "working"
 priority = 500
-region = "bottom_non_empty_lines(3)"
+region = "after_current_prompt_block_marker"
 visible_working = true
-# Codex v0.146 keeps OSC title static while working and renders this progress
-# line without a bullet. Accept either current line decoration in the terminal
-# bottom buffer; blockers and interrupted-state checks above still outrank it.
+# Start at the latest Codex block marker so footer height cannot hide the live
+# status while an earlier turn in scrollback cannot satisfy the rule.
 line_regex = ['^(?:[•◦]\s+)?Working \([^)]*esc to interrupt\)(?: · .*)?$']
 not = [{ contains = ["■ Conversation interrupted"] }]
 
@@ -73,7 +72,6 @@ id = "osc_title_idle"
 state = "idle"
 priority = 100
 region = "osc_title"
-visible_idle = true
 regex = ['\S']
 not = [
   { regex = ['(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)'] },
