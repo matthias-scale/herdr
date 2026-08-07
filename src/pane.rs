@@ -40,10 +40,11 @@ mod xtgettcap;
 
 use self::agent_detection::{
     decide_detection_screen_read, decide_screen_detection_publish,
-    detection_update_for_publish_with_osc, mark_detection_content_changed,
-    observe_detection_content_change, DetectionPublishDecision, DetectionScreenReadDecision,
-    DetectionScreenReadInput, FullLifecycleHookOutputRetirement, PendingIdleConfirmation,
-    ScreenDetectionPublishInput, AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
+    detection_update_for_publish_with_osc, mark_detection_content_changed, observe_agent_output,
+    observe_detection_content_change, recent_agent_output, DetectionPublishDecision,
+    DetectionScreenReadDecision, DetectionScreenReadInput, FullLifecycleHookOutputRetirement,
+    PendingIdleConfirmation, ScreenDetectionPublishInput, AGENT_PENDING_IDLE_RECHECK,
+    AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{
@@ -669,6 +670,7 @@ fn spawn_basic_detection_task(
     terminal: Arc<PaneTerminal>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
+    agent_output_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     full_lifecycle_hook_blocked: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
@@ -700,6 +702,8 @@ fn spawn_basic_detection_task(
         let mut last_detection_text = String::new();
         let mut last_screen_scan_detection_content_seq = None;
         let mut hook_output_retirement = FullLifecycleHookOutputRetirement::default();
+        let mut last_output_seq = Some(agent_output_seq.load(Ordering::Relaxed));
+        let mut last_output_at = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
         let mut last_background_job_count = None;
@@ -732,6 +736,7 @@ fn spawn_basic_detection_task(
                     last_detection_text.clear();
                     last_screen_scan_detection_content_seq = None;
                     hook_output_retirement.clear();
+                    last_output_at = None;
                     agent_startup_grace_until = None;
                     pending_idle.clear();
                     last_background_job_count = None;
@@ -883,6 +888,17 @@ fn spawn_basic_detection_task(
                 hook_output_retirement.clear();
             }
 
+            if agent_changed || suppressed_agent.is_some() {
+                last_output_at = None;
+            }
+            let recent_output = recent_agent_output(
+                agent,
+                agent_output_seq.load(Ordering::Relaxed),
+                &mut last_output_seq,
+                &mut last_output_at,
+                now,
+            );
+
             let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
             if background_scan_needed(
                 agent_changed,
@@ -980,6 +996,7 @@ fn spawn_basic_detection_task(
             match decide_screen_detection_publish(
                 ScreenDetectionPublishInput {
                     screen_detection,
+                    recent_output,
                     current_state: state,
                     last_visible_idle,
                     last_visible_blocker,
@@ -1958,6 +1975,7 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let agent_output_seq = Arc::new(AtomicU64::new(0));
 
         let io = {
             let terminal = terminal.clone();
@@ -1965,6 +1983,7 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
+            let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
             let reported_cwd = reported_cwd.clone();
@@ -1975,6 +1994,7 @@ impl PaneRuntime {
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 observe_detection_content_change(bytes, &detection_content_seq);
+                observe_agent_output(bytes, &agent_output_seq);
                 if result.request_render && render_dirty.request_pty(pane_id) {
                     render_notify.notify_one();
                 }
@@ -2027,6 +2047,7 @@ impl PaneRuntime {
             terminal.clone(),
             detection_content_seq.clone(),
             full_lifecycle_hook_baseline_content_seq.clone(),
+            agent_output_seq.clone(),
             full_lifecycle_authority_active.clone(),
             full_lifecycle_hook_blocked.clone(),
             events,
@@ -2100,6 +2121,7 @@ impl PaneRuntime {
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
+        let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
         {
@@ -2134,6 +2156,7 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
+            let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
@@ -2144,6 +2167,7 @@ impl PaneRuntime {
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
+                    observe_agent_output(bytes, &agent_output_seq);
                 }
                 if result.request_render && render_dirty.request_pty(pane_id) {
                     render_notify.notify_one();
@@ -2203,6 +2227,7 @@ impl PaneRuntime {
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_hook_baseline_content_seq_for_task =
                 full_lifecycle_hook_baseline_content_seq.clone();
+            let agent_output_seq = agent_output_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
             let full_lifecycle_hook_blocked_for_task = full_lifecycle_hook_blocked.clone();
             let render_notify = render_notify.clone();
@@ -2232,6 +2257,8 @@ impl PaneRuntime {
                 let mut last_detection_text = String::new();
                 let mut last_screen_scan_detection_content_seq = None;
                 let mut hook_output_retirement = FullLifecycleHookOutputRetirement::default();
+                let mut last_output_seq = Some(agent_output_seq.load(Ordering::Relaxed));
+                let mut last_output_at = None;
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
                 let mut last_background_job_count = None;
@@ -2274,6 +2301,7 @@ impl PaneRuntime {
                             last_detection_text.clear();
                             last_screen_scan_detection_content_seq = None;
                             hook_output_retirement.clear();
+                            last_output_at = None;
                             agent_startup_grace_until = None;
                             pending_idle.clear();
                             last_background_job_count = None;
@@ -2466,6 +2494,17 @@ impl PaneRuntime {
                         hook_output_retirement.clear();
                     }
 
+                    if agent_changed || suppressed_agent.is_some() {
+                        last_output_at = None;
+                    }
+                    let recent_output = recent_agent_output(
+                        agent,
+                        agent_output_seq.load(Ordering::Relaxed),
+                        &mut last_output_seq,
+                        &mut last_output_at,
+                        now,
+                    );
+
                     let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
                     if background_scan_needed(
                         agent_changed,
@@ -2563,6 +2602,7 @@ impl PaneRuntime {
                     match decide_screen_detection_publish(
                         ScreenDetectionPublishInput {
                             screen_detection,
+                            recent_output,
                             current_state: state,
                             last_visible_idle,
                             last_visible_blocker,

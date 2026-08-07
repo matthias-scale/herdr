@@ -697,6 +697,19 @@ fn claude_empty_osc_empty_screen_is_idle_fallback() {
     assert!(!result.visible_idle);
 }
 
+#[test]
+fn claude_live_prompt_box_remains_a_positive_idle_observation() {
+    let screen = "──────────\n❯\n──────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+
+    assert_eq!(result.state, AgentState::Idle);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(result.visible_idle);
+}
+
 // --- Codex OSC rules ---
 
 #[test]
@@ -730,7 +743,7 @@ fn codex_osc_title_plain_is_idle() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_idle")
     );
-    assert!(result.visible_idle);
+    assert!(!result.visible_idle);
 }
 
 #[test]
@@ -744,7 +757,7 @@ fn codex_background_terminal_screen_does_not_override_osc_idle() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_idle")
     );
-    assert!(result.visible_idle);
+    assert!(!result.visible_idle);
 }
 
 #[test]
@@ -756,7 +769,8 @@ fn codex_screen_working_fallback_handles_static_osc_title_and_progress_decoratio
         let screen = format!(
             "• I’ll run it and wait for completion.\n\n{progress_line}\n\n\
              › Use /skills to list available skills\n\n\
-             gpt-5.6-sol default · /work\n"
+             gpt-5.6-sol default · /work\n\
+             footer detail\n"
         );
         let result = osc_explain(Agent::Codex, &screen, "project", "");
 
@@ -764,6 +778,14 @@ fn codex_screen_working_fallback_handles_static_osc_title_and_progress_decoratio
         assert_eq!(
             result.matched_rule.as_ref().map(|r| r.id.as_str()),
             Some("screen_working_fallback"),
+            "{progress_line}"
+        );
+        assert_eq!(
+            result
+                .matched_rule
+                .as_ref()
+                .map(|rule| rule.region.as_str()),
+            Some("after_current_prompt_block_marker"),
             "{progress_line}"
         );
         assert!(result.visible_working, "{progress_line}");
@@ -844,6 +866,12 @@ fn codex_screen_working_fallback_ignores_stale_and_prompt_text() {
         "  ◦ Working (1m 16s • esc to interrupt)\n\
          › Use /skills to list available skills\n\
          gpt-5.6-sol default · /work\n",
+        "• Earlier turn\n\
+         ◦ Working (1m 16s • esc to interrupt)\n\
+         › Previous prompt\n\
+         • Current turn\n\
+         › Use /skills to list available skills\n\
+         gpt-5.6-sol default · /work\n",
     ];
 
     for screen in screens {
@@ -853,7 +881,7 @@ fn codex_screen_working_fallback_ignores_stale_and_prompt_text() {
             result.matched_rule.as_ref().map(|r| r.id.as_str()),
             Some("osc_title_idle")
         );
-        assert!(result.visible_idle);
+        assert!(!result.visible_idle);
         assert!(!result.visible_working);
     }
 }
@@ -870,7 +898,7 @@ fn codex_screen_working_fallback_ignores_interrupted_short_terminal() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_idle")
     );
-    assert!(result.visible_idle);
+    assert!(!result.visible_idle);
     assert!(!result.visible_working);
 }
 
