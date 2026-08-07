@@ -477,12 +477,41 @@ impl App {
                     else {
                         continue;
                     };
-                    runtime.set_full_lifecycle_authority_active(
+                    runtime.set_full_lifecycle_authority_state(
                         terminal.full_lifecycle_hook_authority_active(),
+                        terminal.state == crate::detect::AgentState::Blocked,
                     );
                 }
             }
         }
+    }
+
+    pub(crate) fn retire_blocked_hook_authority_for_terminal(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+        observed_at: Instant,
+    ) {
+        let Some(pane_id) = self.state.workspaces.iter().find_map(|workspace| {
+            workspace.tabs.iter().find_map(|tab| {
+                tab.panes.iter().find_map(|(pane_id, pane)| {
+                    (pane.attached_terminal_id == *terminal_id).then_some(*pane_id)
+                })
+            })
+        }) else {
+            return;
+        };
+        self.retire_blocked_hook_authority_for_pane(pane_id, observed_at);
+    }
+
+    pub(crate) fn retire_blocked_hook_authority_for_pane(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        observed_at: Instant,
+    ) {
+        self.handle_internal_event(AppEvent::HookAuthorityRetired {
+            pane_id,
+            observed_at,
+        });
     }
 
     pub(crate) fn show_clipboard_feedback(&mut self) {

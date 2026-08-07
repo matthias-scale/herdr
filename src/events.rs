@@ -112,6 +112,11 @@ pub enum AppEvent {
         source: Option<String>,
         seq: Option<u64>,
     },
+    /// Activity after a blocked full-lifecycle report made that report stale.
+    HookAuthorityRetired {
+        pane_id: PaneId,
+        observed_at: Instant,
+    },
     /// The current detected agent gracefully released this pane back to the shell.
     HookAgentReleased {
         pane_id: PaneId,
