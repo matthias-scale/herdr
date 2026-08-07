@@ -7,14 +7,16 @@ pub(super) const AGENT_PENDING_IDLE_RECHECK: std::time::Duration =
 const AGENT_PENDING_IDLE_CONFIRMATIONS: u8 = 3;
 pub(super) const AGENT_PENDING_IDLE_CAP: std::time::Duration =
     std::time::Duration::from_millis(700);
-/// Two seconds spans six 300ms identified-agent ticks and outlasts the 700ms
-/// pending-idle hold. It only has to cover a stall in a *stream*: a codex pane
-/// waiting on a tool keeps its progress line on screen for the whole wait --
-/// measured at 15s of an unchanged screen -- and is held Working by the rule
-/// that reads it, not by this window. Longer would keep a finished pane
-/// Working for no gain, since the turn-end hook reports idle either way.
+/// This only has to cover a stall *inside* a turn: a codex pane waiting on a
+/// tool keeps its progress line on screen for the whole wait and is held
+/// Working by the rule that reads it, not by this window. The gap this covers
+/// is the silent one after codex erases that line and before the first token
+/// arrives -- measured at 3.6s on a live 0.147 pane, which a two-second window
+/// let show as `done` mid-turn. Eight seconds gives that measurement room to
+/// double and costs nothing at the real end of a turn, because the turn-end
+/// hook reports idle directly and outranks this.
 pub(super) const AGENT_RECENT_OUTPUT_WINDOW: std::time::Duration =
-    std::time::Duration::from_secs(2);
+    std::time::Duration::from_secs(8);
 pub(super) const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration =
     std::time::Duration::from_millis(800);
 pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
