@@ -254,6 +254,7 @@ pub struct PaneStateUpdate {
     pub presentation: crate::terminal::EffectivePresentation,
     pub agent_name_changed: bool,
     pub session_ref_changed: bool,
+    pub session_replaced: bool,
     pub hook_work_context_changed: bool,
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
@@ -1097,6 +1098,7 @@ impl AppState {
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
                     session_ref_changed: mutation.session_ref_changed,
+                    session_replaced: mutation.session_replaced,
                     hook_work_context_changed: false,
                     agent_released: false,
                     agent_release_status: None,
@@ -3123,7 +3125,7 @@ impl AppState {
         {
             self.mark_session_dirty();
         }
-        if mutation.session_ref_changed {
+        if mutation.session_replaced {
             if let Some(pane) = self.workspaces[ws_idx].panes.get_mut(&pane_id) {
                 pane.seen = true;
             }
@@ -3163,6 +3165,7 @@ impl AppState {
             presentation: change.presentation.clone(),
             agent_name_changed,
             session_ref_changed: mutation.session_ref_changed,
+            session_replaced: mutation.session_replaced,
             hook_work_context_changed: mutation.hook_work_context_changed,
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
@@ -5195,6 +5198,34 @@ mod tests {
             process_exited: false,
             observed_at: Instant::now(),
         });
+        assert!(!state.workspaces[0].panes[&pane_id].seen);
+    }
+
+    #[test]
+    fn repro_a2_first_session_report_does_not_mark_unfocused_idle_pane_seen() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        state.active = None;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("first-session"),
+            session_start_source: Some("startup".into()),
+        });
+
         assert!(!state.workspaces[0].panes[&pane_id].seen);
     }
 

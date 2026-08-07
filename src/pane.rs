@@ -2679,9 +2679,9 @@ impl PaneRuntime {
         self.terminal.agent_osc_progress()
     }
 
-    pub fn clear_agent_osc_state_for_session_replacement(&self, preserve_title: bool) {
+    pub fn clear_agent_osc_state_for_session_replacement(&self) {
         self.terminal
-            .clear_agent_osc_state_for_session_replacement(preserve_title);
+            .clear_agent_osc_state_for_session_replacement();
     }
 
     pub fn recent_text(&self, lines: usize) -> String {

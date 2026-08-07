@@ -1467,6 +1467,12 @@ impl App {
                 );
             }
         }
+        if agent_session_id.is_none() && terminal.metadata_report_is_quarantined(&source) {
+            return encode_success(id, ResponseResult::Ok {});
+        }
+        if agent_session_id.is_some() && terminal.metadata_report_is_quarantined(&source) {
+            terminal.reanchor_metadata_report_source(&source);
+        }
         if terminal.metadata_report_blocked_by_process_exit(
             &source,
             agent_label.as_deref(),
@@ -5182,7 +5188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_session_replacement_preserves_title_emitted_before_session_report() {
+    async fn agent_session_replacement_clears_title_emitted_after_last_sync() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[workspace_idx]
@@ -5217,7 +5223,16 @@ mod tests {
             .values()
             .next()
             .unwrap()
-            .test_process_pty_bytes(b"\x1b]0;Incoming session title\x07");
+            .test_process_pty_bytes(b"\x1b]0;Outgoing session title\x07");
+        assert_eq!(
+            app.terminal_runtimes
+                .values()
+                .next()
+                .unwrap()
+                .terminal_title()
+                .as_deref(),
+            Some("Outgoing session title")
+        );
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "session-b".into(),
             method: crate::api::schema::Method::PaneReportAgentSession(
@@ -5241,12 +5256,54 @@ mod tests {
                 .unwrap()
                 .terminal_title()
                 .as_deref(),
-            Some("Incoming session title")
+            None
         );
-        let _ = app.sync_terminal_titles();
+    }
+
+    #[tokio::test]
+    async fn initial_agent_session_assignment_does_not_clear_retained_title() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]0;Initial session title\x07");
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "session-a".into(),
+            method: crate::api::schema::Method::PaneReportAgentSession(
+                PaneReportAgentSessionParams {
+                    pane_id,
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    seq: Some(1),
+                    agent_session_id: Some("session-a".into()),
+                    agent_session_path: None,
+                    session_start_source: Some("startup".into()),
+                },
+            ),
+        });
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
         assert_eq!(
-            app.tab_info(workspace_idx, 0).unwrap().label,
-            "codex · Incoming session title"
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .terminal_title()
+                .as_deref(),
+            Some("Initial session title")
         );
     }
 

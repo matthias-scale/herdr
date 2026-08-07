@@ -345,26 +345,23 @@ impl App {
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
-        // Capture the last projected title before adopting the new identity. A runtime
-        // title that differs from it was emitted after that projection and belongs to
-        // the incoming session, so the replacement clear must preserve it.
-        let session_replacement_osc_snapshot = self.session_replacement_osc_snapshot(&ev);
+        // The shared PTY channel cannot distinguish a late OSC title from the outgoing
+        // session from an early title from the incoming session, and hook-socket ordering
+        // is not guaranteed. On genuine replacement, choose the lower-cost failure mode:
+        // manual_label > OSC terminal title > context.work_title, so clearing falls back
+        // to the git-derived work title and self-corrects on the next incoming OSC
+        // emission. A briefly generic label costs less than a wrong title that persists.
         let pane_updates = self.state.handle_app_event(ev);
         for update in &pane_updates {
-            if !update.session_ref_changed {
+            if !update.session_replaced {
                 continue;
             }
-            let preserve_title = session_replacement_osc_snapshot.as_ref().is_some_and(
-                |(pane_id, previous_title, runtime_title)| {
-                    *pane_id == update.pane_id && previous_title != runtime_title
-                },
-            );
             if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
                 &self.terminal_runtimes,
                 update.ws_idx,
                 update.pane_id,
             ) {
-                runtime.clear_agent_osc_state_for_session_replacement(preserve_title);
+                runtime.clear_agent_osc_state_for_session_replacement();
             }
         }
         if pane_updates
@@ -444,30 +441,6 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
-    }
-
-    fn session_replacement_osc_snapshot(
-        &self,
-        ev: &AppEvent,
-    ) -> Option<(crate::layout::PaneId, Option<String>, Option<String>)> {
-        let pane_id = match ev {
-            AppEvent::StateChanged { pane_id, .. }
-            | AppEvent::HookStateReported { pane_id, .. }
-            | AppEvent::AgentSessionReported { pane_id, .. } => *pane_id,
-            _ => return None,
-        };
-        let (ws_idx, pane) = self.find_pane(pane_id)?;
-        let terminal_id = pane.attached_terminal_id.clone();
-        let previous_title = self
-            .state
-            .terminals
-            .get(&terminal_id)
-            .and_then(|terminal| terminal.terminal_title.clone());
-        let runtime_title = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-            .and_then(|runtime| runtime.terminal_title());
-        Some((pane_id, previous_title, runtime_title))
     }
 
     fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {

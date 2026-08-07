@@ -98,6 +98,7 @@ pub(crate) struct TerminalTitleChange {
 pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
+    pub session_replaced: bool,
     pub hook_work_context_changed: bool,
     pub agent_released: bool,
 }
@@ -276,6 +277,7 @@ pub struct TerminalState {
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
     metadata_report_agents: HashMap<String, Agent>,
+    metadata_report_quarantined_sources: std::collections::HashSet<String>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
     /// Provider-reported background jobs owned by this agent thread. `None`
@@ -319,6 +321,7 @@ impl TerminalState {
             stale_full_lifecycle_hook_sessions: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
             metadata_report_agents: HashMap::new(),
+            metadata_report_quarantined_sources: std::collections::HashSet::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             background_job_count: None,
@@ -395,7 +398,8 @@ impl TerminalState {
         )>,
     ) {
         let had_tokens = !self.metadata_tokens.values().is_empty();
-        let mut cleared_metadata_sources = Vec::new();
+        let mut session_bound_metadata_sources = Vec::new();
+        let mut quarantined_metadata_sources = Vec::new();
         if let Some((session_source, agent_label, _, _)) = replaced_session {
             let session_agent = crate::detect::parse_agent_label(agent_label);
             self.agent_metadata.retain(|source, metadata| {
@@ -421,27 +425,45 @@ impl TerminalState {
                         || (official_metadata && applies_to_session)
                         || agent_owned);
                 if clear {
-                    cleared_metadata_sources.push(source.clone());
+                    if source_matches_session || applies_to_session {
+                        session_bound_metadata_sources.push(source.clone());
+                    } else if agent_owned {
+                        quarantined_metadata_sources.push(source.clone());
+                    }
                 }
                 !clear
             });
 
-            let mut agent_owned_sources = Vec::new();
             self.metadata_report_agents.retain(|source, owner| {
-                let clear = !source.starts_with("user:")
-                    && (cleared_metadata_sources
-                        .iter()
-                        .any(|cleared| cleared == source)
-                        || session_agent == Some(*owner));
-                if clear {
-                    agent_owned_sources.push(source.clone());
+                if source.starts_with("user:") {
+                    return true;
                 }
-                !clear
+                if source == session_source
+                    || session_bound_metadata_sources
+                        .iter()
+                        .any(|bound| bound == source)
+                {
+                    if source == session_source
+                        && !session_bound_metadata_sources
+                            .iter()
+                            .any(|bound| bound == source)
+                    {
+                        session_bound_metadata_sources.push(source.clone());
+                    }
+                    return false;
+                }
+                if session_agent == Some(*owner) {
+                    quarantined_metadata_sources.push(source.clone());
+                }
+                true
             });
-            cleared_metadata_sources.extend(agent_owned_sources);
-            for source in &cleared_metadata_sources {
+            for source in quarantined_metadata_sources {
+                self.metadata_report_quarantined_sources.insert(source);
+            }
+            for source in &session_bound_metadata_sources {
                 self.metadata_report_sequences.remove(source);
                 self.metadata_report_agents.remove(source);
+                self.metadata_report_quarantined_sources.remove(source);
                 self.metadata_token_sequence_sources.remove(source);
             }
         }
@@ -661,6 +683,8 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                session_replaced: previous_session.is_some()
+                    && previous_session != self.current_session_identity_for_persistence(),
                 hook_work_context_changed: false,
                 agent_released: false,
             };
@@ -681,6 +705,8 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                session_replaced: previous_session.is_some()
+                    && previous_session != self.current_session_identity_for_persistence(),
                 hook_work_context_changed: false,
                 agent_released: false,
             };
@@ -903,6 +929,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
+            session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released,
         }
@@ -1071,6 +1098,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
+            session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
         })
@@ -1807,6 +1835,8 @@ impl TerminalState {
                         now,
                     ),
                     session_ref_changed: previous_session != current_session,
+                    session_replaced: previous_session.is_some()
+                        && previous_session != current_session,
                     hook_work_context_changed,
                     agent_released: false,
                 });
@@ -1918,6 +1948,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
+            session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
         })
@@ -2027,6 +2058,9 @@ impl TerminalState {
         );
         self.hook_authority = None;
         self.persisted_agent_session = None;
+        if previous_session.is_some() {
+            self.clear_agent_session_metadata(previous_session.as_ref());
+        }
         let hook_work_context_changed = self.clear_hook_work_context();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -2037,6 +2071,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            session_replaced: previous_session.is_some(),
             hook_work_context_changed,
             agent_released: false,
         })
@@ -2104,6 +2139,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            session_replaced: previous_session.is_some() && previous_session != current_session,
             hook_work_context_changed,
             agent_released: !process_owns_agent,
         })
@@ -2415,6 +2451,7 @@ impl TerminalState {
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
+        self.metadata_report_quarantined_sources.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
@@ -5355,6 +5392,119 @@ mod tests {
             terminal.metadata_tokens.values(),
             std::collections::HashMap::from([("summary".into(), "new".into())])
         );
+    }
+
+    #[test]
+    fn repro_b2_delayed_unguarded_metadata_report_cannot_restore_session_a() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("session-a"),
+                Some(1),
+            )
+            .expect("initial session should be accepted");
+        terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "custom:claude-metadata".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: None,
+                title: Some("session A title".into()),
+                display_agent: Some("session A agent".into()),
+                state_labels: std::collections::HashMap::from([(
+                    "idle".into(),
+                    "session A idle".into(),
+                )]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            })
+            .expect("initial metadata should be accepted");
+
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("session-b"),
+                Some(2),
+                Some("clear".into()),
+            )
+            .expect("replacement session should be accepted");
+        terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "custom:claude-metadata".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: None,
+                title: Some("delayed session A title".into()),
+                display_agent: Some("session A agent".into()),
+                state_labels: std::collections::HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(3),
+            })
+            .expect("delayed report is accepted at the unfixed boundary");
+
+        assert_eq!(terminal.effective_title(), None);
+    }
+
+    #[test]
+    fn repro_b3_hook_authority_reacquisition_cannot_restore_cleared_session_metadata() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            crate::agent_resume::AgentSessionRef::id("session-a").unwrap(),
+        );
+        terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                crate::agent_resume::AgentSessionRef::id("session-a"),
+                Some(1),
+            )
+            .expect("initial hook authority should be accepted");
+        terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "custom:pi-metadata".into(),
+                agent_label: Some("pi".into()),
+                applies_to_source: Some("herdr:pi".into()),
+                title: Some("session A title".into()),
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            })
+            .expect("session metadata should be accepted");
+
+        terminal
+            .clear_hook_authority(Some("herdr:pi"), Some(2))
+            .expect("hook clear should be accepted");
+        terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                crate::agent_resume::AgentSessionRef::id("session-b"),
+                Some(3),
+            )
+            .expect("replacement hook authority should be accepted");
+
+        assert_eq!(terminal.effective_title(), None);
     }
 
     #[test]

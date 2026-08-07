@@ -58,6 +58,17 @@ impl TerminalState {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }
 
+    pub(crate) fn metadata_report_is_quarantined(&self, source: &str) -> bool {
+        self.metadata_report_quarantined_sources.contains(source)
+    }
+
+    pub(crate) fn reanchor_metadata_report_source(&mut self, source: &str) {
+        self.metadata_report_quarantined_sources.remove(source);
+        self.metadata_report_sequences.remove(source);
+        self.metadata_report_agents.remove(source);
+        self.metadata_token_sequence_sources.remove(source);
+    }
+
     pub(crate) fn metadata_report_agent(
         source: &str,
         agent_label: Option<&str>,
@@ -145,6 +156,9 @@ impl TerminalState {
         &mut self,
         report: AgentMetadataReport,
     ) -> Option<TerminalStateMutation> {
+        if self.metadata_report_is_quarantined(&report.source) {
+            return Some(TerminalStateMutation::default());
+        }
         if self.metadata_report_blocked_by_process_exit(
             &report.source,
             report.agent_label.as_deref(),
@@ -289,6 +303,7 @@ impl TerminalState {
         Some(TerminalStateMutation {
             effective_state_change,
             session_ref_changed: false,
+            session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
         })
@@ -373,6 +388,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: false,
+            session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
         })

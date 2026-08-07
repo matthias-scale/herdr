@@ -521,13 +521,11 @@ impl AgentOscStateTracker {
         self.latest_progress = None;
     }
 
-    pub(super) fn clear_for_session_replacement(&mut self, preserve_title: bool) {
+    pub(super) fn clear_for_session_replacement(&mut self) {
         self.collector = OscStreamCollector::default();
         self.latest_progress = None;
-        if !preserve_title {
-            self.latest_title = None;
-            self.terminal_title = None;
-        }
+        self.latest_title = None;
+        self.terminal_title = None;
     }
 }
 
@@ -1033,7 +1031,7 @@ mod tests {
         let mut tracker = AgentOscStateTracker::default();
         tracker.observe(b"\x1b]0;old session title");
 
-        tracker.clear_for_session_replacement(false);
+        tracker.clear_for_session_replacement();
         tracker.observe(b"\x07");
 
         assert_eq!(tracker.latest_title(), "");
