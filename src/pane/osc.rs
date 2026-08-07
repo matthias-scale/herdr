@@ -520,6 +520,11 @@ impl AgentOscStateTracker {
         self.latest_title = None;
         self.latest_progress = None;
     }
+
+    pub(super) fn clear_for_session_replacement(&mut self) {
+        self.clear_retained();
+        self.terminal_title = None;
+    }
 }
 
 /// Splits an OSC body at the first `;`, returning `(command, payload)`.

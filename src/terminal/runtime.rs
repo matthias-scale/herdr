@@ -332,6 +332,10 @@ impl TerminalRuntime {
         self.0.agent_osc_progress()
     }
 
+    pub fn clear_agent_osc_state_for_session_replacement(&self) {
+        self.0.clear_agent_osc_state_for_session_replacement();
+    }
+
     pub fn recent_text(&self, lines: usize) -> String {
         self.0.recent_text(lines)
     }

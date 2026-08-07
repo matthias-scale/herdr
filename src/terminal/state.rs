@@ -385,6 +385,18 @@ impl TerminalState {
         changed
     }
 
+    fn clear_agent_session_metadata(&mut self) {
+        let had_tokens = !self.metadata_tokens.values().is_empty();
+        self.agent_metadata.clear();
+        self.metadata_tokens = crate::metadata_tokens::MetadataTokens::default();
+        self.metadata_report_sequences.clear();
+        self.metadata_report_agents.clear();
+        self.metadata_token_sequence_sources.clear();
+        if had_tokens {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     pub(crate) fn restore_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,
@@ -817,6 +829,11 @@ impl TerminalState {
             self.clear_agent_name();
         }
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
+        if session_ref_changed {
+            self.terminal_title = None;
+            self.clear_agent_session_metadata();
+        }
         let hook_work_context_changed =
             if (process_exited && !newer_custom_authority) || previous_session != current_session {
                 self.clear_hook_work_context()
@@ -831,7 +848,7 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
             hook_work_context_changed,
             agent_released,
         }
@@ -981,6 +998,11 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
+        if session_ref_changed {
+            self.terminal_title = None;
+            self.clear_agent_session_metadata();
+        }
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
@@ -994,7 +1016,7 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
         })
@@ -1823,6 +1845,11 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
+        if session_ref_changed {
+            self.terminal_title = None;
+            self.clear_agent_session_metadata();
+        }
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
@@ -1836,7 +1863,7 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
         })
@@ -5149,6 +5176,131 @@ mod tests {
                 Some(next_session.as_str())
             );
         }
+    }
+
+    #[test]
+    fn agent_session_replacement_clears_prior_agent_metadata() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-old"),
+                Some(1),
+            )
+            .expect("initial session should be accepted");
+        terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "herdr:claude".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: None,
+                title: Some("Old title".into()),
+                display_agent: Some("Old Agent".into()),
+                state_labels: std::collections::HashMap::from([("idle".into(), "Old idle".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            })
+            .expect("old metadata should be accepted");
+        assert_eq!(
+            terminal.effective_display_agent().as_deref(),
+            Some("Old Agent")
+        );
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-new"),
+                Some(2),
+                Some("clear".into()),
+            )
+            .expect("replacement session should be accepted");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(terminal.effective_display_agent(), None);
+        assert_eq!(terminal.effective_title(), None);
+        assert!(terminal.effective_presentation().state_labels.is_empty());
+        assert!(terminal.agent_metadata.is_empty());
+
+        terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "herdr:claude".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: None,
+                title: Some("New title".into()),
+                display_agent: Some("New Agent".into()),
+                state_labels: std::collections::HashMap::from([("idle".into(), "New idle".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            })
+            .expect("new metadata should be accepted");
+        assert_eq!(
+            terminal.effective_display_agent().as_deref(),
+            Some("New Agent")
+        );
+    }
+
+    #[test]
+    fn agent_session_replacement_clears_prior_metadata_tokens() {
+        let mut terminal = test_terminal();
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-old"),
+                Some(1),
+            )
+            .expect("initial session should be accepted");
+        assert!(matches!(
+            terminal.accept_metadata_report("herdr:claude", Some(1), true, Some(Agent::Claude)),
+            Ok(true)
+        ));
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([("summary".into(), Some("old".into()))]),
+            None,
+            Instant::now(),
+        );
+        assert_eq!(
+            terminal.metadata_tokens.values(),
+            std::collections::HashMap::from([("summary".into(), "old".into())])
+        );
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-new"),
+                Some(2),
+                Some("clear".into()),
+            )
+            .expect("replacement session should be accepted");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(
+            terminal.metadata_tokens.values(),
+            std::collections::HashMap::new()
+        );
+
+        assert!(matches!(
+            terminal.accept_metadata_report("herdr:claude", Some(1), true, Some(Agent::Claude)),
+            Ok(true)
+        ));
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([("summary".into(), Some("new".into()))]),
+            None,
+            Instant::now(),
+        );
+        assert_eq!(
+            terminal.metadata_tokens.values(),
+            std::collections::HashMap::from([("summary".into(), "new".into())])
+        );
     }
 
     #[test]

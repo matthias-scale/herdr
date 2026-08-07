@@ -253,6 +253,7 @@ pub struct PaneStateUpdate {
     pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
     pub agent_name_changed: bool,
+    pub session_ref_changed: bool,
     pub hook_work_context_changed: bool,
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
@@ -1095,6 +1096,7 @@ impl AppState {
                     seen,
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
+                    session_ref_changed: mutation.session_ref_changed,
                     hook_work_context_changed: false,
                     agent_released: false,
                     agent_release_status: None,
@@ -3122,6 +3124,9 @@ impl AppState {
             self.mark_session_dirty();
         }
         if mutation.session_ref_changed {
+            if let Some(pane) = self.workspaces[ws_idx].panes.get_mut(&pane_id) {
+                pane.seen = true;
+            }
             if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
                 self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
             }
@@ -3157,6 +3162,7 @@ impl AppState {
             seen,
             presentation: change.presentation.clone(),
             agent_name_changed,
+            session_ref_changed: mutation.session_ref_changed,
             hook_work_context_changed: mutation.hook_work_context_changed,
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
@@ -5125,6 +5131,71 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+    }
+
+    #[test]
+    fn agent_session_replacement_resets_seen_so_new_session_is_not_marked_done() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-old"),
+                Some(1),
+            )
+            .expect("initial session should be accepted");
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+
+        let updates = state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(2),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-new"),
+            session_start_source: Some("clear".into()),
+        });
+
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].session_ref_changed);
+        assert!(updates[0].seen);
+        assert!(state.workspaces[0].panes[&pane_id].seen);
+
+        state.active = None;
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        assert!(!state.workspaces[0].panes[&pane_id].seen);
     }
 
     #[test]

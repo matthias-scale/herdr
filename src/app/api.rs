@@ -346,6 +346,18 @@ impl App {
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
+        for update in &pane_updates {
+            if !update.session_ref_changed {
+                continue;
+            }
+            if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                &self.terminal_runtimes,
+                update.ws_idx,
+                update.pane_id,
+            ) {
+                runtime.clear_agent_osc_state_for_session_replacement();
+            }
+        }
         if pane_updates
             .iter()
             .any(|update| update.hook_work_context_changed)

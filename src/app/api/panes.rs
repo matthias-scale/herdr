@@ -5090,6 +5090,95 @@ mod tests {
         assert_only_manual_work_context_remains(&app, &terminal_id);
     }
 
+    #[tokio::test]
+    async fn agent_session_replacement_clears_retained_osc_title_before_work_context_projection() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "session-a".into(),
+            method: crate::api::schema::Method::PaneReportAgentSession(
+                PaneReportAgentSessionParams {
+                    pane_id: pane_id.clone(),
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    seq: Some(1),
+                    agent_session_id: Some("session-a".into()),
+                    agent_session_path: None,
+                    session_start_source: Some("startup".into()),
+                },
+            ),
+        });
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]0;Review auth\x07");
+        assert!(app.sync_terminal_titles());
+        assert_eq!(
+            app.tab_info(workspace_idx, 0).unwrap().label,
+            "codex · Review auth"
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "session-b".into(),
+            method: crate::api::schema::Method::PaneReportAgentSession(
+                PaneReportAgentSessionParams {
+                    pane_id: pane_id.clone(),
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    seq: Some(2),
+                    agent_session_id: Some("session-b".into()),
+                    agent_session_path: None,
+                    session_start_source: Some("startup".into()),
+                },
+            ),
+        });
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "work-title".into(),
+            method: crate::api::schema::Method::PaneReportMetadata(guarded_work_title_params(
+                pane_id.clone(),
+                "codex",
+                "herdr:codex",
+                "session-b",
+                "Fix billing",
+                3,
+            )),
+        });
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let _ = app.sync_terminal_titles();
+        assert_eq!(
+            app.tab_info(workspace_idx, 0).unwrap().label,
+            "codex · Fix billing"
+        );
+
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]0;New session title\x07");
+        assert!(app.sync_terminal_titles());
+        assert_eq!(
+            app.tab_info(workspace_idx, 0).unwrap().label,
+            "codex · New session title"
+        );
+    }
+
     #[test]
     fn ac5_unguarded_metadata_cannot_replace_hook_work_context() {
         let (mut app, pane_id) = app_with_test_workspace();
