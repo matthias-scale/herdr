@@ -60,10 +60,14 @@ any = [
 id = "screen_working_fallback"
 state = "working"
 priority = 500
-region = "after_current_prompt_block_marker"
+region = "bottom_non_empty_lines(6)"
 visible_working = true
-# Start at the latest Codex block marker so footer height cannot hide the live
-# status while an earlier turn in scrollback cannot satisfy the rule.
+# Anchoring to a block marker looked tidier but empties the region on a real
+# turn: a codex 0.147 pane running a tool prints no bullet at all, so there is
+# nothing to anchor to and the only working rule the manifest has stops firing.
+# Six bottom lines clear the composer and status footer with room for a taller
+# one, and codex erases this line when it streams, so scrollback holds no stale
+# copy to match by accident.
 line_regex = ['^(?:[•◦]\s+)?Working \([^)]*esc to interrupt\)(?: · .*)?$']
 not = [{ contains = ["■ Conversation interrupted"] }]
 

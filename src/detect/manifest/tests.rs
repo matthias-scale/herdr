@@ -785,11 +785,65 @@ fn codex_screen_working_fallback_handles_static_osc_title_and_progress_decoratio
                 .matched_rule
                 .as_ref()
                 .map(|rule| rule.region.as_str()),
-            Some("after_current_prompt_block_marker"),
+            Some("bottom_non_empty_lines(6)"),
             "{progress_line}"
         );
         assert!(result.visible_working, "{progress_line}");
     }
+}
+
+/// Verbatim from a codex-cli 0.147.0 pane read back through `agent.read` while
+/// it ran a shell command. Note what is *not* here: no bullet, no spinner, and
+/// an OSC title that never leaves the cwd. This screen is the reason the rule
+/// cannot anchor itself to a block marker.
+const CODEX_TOOL_CALL_SCREEN: &str = "\
+› Run exactly this shell command and nothing else, then report the exit code: sleep 45
+
+Working (19s • esc to interrupt) · 1 background terminal running · /ps to view
+
+› Write tests for @filename
+
+  gpt-5.6-luna medium · Context 97% left · 8.69K used · ~/workspaces/personal
+";
+
+/// The same pane a few seconds later, streaming its answer. Codex removes the
+/// progress line while it writes, so nothing on screen separates this from a
+/// finished turn -- only the bytes still arriving do.
+const CODEX_STREAMING_SCREEN: &str = "\
+› Explain in detail, step by step, how the Rust borrow checker works.
+
+• Rust's borrow checker enforces one central rule:
+
+  let value = String::from(\"hello\");
+  let reference = &value;
+
+› Use /skills to list available skills
+
+  gpt-5.6-luna medium · Context 100% left · ~/workspaces/personal
+";
+
+#[test]
+fn a_codex_pane_running_a_tool_is_working_even_though_it_printed_no_block_marker() {
+    let result = osc_explain(Agent::Codex, CODEX_TOOL_CALL_SCREEN, "personal", "");
+
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("screen_working_fallback")
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn a_streaming_codex_pane_shows_no_working_evidence_on_screen_at_all() {
+    let result = osc_explain(Agent::Codex, CODEX_STREAMING_SCREEN, "personal", "");
+
+    // Idle by elimination, and the flag says so: nobody observed an idle pane,
+    // the manifest simply ran out of rules. Recent output is what rescues this
+    // screen, and it lives outside the manifest.
+    assert_eq!(result.state, AgentState::Idle);
+    assert!(!result.visible_working);
+    assert!(!result.visible_idle);
 }
 
 #[test]
@@ -866,12 +920,14 @@ fn codex_screen_working_fallback_ignores_stale_and_prompt_text() {
         "  ◦ Working (1m 16s • esc to interrupt)\n\
          › Use /skills to list available skills\n\
          gpt-5.6-sol default · /work\n",
-        "• Earlier turn\n\
-         ◦ Working (1m 16s • esc to interrupt)\n\
-         › Previous prompt\n\
-         • Current turn\n\
-         › Use /skills to list available skills\n\
-         gpt-5.6-sol default · /work\n",
+        // A stale progress line from an *earlier* turn is deliberately not
+        // tested here, because codex erases that line the moment the turn ends
+        // -- the same erase that leaves a streaming pane with no working
+        // evidence at all (see CODEX_STREAMING_SCREEN). A copy can only survive
+        // in scrollback the pane has already scrolled past, which puts it far
+        // above the bottom lines this rule reads. Narrowing the region to
+        // exclude a screen that cannot occur would cost the margin the observed
+        // tool-call screen needs.
     ];
 
     for screen in screens {
