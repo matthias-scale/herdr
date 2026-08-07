@@ -1293,6 +1293,47 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_blocked_worklist_row_focuses_its_own_pane() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("blocked")];
+        app.state.ensure_test_terminals();
+        let working_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let blocked_pane = app.state.workspaces[1].tabs[0].root_pane;
+        for (ws_idx, pane_id, state) in [
+            (0, working_pane, AgentState::Working),
+            (1, blocked_pane, AgentState::Blocked),
+        ] {
+            let terminal_id = app.state.workspaces[ws_idx].terminal_id(pane_id).unwrap().clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let screen = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app.state, screen);
+        let area = app.state.view.sidebar_rect;
+        let card = crate::ui::compute_agent_card_areas(&app.state, area)
+            .into_iter()
+            .find(|card| card.pane_id == blocked_pane)
+            .expect("blocked worklist row should be clickable");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(
+            app.state.workspaces[1].tabs[0].layout.focused(),
+            blocked_pane
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
     fn clicking_worktree_parent_row_focuses_workspace_without_toggling() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
