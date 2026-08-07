@@ -2167,7 +2167,10 @@ fn render_agent_card(
     });
     let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
     let state_icon = state_dot(detail.state, detail.seen, p);
-    let indent = usize::from(depth) * 3;
+    // Grouped rows are pointers under a section header, so they share the
+    // child indentation of the tree even though their semantic depth is zero.
+    let indent_depth = depth.max(1);
+    let indent = usize::from(indent_depth) * 3;
 
     for (row_index, resolved) in rows
         .iter()
@@ -2196,7 +2199,10 @@ fn render_agent_card(
         };
         let baseline_token_spans = resolve_tokens(content_width);
         let mut activity_field = None;
-        let token_spans = if row_index == 0 && agent_activity_age_fits(app, detail, rect, depth) {
+        let token_spans = if row_index == 0
+            && depth > 0
+            && agent_activity_age_fits(app, detail, rect, depth)
+        {
             let label =
                 crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);
             activity_field = Some(format!(" {label:>4}"));
@@ -3958,6 +3964,66 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             agent_entry_height_in_body(&app, &entry, body.height),
             body.height
         );
+    }
+
+    #[test]
+    fn a_depth_zero_worklist_entry_occupies_one_line() {
+        let mut app = priority_app_with_states(&[AgentState::Blocked]);
+        app.sidebar_agents.rows = vec![
+            vec![crate::config::AgentSidebarToken::Agent],
+            vec![crate::config::AgentSidebarToken::Workspace],
+        ];
+        let area = Rect::new(0, 0, 40, 12);
+        let rows = sidebar_rows(&app);
+        let blocked = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Agent { entry, depth } if *depth == 0 => Some(entry),
+                _ => None,
+            })
+            .expect("blocked worklist should contain an agent row");
+
+        assert_eq!(
+            resolved_agent_rows_at(&app, blocked, 0).len(),
+            1,
+            "worklist rows ignore the configured multi-row tree template"
+        );
+        assert_eq!(
+            agent_entry_height_in_body_at(&app, blocked, 8, 0),
+            1,
+            "layout height must match the single painted worklist row"
+        );
+        let cards = compute_agent_card_areas(&app, area);
+        let card = cards
+            .iter()
+            .find(|card| card.ws_idx == blocked.ws_idx && card.pane_id == blocked.pane_id)
+            .expect("blocked worklist card should have geometry");
+        assert_eq!(card.rect.height, 1);
+    }
+
+    #[test]
+    fn a_blocked_worklist_row_renders_its_title_without_its_space_name() {
+        let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
+        let blocked_pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(blocked_pane).unwrap().clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("Review blocked thread".into()));
+        let area = Rect::new(0, 0, 50, 12);
+        let card = compute_agent_card_areas(&app, area)
+            .into_iter()
+            .find(|card| card.pane_id == blocked_pane)
+            .expect("blocked worklist card should render");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar should render");
+
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+        assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
+        assert!(!rendered.contains("ws0"), "{rendered:?}");
     }
 
     #[test]

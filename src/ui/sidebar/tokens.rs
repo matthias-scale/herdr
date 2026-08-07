@@ -1,4 +1,4 @@
-use super::AgentPanelEntry;
+use super::{AgentPanelEntry, DEFAULT_THREAD_TITLE};
 use crate::config::{
     AgentSidebarToken, AgentsSidebarConfig, SidebarTokenStyle, SpaceSidebarToken,
     SpacesSidebarConfig,
@@ -89,18 +89,19 @@ pub(super) fn agent_rows(
         .collect()
 }
 
-/// The worklist groups answer one question -- which agent, and where -- so they
-/// ignore the configured multi-row template and render one fixed line: state
-/// dot, the thread's own title, then the space it lives in. The provider is
-/// deliberately absent: whether it is claude or codex tells you nothing about
-/// which gate to open next.
+/// Worklist rows point at a thread in the tree, so they ignore the configured
+/// multi-row template and carry only its state and title. The provider and
+/// space are deliberately absent: neither tells you which gate to open next.
 pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
     let title = entry
         .terminal_title_stripped
         .clone()
         .or_else(|| entry.terminal_title.clone())
         .or_else(|| entry.pane_label.clone())
-        .or_else(|| entry.primary_tab_label.clone());
+        .or_else(|| entry.primary_tab_label.clone())
+        // Keep the row identifiable when every live title source is absent;
+        // the stable thread fallback is more useful here than a bare state dot.
+        .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
     let mut row = vec![ResolvedToken::new(
         ResolvedTokenKind::StateIcon,
         SidebarTokenStyle::default(),
@@ -111,13 +112,6 @@ pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
             SidebarTokenStyle::default(),
         ));
     }
-    // The space rides in the secondary channel (`Pane`) rather than `Workspace`:
-    // the kinds pick the colour here, and the space is context behind the title,
-    // not the thing you are reading.
-    row.push(ResolvedToken::new(
-        ResolvedTokenKind::Pane(entry.primary_label.clone()),
-        SidebarTokenStyle::default(),
-    ));
     vec![row]
 }
 
@@ -249,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn worklist_rows_are_one_line_of_title_and_space_without_the_provider() {
+    fn worklist_rows_are_one_line_of_title_without_space_or_provider() {
         let mut entry = entry();
         entry.terminal_title_stripped = Some("Review herdr context enrichment".into());
         entry.agent_label = Some("codex".into());
@@ -263,19 +257,18 @@ mod tests {
                 ResolvedToken::unstyled(ResolvedTokenKind::Tab(
                     "Review herdr context enrichment".into()
                 )),
-                ResolvedToken::unstyled(ResolvedTokenKind::Pane("repo".into())),
             ]]
         );
     }
 
     #[test]
-    fn a_titleless_worklist_row_still_says_where_it_lives() {
+    fn a_titleless_worklist_row_uses_the_default_thread_title() {
         let rows = worklist_row(&entry());
         assert_eq!(
             rows,
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
-                ResolvedToken::unstyled(ResolvedTokenKind::Pane("repo".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("New Thread".into())),
             ]]
         );
     }
