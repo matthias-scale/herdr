@@ -473,11 +473,7 @@ fn git_work_context_for_branch(
     }
 
     let mut command = crate::noninteractive_process::command(gh_program);
-    command
-        .current_dir(repo_root)
-        .args(["pr", "view"])
-        .arg(branch)
-        .args(["--json", "url,statusCheckRollup"]);
+    command.current_dir(repo_root).args(gh_pr_view_args(branch));
     let Ok(output) = crate::noninteractive_process::output_with_deadline(command, deadline) else {
         return context;
     };
@@ -496,6 +492,20 @@ fn git_work_context_for_branch(
     context.preview_urls =
         crate::work_context::normalize_preview_urls(preview_urls).unwrap_or_default();
     context
+}
+
+fn gh_pr_view_args(branch: &str) -> Vec<String> {
+    [
+        "pr",
+        "view",
+        "--",
+        branch,
+        "--json",
+        "url,statusCheckRollup",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn collect_preview_urls(value: &Value, urls: &mut Vec<String>) {
@@ -616,6 +626,23 @@ mod tests {
         assert_eq!(WORK_CONTEXT_REFRESH_INTERVAL, Duration::from_secs(60));
     }
 
+    #[test]
+    fn gh_pr_view_args_isolate_hostile_branch_selectors() {
+        for branch in ["27", "--repo=other/target"] {
+            assert_eq!(
+                gh_pr_view_args(branch),
+                vec![
+                    "pr",
+                    "view",
+                    "--",
+                    branch,
+                    "--json",
+                    "url,statusCheckRollup",
+                ]
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn branch_ticket_ids_reuse_shared_extractor() {
@@ -644,7 +671,7 @@ mod tests {
         fake_git(&git, &repo, "feat/MAT-27-branch-qualified");
         write_executable(
             &gh,
-            "#!/bin/sh\nif [ \"$3\" = \"feat/MAT-27-branch-qualified\" ]; then printf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/27\"}'; else exit 1; fi\n",
+            "#!/bin/sh\nif [ \"$4\" = \"feat/MAT-27-branch-qualified\" ]; then printf '%s\\n' '{\"url\":\"https://github.com/o/r/pull/27\"}'; else exit 1; fi\n",
         );
 
         let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
