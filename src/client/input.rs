@@ -40,6 +40,7 @@ pub fn stdin_reader_loop(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
+    host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     #[cfg(windows)]
@@ -47,6 +48,7 @@ pub fn stdin_reader_loop(
         let _ = (
             host_color_query_sent,
             host_color_query_generation,
+            host_cell_size_query_sent,
             host_mouse_capture_active,
         );
         windows_stdin_reader_loop(event_tx, should_quit);
@@ -58,6 +60,7 @@ pub fn stdin_reader_loop(
         should_quit,
         host_color_query_sent,
         host_color_query_generation,
+        host_cell_size_query_sent,
         host_mouse_capture_active,
     );
 }
@@ -68,6 +71,7 @@ fn unix_stdin_reader_loop(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
+    host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
 ) {
     let stdin = io::stdin();
@@ -77,6 +81,10 @@ fn unix_stdin_reader_loop(
     if host_color_query_sent {
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
+        framer.enable_host_appearance_query_on_focus();
+    }
+    if host_cell_size_query_sent {
+        framer.host_cell_size_query_sent();
     }
     let mut seen_query_generation = host_color_query_generation.load(Ordering::Acquire);
     let mut pending_palette = Vec::new();
@@ -195,7 +203,7 @@ fn idle_flush_timeout_ms(
     host_mouse_capture_active: bool,
 ) -> i32 {
     if host_mouse_capture_active
-        && (framer.has_pending_lone_escape() || framer.has_pending_incomplete_sgr_mouse_sequence())
+        && (framer.has_pending_lone_escape() || framer.has_pending_incomplete_mouse_sequence())
     {
         crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
     } else {
@@ -297,7 +305,16 @@ fn windows_crossterm_input_event(
             code: crate::protocol::ClientKeyCode::Char(codepoint),
             modifiers: 0,
             kind: crate::protocol::ClientKeyKind::Press,
-        } => Some(crate::protocol::ClientInputEvent::Text { codepoint }),
+            source,
+            ..
+        } => Some(crate::protocol::ClientInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Char(codepoint),
+            modifiers: 0,
+            kind: crate::protocol::ClientKeyKind::Press,
+            repeat_count: 1,
+            generated_text: Some(codepoint.to_string()),
+            source,
+        }),
         event => Some(event),
     }
 }
@@ -384,20 +401,29 @@ fn windows_client_input_event_from_raw(
     event: crate::raw_input::RawInputEvent,
 ) -> Option<crate::protocol::ClientInputEvent> {
     match event {
-        crate::raw_input::RawInputEvent::Key(key) if key.is_text_commit => {
-            let crossterm::event::KeyCode::Char(codepoint) = key.code else {
-                return None;
-            };
-            Some(crate::protocol::ClientInputEvent::Text { codepoint })
-        }
+        crate::raw_input::RawInputEvent::Text(text) => Some(
+            crate::protocol::ClientInputEvent::TextCommit(text.into_string()),
+        ),
         crate::raw_input::RawInputEvent::Key(key) => {
             let code = crate::protocol::ClientKeyCode::from_crossterm(key.code)?;
             let modifiers = key.modifiers.bits();
             let kind = crate::protocol::ClientKeyKind::from_crossterm(key.kind);
+            let source = if let Some(bytes) = key.vt_bytes() {
+                crate::protocol::ClientKeySource::Vt {
+                    bytes: bytes.to_vec(),
+                }
+            } else if let Some(record) = key.windows_record() {
+                crate::protocol::ClientKeySource::WindowsConsole { record }
+            } else {
+                crate::protocol::ClientKeySource::Synthesized
+            };
             Some(crate::protocol::ClientInputEvent::Key {
                 code,
                 modifiers,
                 kind,
+                repeat_count: key.repeat_count,
+                generated_text: key.generated_text.clone(),
+                source,
             })
         }
         crate::raw_input::RawInputEvent::Mouse(mouse) => {
@@ -420,6 +446,7 @@ fn windows_client_input_event_from_raw(
         crate::raw_input::RawInputEvent::HostDefaultColor { .. }
         | crate::raw_input::RawInputEvent::HostPaletteColors { .. }
         | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
+        | crate::raw_input::RawInputEvent::HostCellSizeReport { .. }
         | crate::raw_input::RawInputEvent::Unsupported => None,
     }
 }
@@ -530,18 +557,20 @@ mod tests {
     fn mouse_active_escape_sequences_get_longer_reassembly_window() {
         let mut escape = crate::raw_input::RawInputByteFramer::default();
         assert!(escape.push(b"\x1b").is_empty());
-        let mut mouse = crate::raw_input::RawInputByteFramer::default();
-        assert!(mouse.push(b"\x1b[<3").is_empty());
+        let mut sgr_mouse = crate::raw_input::RawInputByteFramer::default();
+        assert!(sgr_mouse.push(b"\x1b[<3").is_empty());
+        let mut default_mouse = crate::raw_input::RawInputByteFramer::default();
+        assert!(default_mouse.push(b"\x1b[MC").is_empty());
         let mut unrelated = crate::raw_input::RawInputByteFramer::default();
         assert!(unrelated.push(b"\x1b[49:33;2:").is_empty());
 
-        for framer in [&escape, &mouse, &unrelated] {
+        for framer in [&escape, &sgr_mouse, &default_mouse, &unrelated] {
             assert_eq!(
                 idle_flush_timeout_ms(framer, false),
                 crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
             );
         }
-        for framer in [&escape, &mouse] {
+        for framer in [&escape, &sgr_mouse, &default_mouse] {
             assert_eq!(
                 idle_flush_timeout_ms(framer, true),
                 crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
@@ -589,12 +618,19 @@ mod windows_tests {
     }
 
     #[test]
-    fn windows_crossterm_printable_press_is_text() {
+    fn windows_crossterm_printable_press_keeps_key_semantics_and_text() {
         let event = Event::Key(KeyEvent::new(KeyCode::Char('你'), KeyModifiers::empty()));
 
         assert_eq!(
             windows_crossterm_input_event(event),
-            Some(crate::protocol::ClientInputEvent::Text { codepoint: '你' })
+            Some(crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('你'),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: Some("你".to_string()),
+                source: crate::protocol::ClientKeySource::Synthesized,
+            })
         );
     }
 
@@ -689,6 +725,9 @@ mod windows_tests {
                 code: crate::protocol::ClientKeyCode::Char('d'),
                 modifiers: KeyModifiers::CONTROL.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Vt { bytes: vec![4] },
             }
         );
     }
@@ -709,6 +748,11 @@ mod windows_tests {
                 code: crate::protocol::ClientKeyCode::Up,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Vt {
+                    bytes: b"\x1b[A".to_vec()
+                },
             }
         );
     }
@@ -728,6 +772,9 @@ mod windows_tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Vt { bytes: vec![0x1b] },
             }
         );
     }
