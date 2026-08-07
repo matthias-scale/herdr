@@ -7,6 +7,14 @@ pub(super) const AGENT_PENDING_IDLE_RECHECK: std::time::Duration =
 const AGENT_PENDING_IDLE_CONFIRMATIONS: u8 = 3;
 pub(super) const AGENT_PENDING_IDLE_CAP: std::time::Duration =
     std::time::Duration::from_millis(700);
+/// Two seconds spans six 300ms identified-agent ticks and outlasts the 700ms
+/// pending-idle hold. It only has to cover a stall in a *stream*: a codex pane
+/// waiting on a tool keeps its progress line on screen for the whole wait --
+/// measured at 15s of an unchanged screen -- and is held Working by the rule
+/// that reads it, not by this window. Longer would keep a finished pane
+/// Working for no gain, since the turn-end hook reports idle either way.
+pub(super) const AGENT_RECENT_OUTPUT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(2);
 pub(super) const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration =
     std::time::Duration::from_millis(800);
 pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
@@ -206,6 +214,29 @@ pub(super) fn stable_visible_signal_refresh_due(
         })
 }
 
+pub(super) fn recent_agent_output(
+    agent: Option<Agent>,
+    output_seq: u64,
+    last_output_seq: &mut Option<u64>,
+    last_output_at: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if *last_output_seq != Some(output_seq) {
+        *last_output_seq = Some(output_seq);
+        if agent.is_some() {
+            *last_output_at = Some(now);
+        }
+    }
+
+    if agent.is_none() {
+        *last_output_at = None;
+        return false;
+    }
+
+    last_output_at
+        .is_some_and(|last_output| now.duration_since(last_output) <= AGENT_RECENT_OUTPUT_WINDOW)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DetectionTransitionDecision {
     NoPublish,
@@ -269,6 +300,7 @@ pub(super) struct ScreenDetectionPublishInput {
     pub(super) last_visible_working: bool,
     pub(super) last_visible_signal_refresh: Option<std::time::Instant>,
     pub(super) screen_detection: AgentDetection,
+    pub(super) recent_output: bool,
     pub(super) process_exited: bool,
     pub(super) agent_changed: bool,
     pub(super) now: std::time::Instant,
@@ -279,7 +311,16 @@ pub(super) fn decide_screen_detection_publish(
     pending_idle: &mut PendingIdleConfirmation,
 ) -> DetectionPublishDecision {
     let detection = input.screen_detection;
-    let new_state = crate::terminal::state::stabilize_agent_detection(detection);
+    let detected_state = crate::terminal::state::stabilize_agent_detection(detection);
+    let new_state = if input.recent_output
+        && detected_state == AgentState::Idle
+        && !detection.visible_idle
+        && !detection.visible_blocker
+    {
+        AgentState::Working
+    } else {
+        detected_state
+    };
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
     let visible_working = detection.visible_working && new_state == AgentState::Working;
@@ -361,6 +402,12 @@ pub(super) fn observe_detection_content_change(bytes: &[u8], detection_content_s
     }
 }
 
+pub(super) fn observe_agent_output(bytes: &[u8], output_seq: &AtomicU64) {
+    if !bytes.is_empty() {
+        output_seq.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub(super) fn mark_detection_content_changed(detection_content_seq: &AtomicU64) {
     detection_content_seq.fetch_add(1, Ordering::Relaxed);
 }
@@ -400,6 +447,7 @@ mod tests {
             last_visible_working: false,
             last_visible_signal_refresh: None,
             screen_detection,
+            recent_output: false,
             process_exited: false,
             agent_changed: false,
             now,
@@ -568,6 +616,112 @@ mod tests {
                 process_exited: false,
             }
         );
+    }
+
+    #[test]
+    fn recent_agent_output_promotes_plain_idle_detection_to_working() {
+        let now = std::time::Instant::now();
+        let mut input = screen_publish_input(
+            AgentState::Idle,
+            AgentDetection {
+                state: AgentState::Idle,
+                skip_state_update: false,
+                visible_idle: false,
+                visible_blocker: false,
+                visible_working: false,
+            },
+            now,
+        );
+        input.recent_output = true;
+        let mut pending_idle = PendingIdleConfirmation::default();
+
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::Publish {
+                state: AgentState::Working,
+                visible_idle: false,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+            }
+        );
+    }
+
+    #[test]
+    fn positive_idle_observation_wins_immediately_over_recent_agent_output() {
+        let now = std::time::Instant::now();
+        let mut input =
+            screen_publish_input(AgentState::Working, screen_detection(AgentState::Idle), now);
+        input.recent_output = true;
+        let mut pending_idle = PendingIdleConfirmation::default();
+
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::Publish {
+                state: AgentState::Idle,
+                visible_idle: true,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+            }
+        );
+    }
+
+    #[test]
+    fn recent_agent_output_expires_before_a_plain_idle_transition_completes() {
+        let now = std::time::Instant::now();
+        let mut last_output_seq = None;
+        let mut last_output_at = None;
+        assert!(recent_agent_output(
+            Some(Agent::Codex),
+            1,
+            &mut last_output_seq,
+            &mut last_output_at,
+            now,
+        ));
+
+        let expired_at = now + AGENT_RECENT_OUTPUT_WINDOW + std::time::Duration::from_millis(1);
+        assert!(!recent_agent_output(
+            Some(Agent::Codex),
+            1,
+            &mut last_output_seq,
+            &mut last_output_at,
+            expired_at,
+        ));
+
+        let plain_idle = AgentDetection {
+            state: AgentState::Idle,
+            skip_state_update: false,
+            visible_idle: false,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let mut input = screen_publish_input(AgentState::Working, plain_idle, expired_at);
+        input.recent_output = false;
+        let mut pending_idle = PendingIdleConfirmation::default();
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::NoPublish
+        );
+
+        for confirmation in 1..=3 {
+            input.now = expired_at + AGENT_PENDING_IDLE_RECHECK * confirmation;
+            let decision = decide_screen_detection_publish(input, &mut pending_idle);
+            if confirmation < 3 {
+                assert_eq!(decision, DetectionPublishDecision::NoPublish);
+            } else {
+                assert_eq!(
+                    decision,
+                    DetectionPublishDecision::Publish {
+                        state: AgentState::Idle,
+                        visible_idle: false,
+                        visible_blocker: false,
+                        visible_working: false,
+                        process_exited: false,
+                    }
+                );
+            }
+        }
     }
 
     #[test]
