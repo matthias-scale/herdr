@@ -277,7 +277,6 @@ pub struct TerminalState {
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
     metadata_report_sequences: HashMap<String, u64>,
     metadata_report_agents: HashMap<String, Agent>,
-    metadata_report_quarantined_sources: std::collections::HashSet<String>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
     /// Provider-reported background jobs owned by this agent thread. `None`
@@ -321,7 +320,6 @@ impl TerminalState {
             stale_full_lifecycle_hook_sessions: HashMap::new(),
             metadata_report_sequences: HashMap::new(),
             metadata_report_agents: HashMap::new(),
-            metadata_report_quarantined_sources: std::collections::HashSet::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             background_job_count: None,
@@ -2352,7 +2350,6 @@ impl TerminalState {
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
-        self.metadata_report_quarantined_sources.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;

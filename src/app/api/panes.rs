@@ -1462,12 +1462,6 @@ impl App {
                 );
             }
         }
-        if agent_session_id.is_none() && terminal.metadata_report_is_quarantined(&source) {
-            return encode_success(id, ResponseResult::Ok {});
-        }
-        if agent_session_id.is_some() && terminal.metadata_report_is_quarantined(&source) {
-            terminal.reanchor_metadata_report_source(&source);
-        }
         if terminal.metadata_report_blocked_by_process_exit(
             &source,
             agent_label.as_deref(),
