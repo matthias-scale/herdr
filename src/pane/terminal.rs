@@ -518,12 +518,6 @@ impl PaneTerminal {
         self.ghostty.clear_agent_osc_state()
     }
 
-    pub fn clear_agent_osc_state_for_session_replacement(&self) {
-        if let Ok(mut core) = self.ghostty.core.lock() {
-            core.agent_osc_state.clear_for_session_replacement();
-        }
-    }
-
     pub fn keyboard_protocol(
         &self,
         fallback: crate::input::KeyboardProtocol,

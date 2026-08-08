@@ -521,12 +521,6 @@ impl AgentOscStateTracker {
         self.latest_progress = None;
     }
 
-    pub(super) fn clear_for_session_replacement(&mut self) {
-        self.collector = OscStreamCollector::default();
-        self.latest_progress = None;
-        self.latest_title = None;
-        self.terminal_title = None;
-    }
 }
 
 /// Splits an OSC body at the first `;`, returning `(command, payload)`.
@@ -1026,17 +1020,6 @@ mod tests {
         assert_eq!(tracker.terminal_title(), Some("✳ 修复🙂标题"));
     }
 
-    #[test]
-    fn session_replacement_discards_in_flight_osc_sequence() {
-        let mut tracker = AgentOscStateTracker::default();
-        tracker.observe(b"\x1b]0;old session title");
-
-        tracker.clear_for_session_replacement();
-        tracker.observe(b"\x07");
-
-        assert_eq!(tracker.latest_title(), "");
-        assert_eq!(tracker.terminal_title(), None);
-    }
 
     #[cfg(unix)]
     #[test]

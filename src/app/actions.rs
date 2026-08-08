@@ -779,7 +779,13 @@ impl AppState {
                     })
                     .or_else(|| rows.iter().position(|row| row.matched))
             } else {
-                rows.iter().position(|row| row.matched)
+                // A tab label is now derived from its pane, so a single-pane tab
+                // renders a tab row and a pane row carrying the same text and both
+                // match. The pane is the concrete target, so skip the duplicate tab
+                // row rather than selecting the projection of the row below it.
+                rows.iter().position(|row| {
+                    row.matched && !navigator_row_is_duplicate_of_its_pane(&rows, row)
+                })
             };
             if let Some(idx) = idx {
                 self.navigator.selected = idx;
@@ -3131,9 +3137,6 @@ impl AppState {
             self.mark_session_dirty();
         }
         if mutation.session_replaced {
-            if let Some(pane) = self.workspaces[ws_idx].panes.get_mut(&pane_id) {
-                pane.seen = true;
-            }
             if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
                 self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
             }
@@ -5188,70 +5191,6 @@ mod tests {
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
     }
 
-    #[test]
-    fn agent_session_replacement_resets_seen_so_new_session_is_not_marked_done() {
-        let mut state = app_with_workspaces(&["test"]);
-        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
-        let terminal_id = state.workspaces[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        state.handle_app_event(AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Claude),
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal state")
-            .set_agent_session_ref(
-                "herdr:claude".into(),
-                "claude".into(),
-                crate::agent_resume::AgentSessionRef::id("claude-old"),
-                Some(1),
-            )
-            .expect("initial session should be accepted");
-        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
-
-        let updates = state.handle_app_event(AppEvent::AgentSessionReported {
-            pane_id,
-            source: "herdr:claude".into(),
-            agent_label: "claude".into(),
-            seq: Some(2),
-            session_ref: crate::agent_resume::AgentSessionRef::id("claude-new"),
-            session_start_source: Some("clear".into()),
-        });
-
-        assert_eq!(updates.len(), 1);
-        assert!(updates[0].session_ref_changed);
-        assert!(updates[0].seen);
-        assert!(state.workspaces[0].panes[&pane_id].seen);
-
-        state.active = None;
-        state.handle_app_event(AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Claude),
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        state.handle_app_event(AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Claude),
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        assert!(!state.workspaces[0].panes[&pane_id].seen);
-    }
 
     #[test]
     fn repro_a2_first_session_report_does_not_mark_unfocused_idle_pane_seen() {
@@ -6636,4 +6575,27 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
     }
+}
+
+/// True when `row` is a tab row whose only pane row carries the same label, which
+/// happens when the tab label was derived from that single pane. Selecting the tab
+/// row would shadow the concrete pane the query actually matched.
+fn navigator_row_is_duplicate_of_its_pane(rows: &[NavigatorRow], row: &NavigatorRow) -> bool {
+    let NavigatorTarget::Tab { ws_idx, tab_idx } = row.target else {
+        return false;
+    };
+    let mut panes = rows.iter().filter(|candidate| {
+        matches!(
+            candidate.target,
+            NavigatorTarget::Pane {
+                ws_idx: pane_ws,
+                tab_idx: pane_tab,
+                ..
+            } if pane_ws == ws_idx && pane_tab == tab_idx
+        )
+    });
+    let Some(only_pane) = panes.next() else {
+        return false;
+    };
+    panes.next().is_none() && only_pane.label == row.label
 }

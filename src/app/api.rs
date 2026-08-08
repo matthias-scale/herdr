@@ -345,25 +345,7 @@ impl App {
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
-        // The shared PTY channel cannot distinguish a late OSC title from the outgoing
-        // session from an early title from the incoming session, and hook-socket ordering
-        // is not guaranteed. On genuine replacement, choose the lower-cost failure mode:
-        // manual_label > OSC terminal title > context.work_title, so clearing falls back
-        // to the git-derived work title and self-corrects on the next incoming OSC
-        // emission. A briefly generic label costs less than a wrong title that persists.
         let pane_updates = self.state.handle_app_event(ev);
-        for update in &pane_updates {
-            if !update.session_replaced {
-                continue;
-            }
-            if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
-                &self.terminal_runtimes,
-                update.ws_idx,
-                update.pane_id,
-            ) {
-                runtime.clear_agent_osc_state_for_session_replacement();
-            }
-        }
         if pane_updates
             .iter()
             .any(|update| update.hook_work_context_changed)
