@@ -483,7 +483,19 @@ fn git_work_context_for_branch(
     let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) else {
         return context;
     };
-    let Some(pr) = value.as_array().and_then(|prs| prs.first()) else {
+    let Some(prs) = value.as_array() else {
+        return context;
+    };
+    // `--head` matches by branch name alone, so every fork with a branch of this
+    // name comes back. A PR whose head lives in this repository is unambiguously
+    // ours; otherwise only a single candidate is safe to attribute to this pane.
+    let same_repo = prs
+        .iter()
+        .find(|pr| pr.get("isCrossRepository").and_then(Value::as_bool) == Some(false));
+    let Some(pr) = same_repo.or(match prs.as_slice() {
+        [only] => Some(only),
+        _ => None,
+    }) else {
         return context;
     };
     if let Some(url) = pr.get("url").and_then(Value::as_str) {
@@ -503,9 +515,9 @@ fn gh_pr_view_args(branch: &str) -> Vec<String> {
         "--head",
         branch,
         "--json",
-        "url,statusCheckRollup",
+        "url,statusCheckRollup,isCrossRepository",
         "--limit",
-        "1",
+        "10",
     ]
     .into_iter()
     .map(str::to_string)
@@ -706,8 +718,8 @@ done
 [ -z "$expecting" ] || exit 2
 [ "$positionals" -eq 0 ] || exit 2
 [ "$head" = feat/MAT-27-branch-qualified ] || exit 2
-[ "$json" = url,statusCheckRollup ] || exit 2
-[ "$limit" = 1 ] || exit 2
+[ "$json" = url,statusCheckRollup,isCrossRepository ] || exit 2
+[ "$limit" = 10 ] || exit 2
 printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]'
 "#,
         );
@@ -906,6 +918,52 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             vec!["https://github.com/o/r/pull/8"]
         );
         assert_eq!(expired.cache_updates.len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_prefers_the_pr_whose_head_lives_in_this_repository() {
+        let dir = fixture_dir("same-repo-pr");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "master");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/stranger/r/pull/1\",\"statusCheckRollup\":[],\"isCrossRepository\":true},{\"url\":\"https://github.com/o/r/pull/2\",\"statusCheckRollup\":[],\"isCrossRepository\":false}]'\n",
+        );
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            output.observations[0].context.pr_urls,
+            vec!["https://github.com/o/r/pull/2"]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_reports_no_pr_when_only_unrelated_forks_share_the_branch_name() {
+        let dir = fixture_dir("ambiguous-fork-prs");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "master");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/a/r/pull/1\",\"statusCheckRollup\":[],\"isCrossRepository\":true},{\"url\":\"https://github.com/b/r/pull/2\",\"statusCheckRollup\":[],\"isCrossRepository\":true}]'\n",
+        );
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        let context = &output.observations[0].context;
+        assert!(context.pr_urls.is_empty());
+        assert!(context.preview_urls.is_empty());
+        assert_eq!(context.branch.as_deref(), Some("master"));
 
         let _ = std::fs::remove_dir_all(dir);
     }
