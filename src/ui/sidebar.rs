@@ -19,9 +19,12 @@ use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
+const PRIO_PANEL_HEADER_ROWS: u16 = 1;
+const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
+const TAB_PRIO_FIELD_WIDTH: usize = 2;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
@@ -59,6 +62,7 @@ pub(super) struct TabRowLayout {
     pub show_state_label: bool,
     pub title: String,
     pub agent_suffix: Option<String>,
+    pub foreground_process: Option<String>,
     pub background_jobs: Option<String>,
     pub activity_age: Option<String>,
 }
@@ -90,14 +94,16 @@ pub(super) fn tab_row_layout(
         .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
         .unwrap_or_default();
     let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
+    let prio_width = if entry.prio { TAB_PRIO_FIELD_WIDTH } else { 0 };
     let tab_title = entry
         .primary_tab_label
         .as_deref()
         .unwrap_or(DEFAULT_THREAD_TITLE);
-    let agent_suffix = (!title_repeats_agent_identity(entry, tab_title))
-        .then(|| tab_agent_suffix(entry.agent))
-        .flatten()
-        .map(|suffix| format!(" · {suffix}"));
+    let agent_suffix = (!entry.tab_label_leads_with_agent
+        && !title_repeats_agent_identity(entry, tab_title))
+    .then(|| tab_agent_suffix(entry.agent))
+    .flatten()
+    .map(|suffix| format!(" · {suffix}"));
     let agent_suffix_width = agent_suffix
         .as_deref()
         .map(display_width)
@@ -117,11 +123,41 @@ pub(super) fn tab_row_layout(
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
+    let activity_width = activity_age
+        .as_deref()
+        .map(|label| 1 + display_width(label))
+        .unwrap_or_default();
+    let mut foreground_process = entry
+        .foreground_process_name
+        .as_deref()
+        .map(|name| format!(" · {name}"));
+    if let Some(process) = foreground_process.as_mut() {
+        let process_budget = width.saturating_sub(
+            prefix_width
+                + prio_width
+                + full_status_width
+                + agent_suffix_width
+                + background_width
+                + activity_width
+                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH,
+        );
+        if process_budget < display_width(" · ") + 1 {
+            foreground_process = None;
+        } else {
+            *process = truncate_end(process, process_budget.min(display_width(process)));
+        }
+    }
+    let foreground_process_width = foreground_process
+        .as_deref()
+        .map(display_width)
+        .unwrap_or_default();
     if activity_age.as_deref().is_some_and(|label| {
         width
             < prefix_width
+                + prio_width
                 + full_status_width
                 + agent_suffix_width
+                + foreground_process_width
                 + background_width
                 + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
                 + 1
@@ -135,8 +171,10 @@ pub(super) fn tab_row_layout(
         .unwrap_or_default();
     if width
         < prefix_width
+            + prio_width
             + full_status_width
             + agent_suffix_width
+            + foreground_process_width
             + background_width
             + activity_width
             + 1
@@ -148,14 +186,24 @@ pub(super) fn tab_row_layout(
         .map(display_width)
         .unwrap_or_default();
     let show_state_label = width
-        > prefix_width + full_status_width + agent_suffix_width + background_width + activity_width;
+        > prefix_width
+            + prio_width
+            + full_status_width
+            + agent_suffix_width
+            + background_width
+            + activity_width;
     let status_width = if show_state_label {
         full_status_width
     } else {
         dot_status_width
     };
-    let fixed_width =
-        prefix_width + status_width + agent_suffix_width + background_width + activity_width;
+    let fixed_width = prefix_width
+        + prio_width
+        + status_width
+        + agent_suffix_width
+        + foreground_process_width
+        + background_width
+        + activity_width;
     let title = truncate_end(tab_title, width.saturating_sub(fixed_width));
 
     TabRowLayout {
@@ -163,6 +211,7 @@ pub(super) fn tab_row_layout(
         show_state_label,
         title,
         agent_suffix,
+        foreground_process,
         background_jobs,
         activity_age,
     }
@@ -192,12 +241,14 @@ pub(crate) struct AgentPanelEntry {
     pub pane_id: crate::layout::PaneId,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
+    pub tab_label_leads_with_agent: bool,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
     pub agent_label: Option<String>,
     pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
+    pub foreground_process_name: Option<String>,
     /// Current or most recently exited provider, used only to detect
     /// ambiguous multi-pane rollups. Rendering still uses `agent` so an exited
     /// provider never leaves a stale suffix on a single-pane row.
@@ -206,6 +257,7 @@ pub(crate) struct AgentPanelEntry {
     /// rolled-up tab whose panes have conflicting providers, while `agent`
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
+    pub prio: bool,
     pub state: AgentState,
     pub background_job_count: Option<u16>,
     pub seen: bool,
@@ -218,14 +270,79 @@ pub(crate) struct AgentPanelEntry {
     pub tab_first_pane: bool,
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, _split_ratio: f32) -> (Rect, Rect) {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+    // This is the single vertical partition for the expanded sidebar. All
+    // list geometry, scrolling, rendering, and hit-testing derive from it.
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
     }
-    // Both legacy callers receive the same unified content rectangle. The
-    // sidebar no longer has independent Spaces and Agents sections.
-    (content, content)
+    let max_panel_height = content.height.saturating_sub(MIN_WORKSPACE_LIST_ROWS);
+    let ratio = split_ratio.clamp(0.0, 1.0);
+    let panel_height = (f32::from(content.height) * ratio)
+        .round()
+        .clamp(1.0, f32::from(max_panel_height.max(1))) as u16;
+    let panel_height = panel_height
+        .clamp(1, content.height)
+        .min(max_panel_height.max(1));
+    let list_height = content.height.saturating_sub(panel_height);
+    (
+        Rect::new(content.x, content.y, content.width, list_height),
+        Rect::new(
+            content.x,
+            content.y + list_height,
+            content.width,
+            panel_height,
+        ),
+    )
+}
+
+fn expanded_sidebar_sections_for_app(app: &AppState, area: Rect) -> (Rect, Rect) {
+    let entries = prio_panel_entries(app, None);
+    let panel_collapsed = app.prio_panel_collapsed || entries.is_empty();
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height == 0 {
+        return (Rect::default(), Rect::default());
+    }
+
+    let entry_rows = entries.len().min(usize::from(u16::MAX)) as u16;
+    let minimum_panel_height = if panel_collapsed {
+        PRIO_PANEL_HEADER_ROWS
+    } else {
+        PRIO_PANEL_HEADER_ROWS.saturating_add(1)
+    };
+    let content_panel_height = if panel_collapsed {
+        PRIO_PANEL_HEADER_ROWS
+    } else {
+        PRIO_PANEL_HEADER_ROWS.saturating_add(entry_rows)
+    };
+    let split_ratio = if panel_collapsed {
+        f32::from(PRIO_PANEL_HEADER_ROWS) / f32::from(content.height)
+    } else {
+        app.sidebar_section_split.clamp(0.0, 1.0)
+    };
+    let split_panel_height = (f32::from(content.height) * split_ratio).floor() as u16;
+    let workspace_minimum = content
+        .height
+        .saturating_sub(MIN_WORKSPACE_LIST_ROWS)
+        .max(minimum_panel_height)
+        .min(content.height);
+    let panel_height = content_panel_height
+        .min(split_panel_height.max(minimum_panel_height))
+        .max(minimum_panel_height)
+        .min(workspace_minimum);
+    let list_height = content.height.saturating_sub(panel_height);
+
+    (
+        Rect::new(content.x, content.y, content.width, list_height),
+        Rect::new(
+            content.x,
+            content.y + list_height,
+            content.width,
+            panel_height,
+        ),
+    )
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -238,6 +355,26 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
 
 pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_sidebar_thread_entries_with_runtimes(app, None)
+}
+
+pub(crate) fn prio_panel_entries(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelEntry> {
+    let entries = match terminal_runtimes {
+        Some(terminal_runtimes) => sidebar_thread_entries_from(app, terminal_runtimes),
+        None => sidebar_thread_entries(app),
+    };
+    prio_panel_entries_from_entries(entries)
+}
+
+fn prio_panel_entries_from_entries(entries: Vec<AgentPanelEntry>) -> Vec<AgentPanelEntry> {
+    let tab_entries = aggregate_tab_entries(&entries);
+    entries
+        .into_iter()
+        .filter(|entry| entry.prio && entry.tab_first_pane)
+        .filter_map(|entry| tab_entries.get(&(entry.ws_idx, entry.tab_idx)).cloned())
+        .collect()
 }
 
 pub(crate) fn sidebar_thread_entries_from(
@@ -314,20 +451,13 @@ fn collect_agent_panel_entries_with_runtimes(
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
-                    let thread_title = ws
-                        .tabs
-                        .get(detail.tab_idx)
-                        .and_then(|tab| {
-                            tab.custom_name.clone().or_else(|| {
-                                tab.terminal_id(tab.layout.focused())
-                                    .and_then(|terminal_id| app.terminals.get(terminal_id))
-                                    .and_then(|terminal| {
-                                        terminal.manual_label.clone().or_else(|| {
-                                            terminal.effective_work_context().work_title.clone()
-                                        })
-                                    })
-                            })
-                        })
+                    let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    let projection = ws.tab_display_projection(&app.terminals, detail.tab_idx);
+                    let tab_label_leads_with_agent = projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.leads_with_agent_component());
+                    let thread_title = projection
+                        .map(|projection| projection.full_label())
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
                     AgentPanelEntry {
                         ws_idx,
@@ -335,14 +465,17 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: thread_title,
+                        tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
                         terminal_title_stripped: detail.terminal_title_stripped,
                         agent_label: Some(detail.agent_label),
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
+                        foreground_process_name: detail.foreground_process_name,
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
+                        prio,
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
@@ -413,6 +546,96 @@ fn tab_lifecycle_priority(state: AgentState, seen: bool) -> u8 {
         (AgentState::Idle, true) => 1,
         (AgentState::Unknown, _) => 0,
     }
+}
+
+fn aggregate_tab_entries(
+    entries: &[AgentPanelEntry],
+) -> std::collections::HashMap<(usize, usize), AgentPanelEntry> {
+    let mut aggregated = std::collections::HashMap::<
+        (usize, usize),
+        (AgentPanelEntry, bool, bool, bool, Option<String>),
+    >::new();
+
+    for entry in entries {
+        let key = (entry.ws_idx, entry.tab_idx);
+        let candidate = (entry.state, entry.seen);
+        aggregated
+            .entry(key)
+            .and_modify(
+                |(
+                    tab_entry,
+                    mixed_agents,
+                    has_agent,
+                    has_current_agent,
+                    first_foreground_process_name,
+                )| {
+                    if first_foreground_process_name.is_none() {
+                        *first_foreground_process_name = entry.foreground_process_name.clone();
+                    }
+                    if tab_entry.foreground_process_name.is_none() {
+                        tab_entry.foreground_process_name = first_foreground_process_name.clone();
+                    }
+                    if tab_lifecycle_priority(candidate.0, candidate.1)
+                        > tab_lifecycle_priority(tab_entry.state, tab_entry.seen)
+                    {
+                        tab_entry.state = candidate.0;
+                        tab_entry.seen = candidate.1;
+                        tab_entry.state_labels = entry.state_labels.clone();
+                        tab_entry.foreground_process_name = entry
+                            .foreground_process_name
+                            .clone()
+                            .or_else(|| first_foreground_process_name.clone());
+                    }
+                    tab_entry.activity_at = match (tab_entry.activity_at, entry.activity_at) {
+                        (Some(current), Some(candidate)) => Some(current.max(candidate)),
+                        (current, candidate) => current.or(candidate),
+                    };
+                    tab_entry.background_job_count =
+                        match (tab_entry.background_job_count, entry.background_job_count) {
+                            (Some(current), Some(candidate)) => {
+                                Some(current.saturating_add(candidate))
+                            }
+                            (current, candidate) => current.or(candidate),
+                        };
+                    if !*mixed_agents {
+                        match (tab_entry.agent_context, entry.agent_context) {
+                            (Some(current), Some(candidate)) if current != candidate => {
+                                tab_entry.agent_context = None;
+                                *mixed_agents = true;
+                            }
+                            (None, Some(candidate)) => tab_entry.agent_context = Some(candidate),
+                            _ => {}
+                        }
+                    }
+                    *has_agent |= entry.has_agent;
+                    *has_current_agent |= entry.agent.is_some();
+                },
+            )
+            .or_insert_with(|| {
+                (
+                    entry.clone(),
+                    false,
+                    entry.has_agent,
+                    entry.agent.is_some(),
+                    entry.foreground_process_name.clone(),
+                )
+            });
+    }
+
+    aggregated
+        .into_iter()
+        .map(
+            |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _))| {
+                let agent_context = (!mixed_agents).then_some(entry.agent_context).flatten();
+                entry.agent = (has_current_agent && !mixed_agents)
+                    .then_some(agent_context)
+                    .flatten();
+                entry.agent_context = agent_context;
+                entry.has_agent = has_agent;
+                (key, entry)
+            },
+        )
+        .collect()
 }
 
 pub(crate) fn workspace_parent_group_state(
@@ -531,101 +754,17 @@ fn sidebar_rows_inner(
                 let Some(entries) = agents_by_workspace.remove(&member_idx) else {
                     continue;
                 };
-                let tab_states = entries.iter().fold(
-                    std::collections::HashMap::<
-                        usize,
-                        (
-                            AgentState,
-                            bool,
-                            Option<std::time::Instant>,
-                            Option<u16>,
-                            Option<Agent>,
-                            bool,
-                            bool,
-                            bool,
-                        ),
-                    >::new(),
-                    |mut states, entry| {
-                        let candidate = (entry.state, entry.seen);
-                        states
-                            .entry(entry.tab_idx)
-                            .and_modify(|state| {
-                                if tab_lifecycle_priority(candidate.0, candidate.1)
-                                    > tab_lifecycle_priority(state.0, state.1)
-                                {
-                                    state.0 = candidate.0;
-                                    state.1 = candidate.1;
-                                }
-                                state.2 = match (state.2, entry.activity_at) {
-                                    (Some(current), Some(candidate)) => {
-                                        Some(current.max(candidate))
-                                    }
-                                    (current, candidate) => current.or(candidate),
-                                };
-                                state.3 = match (state.3, entry.background_job_count) {
-                                    (Some(current), Some(candidate)) => {
-                                        Some(current.saturating_add(candidate))
-                                    }
-                                    (current, candidate) => current.or(candidate),
-                                };
-                                if !state.5 {
-                                    match (state.4, entry.agent_context) {
-                                        (Some(current), Some(candidate))
-                                            if current != candidate =>
-                                        {
-                                            state.4 = None;
-                                            state.5 = true;
-                                        }
-                                        (None, Some(candidate)) => state.4 = Some(candidate),
-                                        _ => {}
-                                    }
-                                }
-                                state.6 |= entry.has_agent;
-                                state.7 |= entry.agent.is_some();
-                            })
-                            .or_insert((
-                                candidate.0,
-                                candidate.1,
-                                entry.activity_at,
-                                entry.background_job_count,
-                                entry.agent_context,
-                                false,
-                                entry.has_agent,
-                                entry.agent.is_some(),
-                            ));
-                        states
-                    },
-                );
+                let tab_entries = aggregate_tab_entries(&entries);
                 let mut current_tab = None;
                 for entry in entries {
-                    let tab = entry.tab_idx;
+                    let tab = (entry.ws_idx, entry.tab_idx);
                     if current_tab != Some(tab) {
-                        let mut tab_entry = entry.clone();
-                        if let Some((
-                            state,
-                            seen,
-                            activity_at,
-                            background_job_count,
-                            agent,
-                            mixed_agents,
-                            has_agent,
-                            has_current_agent,
-                        )) = tab_states.get(&tab)
-                        {
-                            tab_entry.state = *state;
-                            tab_entry.seen = *seen;
-                            tab_entry.activity_at = *activity_at;
-                            tab_entry.background_job_count = *background_job_count;
-                            tab_entry.agent = (!mixed_agents && *has_current_agent)
-                                .then_some(*agent)
-                                .flatten();
-                            tab_entry.agent_context = (!mixed_agents).then_some(*agent).flatten();
-                            tab_entry.has_agent = *has_agent;
+                        if let Some(tab_entry) = tab_entries.get(&tab).cloned() {
+                            rows.push(SidebarRow::Tab {
+                                entry: Box::new(tab_entry),
+                                depth,
+                            });
                         }
-                        rows.push(SidebarRow::Tab {
-                            entry: Box::new(tab_entry),
-                            depth,
-                        });
                         current_tab = Some(tab);
                     }
                 }
@@ -652,7 +791,7 @@ pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -776,9 +915,14 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
     let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
     ws_area
+}
+
+pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
+    expanded_sidebar_sections_for_app(app, area).0
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -890,7 +1034,7 @@ pub(crate) fn sidebar_row_scroll_for_target(
     current_scroll: usize,
     target: usize,
 ) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     let max_scroll = workspace_list_bottom_start(app, ws_area);
     if target < current_scroll {
         return target.min(max_scroll);
@@ -972,7 +1116,7 @@ pub(crate) fn compute_sidebar_row_areas(
     Vec<crate::app::state::WorkspaceCardArea>,
     Vec<crate::app::state::AgentCardArea>,
 ) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -1047,7 +1191,7 @@ pub(crate) fn compute_tab_card_areas(
     app: &AppState,
     area: Rect,
 ) -> Vec<crate::app::state::TabCardArea> {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
     let mut y = body.y;
@@ -1101,6 +1245,59 @@ pub(crate) fn workspace_agent_chevron_rect(
         return Rect::default();
     }
     Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
+}
+
+pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {
+    if panel.width < 2 || panel.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(panel.x.saturating_add(1), panel.y, 1, 1)
+}
+
+fn prio_panel_body(panel: Rect) -> Rect {
+    Rect::new(
+        panel.x,
+        panel.y.saturating_add(PRIO_PANEL_HEADER_ROWS),
+        panel.width,
+        panel.height.saturating_sub(PRIO_PANEL_HEADER_ROWS),
+    )
+}
+
+fn prio_panel_entry_row_count(entry_count: usize, body_height: u16) -> usize {
+    let available_rows = usize::from(body_height);
+    if entry_count > available_rows {
+        available_rows.saturating_sub(1)
+    } else {
+        entry_count
+    }
+}
+
+pub(crate) fn compute_prio_panel_row_areas(
+    app: &AppState,
+    area: Rect,
+) -> Vec<crate::app::state::PrioPanelRowArea> {
+    let (_, panel) = expanded_sidebar_sections_for_app(app, area);
+    let body = prio_panel_body(panel);
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+
+    let entries = prio_panel_entries(app, None);
+    let row_count = prio_panel_entry_row_count(entries.len(), body.height);
+    entries
+        .into_iter()
+        .take(row_count)
+        .enumerate()
+        .map(|(row, entry)| crate::app::state::PrioPanelRowArea {
+            ws_idx: entry.ws_idx,
+            tab_idx: entry.tab_idx,
+            rect: Rect::new(body.x, body.y + row as u16, body.width, 1),
+        })
+        .collect()
+}
+
+pub(crate) fn prio_panel_rect(app: &AppState, area: Rect) -> Rect {
+    expanded_sidebar_sections_for_app(app, area).1
 }
 
 #[cfg(test)]
@@ -1387,9 +1584,186 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, _) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, panel_area) = expanded_sidebar_sections_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    render_prio_panel(app, terminal_runtimes, frame, panel_area, area);
     render_sidebar_header(app, frame, area, p);
+}
+
+fn render_prio_panel(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    panel: Rect,
+    sidebar_area: Rect,
+) {
+    if panel.width == 0 || panel.height == 0 {
+        return;
+    }
+
+    let p = &app.palette;
+    let entries = prio_panel_entries(app, Some(terminal_runtimes));
+    let expanded = !app.prio_panel_collapsed && !entries.is_empty();
+    let chevron = if expanded { "▾" } else { "▸" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(chevron, Style::default().fg(p.accent)),
+            Span::raw(" "),
+            Span::styled(
+                "PRIO",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect::new(panel.x, panel.y, panel.width, PRIO_PANEL_HEADER_ROWS),
+    );
+
+    if !expanded {
+        return;
+    }
+
+    let body = prio_panel_body(panel);
+    let rows = compute_prio_panel_row_areas(app, sidebar_area);
+    for row in &rows {
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.ws_idx == row.ws_idx && entry.tab_idx == row.tab_idx)
+        else {
+            continue;
+        };
+        render_prio_panel_row(app, frame, entry, row.rect);
+    }
+    if rows.len() < entries.len() && body.width > 0 && body.height > 0 {
+        let indicator = Rect::new(
+            body.x,
+            body.y.saturating_add(rows.len() as u16),
+            body.width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(format!("  +{} more", entries.len() - rows.len()))
+                .style(Style::default().fg(p.overlay0)),
+            indicator,
+        );
+    }
+}
+
+fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEntry, rect: Rect) {
+    let p = &app.palette;
+    let width = usize::from(rect.width);
+    let prefix = "  ";
+    let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
+    let workspace = entry.primary_label.as_str();
+    // The tab label already opens with the agent when the projection derived it, so
+    // appending the provider here would repeat it in the same row.
+    let agent = (!entry.tab_label_leads_with_agent)
+        .then(|| {
+            entry
+                .agent_kind_label
+                .as_deref()
+                .or(entry.agent_label.as_deref())
+                .or_else(|| tab_agent_suffix(entry.agent))
+        })
+        .flatten()
+        .map(|label| format!(" · {label}"));
+
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    push_prio_panel_span(&mut spans, &mut used, width, prefix, Style::default());
+    push_prio_panel_span(
+        &mut spans,
+        &mut used,
+        width,
+        "●",
+        Style::default().fg(p.peach),
+    );
+    push_prio_panel_span(&mut spans, &mut used, width, " ", Style::default());
+    push_prio_panel_span(&mut spans, &mut used, width, state_icon.0, state_icon.1);
+    push_prio_panel_span(&mut spans, &mut used, width, " ", Style::default());
+
+    let remaining = width.saturating_sub(used);
+    let agent_width = agent.as_deref().map(display_width).unwrap_or_default();
+    let include_agent = agent.as_ref().is_some_and(|_| {
+        remaining >= 1 + display_width(" · ") + display_width(workspace) + agent_width
+    });
+    let agent_width = if include_agent { agent_width } else { 0 };
+    if remaining > display_width(" · ") {
+        let workspace_width = display_width(workspace)
+            .min(remaining.saturating_sub(display_width(" · ") + agent_width + 1));
+        let title_width =
+            remaining.saturating_sub(display_width(" · ") + workspace_width + agent_width);
+        let title = truncate_end(
+            entry
+                .primary_tab_label
+                .as_deref()
+                .unwrap_or(DEFAULT_THREAD_TITLE),
+            title_width,
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            &title,
+            Style::default().fg(p.subtext0),
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            " · ",
+            Style::default().fg(p.overlay0),
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            &truncate_end(workspace, workspace_width),
+            Style::default().fg(p.overlay1),
+        );
+        if include_agent {
+            if let Some(agent) = agent {
+                push_prio_panel_span(
+                    &mut spans,
+                    &mut used,
+                    width,
+                    &agent,
+                    Style::default().fg(p.overlay0),
+                );
+            }
+        }
+    } else {
+        let title = truncate_end(
+            entry
+                .primary_tab_label
+                .as_deref()
+                .unwrap_or(DEFAULT_THREAD_TITLE),
+            remaining,
+        );
+        push_prio_panel_span(
+            &mut spans,
+            &mut used,
+            width,
+            &title,
+            Style::default().fg(p.subtext0),
+        );
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+fn push_prio_panel_span(
+    spans: &mut Vec<Span<'static>>,
+    used: &mut usize,
+    width: usize,
+    text: &str,
+    style: Style,
+) {
+    let clipped = truncate_end(text, width.saturating_sub(*used));
+    let clipped_width = display_width(&clipped);
+    if clipped_width == 0 {
+        return;
+    }
+    spans.push(Span::styled(clipped, style));
+    *used += clipped_width;
 }
 
 fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Palette) {
@@ -1819,6 +2193,10 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         app.status_indicators,
     );
     let mut spans = vec![Span::raw(prefix)];
+    if entry.prio {
+        spans.push(Span::styled("●", Style::default().fg(p.peach)));
+        spans.push(Span::raw(" "));
+    }
     if let Some(state) = layout.state.as_deref() {
         let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
         spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
@@ -1837,6 +2215,12 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
     spans.push(Span::styled(layout.title, style));
     if let Some(agent_suffix) = layout.agent_suffix {
         spans.push(Span::styled(agent_suffix, Style::default().fg(p.overlay1)));
+    }
+    if let Some(foreground_process) = layout.foreground_process {
+        spans.push(Span::styled(
+            foreground_process,
+            Style::default().fg(p.overlay0),
+        ));
     }
     if let Some(background_jobs) = layout.background_jobs {
         spans.push(Span::styled(
@@ -2163,6 +2547,45 @@ mod tests {
         app
     }
 
+    fn aggregation_entry(
+        state: AgentState,
+        seen: bool,
+        foreground_process_name: Option<&str>,
+        state_label: &str,
+    ) -> AgentPanelEntry {
+        let mut state_labels = std::collections::HashMap::new();
+        state_labels.insert(
+            agent_panel_status_key(state, seen).to_string(),
+            state_label.to_string(),
+        );
+        AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::alloc(),
+            primary_label: "workspace".into(),
+            primary_tab_label: Some("tab".into()),
+            tab_label_leads_with_agent: false,
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_label: None,
+            agent_kind_label: None,
+            agent: None,
+            foreground_process_name: foreground_process_name.map(str::to_string),
+            agent_context: None,
+            has_agent: true,
+            prio: true,
+            state,
+            background_job_count: None,
+            seen,
+            last_agent_state_change_seq: None,
+            activity_at: None,
+            state_labels,
+            tokens: std::collections::HashMap::new(),
+            tab_first_pane: false,
+        }
+    }
+
     fn row_kinds(app: &AppState) -> Vec<(char, usize)> {
         sidebar_rows(app)
             .into_iter()
@@ -2211,11 +2634,359 @@ mod tests {
             .iter()
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
-        assert!(
-            text.iter()
-                .any(|line| line.contains("New") && line.contains("· pi")),
-            "{text:?}"
+        assert!(text.iter().any(|line| line.contains("· pi")), "{text:?}");
+    }
+
+    #[test]
+    fn flagged_tab_renders_peach_prio_dot_before_state() {
+        let mut app = app_with_agents(&["one", "two"]);
+        app.workspaces[0].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 40, 20);
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let prio_cell = buffer
+            .cell((card.rect.x + 4, card.rect.y))
+            .expect("flagged tab should have a PRIO cell");
+        assert_eq!(prio_cell.symbol(), "●");
+        assert_eq!(prio_cell.fg, app.palette.peach);
+        assert!(row_text(buffer, card.rect.y, 39).contains("●"));
+    }
+
+    #[test]
+    fn prio_panel_renders_flagged_tab_in_bottom_rows_with_workspace_context() {
+        let mut app = app_with_agents(&["one", "two"]);
+        app.workspaces[1].tabs[0].custom_name = Some("review auth".into());
+        app.workspaces[1].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 40, 16);
+        let panel = prio_panel_rect(&app, area);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].rect.y > panel.y);
+        assert!(rows[0].rect.y < panel.y + panel.height);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width - 1);
+        assert!(rendered.contains("review auth"), "{rendered:?}");
+        assert!(rendered.contains("two"), "{rendered:?}");
+        assert!(rendered.contains("●"), "{rendered:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prio_panel_uses_runtime_workspace_label_like_sidebar() {
+        let mut app = app_with_agents(&["stale"]);
+        let stale_cwd = std::env::temp_dir().join(format!(
+            "herdr-prio-stale-{}-{}",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        ));
+        let live_cwd = std::env::temp_dir().join(format!(
+            "herdr-prio-live-{}-{}",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&stale_cwd).expect("create stale cwd");
+        std::fs::create_dir_all(&live_cwd).expect("create live cwd");
+
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .expect("root terminal")
+            .clone();
+        app.workspaces[0].custom_name = None;
+        app.workspaces[0].identity_cwd = stale_cwd.clone();
+        app.workspaces[0].cached_identity_cwd = stale_cwd.clone();
+        app.workspaces[0].cached_auto_label = "stale".into();
+        app.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd.clone();
+        app.workspaces[0].tabs[0].set_prio(true);
+
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            pane_id,
+            24,
+            80,
+            live_cwd.clone(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("spawn test runtime");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd() != Some(live_cwd.clone()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let runtime_cwd = runtime.cwd().expect("runtime cwd");
+        assert_eq!(
+            runtime_cwd.file_name(),
+            live_cwd.file_name(),
+            "runtime should retain the live cwd fixture"
         );
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+        let sidebar_entry = sidebar_thread_entries_from(&app, &runtimes)
+            .into_iter()
+            .next()
+            .expect("sidebar entry");
+        let prio_entry = prio_panel_entries(&app, Some(&runtimes))
+            .into_iter()
+            .next()
+            .expect("PRIO entry");
+
+        assert_eq!(prio_entry.primary_label, sidebar_entry.primary_label);
+        assert_eq!(
+            prio_entry.primary_label,
+            runtime_cwd
+                .file_name()
+                .expect("live cwd filename")
+                .to_string_lossy()
+        );
+        assert_ne!(
+            prio_entry.primary_label,
+            sidebar_thread_entries(&app)[0].primary_label
+        );
+
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(stale_cwd);
+        let _ = std::fs::remove_dir_all(live_cwd);
+    }
+
+    #[test]
+    fn tab_aggregation_uses_winner_labels_and_process_fallback() {
+        let winner = aggregation_entry(AgentState::Working, false, Some("cargo"), "winner working");
+        let first = aggregation_entry(AgentState::Idle, true, Some("zsh"), "first idle");
+        let aggregated = aggregate_tab_entries(&[first, winner])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+
+        assert_eq!(aggregated.state, AgentState::Working);
+        assert_eq!(
+            aggregated.state_labels.get("working").map(String::as_str),
+            Some("winner working")
+        );
+        assert_eq!(aggregated.foreground_process_name.as_deref(), Some("cargo"));
+
+        let winner_without_process =
+            aggregation_entry(AgentState::Working, false, None, "winner working");
+        let first_with_process =
+            aggregation_entry(AgentState::Idle, true, Some("zsh"), "first idle");
+        let fallback = aggregate_tab_entries(&[first_with_process, winner_without_process])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+        assert_eq!(fallback.foreground_process_name.as_deref(), Some("zsh"));
+    }
+
+    #[test]
+    fn prio_panel_height_matches_content_until_split_cap() {
+        let area = Rect::new(0, 0, 40, 16);
+
+        let mut one_entry = app_with_agents(&["one"]);
+        one_entry.workspaces[0].tabs[0].set_prio(true);
+        assert_eq!(prio_panel_rect(&one_entry, area).height, 2);
+
+        let mut two_entries = app_with_agents(&["one", "two"]);
+        for workspace in &mut two_entries.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        assert_eq!(prio_panel_rect(&two_entries, area).height, 3);
+
+        let mut many_entries = app_with_agents(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ]);
+        for workspace in &mut many_entries.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        assert_eq!(prio_panel_rect(&many_entries, area).height, 8);
+    }
+
+    #[test]
+    fn overflowing_prio_panel_shows_indicator_and_matches_hit_test_rows() {
+        let mut app = app_with_agents(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ]);
+        for workspace in &mut app.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        let area = Rect::new(0, 0, 40, 16);
+        let entries = prio_panel_entries(&app, None);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        let panel = prio_panel_rect(&app, area);
+        let body = Rect::new(
+            panel.x,
+            panel.y + PRIO_PANEL_HEADER_ROWS,
+            panel.width,
+            panel.height - PRIO_PANEL_HEADER_ROWS,
+        );
+        assert_eq!(entries.len(), 10);
+        assert_eq!(rows.len(), usize::from(body.height) - 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let indicator_row = body.y + body.height - 1;
+        assert!(
+            row_text(buffer, indicator_row, body.width).contains("+4 more"),
+            "{buffer:?}"
+        );
+        let rendered_entry_rows = (body.y..indicator_row)
+            .filter(|row| !row_text(buffer, *row, body.width).is_empty())
+            .count();
+        assert_eq!(rendered_entry_rows, rows.len());
+    }
+
+    #[test]
+    fn empty_prio_panel_has_header_only_without_empty_body() {
+        let app = app_with_agents(&["one"]);
+        let area = Rect::new(0, 0, 40, 16);
+        let panel = prio_panel_rect(&app, area);
+        assert_eq!(panel.height, PRIO_PANEL_HEADER_ROWS);
+        assert!(compute_prio_panel_row_areas(&app, area).is_empty());
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        assert!(row_text(terminal.backend().buffer(), panel.y, area.width - 1).contains("PRIO"));
+    }
+
+    #[test]
+    fn collapsing_prio_panel_expands_workspace_list_and_normalizes_scroll() {
+        let mut app = app_with_agents(&["one", "two", "three", "four", "five", "six"]);
+        for workspace in &mut app.workspaces {
+            workspace.tabs[0].set_prio(true);
+        }
+        let area = Rect::new(0, 0, 40, 12);
+        app.view.sidebar_rect = area;
+        app.workspace_scroll = usize::MAX;
+        let expanded_list_height = workspace_list_rect_for_app(&app, area).height;
+
+        let requested = app.workspace_scroll;
+        app.toggle_prio_panel();
+
+        assert!(app.prio_panel_collapsed);
+        assert!(workspace_list_rect_for_app(&app, area).height > expanded_list_height);
+        assert!(compute_prio_panel_row_areas(&app, area).is_empty());
+        assert_eq!(
+            app.workspace_scroll,
+            normalized_workspace_scroll(&app, area, requested)
+        );
+    }
+
+    #[test]
+    fn expanded_prio_panel_keeps_minimum_workspace_height_in_short_sidebar() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 30, 5);
+        let list = workspace_list_rect_for_app(&app, area);
+        assert!(list.height >= MIN_WORKSPACE_LIST_ROWS);
+    }
+
+    #[test]
+    fn unflagged_tab_keeps_title_column_and_has_no_peach_prio_dot() {
+        let app = app_with_agents(&["one", "two"]);
+        let area = Rect::new(0, 0, 40, 20);
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. }
+                    if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
+                {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .expect("tab row should exist");
+        let title = entry
+            .primary_tab_label
+            .as_deref()
+            .expect("test tab should have a title");
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            39,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let title_start = (card.rect.x..card.rect.x + card.rect.width)
+            .find(|x| {
+                buffer.cell((*x, card.rect.y)).is_some_and(|cell| {
+                    cell.symbol() == layout.title.chars().next().unwrap_or_default().to_string()
+                })
+            })
+            .expect("unflagged title should be visible");
+        let mut flagged = app_with_agents(&["one", "two"]);
+        flagged.workspaces[0].tabs[0].set_prio(true);
+        let mut flagged_terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        flagged_terminal
+            .draw(|frame| render_sidebar(&flagged, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let flagged_card = compute_tab_card_areas(&flagged, area)[0].clone();
+        let flagged_buffer = flagged_terminal.backend().buffer();
+        let flagged_title_start = (flagged_card.rect.x
+            ..flagged_card.rect.x + flagged_card.rect.width)
+            .find(|x| {
+                flagged_buffer
+                    .cell((*x, flagged_card.rect.y))
+                    .is_some_and(|cell| {
+                        cell.symbol() == layout.title.chars().next().unwrap_or_default().to_string()
+                    })
+            })
+            .expect("flagged title should be visible");
+        assert_eq!(
+            flagged_title_start,
+            title_start + TAB_PRIO_FIELD_WIDTH as u16
+        );
+        assert_ne!(
+            buffer.cell((card.rect.x + 4, card.rect.y)).unwrap().fg,
+            app.palette.peach
+        );
+        assert!(row_text(buffer, card.rect.y, 39).contains(title));
+    }
+
+    #[test]
+    fn narrow_flagged_tab_budget_truncates_title() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("a deliberately long tab title".into());
+        app.workspaces[0].tabs[0].set_prio(true);
+        let area = Rect::new(0, 0, 18, 12);
+        let mut terminal = Terminal::new(TestBackend::new(18, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 17);
+        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(
+            !rendered.contains("deliberately long tab title"),
+            "{rendered:?}"
+        );
+        assert!(rendered.chars().count() <= 17, "{rendered:?}");
     }
 
     #[test]
@@ -2379,10 +3150,7 @@ mod tests {
             .filter(|entry| entry.ws_idx == 0)
             .collect::<Vec<_>>();
         assert_eq!(empty_threads.len(), 1);
-        assert_eq!(
-            empty_threads[0].primary_tab_label.as_deref(),
-            Some(DEFAULT_THREAD_TITLE)
-        );
+        assert_eq!(empty_threads[0].primary_tab_label.as_deref(), Some("1"));
         assert_eq!(empty_threads[0].agent, None);
         assert!(all_agent_panel_entries(&app)
             .iter()
@@ -2820,6 +3588,7 @@ mod tests {
             sidebar_width: Some(24),
             sidebar_section_split: Some(0.4),
             collapsed_space_keys: std::collections::HashSet::new(),
+            prio_panel_collapsed: false,
         };
         let value = serde_json::to_value(snapshot).unwrap();
         let object = value.as_object().unwrap();
@@ -2862,7 +3631,11 @@ row_gap = 1
         let area = Rect::new(0, 0, 31, 20);
         assert_eq!(
             expanded_sidebar_sections(area, 0.1),
-            expanded_sidebar_sections(area, 0.9)
+            (Rect::new(0, 0, 30, 18), Rect::new(0, 18, 30, 2))
+        );
+        assert_eq!(
+            expanded_sidebar_sections(area, 0.9),
+            (Rect::new(0, 0, 30, 3), Rect::new(0, 3, 30, 17))
         );
     }
 
@@ -3302,6 +4075,151 @@ row_gap = 1
     }
 
     #[test]
+    fn expanded_tab_row_renders_cached_foreground_process_name() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.workspaces[0].tabs[0].custom_name = Some("release ticket".into());
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("cargo".into());
+
+        let area = Rect::new(0, 0, 60, 12);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = &compute_tab_card_areas(&app, area)[0];
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+
+        assert!(rendered.contains("cargo"), "{rendered:?}");
+        assert!(rendered.contains("release ticket"), "{rendered:?}");
+    }
+
+    #[test]
+    fn shell_only_foreground_cache_renders_no_extra_process() {
+        let app = app_with_agents(&["one"]);
+        let area = Rect::new(0, 0, 60, 12);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = &compute_tab_card_areas(&app, area)[0];
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+
+        assert!(!rendered.contains("zsh"), "{rendered:?}");
+        assert!(!rendered.contains("cargo"), "{rendered:?}");
+    }
+
+    #[test]
+    fn foreground_process_is_dropped_before_existing_tab_details() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("ticket".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("cargo".into());
+        let entry = sidebar_thread_entries(&app).remove(0);
+
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            24,
+            1,
+            &app.palette,
+            app.status_indicators,
+        );
+
+        assert!(layout.foreground_process.is_none());
+        assert!(layout.agent_suffix.is_some());
+        assert!(display_width(&layout.title) >= TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH);
+    }
+
+    #[test]
+    fn foreground_process_drops_before_activity_age_in_width_ladder() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("ticket".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("node".into());
+        let mut entry = sidebar_thread_entries(&app).remove(0);
+        entry.background_job_count = Some(1);
+        entry.activity_at = Some(
+            app.view_observed_at
+                .checked_sub(std::time::Duration::from_secs(12 * 60))
+                .expect("activity timestamp before observation time"),
+        );
+
+        // At this width the old ladder kept "node" while dropping "12m ago".
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            32,
+            1,
+            &app.palette,
+            app.status_indicators,
+        );
+
+        assert!(layout.foreground_process.is_none());
+        assert!(layout.activity_age.is_none());
+        assert!(layout.background_jobs.is_some());
+    }
+
+    #[test]
+    fn long_foreground_process_name_is_truncated_to_its_budget() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .foreground_process_name = Some("foreground-process-name".into());
+        let entry = sidebar_thread_entries(&app).remove(0);
+
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            32,
+            1,
+            &app.palette,
+            app.status_indicators,
+        );
+        let process = layout
+            .foreground_process
+            .expect("process should fit partially");
+
+        assert_ne!(process, " · foreground-process-name");
+        let used_width = 1
+            + layout
+                .state
+                .as_deref()
+                .map(|state| display_width(state) + 2 + display_width("●") + 3)
+                .unwrap_or_default()
+            + display_width(&layout.title)
+            + layout
+                .agent_suffix
+                .as_deref()
+                .map(display_width)
+                .unwrap_or_default()
+            + display_width(&process);
+        assert!(used_width <= 32, "used width: {used_width}");
+    }
+
+    #[test]
     fn review_findings_activity_deadlines_follow_visible_age_fields() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -3384,9 +4302,179 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let buffer = terminal.backend().buffer();
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(buffer, tab_row, 25);
-        assert!(rendered.contains("New Th"), "{rendered:?}");
-        assert!(rendered.contains("· pi"), "{rendered:?}");
+        assert!(!rendered.contains("New Th"), "{rendered:?}");
+        assert!(rendered.contains("pi"), "{rendered:?}");
         assert!(compute_agent_card_areas(&app, area).is_empty());
+    }
+
+    #[test]
+    fn sidebar_tab_row_uses_live_agent_title() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("⠋ Add Subabe management token to Doppler".into()));
+
+        let entries = sidebar_thread_entries(&app);
+        assert_eq!(
+            entries[0].primary_tab_label.as_deref(),
+            Some("pi · Add Subabe management token to Doppler")
+        );
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+        assert!(rendered.contains("Add Subabe"), "{rendered:?}");
+    }
+
+    #[test]
+    fn sidebar_and_tab_bar_render_the_same_agent_title() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("Fix billing".into()));
+
+        let area = Rect::new(0, 0, 60, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+
+        let tab_bar_label = crate::ui::tabs::tab_chrome_label(
+            &app.workspaces[0],
+            &app.terminals,
+            0,
+            usize::from(area.width),
+        );
+        assert_eq!(tab_bar_label, "pi · Fix billing");
+        assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
+        // The projection already names the agent, so the sidebar must not append
+        // the provider chip on top of it.
+        assert!(
+            !rendered.contains("Fix billing · pi"),
+            "sidebar repeated the agent identity: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn split_tab_sidebar_and_tab_bar_share_agent_title_projection() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let root_pane = workspace.tabs[0].root_pane;
+        let focused_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let root_terminal = app.workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&root_terminal)
+            .expect("root terminal")
+            .detected_agent = Some(Agent::Pi);
+
+        let focused_terminal = app.workspaces[0].tabs[0].panes[&focused_pane]
+            .attached_terminal_id
+            .clone();
+        let focused = app
+            .terminals
+            .get_mut(&focused_terminal)
+            .expect("focused terminal");
+        focused.detected_agent = Some(Agent::Pi);
+        focused.agent_name = Some("Reviewer".into());
+        focused.set_terminal_title(Some("Fix billing".into()));
+        app.reconcile_sidebar_presentation();
+
+        let sidebar_entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("split tab sidebar row");
+        assert!(sidebar_entry.tab_label_leads_with_agent);
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+        let tab_bar_label = crate::ui::tabs::tab_chrome_label(
+            &app.workspaces[0],
+            &app.terminals,
+            0,
+            usize::from(area.width),
+        );
+
+        assert_eq!(tab_bar_label, "Reviewer · Fix billing");
+        assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
+        assert!(
+            !rendered.contains("Reviewer · Fix billing · pi"),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn prio_row_omits_the_provider_when_the_tab_label_already_leads_with_it() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let focused_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].set_prio(true);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let focused_terminal = app.workspaces[0].tabs[0].panes[&focused_pane]
+            .attached_terminal_id
+            .clone();
+        let focused = app
+            .terminals
+            .get_mut(&focused_terminal)
+            .expect("focused terminal");
+        focused.detected_agent = Some(Agent::Pi);
+        focused.agent_name = Some("Reviewer".into());
+        focused.set_terminal_title(Some("Fix billing".into()));
+        app.reconcile_sidebar_presentation();
+
+        let entry = prio_panel_entries(&app, None)
+            .into_iter()
+            .next()
+            .expect("prio entry");
+        assert!(entry.tab_label_leads_with_agent);
+
+        let area = Rect::new(0, 0, 60, 16);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        assert_eq!(rows.len(), 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
+
+        assert!(
+            rendered.contains("Reviewer · Fix billing · one"),
+            "{rendered:?}"
+        );
+        assert!(!rendered.contains("one · "), "{rendered:?}");
     }
 
     #[test]
@@ -3802,9 +4890,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             labels,
             [
-                ("auto", Some("New Thread")),
+                ("auto", Some("pi")),
                 ("custom", Some("focus")),
-                ("multi", Some("New Thread")),
+                ("multi", Some("codex")),
                 ("multi", Some("logs")),
             ]
         );
@@ -4054,8 +5142,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn expanded_sidebar_sections_handle_tiny_heights() {
         let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
 
-        assert_eq!(ws_area, Rect::new(0, 0, 19, 5));
-        assert_eq!(detail_area, ws_area);
+        assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
+        assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
     }
 
     #[test]
@@ -4248,6 +5336,119 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].background_job_count, Some(3));
+    }
+
+    #[test]
+    fn prio_panel_aggregates_state_activity_and_jobs_across_tab_panes() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].prio = true;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let started = std::time::Instant::now();
+        let blocked_at = started + std::time::Duration::from_secs(5);
+        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                started,
+            );
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Idle,
+                false,
+                true,
+                false,
+                false,
+                started + std::time::Duration::from_secs(1),
+            );
+        app.terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .background_job_count = Some(1);
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .seen = true;
+
+        let second_terminal = app.workspaces[0].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Blocked,
+                true,
+                false,
+                false,
+                false,
+                blocked_at,
+            );
+        app.terminals
+            .get_mut(&second_terminal)
+            .unwrap()
+            .background_job_count = Some(2);
+        app.view_observed_at = blocked_at + std::time::Duration::from_secs(60);
+        app.reconcile_sidebar_presentation();
+
+        let sidebar_tab = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("sidebar tab row");
+        let prio_tab = prio_panel_entries(&app, None)
+            .into_iter()
+            .find(|entry| entry.ws_idx == 0 && entry.tab_idx == 0)
+            .expect("PRIO tab row");
+
+        assert_eq!(prio_tab.state, AgentState::Blocked);
+        assert_eq!(prio_tab.activity_at, sidebar_tab.activity_at);
+        assert_eq!(
+            prio_tab.background_job_count,
+            sidebar_tab.background_job_count
+        );
+        assert_eq!(prio_tab.background_job_count, Some(3));
+        assert_eq!(
+            tab_row_layout(
+                &prio_tab,
+                app.view_observed_at,
+                80,
+                1,
+                &app.palette,
+                app.status_indicators
+            )
+            .activity_age,
+            tab_row_layout(
+                &sidebar_tab,
+                app.view_observed_at,
+                80,
+                1,
+                &app.palette,
+                app.status_indicators
+            )
+            .activity_age
+        );
     }
 
     #[test]
@@ -4768,7 +5969,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.mode = Mode::Terminal;
         app.workspace_scroll = 1;
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 2));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);
@@ -4987,9 +6188,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.title, "Codex");
+        assert_eq!(layout.title, "codex · Codex");
         assert_eq!(layout.state.as_deref(), Some("working"));
-        assert_eq!(layout.agent_suffix, None);
+        // The derived projection already leads with the agent, so no provider chip.
+        assert_eq!(layout.agent_suffix.as_deref(), None);
 
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal
@@ -5008,8 +6210,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.title, "manual pane");
+        assert_eq!(layout.title, "codex · manual pane");
         assert_eq!(layout.state.as_deref(), Some("working"));
-        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
+        assert_eq!(layout.agent_suffix.as_deref(), None);
     }
 }

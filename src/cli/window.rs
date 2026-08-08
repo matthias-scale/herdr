@@ -77,6 +77,7 @@ mod tests {
             workspace_id: "workspace".into(),
             number: 1,
             label: id.into(),
+            prio: false,
             focused,
             pane_count: 1,
             agent_status: AgentStatus::Idle,

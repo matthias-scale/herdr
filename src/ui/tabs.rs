@@ -530,9 +530,18 @@ mod tests {
         let row = buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0);
         assert!(row.contains(" 1 Z"), "tab row: {row:?}");
         assert!(row.contains(" test Z"), "tab row: {row:?}");
-        assert_eq!(app.workspaces[0].tab_display_name(0).as_deref(), Some("1"));
         assert_eq!(
-            app.workspaces[0].tab_display_name(custom_tab).as_deref(),
+            app.workspaces[0]
+                .tab_display_projection(&app.terminals, 0)
+                .map(|projection| projection.full_label())
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            app.workspaces[0]
+                .tab_display_projection(&app.terminals, custom_tab)
+                .map(|projection| projection.full_label())
+                .as_deref(),
             Some("test")
         );
     }
@@ -579,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_tab_projection_uses_focused_context_order_manual_precedence_and_cell_fallbacks() {
+    fn tab_projection_prefers_detected_agent_title_and_degrades_by_width() {
         let mut app = AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let other = ws.test_split(ratatui::layout::Direction::Horizontal);
@@ -603,17 +612,19 @@ mod tests {
         let focused_terminal = app.workspaces[0].terminal_id(other).cloned().unwrap();
         let focused = app.terminals.get_mut(&focused_terminal).unwrap();
         focused.agent_name = Some("Claude".into());
+        focused.detected_agent = Some(crate::detect::Agent::Claude);
+        focused.set_terminal_title(Some("⠋ Add Subabe management token to Doppler".into()));
         focused
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
                 ticket_ids: Some(vec!["SCA-42".into()]),
-                work_title: Some("修复登录回归".into()),
+                work_title: Some("Review If Context Correctly Enriched Herdr Plus".into()),
                 ..Default::default()
             })
             .unwrap();
 
         assert_eq!(
             tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 80),
-            "Claude · SCA-42 · 修复登录回归"
+            "Claude · SCA-42 · Add Subabe management token to Doppler"
         );
         assert_eq!(
             tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 15),
@@ -628,6 +639,47 @@ mod tests {
         assert_eq!(
             tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 7),
             "手动名…"
+        );
+    }
+
+    #[test]
+    fn fit_tab_display_projection_truncates_only_after_component_fallbacks() {
+        use crate::workspace::TabDisplayProjection;
+
+        let projection = TabDisplayProjection::Derived {
+            agent: Some("Claude".into()),
+            ticket: Some("SCA-42".into()),
+            title: Some("repair login regression".into()),
+        };
+
+        assert_eq!(
+            fit_tab_display_projection(projection.clone(), 80),
+            "Claude · SCA-42 · repair login regression"
+        );
+        assert_eq!(
+            fit_tab_display_projection(projection.clone(), 15),
+            "Claude · SCA-42"
+        );
+        assert_eq!(fit_tab_display_projection(projection.clone(), 8), "SCA-42");
+        assert_eq!(fit_tab_display_projection(projection, 4), "SCA…");
+    }
+
+    #[test]
+    fn plain_shell_tab_bar_uses_number_instead_of_cwd_title() {
+        let mut app = AppState::test_new();
+        let ws = Workspace::test_new("test");
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0]
+            .terminal_id(app.workspaces[0].tabs[0].layout.focused())
+            .cloned()
+            .unwrap();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_terminal_title(Some("cx-personal-20260801-feature".into()));
+
+        assert_eq!(
+            tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 80),
+            "1"
         );
     }
 

@@ -2978,7 +2978,9 @@ command = ["show-ctx"]
         assert_eq!(context.workspace_label.as_deref(), Some("Plugin Work"));
         assert_eq!(context.workspace_cwd.as_deref(), Some("/tmp/issue"));
         assert_eq!(context.tab_id.as_deref(), Some(tab_public.as_str()));
-        assert_eq!(context.tab_label.as_deref(), Some("1"));
+        // The plugin context label now shares the tab bar's projection instead of the bare tab
+        // number, so a pane with a detected agent and no title reports the agent name.
+        assert_eq!(context.tab_label.as_deref(), Some("codex"));
         assert_eq!(
             context.focused_pane_id.as_deref(),
             Some(pane_public.as_str())

@@ -25,7 +25,7 @@ use self::git::git_status_cache_key_for_space;
 #[cfg(test)]
 pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand;
 pub(crate) use self::git::git_status_snapshot_for_cwd_with_demand_and_program;
-pub(crate) use self::tab::{MovedPane, TabDisplayProjection};
+pub(crate) use self::tab::{MovedPane, TabDisplayProjection, TabNameOrigin, TabPrioAction};
 pub use self::{
     git::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
@@ -499,17 +499,12 @@ impl Workspace {
         self.tabs.get_mut(self.active_tab)
     }
 
-    pub fn active_tab_display_name(&self) -> Option<String> {
-        self.tab_display_name(self.active_tab)
-    }
-
-    pub fn tab_display_name(&self, tab_idx: usize) -> Option<String> {
-        let tab = self.tabs.get(tab_idx)?;
-        Some(
-            tab.custom_name
-                .clone()
-                .unwrap_or_else(|| (tab_idx + 1).to_string()),
-        )
+    pub fn active_tab_display_name_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<String> {
+        self.tab_display_projection(terminals, self.active_tab)
+            .map(|projection| projection.full_label())
     }
 
     pub(crate) fn tab_display_projection(
@@ -525,6 +520,16 @@ impl Workspace {
             tab.work_context_display_projection(terminals)
                 .unwrap_or_else(|| TabDisplayProjection::Fallback((tab_idx + 1).to_string())),
         )
+    }
+
+    /// Resolve the live label shared by non-TUI contexts.
+    pub fn tab_display_name_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        tab_idx: usize,
+    ) -> Option<String> {
+        self.tab_display_projection(terminals, tab_idx)
+            .map(|projection| projection.full_label())
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -1508,12 +1513,14 @@ impl Workspace {
         panes.insert(root_id, PaneState::new(terminal_id));
         let tab = Tab {
             custom_name: None,
+            name_origin: TabNameOrigin::Structural,
             number: 1,
             root_pane: root_id,
             layout,
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
+            prio: false,
             events,
             render_notify,
             render_dirty,
@@ -1564,12 +1571,14 @@ impl Workspace {
         panes.insert(root_id, PaneState::new(TerminalId::alloc()));
         let tab = Tab {
             custom_name: name.map(str::to_string),
+            name_origin: TabNameOrigin::Structural,
             number: self.next_public_tab_number,
             root_pane: root_id,
             layout,
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
+            prio: false,
             events,
             render_notify,
             render_dirty,
@@ -2031,7 +2040,10 @@ mod tests {
         assert!(ws.move_tab(0, ws.tabs.len()));
 
         let labels: Vec<_> = (0..ws.tabs.len())
-            .map(|tab_idx| ws.tab_display_name(tab_idx).unwrap())
+            .map(|tab_idx| {
+                ws.tab_display_name_from(&HashMap::new(), tab_idx)
+                    .unwrap_or_else(|| (tab_idx + 1).to_string())
+            })
             .collect();
         assert_eq!(labels, vec!["foo", "2", "3"]);
         assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("foo"));

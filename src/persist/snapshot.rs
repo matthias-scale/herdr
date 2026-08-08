@@ -29,6 +29,8 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub prio_panel_collapsed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,9 +93,13 @@ struct LegacyWorkspaceSnapshot {
 pub struct TabSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
+    #[serde(default)]
+    pub name_origin: crate::workspace::TabNameOrigin,
     pub layout: LayoutSnapshot,
     pub panes: HashMap<u32, PaneSnapshot>,
     pub zoomed: bool,
+    #[serde(default)]
+    pub prio: bool,
     #[serde(default)]
     pub focused: Option<u32>,
     #[serde(default)]
@@ -164,9 +170,11 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
         let identity_cwd = legacy_identity_cwd(&snap);
         let tab = TabSnapshot {
             custom_name: None,
+            name_origin: Default::default(),
             layout: snap.layout,
             panes: snap.panes,
             zoomed: snap.zoomed,
+            prio: false,
             focused: snap.focused,
             root_pane: snap.root_pane,
         };
@@ -204,6 +212,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    prio_panel_collapsed: bool,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -220,6 +230,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        prio_panel_collapsed: raw.prio_panel_collapsed,
     })
 }
 
@@ -282,6 +293,7 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    prio_panel_collapsed: bool,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -295,6 +307,7 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        prio_panel_collapsed,
     }
 }
 
@@ -401,9 +414,11 @@ fn capture_tab(
     }
     TabSnapshot {
         custom_name: tab.custom_name.clone(),
+        name_origin: tab.name_origin,
         layout: capture_node(tab.layout.root()),
         panes,
         zoomed: tab.zoomed,
+        prio: tab.prio,
         focused: Some(tab.layout.focused().raw()),
         root_pane: Some(tab.root_pane.raw()),
     }
@@ -581,6 +596,7 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            state.prio_panel_collapsed,
         )
     }
 
@@ -646,6 +662,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            prio_panel_collapsed: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -653,6 +670,7 @@ mod tests {
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
         assert_eq!(restored.sidebar_section_split, Some(0.5));
+        assert!(!restored.prio_panel_collapsed);
     }
 
     #[test]
@@ -715,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn ac25_v4_snapshot_restore_discards_forbidden_preview_tiers() {
+    fn ac25_v4_snapshot_restore_preserves_git_preview_tier() {
         let state = state_with_workspaces(&["context"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let mut snapshot = capture_from_state(&state);
@@ -765,13 +783,16 @@ mod tests {
 
         let tiers = restored.work_context.snapshot_tiers();
         assert!(tiers.manual.preview_urls.is_empty());
-        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            tiers.git_observation.preview_urls,
+            preview_urls("git", crate::work_context::MAX_PREVIEW_URLS)
+        );
         assert_eq!(
             restored.effective_work_context().preview_urls,
             preview_urls("hook", 2)
                 .into_iter()
                 .chain(preview_urls(
-                    "fallback",
+                    "git",
                     crate::work_context::MAX_PREVIEW_URLS - 2,
                 ))
                 .collect::<Vec<_>>()
@@ -1100,6 +1121,7 @@ mod tests {
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
                     custom_name: Some("api".to_string()),
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
                         leading: false,
@@ -1109,6 +1131,7 @@ mod tests {
                     },
                     panes,
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1119,6 +1142,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            prio_panel_collapsed: false,
             version: SNAPSHOT_VERSION,
         };
 
@@ -1187,6 +1211,7 @@ mod tests {
 
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
+        assert!(!restored.prio_panel_collapsed);
     }
 
     #[test]
@@ -1279,6 +1304,25 @@ mod tests {
     }
 
     #[test]
+    fn tab_snapshot_without_name_origin_defaults_to_structural() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.workspaces[0].tabs[0].set_prio(true);
+        let snapshot = capture_from_state(&state);
+        assert!(snapshot.workspaces[0].tabs[0].prio);
+        let mut value = serde_json::to_value(&snapshot.workspaces[0].tabs[0]).unwrap();
+        value.as_object_mut().unwrap().remove("name_origin");
+        value.as_object_mut().unwrap().remove("prio");
+
+        let restored: TabSnapshot = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            restored.name_origin,
+            crate::workspace::TabNameOrigin::Structural
+        );
+        assert!(!restored.prio);
+    }
+
+    #[test]
     fn capture_contract_tracks_workspace_closure() {
         let mut state = state_with_workspaces(&["one", "two"]);
         state.selected = 1;
@@ -1299,11 +1343,16 @@ mod tests {
         state.sidebar_width = 31;
         state.sidebar_section_split = 0.4;
         state.collapsed_space_keys.insert("repo-key".into());
+        state.prio_panel_collapsed = true;
 
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.sidebar_width, Some(31));
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
         assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+        assert!(snapshot.prio_panel_collapsed);
+
+        let restored = parse_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert!(restored.prio_panel_collapsed);
     }
 
     #[test]
@@ -1674,6 +1723,7 @@ mod tests {
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
                         leading: false,
@@ -1683,6 +1733,7 @@ mod tests {
                     },
                     panes,
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1693,6 +1744,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            prio_panel_collapsed: false,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

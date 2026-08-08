@@ -30,6 +30,32 @@ pub struct TabRenameParams {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct TabPrioParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub mode: TabPrioMode,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TabPrioMode {
+    #[default]
+    Toggle,
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabPrioResult {
+    pub changed: bool,
+    pub tab_id: String,
+    pub prio: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabMoveParams {
     pub tab_id: String,
@@ -42,6 +68,7 @@ pub struct TabInfo {
     pub workspace_id: String,
     pub number: usize,
     pub label: String,
+    pub prio: bool,
     pub focused: bool,
     pub pane_count: usize,
     pub agent_status: AgentStatus,

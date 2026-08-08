@@ -12,7 +12,7 @@ use crate::layout::PaneId;
 use crate::layout::{find_in_direction, NavDirection};
 use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
-use crate::workspace::WorkspaceGitStatus;
+use crate::workspace::{TabPrioAction, WorkspaceGitStatus};
 
 use super::api_helpers::pane_agent_status;
 use super::state::{
@@ -217,6 +217,10 @@ fn sound_for_toast_kind(
 
 pub fn notification_context(
     ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
     workspace_label: &str,
     ws_idx: usize,
     pane_id: PaneId,
@@ -224,9 +228,11 @@ pub fn notification_context(
     let mut context = format!("{} · {}", workspace_label, ws_idx + 1);
     if ws.tabs.len() > 1 {
         if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
-            if let Some(label) = ws.tab_display_name(tab_idx) {
-                context.push_str(&format!(" · {label}"));
-            }
+            let label = ws
+                .tab_display_projection(terminals, tab_idx)
+                .map(|projection| projection.full_label())
+                .unwrap_or_else(|| (tab_idx + 1).to_string());
+            context.push_str(&format!(" · {label}"));
         }
     }
     context
@@ -247,6 +253,8 @@ pub struct PaneStateUpdate {
     pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
     pub agent_name_changed: bool,
+    pub session_ref_changed: bool,
+    pub session_replaced: bool,
     pub hook_work_context_changed: bool,
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
@@ -257,6 +265,19 @@ pub struct PaneStateUpdate {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    pub(crate) fn apply_tab_prio(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+        action: TabPrioAction,
+    ) -> Option<bool> {
+        self.workspaces
+            .get_mut(ws_idx)?
+            .tabs
+            .get_mut(tab_idx)
+            .map(|tab| tab.apply_prio(action))
+    }
+
     pub(crate) fn current_pane_focus_target(&self) -> Option<PaneFocusTarget> {
         let ws_idx = self.active?;
         let ws = self.workspaces.get(ws_idx)?;
@@ -758,7 +779,13 @@ impl AppState {
                     })
                     .or_else(|| rows.iter().position(|row| row.matched))
             } else {
-                rows.iter().position(|row| row.matched)
+                // A tab label is now derived from its pane, so a single-pane tab
+                // renders a tab row and a pane row carrying the same text and both
+                // match. The pane is the concrete target, so skip the duplicate tab
+                // row rather than selecting the projection of the row below it.
+                rows.iter().position(|row| {
+                    row.matched && !navigator_row_is_duplicate_of_its_pane(&rows, row)
+                })
             };
             if let Some(idx) = idx {
                 self.navigator.selected = idx;
@@ -1081,6 +1108,8 @@ impl AppState {
                     seen,
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
+                    session_ref_changed: mutation.session_ref_changed,
+                    session_replaced: mutation.session_replaced,
                     hook_work_context_changed: false,
                     agent_released: false,
                     agent_release_status: None,
@@ -3060,6 +3089,8 @@ impl AppState {
                 let _ = cache_updates;
                 Vec::new()
             }
+            AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
+            AppEvent::ForegroundProcessesRefreshed { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
@@ -3087,6 +3118,7 @@ impl AppState {
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let unchanged_change = (mutation.agent_released
+                || mutation.session_ref_changed
                 || agent_name_changed
                 || mutation.hook_work_context_changed)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
@@ -3103,6 +3135,11 @@ impl AppState {
             || mutation.hook_work_context_changed
         {
             self.mark_session_dirty();
+        }
+        if mutation.session_replaced {
+            if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
+                self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
+            }
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
@@ -3135,6 +3172,8 @@ impl AppState {
             seen,
             presentation: change.presentation.clone(),
             agent_name_changed,
+            session_ref_changed: mutation.session_ref_changed,
+            session_replaced: mutation.session_replaced,
             hook_work_context_changed: mutation.hook_work_context_changed,
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
@@ -3330,8 +3369,13 @@ impl AppState {
         let build_toast = || {
             let workspace_label =
                 self.workspaces[ws_idx].display_name_from_terminals(&self.terminals);
-            let context =
-                notification_context(&self.workspaces[ws_idx], &workspace_label, ws_idx, pane_id);
+            let context = notification_context(
+                &self.workspaces[ws_idx],
+                &self.terminals,
+                &workspace_label,
+                ws_idx,
+                pane_id,
+            );
             ToastNotification {
                 kind,
                 title: format!(
@@ -3510,6 +3554,32 @@ impl AppState {
     }
 }
 
+/// True when `row` is a tab row whose only pane row carries the same label, which
+/// happens when the tab label was derived from that single pane. Selecting the tab
+/// row would shadow the concrete pane the query actually matched.
+fn navigator_row_is_duplicate_of_its_pane(rows: &[NavigatorRow], row: &NavigatorRow) -> bool {
+    let NavigatorTarget::Tab { ws_idx, tab_idx } = row.target else {
+        return false;
+    };
+    let mut panes = rows.iter().filter(|candidate| {
+        matches!(
+            candidate.target,
+            NavigatorTarget::Pane {
+                ws_idx: pane_ws,
+                tab_idx: pane_tab,
+                ..
+            } if pane_ws == ws_idx && pane_tab == tab_idx
+        )
+    });
+    let Some(only_pane) = panes.next() else {
+        return false;
+    };
+    // Only a pane that matched can stand in for the tab row. A tab can match on
+    // metadata its pane row does not carry (`"<label> N panes"`), and suppressing
+    // the tab row then would drop the query's only match.
+    panes.next().is_none() && only_pane.matched && only_pane.label == row.label
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3582,7 +3652,13 @@ mod tests {
         let root = state.workspaces[0].tabs[0].root_pane;
 
         assert_eq!(
-            notification_context(&state.workspaces[0], "__herdr_projects__", 0, root),
+            notification_context(
+                &state.workspaces[0],
+                &state.terminals,
+                "__herdr_projects__",
+                0,
+                root,
+            ),
             "__herdr_projects__ · 1"
         );
     }
@@ -4204,6 +4280,37 @@ mod tests {
         assert!(matches!(
             selected.target,
             crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+        ));
+    }
+
+    #[test]
+    fn navigator_search_keeps_a_tab_matched_only_by_its_own_metadata() {
+        // Tab rows only render for multi-tab workspaces, and each tab here holds a
+        // single pane, so every tab label is derived from its own pane.
+        let mut state = app_with_workspaces(&["one"]);
+        state.workspaces[0].test_add_tab(Some("tests"));
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("pi ui build".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_navigator_from(&terminal_runtimes);
+        // "1 panes" lives in the tab row's metadata only; the pane row that shares
+        // the tab's derived label does not match, so the tab is the only match.
+        state.navigator.query = "1 panes".into();
+        state.select_first_navigator_match_from(&terminal_runtimes);
+
+        let rows = state.navigator_rows_from(&terminal_runtimes);
+        let selected = &rows[state.navigator.selected];
+        assert!(selected.matched, "selection landed on an unmatched row");
+        assert!(matches!(
+            selected.target,
+            crate::app::state::NavigatorTarget::Tab { tab_idx, .. } if tab_idx == 0
         ));
     }
 
@@ -5142,6 +5249,34 @@ mod tests {
     }
 
     #[test]
+    fn repro_a2_first_session_report_does_not_mark_unfocused_idle_pane_seen() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        state.active = None;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+
+        state.handle_app_event(AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("first-session"),
+            session_start_source: Some("startup".into()),
+        });
+
+        assert!(!state.workspaces[0].panes[&pane_id].seen);
+    }
+
+    #[test]
     fn background_jobs_change_does_not_change_lifecycle_or_seen_state() {
         let mut state = app_with_workspaces(&["test"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
@@ -5756,8 +5891,120 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });
 
-        assert!(second_updates.is_empty());
+        assert_eq!(second_updates.len(), 1);
         assert!(state.session_dirty);
+    }
+
+    #[test]
+    fn session_change_preserves_user_tab_name_and_structural_name() {
+        let mut state = app_with_workspaces(&["active"]);
+        let structural_tab = state.workspaces[0].test_add_tab(Some("layout"));
+        state.ensure_test_terminals();
+        let user_pane = state.workspaces[0].tabs[0].root_pane;
+        let user_terminal_id = state.workspaces[0].tabs[0].panes[&user_pane]
+            .attached_terminal_id
+            .clone();
+        let user_terminal = state.terminals.get_mut(&user_terminal_id).unwrap();
+        user_terminal.detected_agent = Some(Agent::Pi);
+        user_terminal.set_terminal_title(Some("⠋ Fresh agent title".into()));
+        state.workspaces[0].tabs[0].set_user_custom_name("old turn".into());
+
+        let first_session = std::env::current_dir()
+            .unwrap()
+            .join("one.jsonl")
+            .display()
+            .to_string();
+        let second_session = std::env::current_dir()
+            .unwrap()
+            .join("two.jsonl")
+            .display()
+            .to_string();
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: user_pane,
+            source: "custom:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
+        });
+        assert_eq!(
+            state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("old turn")
+        );
+        assert_eq!(
+            state.workspaces[0].tabs[0].name_origin,
+            crate::workspace::TabNameOrigin::User
+        );
+
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: user_pane,
+            source: "custom:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(21),
+            session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
+        });
+        assert_eq!(
+            state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("old turn")
+        );
+
+        let structural_pane = state.workspaces[0].tabs[structural_tab].root_pane;
+        for (seq, session_ref) in [
+            (
+                30,
+                crate::agent_resume::AgentSessionRef::path(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join("layout-one.jsonl")
+                        .display()
+                        .to_string(),
+                ),
+            ),
+            (
+                31,
+                crate::agent_resume::AgentSessionRef::path(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join("layout-two.jsonl")
+                        .display()
+                        .to_string(),
+                ),
+            ),
+        ] {
+            state.handle_app_event(AppEvent::HookStateReported {
+                pane_id: structural_pane,
+                source: "custom:pi".into(),
+                agent_label: "pi".into(),
+                state: AgentState::Working,
+                message: None,
+                seq: Some(seq),
+                session_ref,
+            });
+        }
+
+        assert_eq!(
+            state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("old turn")
+        );
+        assert_eq!(
+            state.workspaces[0]
+                .tab_display_name_from(&state.terminals, 0)
+                .as_deref(),
+            Some("old turn")
+        );
+        assert_eq!(
+            state.workspaces[0]
+                .tab_display_name_from(&state.terminals, structural_tab)
+                .as_deref(),
+            Some("layout")
+        );
+        assert_eq!(
+            state.workspaces[0].tabs[0].name_origin,
+            crate::workspace::TabNameOrigin::User
+        );
     }
 
     #[test]

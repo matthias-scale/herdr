@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
@@ -24,6 +25,15 @@ pub struct NewPane {
     pub runtime: TerminalRuntime,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabNameOrigin {
+    #[default]
+    Structural,
+    User,
+    AgentDerived,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TabDisplayProjection {
     Manual(String),
@@ -34,6 +44,15 @@ pub(crate) enum TabDisplayProjection {
     },
     Fallback(String),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabPrioAction {
+    Toggle,
+    Set(bool),
+}
+
+/// Separator joining the components of a derived tab projection.
+pub(crate) const TAB_DISPLAY_SEPARATOR: &str = " · ";
 
 impl TabDisplayProjection {
     pub(crate) fn full_label(&self) -> String {
@@ -47,8 +66,18 @@ impl TabDisplayProjection {
                 .into_iter()
                 .filter_map(|part| part.as_deref())
                 .collect::<Vec<_>>()
-                .join(" · "),
+                .join(TAB_DISPLAY_SEPARATOR),
         }
+    }
+
+    pub(crate) fn leads_with_agent_component(&self) -> bool {
+        matches!(self, Self::Derived { agent: Some(_), .. })
+    }
+}
+
+impl TabNameOrigin {
+    pub(crate) fn expires_on_agent_session_change(self) -> bool {
+        matches!(self, Self::AgentDerived)
     }
 }
 
@@ -65,6 +94,7 @@ enum SplitCommand<'a> {
 
 pub struct Tab {
     pub custom_name: Option<String>,
+    pub name_origin: TabNameOrigin,
     pub number: usize,
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
@@ -74,12 +104,105 @@ pub struct Tab {
     #[cfg(test)]
     pub runtimes: HashMap<PaneId, TerminalRuntime>,
     pub zoomed: bool,
+    pub prio: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
 }
 
 impl Tab {
+    /// Agent CLIs often set the terminal title to the current directory; that
+    /// location label duplicates the workspace and hides the useful work title.
+    ///
+    /// Codex composes both: `codex — ~/.herdr-test` is neither the bare cwd nor
+    /// a real session title, and rendering it produces `codex · codex —
+    /// ~/.herdr-test`. A title whose every segment merely restates the agent or
+    /// the location is therefore rejected too.
+    fn is_informative_terminal_title(terminal: &TerminalState, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        if !Self::is_novel_title_segment(terminal, title) {
+            return false;
+        }
+
+        let segments = title
+            .split(['—', '–', '·', '|'])
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.len() > 1
+            && !segments
+                .iter()
+                .any(|segment| Self::is_novel_title_segment(terminal, segment))
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// True when `title` says something the tab bar does not already show from
+    /// the pane's agent name or working directory.
+    fn is_novel_title_segment(terminal: &TerminalState, title: &str) -> bool {
+        let title = title.trim();
+        let cwd = terminal.cwd.to_string_lossy();
+        let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
+
+        if terminal.agent_name.as_deref().is_some_and(same_text)
+            || terminal.effective_agent_label().is_some_and(same_text)
+        {
+            return false;
+        }
+
+        if terminal
+            .cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(same_text)
+            || same_text(&cwd)
+        {
+            return false;
+        }
+
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            let home = home.to_string_lossy();
+            let cwd_lower = cwd.to_ascii_lowercase();
+            let home_lower = home.to_ascii_lowercase();
+            if let Some(relative) = cwd_lower.strip_prefix(&home_lower) {
+                if relative.is_empty() || relative.starts_with('/') || relative.starts_with('\\') {
+                    let relative = relative.trim_start_matches(['/', '\\']);
+                    let abbreviated = if relative.is_empty() {
+                        "~".to_string()
+                    } else {
+                        format!("~/{relative}")
+                    };
+                    if same_text(&abbreviated) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        let path_parts = |value: &str| {
+            value
+                .split(['/', '\\'])
+                .filter(|part| !part.is_empty() && *part != ".")
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let cwd_parts = path_parts(&cwd);
+        let title_parts = path_parts(title);
+        if !title_parts.is_empty()
+            && (cwd_parts.starts_with(&title_parts) || cwd_parts.ends_with(&title_parts))
+        {
+            return false;
+        }
+
+        true
+    }
+
     pub(crate) fn work_context_display_projection(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
@@ -93,7 +216,18 @@ impl Tab {
             .or_else(|| terminal.agent_name.clone())
             .or_else(|| terminal.effective_agent_label().map(str::to_string));
         let ticket = context.primary_ticket().map(str::to_string);
-        let title = context.work_title.clone();
+        let title = terminal
+            .manual_label
+            .clone()
+            .or_else(|| {
+                terminal
+                    .detected_agent
+                    .is_some()
+                    .then(|| terminal.terminal_title_stripped())
+                    .flatten()
+                    .filter(|title| Self::is_informative_terminal_title(terminal, title))
+            })
+            .or_else(|| context.work_title.clone());
         (agent.is_some() || ticket.is_some() || title.is_some()).then_some(
             TabDisplayProjection::Derived {
                 agent,
@@ -232,6 +366,7 @@ impl Tab {
         Ok((
             Self {
                 custom_name: None,
+                name_origin: TabNameOrigin::Structural,
                 number,
                 root_pane: root_id,
                 layout,
@@ -239,6 +374,7 @@ impl Tab {
                 #[cfg(test)]
                 runtimes: HashMap::new(),
                 zoomed: false,
+                prio: false,
                 events,
                 render_notify,
                 render_dirty,
@@ -254,6 +390,37 @@ impl Tab {
 
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
+        self.name_origin = TabNameOrigin::Structural;
+    }
+
+    pub(crate) fn apply_prio(&mut self, action: TabPrioAction) -> bool {
+        let prio = match action {
+            TabPrioAction::Toggle => return self.toggle_prio(),
+            TabPrioAction::Set(prio) => prio,
+        };
+        self.set_prio(prio)
+    }
+
+    pub fn set_prio(&mut self, prio: bool) -> bool {
+        let changed = self.prio != prio;
+        self.prio = prio;
+        changed
+    }
+
+    pub fn toggle_prio(&mut self) -> bool {
+        self.set_prio(!self.prio)
+    }
+
+    pub fn set_user_custom_name(&mut self, name: String) {
+        self.custom_name = Some(name);
+        self.name_origin = TabNameOrigin::User;
+    }
+
+    pub(crate) fn expire_agent_scoped_name(&mut self) {
+        if self.name_origin.expires_on_agent_session_change() {
+            self.custom_name = None;
+            self.name_origin = TabNameOrigin::Structural;
+        }
     }
 
     #[cfg(test)]
@@ -565,6 +732,7 @@ impl Tab {
         panes.insert(pane_id, moved.pane_state);
         Self {
             custom_name,
+            name_origin: TabNameOrigin::Structural,
             number,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
@@ -572,6 +740,7 @@ impl Tab {
             #[cfg(test)]
             runtimes: HashMap::new(),
             zoomed: false,
+            prio: false,
             events,
             render_notify,
             render_dirty,

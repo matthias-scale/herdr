@@ -10,7 +10,7 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+        crate::ui::workspace_list_rect_for_app(self, sidebar)
     }
 
     pub(super) fn workspace_list_scrollbar_target_at(
@@ -398,6 +398,26 @@ impl AppState {
             .into_iter()
             .find(|card| row >= card.rect.y && row < card.rect.y + card.rect.height)
             .map(|card| (card.ws_idx, card.tab_idx))
+    }
+
+    pub(super) fn prio_panel_target_at(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        if self.sidebar_collapsed {
+            return None;
+        }
+        let row_areas = if self.view.prio_panel_row_areas.is_empty() {
+            crate::ui::compute_prio_panel_row_areas(self, self.view.sidebar_rect)
+        } else {
+            self.view.prio_panel_row_areas.clone()
+        };
+        row_areas
+            .into_iter()
+            .find(|target| {
+                column >= target.rect.x
+                    && column < target.rect.x + target.rect.width
+                    && row >= target.rect.y
+                    && row < target.rect.y + target.rect.height
+            })
+            .map(|target| (target.ws_idx, target.tab_idx))
     }
 }
 
@@ -1461,7 +1481,11 @@ mod tests {
             .tabs
             .iter()
             .enumerate()
-            .map(|(tab_idx, _)| app.state.workspaces[0].tab_display_name(tab_idx).unwrap())
+            .map(|(tab_idx, _)| {
+                app.state.workspaces[0]
+                    .tab_display_name_from(&app.state.terminals, tab_idx)
+                    .unwrap_or_else(|| (tab_idx + 1).to_string())
+            })
             .collect();
         assert_eq!(labels, vec!["foo", "2", "3"]);
         assert_eq!(

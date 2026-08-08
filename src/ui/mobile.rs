@@ -724,6 +724,10 @@ fn render_mobile_switcher_content(
                     app.status_indicators,
                 );
                 let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
+                if entry.prio {
+                    spans.push(Span::styled("●", Style::default().fg(p.peach).bg(bg)));
+                    spans.push(Span::styled(" ", Style::default().bg(bg)));
+                }
                 if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) =
                         state_icon(entry.state, entry.seen, app.status_indicators, p);
@@ -750,6 +754,12 @@ fn render_mobile_switcher_content(
                     spans.push(Span::styled(
                         agent_suffix,
                         Style::default().fg(p.overlay1).bg(bg),
+                    ));
+                }
+                if let Some(foreground_process) = layout.foreground_process {
+                    spans.push(Span::styled(
+                        foreground_process,
+                        Style::default().fg(p.overlay0).bg(bg),
                     ));
                 }
                 if let Some(background_jobs) = layout.background_jobs {
@@ -1364,6 +1374,7 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
+            tab_label_leads_with_agent: false,
             pane_label: None,
             terminal_title: None,
             terminal_title_stripped: None,
@@ -1372,6 +1383,8 @@ mod tests {
             agent: agent_label.and_then(crate::detect::parse_agent_label),
             agent_context: agent_label.and_then(crate::detect::parse_agent_label),
             has_agent: agent_label.is_some(),
+            foreground_process_name: None,
+            prio: false,
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,
@@ -1833,7 +1846,7 @@ mod tests {
     }
 
     #[test]
-    fn ac1_mobile_tab_status_uses_context_order_and_narrow_ticket_fallback() {
+    fn mobile_tab_status_uses_context_order_and_narrow_ticket_fallback() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-tabs")];
         app.ensure_test_terminals();
@@ -1895,10 +1908,10 @@ mod tests {
             .collect::<Vec<_>>();
         let tab_row = rows
             .iter()
-            .find(|row| row.contains("New Thread"))
+            .find(|row| row.contains("tab 2"))
             .expect("explicit mobile tab row");
 
-        assert!(!tab_row.contains("tab 2"), "mobile tab row: {tab_row:?}");
+        assert!(tab_row.contains("tab 2"), "mobile tab row: {tab_row:?}");
     }
 
     #[test]

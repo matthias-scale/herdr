@@ -232,8 +232,7 @@ impl PaneWorkContextState {
         let mut manual = tiers.manual.normalized()?;
         manual.preview_urls.clear();
         let hook_turn = tiers.hook_turn.normalized()?;
-        let mut git_observation = tiers.git_observation.normalized()?;
-        git_observation.preview_urls.clear();
+        let git_observation = tiers.git_observation.normalized()?;
         let restored_fallback = tiers.restored_fallback.normalized()?;
         let mut state = Self {
             manual,
@@ -320,12 +319,8 @@ impl PaneWorkContextState {
         true
     }
 
-    #[allow(dead_code)]
     pub fn replace_git_observation(&mut self, context: PaneWorkContext) -> Result<bool, String> {
-        let mut context = context.normalized()?;
-        // Git observations do not carry preview deployments. Keep this
-        // boundary explicit even if a future caller reuses PaneWorkContext.
-        context.preview_urls.clear();
+        let context = context.normalized()?;
         // Any live observation supersedes the unknown-provenance legacy value.
         let fallback_changed = self.clear_restored_fallback();
         if context == self.git_observation && !fallback_changed {
@@ -912,11 +907,14 @@ mod tests {
     }
 
     #[test]
-    fn ac25_manual_and_git_tiers_do_not_produce_preview_urls() {
+    fn ac25_manual_and_git_tiers_keep_git_preview_urls_bounded() {
         let mut state = PaneWorkContextState::default();
         state
             .replace_git_observation(PaneWorkContext {
-                preview_urls: vec!["https://git.vercel.app".into()],
+                preview_urls: vec![
+                    "https://git-1.vercel.app".into(),
+                    "https://git-2.vercel.app".into(),
+                ],
                 ..PaneWorkContext::default()
             })
             .unwrap();
@@ -927,7 +925,35 @@ mod tests {
             })
             .unwrap();
 
-        assert!(state.effective().preview_urls.is_empty());
+        assert_eq!(
+            state.effective().preview_urls,
+            vec!["https://git-1.vercel.app", "https://git-2.vercel.app"]
+        );
+    }
+
+    #[test]
+    fn hook_pr_url_precedes_git_observation_pr_url() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/1".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/2".into()],
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.effective().pr_urls,
+            vec![
+                "https://github.com/o/r/pull/2",
+                "https://github.com/o/r/pull/1"
+            ]
+        );
     }
 
     #[test]
@@ -1023,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn ac25_restored_preview_sources_are_bounded_to_hook_and_fallback() {
+    fn ac25_restored_preview_sources_are_bounded_to_hook_and_git() {
         let preview_urls = |prefix: &str, count: usize| {
             (0..count)
                 .map(|index| format!("https://{prefix}-{index}.vercel.app"))
@@ -1054,12 +1080,15 @@ mod tests {
 
         let tiers = state.snapshot_tiers();
         assert!(tiers.manual.preview_urls.is_empty());
-        assert!(tiers.git_observation.preview_urls.is_empty());
+        assert_eq!(
+            tiers.git_observation.preview_urls,
+            preview_urls("git", MAX_PREVIEW_URLS)
+        );
         assert_eq!(
             state.effective().preview_urls,
             preview_urls("hook", 2)
                 .into_iter()
-                .chain(preview_urls("fallback", MAX_PREVIEW_URLS - 2))
+                .chain(preview_urls("git", MAX_PREVIEW_URLS - 2))
                 .collect::<Vec<_>>()
         );
         assert_eq!(state.effective().preview_urls.len(), MAX_PREVIEW_URLS);

@@ -99,6 +99,8 @@ pub enum Method {
     TabFocus(TabTarget),
     #[serde(rename = "tab.rename")]
     TabRename(TabRenameParams),
+    #[serde(rename = "tab.prio")]
+    TabPrio(TabPrioParams),
     #[serde(rename = "tab.move")]
     TabMove(TabMoveParams),
     #[serde(rename = "tab.close")]

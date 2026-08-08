@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams};
+use crate::api::schema::{
+    TabCreateParams, TabListParams, TabPrioMode, TabPrioParams, TabRenameParams,
+};
 
 pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -14,6 +16,7 @@ pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "get" => tab_get(&args[1..]),
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
+        "prio" => tab_prio(&args[1..]),
         "close" => tab_close(&args[1..]),
         "help" | "--help" | "-h" => {
             print_tab_help();
@@ -161,6 +164,75 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
     })
 }
 
+fn tab_prio(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_tab_prio_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("usage: herdr tab prio [<tab_id>|--tab ID|--current] [--toggle|--on|--off]");
+            return Ok(2);
+        }
+    };
+
+    super::runtime::tab_prio(params)
+}
+
+fn parse_tab_prio_args(args: &[String]) -> Result<TabPrioParams, String> {
+    let mut tab_id = None;
+    let mut mode = TabPrioMode::Toggle;
+    let mut mode_seen = false;
+    let mut index = 0;
+    if args
+        .first()
+        .is_some_and(|arg| !arg.as_str().starts_with("--"))
+    {
+        tab_id = args.first().map(|arg| super::normalize_tab_id(arg));
+        index = 1;
+    }
+    while index < args.len() {
+        match args[index].as_str() {
+            "--tab" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --tab".into());
+                };
+                tab_id = Some(super::normalize_tab_id(value));
+                index += 2;
+            }
+            "--current" => {
+                tab_id = None;
+                index += 1;
+            }
+            "--toggle" => {
+                if mode_seen {
+                    return Err("provide only one of --toggle, --on, or --off".into());
+                }
+                mode = TabPrioMode::Toggle;
+                mode_seen = true;
+                index += 1;
+            }
+            "--on" => {
+                if mode_seen {
+                    return Err("provide only one of --toggle, --on, or --off".into());
+                }
+                mode = TabPrioMode::On;
+                mode_seen = true;
+                index += 1;
+            }
+            "--off" => {
+                if mode_seen {
+                    return Err("provide only one of --toggle, --on, or --off".into());
+                }
+                mode = TabPrioMode::Off;
+                mode_seen = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    Ok(TabPrioParams { tab_id, mode })
+}
+
 fn tab_close(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_tab_id) = args.first() else {
         eprintln!("usage: herdr tab close <tab_id>");
@@ -183,5 +255,6 @@ fn print_tab_help() {
     eprintln!("  herdr tab get <tab_id>");
     eprintln!("  herdr tab focus <tab_id>");
     eprintln!("  herdr tab rename <tab_id> <label>");
+    eprintln!("  herdr tab prio [<tab_id>|--tab ID|--current] [--toggle|--on|--off]");
     eprintln!("  herdr tab close <tab_id>");
 }

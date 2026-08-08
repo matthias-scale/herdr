@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
-    TabMoveParams, TabRenameParams, TabTarget,
+    TabMoveParams, TabPrioMode, TabPrioParams, TabPrioResult, TabRenameParams, TabTarget,
 };
 use crate::app::{App, Mode};
+use crate::workspace::TabPrioAction as StateTabPrioAction;
 
 use super::responses::{encode_error, encode_success};
 
@@ -155,7 +156,7 @@ impl App {
         else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_custom_name(params.label.clone());
+        tab.set_user_custom_name(params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         if self.state.active == Some(ws_idx) {
             // Reflow the tab bar so the new label width takes effect immediately.
@@ -176,6 +177,42 @@ impl App {
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
 
         encode_success(id, ResponseResult::TabInfo { tab })
+    }
+
+    pub(super) fn handle_tab_prio(&mut self, id: String, params: TabPrioParams) -> String {
+        let requested_tab_id = params.tab_id.clone();
+        let Some((ws_idx, tab_idx)) = self.resolve_optional_tab(requested_tab_id.as_deref()) else {
+            return tab_not_found(id, requested_tab_id.as_deref().unwrap_or("active"));
+        };
+        let action = match params.mode {
+            TabPrioMode::Toggle => StateTabPrioAction::Toggle,
+            TabPrioMode::On => StateTabPrioAction::Set(true),
+            TabPrioMode::Off => StateTabPrioAction::Set(false),
+        };
+        let Some(changed) = self.state.apply_tab_prio(ws_idx, tab_idx, action) else {
+            return tab_not_found(id, requested_tab_id.as_deref().unwrap_or("active"));
+        };
+        if changed {
+            self.schedule_session_save();
+            if self.no_session {
+                self.state.mark_session_dirty();
+            }
+        }
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return tab_not_found(id, requested_tab_id.as_deref().unwrap_or("active"));
+        };
+        let prio = self.state.workspaces[ws_idx].tabs[tab_idx].prio;
+
+        encode_success(
+            id,
+            ResponseResult::TabPrio {
+                prio: TabPrioResult {
+                    changed,
+                    tab_id,
+                    prio,
+                },
+            },
+        )
     }
 
     pub(super) fn handle_tab_move(&mut self, id: String, params: TabMoveParams) -> String {
@@ -309,6 +346,18 @@ impl App {
             })
             .unwrap_or_default()
     }
+
+    fn resolve_optional_tab(&self, tab_id: Option<&str>) -> Option<(usize, usize)> {
+        match tab_id {
+            Some(tab_id) => self.parse_tab_id(tab_id),
+            None => {
+                let ws_idx = self.state.active?;
+                let tab_idx = self.state.workspaces.get(ws_idx)?.active_tab_index();
+                self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+                Some((ws_idx, tab_idx))
+            }
+        }
+    }
 }
 
 fn workspace_not_found(id: String, workspace_id: &str) -> String {
@@ -328,10 +377,144 @@ mod tests {
     use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
     use super::*;
     use crate::{
-        api::schema::SuccessResponse,
+        api::schema::{ErrorResponse, SuccessResponse},
         config::{Config, ShellModeConfig},
         workspace::Workspace,
     };
+
+    #[test]
+    fn api_tab_prio_sets_clears_toggles_and_reports_changes() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.session_dirty = false;
+        app.state.session_dirty_revision = 0;
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let set_response = app.handle_tab_prio(
+            "set".into(),
+            TabPrioParams {
+                tab_id: Some(tab_id.clone()),
+                mode: TabPrioMode::On,
+            },
+        );
+        let set: SuccessResponse = serde_json::from_str(&set_response).unwrap();
+        assert_eq!(
+            set.result,
+            ResponseResult::TabPrio {
+                prio: TabPrioResult {
+                    changed: true,
+                    tab_id: tab_id.clone(),
+                    prio: true,
+                },
+            }
+        );
+        assert!(app.state.session_dirty);
+        assert_eq!(app.state.session_dirty_revision, 1);
+
+        let get_response = app.handle_tab_get(
+            "get".into(),
+            TabTarget {
+                tab_id: tab_id.clone(),
+            },
+        );
+        let get: SuccessResponse = serde_json::from_str(&get_response).unwrap();
+        let ResponseResult::TabInfo { tab } = get.result else {
+            panic!("expected tab info");
+        };
+        assert!(tab.prio);
+
+        let unchanged_response = app.handle_tab_prio(
+            "unchanged".into(),
+            TabPrioParams {
+                tab_id: None,
+                mode: TabPrioMode::On,
+            },
+        );
+        let unchanged: SuccessResponse = serde_json::from_str(&unchanged_response).unwrap();
+        assert_eq!(
+            unchanged.result,
+            ResponseResult::TabPrio {
+                prio: TabPrioResult {
+                    changed: false,
+                    tab_id: tab_id.clone(),
+                    prio: true,
+                },
+            }
+        );
+        assert_eq!(app.state.session_dirty_revision, 1);
+
+        let toggle_response = app.handle_tab_prio(
+            "toggle".into(),
+            TabPrioParams {
+                tab_id: Some(tab_id.clone()),
+                mode: TabPrioMode::Toggle,
+            },
+        );
+        let toggle: SuccessResponse = serde_json::from_str(&toggle_response).unwrap();
+        assert!(matches!(
+            toggle.result,
+            ResponseResult::TabPrio {
+                prio: TabPrioResult {
+                    changed: true,
+                    prio: false,
+                    ..
+                }
+            }
+        ));
+
+        let clear_response = app.handle_tab_prio(
+            "clear".into(),
+            TabPrioParams {
+                tab_id: Some(tab_id.clone()),
+                mode: TabPrioMode::Off,
+            },
+        );
+        let clear: SuccessResponse = serde_json::from_str(&clear_response).unwrap();
+        assert!(matches!(
+            clear.result,
+            ResponseResult::TabPrio {
+                prio: TabPrioResult {
+                    changed: false,
+                    prio: false,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn api_tab_prio_unknown_tab_uses_tab_not_found_error() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        let response = app.handle_tab_prio(
+            "req".into(),
+            TabPrioParams {
+                tab_id: Some("w_missing:t1".into()),
+                mode: TabPrioMode::On,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "tab_not_found");
+        assert_eq!(error.error.message, "tab w_missing:t1 not found");
+    }
 
     #[test]
     fn api_tab_close_last_tab_closes_workspace_and_emits_both_events() {

@@ -13,6 +13,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
+pub(crate) mod foreground_process;
 mod git_refresh;
 mod ids;
 mod input;
@@ -24,6 +25,7 @@ pub mod state;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+pub(crate) mod work_context_git;
 mod worktrees;
 
 use std::collections::{HashMap, HashSet};
@@ -129,6 +131,24 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) git_work_context_refresh_in_flight:
+        Option<work_context_git::GitWorkContextRefreshInFlight>,
+    pub(crate) git_work_context_refresh_due_after_in_flight: bool,
+    pub(crate) git_work_context_rotation: usize,
+    pub(crate) last_git_work_context_refresh_generation: u64,
+    pub(crate) last_applied_git_work_context_refresh_generation: u64,
+    pub(crate) next_git_work_context_refresh: Instant,
+    pub(crate) git_work_context_cache: HashMap<
+        work_context_git::GitWorkContextCacheKey,
+        work_context_git::GitWorkContextCacheEntry,
+    >,
+    pub(crate) git_work_context_inputs:
+        HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
+    pub(crate) foreground_process_refresh_in_flight:
+        Option<foreground_process::ForegroundProcessRefreshInFlight>,
+    pub(crate) last_foreground_process_refresh_generation: u64,
+    pub(crate) last_applied_foreground_process_refresh_generation: u64,
+    pub(crate) next_foreground_process_refresh: Instant,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
@@ -406,6 +426,7 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            prio_panel_collapsed,
         ) = if no_session {
             (
                 Vec::new(),
@@ -415,6 +436,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                false,
             )
         } else if let Some(snap) = crate::persist::load() {
             let history = config
@@ -451,6 +473,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.prio_panel_collapsed,
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -468,6 +491,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.prio_panel_collapsed,
                 )
             }
         } else {
@@ -479,6 +503,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                false,
             )
         };
 
@@ -581,6 +606,7 @@ impl App {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
+            rename_tab_prefill: None,
             release_notes: None,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
@@ -609,6 +635,7 @@ impl App {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
+                prio_panel_row_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -652,6 +679,7 @@ impl App {
             sidebar_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
+            prio_panel_collapsed,
             agent_panel_scroll: 0,
             agent_panel_sort,
             status_indicators: config.ui.status_indicators,
@@ -783,6 +811,18 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            git_work_context_refresh_in_flight: None,
+            git_work_context_refresh_due_after_in_flight: false,
+            git_work_context_rotation: 0,
+            last_git_work_context_refresh_generation: 0,
+            last_applied_git_work_context_refresh_generation: 0,
+            next_git_work_context_refresh: Instant::now(),
+            git_work_context_cache: HashMap::new(),
+            git_work_context_inputs: HashMap::new(),
+            foreground_process_refresh_in_flight: None,
+            last_foreground_process_refresh_generation: 0,
+            last_applied_foreground_process_refresh_generation: 0,
+            next_foreground_process_refresh: Instant::now(),
             #[cfg(test)]
             git_program_override: None,
             pending_api_worktree_creates: HashMap::new(),
@@ -889,6 +929,7 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.prio_panel_collapsed = snapshot.prio_panel_collapsed;
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {

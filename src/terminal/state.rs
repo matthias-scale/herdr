@@ -98,6 +98,7 @@ pub(crate) struct TerminalTitleChange {
 pub struct TerminalStateMutation {
     pub effective_state_change: Option<EffectiveStateChange>,
     pub session_ref_changed: bool,
+    pub session_replaced: bool,
     pub hook_work_context_changed: bool,
     pub agent_released: bool,
 }
@@ -281,6 +282,8 @@ pub struct TerminalState {
     /// Provider-reported background jobs owned by this agent thread. `None`
     /// means the provider does not expose a supported count.
     pub background_job_count: Option<u16>,
+    /// Last background observation of the pane's distinct foreground process.
+    pub(crate) foreground_process_name: Option<String>,
     pub last_agent_state_change_seq: Option<u64>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
@@ -320,6 +323,7 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             background_job_count: None,
+            foreground_process_name: None,
             last_agent_state_change_seq: None,
             agent_active_since: None,
             agent_last_active_at: None,
@@ -352,6 +356,17 @@ impl TerminalState {
         context: crate::work_context::PaneWorkContext,
     ) -> Result<bool, String> {
         let changed = self.work_context.replace_hook_turn(context)?;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn replace_git_work_context(
+        &mut self,
+        context: crate::work_context::PaneWorkContext,
+    ) -> Result<bool, String> {
+        let changed = self.work_context.replace_git_observation(context)?;
         if changed {
             self.revision = self.revision.wrapping_add(1);
         }
@@ -398,6 +413,14 @@ impl TerminalState {
         }
         self.background_job_count = count;
         self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn set_foreground_process_name(&mut self, name: Option<String>) -> bool {
+        if self.foreground_process_name == name {
+            return false;
+        }
+        self.foreground_process_name = name;
         true
     }
 
@@ -573,6 +596,8 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                session_replaced: previous_session.is_some()
+                    && previous_session != self.current_session_identity_for_persistence(),
                 hook_work_context_changed: false,
                 agent_released: false,
             };
@@ -593,6 +618,8 @@ impl TerminalState {
                 ),
                 session_ref_changed: previous_session
                     != self.current_session_identity_for_persistence(),
+                session_replaced: previous_session.is_some()
+                    && previous_session != self.current_session_identity_for_persistence(),
                 hook_work_context_changed: false,
                 agent_released: false,
             };
@@ -795,6 +822,7 @@ impl TerminalState {
             self.clear_agent_name();
         }
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
         let hook_work_context_changed =
             if (process_exited && !newer_custom_authority) || previous_session != current_session {
                 self.clear_hook_work_context()
@@ -809,7 +837,8 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
+            session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released,
         }
@@ -959,6 +988,7 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
@@ -972,7 +1002,8 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
+            session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
         })
@@ -1710,6 +1741,8 @@ impl TerminalState {
                         now,
                     ),
                     session_ref_changed: previous_session != current_session,
+                    session_replaced: previous_session.is_some()
+                        && previous_session != current_session,
                     hook_work_context_changed,
                     agent_released: false,
                 });
@@ -1802,6 +1835,7 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
@@ -1815,7 +1849,8 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
+            session_replaced: previous_session.is_some() && session_ref_changed,
             hook_work_context_changed,
             agent_released: false,
         })
@@ -1935,6 +1970,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
+            session_replaced: previous_session.is_some(),
             hook_work_context_changed,
             agent_released: false,
         })
@@ -2002,6 +2038,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: previous_session != current_session,
+            session_replaced: previous_session.is_some() && previous_session != current_session,
             hook_work_context_changed,
             agent_released: !process_owns_agent,
         })
@@ -5152,6 +5189,116 @@ mod tests {
                 Some(next_session.as_str())
             );
         }
+    }
+
+    #[test]
+    fn agent_session_replacement_preserves_unguarded_user_metadata() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-old"),
+                Some(1),
+            )
+            .expect("initial session should be accepted");
+        for (source, title) in [("user:title", "User title"), ("user:jj", "User note")] {
+            terminal
+                .set_agent_metadata(AgentMetadataReport {
+                    source: source.into(),
+                    agent_label: None,
+                    applies_to_source: None,
+                    title: Some(title.into()),
+                    display_agent: None,
+                    state_labels: std::collections::HashMap::new(),
+                    clear_title: false,
+                    clear_display_agent: false,
+                    clear_state_labels: false,
+                    ttl: None,
+                    seq: None,
+                })
+                .expect("user metadata should be accepted");
+        }
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-new"),
+                Some(2),
+                Some("clear".into()),
+            )
+            .expect("replacement session should be accepted");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(terminal.agent_metadata.len(), 2);
+        assert_eq!(
+            terminal.agent_metadata["user:jj"].title.as_deref(),
+            Some("User note")
+        );
+        assert!(terminal.agent_metadata.contains_key("user:title"));
+        assert!(terminal.agent_metadata.contains_key("user:jj"));
+    }
+
+    #[test]
+    fn agent_session_replacement_preserves_surviving_metadata_watermarks() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-old"),
+                Some(1),
+            )
+            .expect("initial session should be accepted");
+        terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "user:jj".into(),
+                agent_label: None,
+                applies_to_source: None,
+                title: Some("Keep me".into()),
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(5),
+            })
+            .expect("user metadata should be accepted");
+
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-new"),
+                Some(2),
+                Some("clear".into()),
+            )
+            .expect("replacement session should be accepted");
+
+        assert!(!terminal.metadata_report_sequence_is_fresh("user:jj", Some(1)));
+        assert!(terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "user:jj".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: Some("herdr:claude".into()),
+                title: Some("Stale report".into()),
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            })
+            .is_none());
+        assert_eq!(
+            terminal.agent_metadata["user:jj"].title.as_deref(),
+            Some("Keep me")
+        );
     }
 
     #[test]

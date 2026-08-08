@@ -289,6 +289,7 @@ impl TerminalState {
         Some(TerminalStateMutation {
             effective_state_change,
             session_ref_changed: false,
+            session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
         })
@@ -373,6 +374,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: false,
+            session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
         })

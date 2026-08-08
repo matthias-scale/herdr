@@ -175,6 +175,18 @@ fn pane_read_recent_text(socket_path: &PathBuf, pane_id: &str) -> String {
         .to_string()
 }
 
+fn focused_tab_prio(socket_path: &PathBuf) -> Option<bool> {
+    let response = send_json_request(
+        socket_path,
+        r#"{"id":"tab_list","method":"tab.list","params":{}}"#,
+    );
+    response["result"]["tabs"]
+        .as_array()?
+        .iter()
+        .find(|tab| tab["focused"].as_bool() == Some(true))
+        .and_then(|tab| tab["prio"].as_bool())
+}
+
 fn pane_send_text(socket_path: &PathBuf, pane_id: &str, text: &str) -> Value {
     send_json_request(
         socket_path,
@@ -416,6 +428,15 @@ fn reattach_after_detach_shows_current_state() {
         "workspace creation should succeed: {ws_response}"
     );
 
+    // Toggle the active tab's PRIO flag through the real client key path.
+    send_input(&mut stream_a, &[0x02, b'F']).expect("toggle tab PRIO");
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+            focused_tab_prio(&api_socket) == Some(true)
+        }),
+        "client A key path should set the focused tab's PRIO flag via the API"
+    );
+
     // Client A detaches (send ClientMessage::Detach).
     send_detach(&mut stream_a).expect("send detach");
 
@@ -444,30 +465,19 @@ fn reattach_after_detach_shows_current_state() {
         error
     );
 
-    // Client B should receive a frame with the current state,
-    // including the workspace created while client A was attached.
-    stream_b.set_nonblocking(false).unwrap();
-    stream_b
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-
-    let mut received_frame = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        match read_server_message(&mut stream_b) {
-            Ok((variant, _payload)) => {
-                if variant == 1 {
-                    // ServerMessage::Frame
-                    received_frame = true;
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
+    // Client B should still receive a current-state Frame after reattaching.
+    let received_frame = wait_for_message_variant(&mut stream_b, Duration::from_secs(5), 1)
+        .expect("wait for reattach Frame");
     assert!(
         received_frame,
         "reattached client should receive a Frame with current state"
+    );
+
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+            focused_tab_prio(&api_socket) == Some(true)
+        }),
+        "reattached client should preserve the focused tab's PRIO flag via the API"
     );
 
     // Verify the workspace still exists via API.

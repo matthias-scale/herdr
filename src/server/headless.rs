@@ -1207,6 +1207,7 @@ impl HeadlessServer {
             self.app.state.sidebar_width,
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
+            self.app.state.prio_panel_collapsed,
         );
 
         let mut handoff_entries = Vec::new();
@@ -1928,6 +1929,7 @@ impl HeadlessServer {
             ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context = crate::app::actions::notification_context(
             ws,
+            &self.app.state.terminals,
             &workspace_label,
             update.ws_idx,
             update.pane_id,
@@ -3656,6 +3658,7 @@ impl HeadlessServer {
                         );
                         let context = crate::app::actions::notification_context(
                             &self.app.state.workspaces[*ws_idx],
+                            &self.app.state.terminals,
                             &workspace_label,
                             *ws_idx,
                             *pane_id,
@@ -4486,6 +4489,9 @@ impl HeadlessServer {
         changed |= self.app.clear_due_selection_highlight(now);
 
         if self.has_app_client() {
+            // Work-context links matter only while a TUI is attached and viewing panes.
+            self.app.start_git_work_context_refresh_if_due(now);
+            self.app.start_foreground_process_refresh_if_due(now);
             self.app.start_git_status_refresh_if_due(now);
         }
 
@@ -5256,12 +5262,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains("New Thread"),
-            "rendered frame: {rendered:?}"
+            rendered.contains("task"),
+            "agent terminal titles drive the tab label: {rendered:?}"
         );
         assert!(
             !rendered.contains("⠋ task"),
-            "terminal titles must not create a sidebar subtitle: {rendered:?}"
+            "spinner decorations must be stripped before the title reaches the sidebar: {rendered:?}"
         );
 
         server

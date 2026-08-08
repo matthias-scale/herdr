@@ -1270,6 +1270,7 @@ impl App {
             message: params.message,
             seq: params.seq,
         });
+        self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1300,6 +1301,7 @@ impl App {
                 params.session_start_source,
             ),
         });
+        self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -5102,6 +5104,53 @@ mod tests {
         );
 
         assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
+    #[tokio::test]
+    async fn initial_agent_session_assignment_does_not_clear_retained_title() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b]0;Initial session title\x07");
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "session-a".into(),
+            method: crate::api::schema::Method::PaneReportAgentSession(
+                PaneReportAgentSessionParams {
+                    pane_id,
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    seq: Some(1),
+                    agent_session_id: Some("session-a".into()),
+                    agent_session_path: None,
+                    session_start_source: Some("startup".into()),
+                },
+            ),
+        });
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .terminal_title()
+                .as_deref(),
+            Some("Initial session title")
+        );
     }
 
     #[test]

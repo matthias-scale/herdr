@@ -150,6 +150,20 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// Background git/gh work-context observations completed for live panes.
+    GitWorkContextRefreshed {
+        generation: u64,
+        observations: Vec<crate::app::work_context_git::GitWorkContextObservation>,
+        cache_updates: Vec<(
+            crate::app::work_context_git::GitWorkContextCacheKey,
+            crate::app::work_context_git::GitWorkContextCacheEntry,
+        )>,
+    },
+    /// Background foreground-process observations completed for live panes.
+    ForegroundProcessesRefreshed {
+        generation: u64,
+        observations: Vec<crate::app::foreground_process::ForegroundProcessObservation>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

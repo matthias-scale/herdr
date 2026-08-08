@@ -74,6 +74,15 @@ impl App {
                 results,
                 cache_updates,
             } => self.handle_git_status_refreshed(generation, results, cache_updates),
+            AppEvent::GitWorkContextRefreshed {
+                generation,
+                observations,
+                cache_updates,
+            } => self.handle_git_work_context_refreshed(generation, observations, cache_updates),
+            AppEvent::ForegroundProcessesRefreshed {
+                generation,
+                observations,
+            } => self.handle_foreground_processes_refreshed(generation, observations),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -170,6 +179,25 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(generation, results, cache_updates);
+            return;
+        }
+
+        if let AppEvent::GitWorkContextRefreshed {
+            generation,
+            observations,
+            cache_updates,
+        } = ev
+        {
+            self.handle_git_work_context_refreshed(generation, observations, cache_updates);
+            return;
+        }
+
+        if let AppEvent::ForegroundProcessesRefreshed {
+            generation,
+            observations,
+        } = ev
+        {
+            self.handle_foreground_processes_refreshed(generation, observations);
             return;
         }
 
@@ -345,6 +373,7 @@ impl App {
             if self.state.status_bar_enabled {
                 self.project_status_context_from_cached();
             }
+            self.request_git_work_context_refresh(Instant::now());
             self.request_git_identity_refresh(Instant::now());
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
@@ -453,6 +482,7 @@ impl App {
         let workspace_label = ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
         let context = crate::app::actions::notification_context(
             ws,
+            &self.state.terminals,
             &workspace_label,
             update.ws_idx,
             update.pane_id,
@@ -633,7 +663,10 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(update.ws_idx);
 
-        if update.agent_name_changed || update.hook_work_context_changed {
+        if update.agent_name_changed
+            || update.session_ref_changed
+            || update.hook_work_context_changed
+        {
             self.emit_pane_updated(update.ws_idx, update.pane_id);
         }
 
@@ -742,6 +775,7 @@ impl App {
                 &format!("{} {}", agent_label, event_text),
                 Some(&crate::app::actions::notification_context(
                     ws,
+                    &self.state.terminals,
                     &workspace_label,
                     update.ws_idx,
                     update.pane_id,
@@ -811,6 +845,7 @@ impl App {
                 ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
             let context = crate::app::actions::notification_context(
                 ws,
+                &self.state.terminals,
                 &workspace_label,
                 ws_idx,
                 delivery.pane_id,
@@ -954,7 +989,15 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
-        self.sync_terminal_titles();
+        // Session reports must adopt identity before title projection; otherwise an OSC
+        // title emitted by the incoming session is indistinguishable from the old one.
+        if !matches!(
+            &request.method,
+            crate::api::schema::Method::PaneReportAgent(_)
+                | crate::api::schema::Method::PaneReportAgentSession(_)
+        ) {
+            self.sync_terminal_titles();
+        }
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
@@ -1079,6 +1122,7 @@ impl App {
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
+            Method::TabPrio(params) => return self.handle_tab_prio(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),

@@ -428,6 +428,18 @@
           "description": "Rename the active tab."
         },
         {
+          "key": "keys.toggle_tab_prio",
+          "type": "keybinding",
+          "default": "\"prefix+shift+f\"",
+          "description": "Toggle the active tab's PRIO flag."
+        },
+        {
+          "key": "keys.toggle_prio_panel",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Toggle the expanded sidebar PRIO panel."
+        },
+        {
           "key": "keys.previous_tab",
           "type": "keybinding",
           "default": "\"prefix+p\"",

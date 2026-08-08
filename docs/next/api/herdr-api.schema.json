@@ -1098,6 +1098,9 @@
               "minimum": 0,
               "type": "integer"
             },
+            "prio": {
+              "type": "boolean"
+            },
             "tab_id": {
               "type": "string"
             },
@@ -1110,6 +1113,7 @@
             "workspace_id",
             "number",
             "label",
+            "prio",
             "focused",
             "pane_count",
             "agent_status"
@@ -4225,6 +4229,29 @@
           ],
           "type": "object"
         },
+        "TabPrioMode": {
+          "enum": [
+            "toggle",
+            "on",
+            "off"
+          ],
+          "type": "string"
+        },
+        "TabPrioParams": {
+          "properties": {
+            "mode": {
+              "$ref": "#/schemas/request/$defs/TabPrioMode",
+              "default": "toggle"
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "TabRenameParams": {
           "properties": {
             "label": {
@@ -4982,6 +5009,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TabRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.prio",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabPrioParams"
             }
           },
           "required": [
@@ -9024,6 +9067,22 @@
             },
             {
               "properties": {
+                "prio": {
+                  "$ref": "#/schemas/success_response/$defs/TabPrioResult"
+                },
+                "type": {
+                  "const": "tab_prio",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "prio"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "root_pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -10001,6 +10060,9 @@
               "minimum": 0,
               "type": "integer"
             },
+            "prio": {
+              "type": "boolean"
+            },
             "tab_id": {
               "type": "string"
             },
@@ -10013,9 +10075,29 @@
             "workspace_id",
             "number",
             "label",
+            "prio",
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "TabPrioResult": {
+          "properties": {
+            "changed": {
+              "type": "boolean"
+            },
+            "prio": {
+              "type": "boolean"
+            },
+            "tab_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "changed",
+            "tab_id",
+            "prio"
           ],
           "type": "object"
         },

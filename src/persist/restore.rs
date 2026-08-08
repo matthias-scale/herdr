@@ -751,6 +751,7 @@ fn restore_tab(
         Some((
             crate::workspace::Tab {
                 custom_name: snap.custom_name.clone(),
+                name_origin: snap.name_origin,
                 number,
                 root_pane,
                 layout,
@@ -758,6 +759,7 @@ fn restore_tab(
                 #[cfg(test)]
                 runtimes: HashMap::new(),
                 zoomed: snap.zoomed,
+                prio: snap.prio,
                 events: runtime_context.events.clone(),
                 render_notify: runtime_context.render_notify.clone(),
                 render_dirty: runtime_context.render_dirty.clone(),
@@ -1013,6 +1015,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: HashSet::new(),
+            prio_panel_collapsed: false,
         };
         let history = SessionHistorySnapshot {
             generation: Some("history-generation".into()),
@@ -1320,6 +1323,7 @@ mod tests {
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Pane(0),
                     panes: HashMap::from([(
                         0,
@@ -1346,6 +1350,7 @@ mod tests {
                         },
                     )]),
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1356,6 +1361,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            prio_panel_collapsed: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1419,6 +1425,7 @@ mod tests {
                 next_public_tab_number: 6,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Split {
                         direction: super::super::snapshot::DirectionSnapshot::Horizontal,
                         leading: false,
@@ -1455,6 +1462,7 @@ mod tests {
                         ),
                     ]),
                     zoomed: false,
+                    prio: false,
                     focused: Some(10),
                     root_pane: Some(10),
                 }],
@@ -1465,6 +1473,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            prio_panel_collapsed: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1539,33 +1548,41 @@ mod tests {
                 tabs: vec![
                     TabSnapshot {
                         custom_name: None,
+                        name_origin: Default::default(),
                         layout: LayoutSnapshot::Pane(10),
                         panes: HashMap::from([pane_snap("10")]),
                         zoomed: false,
+                        prio: false,
                         focused: Some(10),
                         root_pane: Some(10),
                     },
                     TabSnapshot {
                         custom_name: None,
+                        name_origin: Default::default(),
                         layout: LayoutSnapshot::Pane(11),
                         panes: HashMap::from([pane_snap("11")]),
                         zoomed: false,
+                        prio: false,
                         focused: Some(11),
                         root_pane: Some(11),
                     },
                     TabSnapshot {
                         custom_name: None,
+                        name_origin: Default::default(),
                         layout: LayoutSnapshot::Pane(12),
                         panes: HashMap::from([pane_snap("12")]),
                         zoomed: false,
+                        prio: false,
                         focused: Some(12),
                         root_pane: Some(12),
                     },
                     TabSnapshot {
                         custom_name: None,
+                        name_origin: Default::default(),
                         layout: LayoutSnapshot::Pane(13),
                         panes: HashMap::from([(13, final_pane)]),
                         zoomed: false,
+                        prio: false,
                         focused: Some(13),
                         root_pane: Some(13),
                     },
@@ -1577,6 +1594,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            prio_panel_collapsed: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1623,6 +1641,7 @@ mod tests {
             next_public_tab_number: 0,
             tabs: vec![TabSnapshot {
                 custom_name: None,
+                name_origin: Default::default(),
                 layout: LayoutSnapshot::Split {
                     direction: super::super::snapshot::DirectionSnapshot::Horizontal,
                     leading: false,
@@ -1632,6 +1651,7 @@ mod tests {
                 },
                 panes: HashMap::new(),
                 zoomed: false,
+                prio: false,
                 focused: Some(10),
                 root_pane: Some(10),
             }],
@@ -1664,6 +1684,7 @@ mod tests {
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Pane(0),
                     panes: HashMap::from([(
                         0,
@@ -1684,6 +1705,7 @@ mod tests {
                         },
                     )]),
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1694,6 +1716,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            prio_panel_collapsed: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1952,9 +1975,11 @@ mod tests {
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
+                    name_origin: Default::default(),
                     layout: LayoutSnapshot::Pane(0),
                     panes,
                     zoomed: false,
+                    prio: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1965,6 +1990,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            prio_panel_collapsed: false,
         };
         (snapshot, history)
     }
