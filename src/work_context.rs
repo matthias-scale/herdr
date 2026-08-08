@@ -623,7 +623,23 @@ fn normalize_missive_url(raw: &str) -> Result<String, String> {
     if !rest.starts_with('/') && !rest.starts_with('#') {
         return Err(invalid());
     }
+    if !missive_route_is_conversation(rest) {
+        return Err(invalid());
+    }
     Ok(format!("https://{MISSIVE_HOST}{rest}"))
+}
+
+/// True for a route addressing one conversation, under any view: `#inbox/conversations/<id>`
+/// or `#custom/<team>/conversations/<id>`. Missive's other routes — settings, search, contacts
+/// — carry no pane-specific work context, and accepting them lets a handful of them exhaust
+/// `MAX_MISSIVE_URLS` before a real conversation link is reached.
+fn missive_route_is_conversation(route: &str) -> bool {
+    let route = route.split('?').next().unwrap_or(route);
+    let mut segments = route
+        .split(['/', '#'])
+        .filter(|segment| !segment.is_empty())
+        .skip_while(|segment| !segment.eq_ignore_ascii_case("conversations"));
+    segments.next().is_some() && segments.next().is_some()
 }
 
 pub(crate) fn hook_turn_context(
@@ -969,7 +985,10 @@ mod tests {
             MAX_MISSIVE_URLS
         );
         assert!(normalize_missive_urls(["https://mail.missiveapp.com"]).is_err());
-        assert!(normalize_missive_urls(["https://mail.missiveapp.com.evil.test/#x"]).is_err());
+        assert!(normalize_missive_urls([
+            "https://mail.missiveapp.com.evil.test/#inbox/conversations/abc123"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -1003,10 +1022,46 @@ mod tests {
             vec!["https://mail.missiveapp.com/#inbox/conversations/AbC123"],
             "the host folds to lowercase but the conversation id must survive verbatim"
         );
-        assert!(normalize_missive_urls(["https://MAIL.missiveapp.com/#x"]).is_ok());
+        assert!(
+            normalize_missive_urls(["https://MAIL.missiveapp.com/#inbox/conversations/x"]).is_ok()
+        );
         // Case folding must not widen the host: a confusable neighbour still has to fail.
-        assert!(normalize_missive_urls(["https://mail.missiveapp.com.evil.test/#x"]).is_err());
-        assert!(normalize_missive_urls(["https://mail.missiveapp.com@evil.test/#x"]).is_err());
+        assert!(normalize_missive_urls([
+            "https://mail.missiveapp.com.evil.test/#inbox/conversations/x"
+        ])
+        .is_err());
+        assert!(normalize_missive_urls([
+            "https://mail.missiveapp.com@evil.test/#inbox/conversations/x"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn missive_non_conversation_routes_cannot_crowd_out_a_conversation_link() {
+        for route in [
+            "/#settings/organization",
+            "/#search/from:someone",
+            "/#contacts",
+            "/",
+            "/#inbox/conversations",
+        ] {
+            assert!(
+                normalize_missive_urls([format!("https://{MISSIVE_HOST}{route}")]).is_err(),
+                "{route} is not a conversation route"
+            );
+        }
+
+        // The cap is small, so a handful of settings links pasted ahead of the real
+        // conversation used to consume it and drop the only link worth showing.
+        let noise = (0..MAX_MISSIVE_URLS)
+            .map(|index| format!("https://{MISSIVE_HOST}/#settings/s{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = format!("{noise} https://{MISSIVE_HOST}/#inbox/conversations/kept");
+        assert_eq!(
+            extract_missive_urls(&text),
+            vec![format!("https://{MISSIVE_HOST}/#inbox/conversations/kept")]
+        );
     }
 
     #[test]
