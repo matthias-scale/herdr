@@ -2918,7 +2918,14 @@ mod tests {
             .primary_tab_label
             .as_deref()
             .expect("test tab should have a title");
-        let layout = tab_row_layout(&entry, app.view_observed_at, 39, 4, &app.palette, app.status_indicators);
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            39,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal
@@ -4121,7 +4128,14 @@ row_gap = 1
             .foreground_process_name = Some("cargo".into());
         let entry = sidebar_thread_entries(&app).remove(0);
 
-        let layout = tab_row_layout(&entry, app.view_observed_at, 24, 1, &app.palette, app.status_indicators);
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            24,
+            1,
+            &app.palette,
+            app.status_indicators,
+        );
 
         assert!(layout.foreground_process.is_none());
         assert!(layout.agent_suffix.is_some());
@@ -4149,7 +4163,14 @@ row_gap = 1
         );
 
         // At this width the old ladder kept "node" while dropping "12m ago".
-        let layout = tab_row_layout(&entry, app.view_observed_at, 32, 1, &app.palette, app.status_indicators);
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            32,
+            1,
+            &app.palette,
+            app.status_indicators,
+        );
 
         assert!(layout.foreground_process.is_none());
         assert!(layout.activity_age.is_none());
@@ -4169,7 +4190,14 @@ row_gap = 1
             .foreground_process_name = Some("foreground-process-name".into());
         let entry = sidebar_thread_entries(&app).remove(0);
 
-        let layout = tab_row_layout(&entry, app.view_observed_at, 32, 1, &app.palette, app.status_indicators);
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            32,
+            1,
+            &app.palette,
+            app.status_indicators,
+        );
         let process = layout
             .foreground_process
             .expect("process should fit partially");
@@ -5402,8 +5430,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         assert_eq!(prio_tab.background_job_count, Some(3));
         assert_eq!(
-            tab_row_layout(&prio_tab, app.view_observed_at, 80, 1, &app.palette, app.status_indicators).activity_age,
-            tab_row_layout(&sidebar_tab, app.view_observed_at, 80, 1, &app.palette, app.status_indicators).activity_age
+            tab_row_layout(
+                &prio_tab,
+                app.view_observed_at,
+                80,
+                1,
+                &app.palette,
+                app.status_indicators
+            )
+            .activity_age,
+            tab_row_layout(
+                &sidebar_tab,
+                app.view_observed_at,
+                80,
+                1,
+                &app.palette,
+                app.status_indicators
+            )
+            .activity_age
         );
     }
 

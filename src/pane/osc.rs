@@ -520,7 +520,6 @@ impl AgentOscStateTracker {
         self.latest_title = None;
         self.latest_progress = None;
     }
-
 }
 
 /// Splits an OSC body at the first `;`, returning `(command, payload)`.
@@ -1019,7 +1018,6 @@ mod tests {
         assert_eq!(tracker.latest_title(), "");
         assert_eq!(tracker.terminal_title(), Some("✳ 修复🙂标题"));
     }
-
 
     #[cfg(unix)]
     #[test]

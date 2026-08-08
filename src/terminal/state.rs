@@ -388,7 +388,6 @@ impl TerminalState {
         changed
     }
 
-
     pub(crate) fn restore_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,
@@ -5194,10 +5193,6 @@ mod tests {
             );
         }
     }
-
-
-
-
 
     #[test]
     fn agent_session_replacement_preserves_unguarded_user_metadata() {

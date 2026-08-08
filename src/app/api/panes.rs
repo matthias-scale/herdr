@@ -5112,8 +5112,6 @@ mod tests {
         assert_only_manual_work_context_remains(&app, &terminal_id);
     }
 
-
-
     #[tokio::test]
     async fn initial_agent_session_assignment_does_not_clear_retained_title() {
         let (mut app, pane_id) = app_with_test_workspace();
@@ -5160,7 +5158,6 @@ mod tests {
             Some("Initial session title")
         );
     }
-
 
     #[test]
     fn ac5_unguarded_metadata_cannot_replace_hook_work_context() {

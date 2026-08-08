@@ -3554,6 +3554,29 @@ impl AppState {
     }
 }
 
+/// True when `row` is a tab row whose only pane row carries the same label, which
+/// happens when the tab label was derived from that single pane. Selecting the tab
+/// row would shadow the concrete pane the query actually matched.
+fn navigator_row_is_duplicate_of_its_pane(rows: &[NavigatorRow], row: &NavigatorRow) -> bool {
+    let NavigatorTarget::Tab { ws_idx, tab_idx } = row.target else {
+        return false;
+    };
+    let mut panes = rows.iter().filter(|candidate| {
+        matches!(
+            candidate.target,
+            NavigatorTarget::Pane {
+                ws_idx: pane_ws,
+                tab_idx: pane_tab,
+                ..
+            } if pane_ws == ws_idx && pane_tab == tab_idx
+        )
+    });
+    let Some(only_pane) = panes.next() else {
+        return false;
+    };
+    panes.next().is_none() && only_pane.label == row.label
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -5191,7 +5214,6 @@ mod tests {
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
     }
 
-
     #[test]
     fn repro_a2_first_session_report_does_not_mark_unfocused_idle_pane_seen() {
         let mut state = app_with_workspaces(&["test"]);
@@ -6575,27 +6597,4 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
     }
-}
-
-/// True when `row` is a tab row whose only pane row carries the same label, which
-/// happens when the tab label was derived from that single pane. Selecting the tab
-/// row would shadow the concrete pane the query actually matched.
-fn navigator_row_is_duplicate_of_its_pane(rows: &[NavigatorRow], row: &NavigatorRow) -> bool {
-    let NavigatorTarget::Tab { ws_idx, tab_idx } = row.target else {
-        return false;
-    };
-    let mut panes = rows.iter().filter(|candidate| {
-        matches!(
-            candidate.target,
-            NavigatorTarget::Pane {
-                ws_idx: pane_ws,
-                tab_idx: pane_tab,
-                ..
-            } if pane_ws == ws_idx && pane_tab == tab_idx
-        )
-    });
-    let Some(only_pane) = panes.next() else {
-        return false;
-    };
-    panes.next().is_none() && only_pane.label == row.label
 }
