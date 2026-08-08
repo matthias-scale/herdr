@@ -3139,8 +3139,22 @@ mod tests {
             .find(|entry| entry.ws_idx == 1)
             .expect("unlinked entry");
 
-        let linked_layout = tab_row_layout(linked, app.view_observed_at, 18, 4, &app.palette);
-        let unlinked_layout = tab_row_layout(unlinked, app.view_observed_at, 18, 4, &app.palette);
+        let linked_layout = tab_row_layout(
+            linked,
+            app.view_observed_at,
+            18,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        let unlinked_layout = tab_row_layout(
+            unlinked,
+            app.view_observed_at,
+            18,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
 
         assert!(
             display_width(&linked_layout.title)
