@@ -71,6 +71,9 @@ pub(crate) enum TerminalWordMotion {
     NextStart,
     PreviousStart,
     NextEnd,
+    NextBigStart,
+    PreviousBigStart,
+    NextBigEnd,
 }
 
 const COPY_MODE_WORD_SEPARATORS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~";
@@ -120,6 +123,8 @@ pub struct InputState {
     pub mouse_alternate_scroll: bool,
     #[serde(default)]
     pub modify_other_keys: bool,
+    #[serde(default)]
+    pub color_scheme_reporting: bool,
 }
 
 impl InputState {
@@ -128,7 +133,11 @@ impl InputState {
     }
 
     pub fn plain_page_keys_use_host_scrollback(self) -> bool {
-        !self.alternate_screen && !self.mouse_reporting_enabled() && !self.application_cursor
+        !self.alternate_screen
+            && !self.mouse_reporting_enabled()
+            // Bracketed paste distinguishes zsh's line editor (where it's on)
+            // from e.g. less -X (where it's off).
+            && (!self.application_cursor || self.bracketed_paste)
     }
 }
 
@@ -314,6 +323,12 @@ impl PaneTerminal {
                 TerminalWordMotion::NextStart | TerminalWordMotion::NextEnd => {
                     (row, row.saturating_add(window_rows).min(total_rows))
                 }
+                TerminalWordMotion::PreviousBigStart => {
+                    (row.saturating_sub(window_rows.saturating_sub(1)), row + 1)
+                }
+                TerminalWordMotion::NextBigStart | TerminalWordMotion::NextBigEnd => {
+                    (row, row.saturating_add(window_rows).min(total_rows))
+                }
             };
             let rows = core
                 .terminal
@@ -327,10 +342,12 @@ impl PaneTerminal {
                 .is_some_and(|row| row.soft_wrapped && end_row < total_rows);
             let buffer = RetainedTextBuffer::new_words(cols, rows, u32::try_from(start_row).ok()?);
             let target = buffer.word_motion(u32::try_from(row).ok()?, col, motion);
-            let needs_more_history = motion == TerminalWordMotion::PreviousStart
+            let needs_more_history = (motion == TerminalWordMotion::PreviousStart
+                || motion == TerminalWordMotion::PreviousBigStart)
                 && target
                     .is_some_and(|target| starts_in_continuation && target.row == start_row as u32);
-            let needs_more_future = motion == TerminalWordMotion::NextEnd
+            let needs_more_future = (motion == TerminalWordMotion::NextEnd
+                || motion == TerminalWordMotion::NextBigEnd)
                 && ends_in_continuation
                 && target.is_some_and(|target| buffer.point_is_final_atom(target));
             if target.is_some() && !needs_more_history && !needs_more_future {
@@ -340,6 +357,10 @@ impl PaneTerminal {
             let reached_edge = match motion {
                 TerminalWordMotion::PreviousStart => start_row == 0,
                 TerminalWordMotion::NextStart | TerminalWordMotion::NextEnd => {
+                    end_row == total_rows
+                }
+                TerminalWordMotion::PreviousBigStart => start_row == 0,
+                TerminalWordMotion::NextBigStart | TerminalWordMotion::NextBigEnd => {
                     end_row == total_rows
                 }
             };
@@ -367,6 +388,16 @@ impl PaneTerminal {
 
     pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
         self.ghostty.wheel_routing()
+    }
+
+    pub(crate) fn screen_text_snapshot(
+        &self,
+    ) -> Option<(
+        crate::ghostty::ActiveScreen,
+        u16,
+        Vec<crate::ghostty::ScreenTextRow>,
+    )> {
+        self.ghostty.screen_text_snapshot()
     }
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
@@ -450,6 +481,13 @@ impl PaneTerminal {
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.ghostty.apply_host_terminal_theme(theme);
+    }
+
+    pub fn apply_host_terminal_appearance(
+        &self,
+        appearance: Option<crate::terminal_theme::HostAppearance>,
+    ) -> Option<Bytes> {
+        self.ghostty.apply_host_terminal_appearance(appearance)
     }
 
     pub fn has_transient_default_color_override(&self) -> bool {
@@ -769,6 +807,9 @@ impl RetainedTextBuffer {
             TerminalWordMotion::NextStart => self.next_word_start(current),
             TerminalWordMotion::PreviousStart => self.previous_word_start(current),
             TerminalWordMotion::NextEnd => self.next_word_end(current),
+            TerminalWordMotion::NextBigStart => self.next_big_word_start(current),
+            TerminalWordMotion::PreviousBigStart => self.previous_big_word_start(current),
+            TerminalWordMotion::NextBigEnd => self.next_big_word_end(current),
         }
     }
 
@@ -835,6 +876,71 @@ impl RetainedTextBuffer {
         self.previous_point(next)
     }
 
+    fn next_big_word_start(&self, current: usize) -> Option<TerminalTextPoint> {
+        let mut next = current.saturating_add(1);
+        if self
+            .atoms
+            .get(current)
+            .is_some_and(|atom| atom.class != TextClass::Whitespace)
+        {
+            while self
+                .atoms
+                .get(next)
+                .is_some_and(|atom| atom.class != TextClass::Whitespace)
+            {
+                next += 1;
+            }
+        }
+        while self
+            .atoms
+            .get(next)
+            .is_some_and(|atom| atom.class == TextClass::Whitespace)
+        {
+            next += 1;
+        }
+        self.next_point(next)
+    }
+
+    fn previous_big_word_start(&self, current: usize) -> Option<TerminalTextPoint> {
+        let mut previous = current.checked_sub(1)?;
+        while self
+            .atoms
+            .get(previous)
+            .is_some_and(|atom| atom.class == TextClass::Whitespace)
+        {
+            previous = previous.checked_sub(1)?;
+        }
+        while previous > 0
+            && self
+                .atoms
+                .get(previous - 1)
+                .is_some_and(|atom| atom.class != TextClass::Whitespace)
+        {
+            previous -= 1;
+        }
+        self.previous_point(previous)
+    }
+
+    fn next_big_word_end(&self, current: usize) -> Option<TerminalTextPoint> {
+        let mut next = current.saturating_add(1);
+        while self
+            .atoms
+            .get(next)
+            .is_some_and(|atom| atom.class == TextClass::Whitespace)
+        {
+            next += 1;
+        }
+        self.atoms.get(next)?;
+        while self
+            .atoms
+            .get(next + 1)
+            .is_some_and(|atom| atom.class != TextClass::Whitespace)
+        {
+            next += 1;
+        }
+        self.previous_point(next)
+    }
+
     fn next_point(&self, mut index: usize) -> Option<TerminalTextPoint> {
         while let Some(atom) = self.atoms.get(index) {
             if let Some(point) = atom.point {
@@ -855,14 +961,14 @@ impl RetainedTextBuffer {
     }
 
     fn point_is_final_atom(&self, point: TerminalTextPoint) -> bool {
+        // Word motion targets are atom start points, so compare against the
+        // final atom's start point. Comparing against `end_col` would never
+        // match a wide glyph, whose end column is one past its start.
         self.atoms
             .iter()
             .rev()
             .find(|atom| atom.point.is_some())
-            .is_some_and(|atom| {
-                atom.point
-                    .is_some_and(|start| start.row == point.row && atom.end_col == point.col)
-            })
+            .is_some_and(|atom| atom.point == Some(point))
     }
 }
 
@@ -986,6 +1092,32 @@ impl GhosttyPaneTerminal {
                 background_unowned,
             );
         }
+    }
+
+    pub fn apply_host_terminal_appearance(
+        &self,
+        appearance: Option<crate::terminal_theme::HostAppearance>,
+    ) -> Option<Bytes> {
+        let mut core = self.core.lock().ok()?;
+        let color_scheme = appearance.map(|appearance| match appearance {
+            crate::terminal_theme::HostAppearance::Dark => crate::ghostty::ColorScheme::Dark,
+            crate::terminal_theme::HostAppearance::Light => crate::ghostty::ColorScheme::Light,
+        });
+        let previous = core.terminal.set_color_scheme(color_scheme);
+
+        let transitioned = matches!(
+            (previous, color_scheme),
+            (Some(previous), Some(current)) if previous != current
+        );
+        if !transitioned
+            || !core
+                .terminal
+                .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        appearance.map(|appearance| Bytes::from_static(appearance.color_scheme_report()))
     }
 
     pub fn has_transient_default_color_override(&self) -> bool {
@@ -1331,6 +1463,10 @@ impl GhosttyPaneTerminal {
             crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL,
             input_state.mouse_alternate_scroll,
         );
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_COLOR_SCHEME_REPORT,
+            input_state.color_scheme_reporting,
+        );
 
         for mode in [
             MODE_MOUSE_X10,
@@ -1585,6 +1721,10 @@ impl GhosttyPaneTerminal {
                 .keyboard_state_ansi()
                 .ok()
                 .is_some_and(|ansi| !ansi.is_empty()),
+            color_scheme_reporting: core
+                .terminal
+                .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
+                .ok()?,
         })
     }
 
@@ -1635,22 +1775,47 @@ impl GhosttyPaneTerminal {
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
         #[cfg(windows)]
-        if let Some(bytes) = crate::platform::encode_windows_conpty_shift_enter(key) {
-            if self.core.lock().is_ok_and(|core| {
-                core.terminal
-                    .kitty_keyboard_flags()
-                    .is_ok_and(|flags| flags == 0)
-                    && !core.kitty_keyboard.modify_other_keys_enabled()
-            }) {
+        if self.core.lock().is_ok_and(|core| {
+            core.terminal
+                .kitty_keyboard_flags()
+                .is_ok_and(|flags| flags == 0)
+                && !core.kitty_keyboard.modify_other_keys_enabled()
+        }) {
+            if let Some(bytes) = crate::platform::encode_windows_conpty_fallback(&key) {
                 return bytes;
             }
         }
 
-        if ghostty_prefers_herdr_text_encoding(key) {
+        let repeat_count = key.repeat_count;
+        let first = key.with_repeat_count(1);
+        let mut bytes = self.encode_terminal_key_once(first.clone(), protocol);
+        if repeat_count > 1 && first.kind != crossterm::event::KeyEventKind::Release {
+            let repeated = first.with_kind(crossterm::event::KeyEventKind::Repeat);
+            let repeated_bytes = self.encode_terminal_key_once(repeated, protocol);
+            for _ in 1..repeat_count {
+                bytes.extend_from_slice(&repeated_bytes);
+            }
+        }
+        bytes
+    }
+
+    fn encode_terminal_key_once(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        if matches!(protocol, crate::input::KeyboardProtocol::Legacy)
+            && key.code == crossterm::event::KeyCode::Tab
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+        {
             return crate::input::encode_terminal_key(key, protocol);
         }
 
-        let Some(event) = ghostty_key_event_from_terminal_key(key) else {
+        if ghostty_prefers_herdr_text_encoding(&key) {
+            return crate::input::encode_terminal_key(key, protocol);
+        }
+
+        let Some(event) = ghostty_key_event_from_terminal_key(&key) else {
             return crate::input::encode_terminal_key(key, protocol);
         };
 
@@ -1659,7 +1824,8 @@ impl GhosttyPaneTerminal {
         };
         match encoder.encode(&event) {
             Ok(bytes)
-                if !bytes.is_empty() && encoded_key_preserves_event_kind(&bytes, key, protocol) =>
+                if !bytes.is_empty()
+                    && encoded_key_preserves_event_kind(&bytes, &key, protocol) =>
             {
                 bytes
             }
@@ -1722,6 +1888,21 @@ impl GhosttyPaneTerminal {
             .encode(&event)
             .ok()
             .filter(|bytes| !bytes.is_empty())
+    }
+
+    pub(crate) fn screen_text_snapshot(
+        &self,
+    ) -> Option<(
+        crate::ghostty::ActiveScreen,
+        u16,
+        Vec<crate::ghostty::ScreenTextRow>,
+    )> {
+        let core = self.core.lock().ok()?;
+        Some((
+            core.terminal.active_screen().ok()?,
+            core.terminal.cols().ok()?,
+            core.terminal.screen_text_rows().ok()?,
+        ))
     }
 
     pub fn visible_text(&self) -> String {
@@ -1862,6 +2043,9 @@ impl GhosttyPaneTerminal {
             .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
         let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
         let resolved_bg = colors.map(|c| ghostty_color(c.background));
+        let palette_overrides = colors
+            .zip(terminal.default_palette().ok())
+            .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
         let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
@@ -1896,6 +2080,7 @@ impl GhosttyPaneTerminal {
                         default_bg,
                         resolved_fg,
                         resolved_bg,
+                        palette_overrides.as_ref(),
                     );
                     let symbol = match ghostty_buffer_symbol_into(
                         &cells,
@@ -1962,7 +2147,7 @@ impl GhosttyPaneTerminal {
 
 fn encoded_key_preserves_event_kind(
     bytes: &[u8],
-    key: crate::input::TerminalKey,
+    key: &crate::input::TerminalKey,
     protocol: crate::input::KeyboardProtocol,
 ) -> bool {
     if !protocol.reports_event_types() || key.kind == crossterm::event::KeyEventKind::Press {
@@ -2121,6 +2306,9 @@ fn ghostty_collect_dirty_patch(
         .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
     let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
     let resolved_bg = colors.map(|c| ghostty_color(c.background));
+    let palette_overrides = colors
+        .zip(terminal.default_palette().ok())
+        .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
     let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
 
     let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
@@ -2165,6 +2353,7 @@ fn ghostty_collect_dirty_patch(
                     default_bg,
                     resolved_fg,
                     resolved_bg,
+                    palette_overrides.as_ref(),
                 );
                 let symbol = match ghostty_buffer_symbol_into(
                     &cells,
@@ -2613,8 +2802,24 @@ pub(super) fn ghostty_normalize_buffer_symbol(
     if wide == crate::ghostty::CellWide::Narrow && actual_width == 2 {
         return symbol.to_string();
     }
+    if wide == crate::ghostty::CellWide::Wide && is_halfwidth_katakana_voiced_grapheme(symbol) {
+        return symbol.to_string();
+    }
 
     ghostty_blank_symbol_for_width(wide).to_string()
+}
+
+fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    let Some(base) = chars.next() else {
+        return false;
+    };
+    let Some(mark) = chars.next() else {
+        return false;
+    };
+    chars.next().is_none()
+        && ('\u{ff66}'..='\u{ff9d}').contains(&base)
+        && matches!(mark, '\u{ff9e}' | '\u{ff9f}')
 }
 
 fn ghostty_buffer_symbol_into<'a>(
@@ -2648,6 +2853,8 @@ fn ghostty_buffer_symbol_into<'a>(
     let actual_width = symbol_scratch.width();
     if actual_width != expected_width
         && !(wide == crate::ghostty::CellWide::Narrow && actual_width == 2)
+        && !(wide == crate::ghostty::CellWide::Wide
+            && is_halfwidth_katakana_voiced_grapheme(symbol_scratch))
     {
         symbol_scratch.clear();
         symbol_scratch.push_str(ghostty_blank_symbol_for_width(wide));
@@ -2680,11 +2887,7 @@ fn blank_cell_data(default_fg: Option<Color>, default_bg: Option<Color>) -> Cell
 
 fn cell_data_from_style(symbol: String, style: Style) -> CellData {
     CellData {
-        symbol: if symbol.is_empty() {
-            " ".to_string()
-        } else {
-            symbol
-        },
+        symbol,
         fg: crate::protocol::color_to_u32(style.fg.unwrap_or(Color::Reset)),
         bg: crate::protocol::color_to_u32(style.bg.unwrap_or(Color::Reset)),
         modifier: crate::protocol::modifier_to_u16(style.add_modifier),
@@ -2711,11 +2914,12 @@ fn ghostty_cell_style(
     default_bg: Option<Color>,
     resolved_fg: Option<Color>,
     resolved_bg: Option<Color>,
+    palette_overrides: Option<&PaletteOverrides>,
 ) -> Style {
     let mut fg = basic
         .style
         .fg_color
-        .map(ghostty_cell_color)
+        .map(|color| ghostty_cell_color(color, palette_overrides))
         .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
         .or(default_fg);
     let mut bg = cells
@@ -2723,7 +2927,7 @@ fn ghostty_cell_style(
         .ok()
         .flatten()
         .or(basic.style.bg_color)
-        .map(ghostty_cell_color)
+        .map(|color| ghostty_cell_color(color, palette_overrides))
         .or_else(|| cells.bg_color().ok().flatten().map(ghostty_color))
         .or(default_bg);
     if basic.style.invisible {
@@ -2745,7 +2949,11 @@ fn ghostty_cell_style(
     }
 
     let mut style = ghostty_default_style(fg, bg);
-    if let Some(underline_color) = basic.style.underline_color.map(ghostty_cell_color) {
+    if let Some(underline_color) = basic
+        .style
+        .underline_color
+        .map(|color| ghostty_cell_color(color, palette_overrides))
+    {
         style = style.underline_color(underline_color);
     }
     let mut modifiers = Modifier::empty();
@@ -2978,9 +3186,44 @@ fn terminal_theme_color(color: crate::ghostty::RgbColor) -> crate::terminal_them
     }
 }
 
-fn ghostty_cell_color(color: crate::ghostty::CellColor) -> Color {
+// Palette entries the program redefined with OSC 4. Forwarding a palette index to the
+// host makes it resolve against the host's own palette, discarding the redefinition.
+// Only overridden entries become RGB; the rest stay indexed and keep following the
+// host theme. None when nothing was redefined, which is the common case.
+struct PaletteOverrides([Option<crate::ghostty::RgbColor>; 256]);
+
+impl PaletteOverrides {
+    fn new(
+        active: &[crate::ghostty::RgbColor; 256],
+        default: &[crate::ghostty::RgbColor; 256],
+    ) -> Option<Self> {
+        let mut overrides = [None; 256];
+        let mut any = false;
+        for (index, (active, default)) in active.iter().zip(default.iter()).enumerate() {
+            if active != default {
+                overrides[index] = Some(*active);
+                any = true;
+            }
+        }
+        any.then_some(Self(overrides))
+    }
+
+    fn get(&self, index: u8) -> Option<crate::ghostty::RgbColor> {
+        self.0[usize::from(index)]
+    }
+}
+
+fn ghostty_cell_color(
+    color: crate::ghostty::CellColor,
+    palette_overrides: Option<&PaletteOverrides>,
+) -> Color {
     match color {
-        crate::ghostty::CellColor::Palette(index) => Color::Indexed(index),
+        crate::ghostty::CellColor::Palette(index) => {
+            match palette_overrides.and_then(|overrides| overrides.get(index)) {
+                Some(color) => ghostty_color(color),
+                None => Color::Indexed(index),
+            }
+        }
         crate::ghostty::CellColor::Rgb(color) => ghostty_color(color),
     }
 }
@@ -3036,11 +3279,75 @@ mod tests {
     use ratatui::{layout::Rect, style::Color};
     use tokio::sync::mpsc;
 
+    #[test]
+    fn plain_page_keys_host_scroll_for_shell_like_decckm_with_bracketed_paste() {
+        assert!(InputState {
+            alternate_screen: false,
+            application_cursor: true,
+            bracketed_paste: true,
+            focus_reporting: false,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::None,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Default,
+            mouse_alternate_scroll: false,
+            modify_other_keys: false,
+            color_scheme_reporting: false,
+        }
+        .plain_page_keys_use_host_scrollback());
+    }
+
     fn text_cell(text: &str) -> crate::ghostty::ScreenTextCell {
         crate::ghostty::ScreenTextCell {
             wide: crate::ghostty::CellWide::Narrow,
             graphemes: text.chars().map(u32::from).collect(),
         }
+    }
+
+    fn rgb(r: u8, g: u8, b: u8) -> crate::ghostty::RgbColor {
+        crate::ghostty::RgbColor { r, g, b }
+    }
+
+    #[test]
+    fn palette_overrides_are_none_without_an_osc4_write() {
+        let default = [rgb(1, 2, 3); 256];
+        assert!(PaletteOverrides::new(&default, &default).is_none());
+    }
+
+    #[test]
+    fn redefined_palette_entries_render_as_rgb_and_others_stay_indexed() {
+        let default = [rgb(1, 2, 3); 256];
+        let mut active = default;
+        active[18] = rgb(169, 177, 214);
+        let overrides = PaletteOverrides::new(&active, &default).expect("index 18 differs");
+
+        assert_eq!(
+            ghostty_cell_color(crate::ghostty::CellColor::Palette(18), Some(&overrides)),
+            Color::Rgb(169, 177, 214)
+        );
+        // Untouched entries keep being forwarded, so they still follow the host theme.
+        assert_eq!(
+            ghostty_cell_color(crate::ghostty::CellColor::Palette(19), Some(&overrides)),
+            Color::Indexed(19)
+        );
+        // ...and so does everything when the program never wrote a palette at all.
+        assert_eq!(
+            ghostty_cell_color(crate::ghostty::CellColor::Palette(18), None),
+            Color::Indexed(18)
+        );
+    }
+
+    #[test]
+    fn direct_rgb_cells_are_unaffected_by_palette_overrides() {
+        let default = [rgb(1, 2, 3); 256];
+        let mut active = default;
+        active[18] = rgb(169, 177, 214);
+        let overrides = PaletteOverrides::new(&active, &default).expect("index 18 differs");
+        assert_eq!(
+            ghostty_cell_color(
+                crate::ghostty::CellColor::Rgb(rgb(122, 162, 247)),
+                Some(&overrides)
+            ),
+            Color::Rgb(122, 162, 247)
+        );
     }
 
     fn wide_text_cells(text: &str) -> [crate::ghostty::ScreenTextCell; 2] {
@@ -3212,6 +3519,99 @@ mod tests {
     }
 
     #[test]
+    fn retained_text_big_word_motions_treat_only_whitespace_as_separators() {
+        let buffer = RetainedTextBuffer::new(
+            20,
+            vec![text_row(
+                "foo.bar baz qux/quux"
+                    .chars()
+                    .map(|ch| text_cell(&ch.to_string())),
+                false,
+            )],
+        );
+
+        // `W` skips punctuation-separated segments and lands on the next
+        // whitespace-delimited run.
+        assert_eq!(
+            buffer.word_motion(0, 0, TerminalWordMotion::NextBigStart),
+            Some(TerminalTextPoint { row: 0, col: 8 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 8, TerminalWordMotion::NextBigStart),
+            Some(TerminalTextPoint { row: 0, col: 12 })
+        );
+        // `E` lands on the last character of the current/next run.
+        assert_eq!(
+            buffer.word_motion(0, 0, TerminalWordMotion::NextBigEnd),
+            Some(TerminalTextPoint { row: 0, col: 6 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 6, TerminalWordMotion::NextBigEnd),
+            Some(TerminalTextPoint { row: 0, col: 10 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 12, TerminalWordMotion::NextBigEnd),
+            Some(TerminalTextPoint { row: 0, col: 19 })
+        );
+        // `B` returns to the beginning of the previous run.
+        assert_eq!(
+            buffer.word_motion(0, 19, TerminalWordMotion::PreviousBigStart),
+            Some(TerminalTextPoint { row: 0, col: 12 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 12, TerminalWordMotion::PreviousBigStart),
+            Some(TerminalTextPoint { row: 0, col: 8 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 8, TerminalWordMotion::PreviousBigStart),
+            Some(TerminalTextPoint { row: 0, col: 0 })
+        );
+
+        // Lowercase motions keep their punctuation-aware behavior.
+        assert_eq!(
+            buffer.word_motion(0, 0, TerminalWordMotion::NextStart),
+            Some(TerminalTextPoint { row: 0, col: 3 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 3, TerminalWordMotion::NextStart),
+            Some(TerminalTextPoint { row: 0, col: 4 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 4, TerminalWordMotion::PreviousStart),
+            Some(TerminalTextPoint { row: 0, col: 3 })
+        );
+    }
+
+    #[test]
+    fn retained_text_big_word_motions_cross_rows_and_blank_lines() {
+        let buffer = RetainedTextBuffer::new(
+            6,
+            vec![
+                text_row("a.b-c ".chars().map(|ch| text_cell(&ch.to_string())), false),
+                text_row("      ".chars().map(|ch| text_cell(&ch.to_string())), false),
+                text_row("d_e   ".chars().map(|ch| text_cell(&ch.to_string())), false),
+            ],
+        );
+
+        assert_eq!(
+            buffer.word_motion(0, 0, TerminalWordMotion::NextBigStart),
+            Some(TerminalTextPoint { row: 2, col: 0 })
+        );
+        assert_eq!(
+            buffer.word_motion(2, 0, TerminalWordMotion::PreviousBigStart),
+            Some(TerminalTextPoint { row: 0, col: 0 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 0, TerminalWordMotion::NextBigEnd),
+            Some(TerminalTextPoint { row: 0, col: 4 })
+        );
+        assert_eq!(
+            buffer.word_motion(0, 4, TerminalWordMotion::NextBigEnd),
+            Some(TerminalTextPoint { row: 2, col: 2 })
+        );
+    }
+
+    #[test]
     fn live_terminal_match_validation_rejects_overwritten_text() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(20, 3, 100).unwrap();
@@ -3294,6 +3694,30 @@ mod tests {
                 TerminalWordMotion::NextEnd,
             ),
             Some(text_match.end)
+        );
+    }
+
+    #[test]
+    fn live_terminal_word_end_expands_through_a_long_wide_soft_wrap() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(2, 3, 200).unwrap();
+        let word = "界".repeat(66);
+        terminal.write(word.as_bytes());
+        let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap());
+        let text_match = pane.search_text_matches(&word, true)[0];
+
+        // The word end sits on the head cell of the final wide glyph, past the
+        // initial read window, so the window has to expand to reach it.
+        assert_eq!(
+            pane.word_motion_target(
+                text_match.start.row,
+                text_match.start.col,
+                TerminalWordMotion::NextEnd,
+            ),
+            Some(TerminalTextPoint {
+                row: text_match.end.row,
+                col: 0,
+            })
         );
     }
 
@@ -3776,6 +4200,69 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_backtab_preserves_shift_across_keyboard_protocols() {
+        for (kitty_flags, expected) in [
+            (None, b"\x1b[Z".as_slice()),
+            (Some(1), b"\x1b[9;2u".as_slice()),
+        ] {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            if let Some(flags) = kitty_flags {
+                terminal.write(format!("\x1b[>{flags}u").as_bytes());
+            }
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            let protocol = pane.keyboard_protocol().unwrap();
+
+            for modifiers in [
+                crossterm::event::KeyModifiers::empty(),
+                crossterm::event::KeyModifiers::SHIFT,
+            ] {
+                let encoded = pane.encode_terminal_key(
+                    crate::input::TerminalKey::new(crossterm::event::KeyCode::BackTab, modifiers),
+                    protocol,
+                );
+                assert_eq!(encoded, expected, "backtab with modifiers {modifiers:?}");
+            }
+        }
+
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+            crate::input::KeyboardProtocol::Legacy,
+        );
+        assert_eq!(encoded, b"\t");
+    }
+
+    #[test]
+    fn ghostty_ctrl_tab_matches_the_pane_keyboard_protocol() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let legacy = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+
+        assert_eq!(
+            legacy.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy),
+            b"\t"
+        );
+
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>3u");
+        let kitty = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        assert_eq!(
+            kitty.encode_terminal_key(key, crate::input::KeyboardProtocol::Kitty { flags: 3 }),
+            b"\x1b[9;5u"
+        );
+    }
+
+    #[test]
     fn ghostty_enter_backspace_release_in_legacy_pane_emits_nothing() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
@@ -3889,6 +4376,7 @@ mod tests {
             mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
             mouse_alternate_scroll: true,
             modify_other_keys: true,
+            color_scheme_reporting: true,
         });
 
         assert_eq!(
@@ -3902,6 +4390,7 @@ mod tests {
                 mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
                 mouse_alternate_scroll: true,
                 modify_other_keys: true,
+                color_scheme_reporting: true,
             })
         );
 
@@ -3915,8 +4404,48 @@ mod tests {
         assert_eq!(encoded, b"\x1bOA");
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
         assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn grouped_semantic_key_repeats_expand_at_the_destination() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty(),
+        )
+        .with_repeat_count(3);
+
+        assert_eq!(
+            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+            b"xxx"
+        );
+    }
+
+    #[test]
+    fn grouped_release_is_encoded_once() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>11u");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let protocol = pane.keyboard_protocol().unwrap();
+        let release = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        )
+        .with_kind(crossterm::event::KeyEventKind::Release);
+        let expected = pane.encode_terminal_key(release.clone(), protocol);
+
+        assert!(!expected.is_empty());
+        let mut malformed_release = release;
+        malformed_release.repeat_count = 3;
+        assert_eq!(
+            pane.encode_terminal_key(malformed_release, protocol),
+            expected
+        );
     }
 
     #[test]
@@ -3958,9 +4487,9 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
         );
 
-        let before = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let before = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
-        let after = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let after = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_ne!(before, after);
         assert_eq!(after, b"\x1b[13;6u");
@@ -3975,7 +4504,7 @@ mod tests {
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>5u", &tx);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -3993,7 +4522,7 @@ mod tests {
         pane.seed_keyboard_protocol_flags(5);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -4030,6 +4559,20 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_ghostty_default_pane_preserves_synthesized_shift_enter_fallback() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+
+        assert_eq!(
+            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+            b"\x1b[13;28;13;1;16;1_"
+        );
+    }
+
     #[test]
     fn ghostty_modify_other_keys_mode_one_preserves_shift_enter() {
         let (tx, _rx) = mpsc::channel(4);
@@ -4037,14 +4580,8 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
 
-        #[cfg(windows)]
-        assert_eq!(
-            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
-            b"\x1b[13;28;13;1;16;1_"
-        );
-
         pane.seed_history_ansi("\x1b[>4;1m");
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(encoded, b"\x1b[27;2;13~");
     }
@@ -4058,7 +4595,7 @@ mod tests {
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
-        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
         assert_eq!(encoded, b"\x1b[127;3u");
     }
@@ -4077,7 +4614,10 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL,
         );
         assert_eq!(
-            legacy.encode_terminal_key(ctrl_backspace, crate::input::KeyboardProtocol::Legacy),
+            legacy.encode_terminal_key(
+                ctrl_backspace.clone(),
+                crate::input::KeyboardProtocol::Legacy
+            ),
             b"\x08"
         );
 
@@ -4268,6 +4808,14 @@ mod tests {
             ghostty_normalize_buffer_symbol("xx", crate::ghostty::CellWide::SpacerHead),
             " "
         );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol("ｶ\u{ff9e}", crate::ghostty::CellWide::Wide),
+            "ｶ\u{ff9e}"
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol("ﾊ\u{ff9f}", crate::ghostty::CellWide::Wide),
+            "ﾊ\u{ff9f}"
+        );
     }
 
     fn render_cells_to_symbols(
@@ -4334,6 +4882,72 @@ mod tests {
                     && symbol == "👨\u{200d}👩\u{200d}👧"),
             "expected a wide cell containing the full ZWJ grapheme, got {cells:?}"
         );
+    }
+
+    #[test]
+    fn halfwidth_katakana_voiced_marks_render() {
+        let mut terminal = crate::ghostty::Terminal::new(40, 1, 0).unwrap();
+        terminal.write("ｱｲｳｴｵ ｶﾞｷﾞｸﾞｹﾞｺﾞ ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ".as_bytes());
+
+        let cells = render_cells_to_symbols(&mut terminal);
+        let rendered: String = cells.iter().map(|(_, symbol)| symbol.as_str()).collect();
+
+        assert!(
+            rendered.contains("ｱｲｳｴｵ ｶﾞｷﾞｸﾞｹﾞｺﾞ ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ"),
+            "expected halfwidth katakana with voiced marks to survive, got {cells:?}"
+        );
+    }
+
+    #[test]
+    fn render_keeps_halfwidth_katakana_voiced_tail_empty() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(20, 1, 0).unwrap();
+        terminal.write("ｶﾞZ".as_bytes());
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(20, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 1), false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(0, 0)].symbol(), "ｶ\u{ff9e}");
+        assert_eq!(
+            buffer[(1, 0)].symbol(),
+            "",
+            "wide spacer tail must stay empty so the host terminal does not overwrite the voiced kana"
+        );
+        assert_eq!(buffer[(2, 0)].symbol(), "Z");
+    }
+
+    #[test]
+    fn dirty_patch_keeps_halfwidth_katakana_voiced_tail_empty() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 1, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let backend = ratatui::backend::TestBackend::new(20, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 1), false))
+            .unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write("ｶﾞZ".as_bytes());
+        }
+
+        let patch = match pane.collect_dirty_patch(20, 1) {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            other => panic!("expected dirty patch, got {other:?}"),
+        };
+        let row = &patch.rows[0].1;
+
+        assert_eq!(row[0].symbol, "ｶ\u{ff9e}");
+        assert_eq!(
+            row[1].symbol, "",
+            "wide spacer tail must stay empty in retained terminal patches"
+        );
+        assert_eq!(row[2].symbol, "Z");
     }
 
     #[test]
@@ -4981,6 +5595,45 @@ mod tests {
 
         assert_eq!(result.terminal_responses.len(), 1);
         assert!(String::from_utf8_lossy(&result.terminal_responses[0]).contains('R'));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn color_scheme_queries_and_live_updates_follow_terminal_mode() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
+            .is_none());
+        let query = pane.process_pty_bytes(pane_id, 0, b"\x1b[?996n", &tx);
+        assert_eq!(
+            query.terminal_responses,
+            vec![Bytes::from_static(b"\x1b[?997;1n")]
+        );
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[?2031h", &tx);
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
+            .is_none());
+        assert_eq!(
+            pane.apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Light)),
+            Some(Bytes::from_static(b"\x1b[?997;2n"))
+        );
+
+        assert!(pane.apply_host_terminal_appearance(None).is_none());
+        let unknown_query = pane.process_pty_bytes(pane_id, 0, b"\x1b[?996n", &tx);
+        assert!(unknown_query.terminal_responses.is_empty());
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
+            .is_none());
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1bc", &tx);
+        assert!(pane
+            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Light))
+            .is_none());
         assert!(rx.try_recv().is_err());
     }
 

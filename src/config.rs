@@ -21,8 +21,9 @@ pub use self::{
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
         ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig,
-        SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
-        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
+        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
+        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -39,6 +40,9 @@ pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
 pub const DEFAULT_MOUSE_SCROLL_LINES: usize = 3;
 pub const DEFAULT_MOBILE_WIDTH_THRESHOLD: u16 = 64;
+pub const DEFAULT_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS: u64 = 60;
+pub const MIN_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS: u64 = 5;
+pub const MAX_THEME_AUTO_SWITCH_POLL_INTERVAL_SECONDS: u64 = 3600;
 
 #[cfg(test)]
 pub(crate) fn app_dir_name() -> &'static str {

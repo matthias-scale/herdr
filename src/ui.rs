@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
     Frame,
 };
+use tokio::sync::Notify;
 
 mod dialogs;
 mod info_panel;
@@ -97,6 +100,7 @@ pub(crate) use self::{
         AgentPanelEntry, SidebarRow, WorkspaceListEntry,
     },
 };
+use crate::render_signal::RenderSignal;
 
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
@@ -205,9 +209,18 @@ fn desktop_tab_bar_and_terminal_area(
 ) -> (Rect, Rect) {
     let hide_single_tab_bar = app.hide_tab_bar_when_single_tab && ws.tabs.len() == 1;
     if !hide_single_tab_bar && main_area.height > 1 {
-        let [tab_bar_rect, terminal_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-        (tab_bar_rect, terminal_area)
+        match app.tab_bar_position {
+            crate::config::TabBarPositionConfig::Top => {
+                let [tab_bar_rect, terminal_area] =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
+                (tab_bar_rect, terminal_area)
+            }
+            crate::config::TabBarPositionConfig::Bottom => {
+                let [terminal_area, tab_bar_rect] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(main_area);
+                (tab_bar_rect, terminal_area)
+            }
+        }
     } else {
         (Rect::default(), main_area)
     }
@@ -482,6 +495,30 @@ pub fn render_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, None);
+}
+
+pub(crate) fn render_with_runtime_registry_and_handles(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    render_notify: &Arc<Notify>,
+    render_dirty: &Arc<RenderSignal>,
+) {
+    render_with_runtime_registry_inner(
+        app,
+        terminal_runtimes,
+        frame,
+        Some((render_notify, render_dirty)),
+    );
+}
+
+fn render_with_runtime_registry_inner(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
+) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 
@@ -504,12 +541,21 @@ pub fn render_with_runtime_registry(
     }
 
     if app.view.info_panel_rect.width > 0 {
-        render_info_panel(app, frame, app.view.info_panel_rect);
+        render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
+
+    let mode_bar_area = if app.view.layout == ViewLayout::Desktop
+        && app.tab_bar_position == crate::config::TabBarPositionConfig::Bottom
+        && tab_bar_area.height > 0
+    {
+        tab_bar_area
+    } else {
+        terminal_area
+    };
 
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
@@ -518,10 +564,10 @@ pub fn render_with_runtime_registry(
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
             render_mobile_panel(app, terminal_runtimes, frame, frame.area())
         }
-        Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
-        Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
-        Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
-        Mode::Resize => render_resize_overlay(app, frame, terminal_area),
+        Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
+        Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
+        Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
+        Mode::Resize => render_resize_overlay(app, frame, mode_bar_area),
         Mode::ConfirmClose => {
             render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
         }
@@ -917,6 +963,35 @@ mod tests {
     }
 
     #[test]
+    fn desktop_tab_bar_position_controls_geometry_and_mode_bar_placement() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Prefix;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
+
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 19, 54, 1));
+        assert!(app.view.tab_hit_areas.iter().all(|rect| rect.y == 19));
+        assert_eq!(app.view.new_tab_hit_area.y, 19);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let mode_row = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.tab_bar_rect,
+            app.view.tab_bar_rect.y,
+        );
+        assert!(mode_row.contains("PREFIX"), "{mode_row}");
+    }
+
+    #[test]
     fn hide_tab_bar_when_single_tab_toggles_geometry_with_tab_count() {
         let mut app = crate::app::state::AppState::test_new();
         app.hide_tab_bar_when_single_tab = true;
@@ -951,6 +1026,30 @@ mod tests {
         assert_eq!(app.view.tab_bar_rect, Rect::default());
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
+    }
+
+    #[test]
+    fn bottom_tab_bar_still_hides_when_single_tab() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.hide_tab_bar_when_single_tab = true;
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Prefix;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.tab_bar_rect, Rect::default());
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 19));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let mode_row = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.terminal_area,
+            app.view.terminal_area.y + app.view.terminal_area.height - 1,
+        );
+        assert!(mode_row.contains("PREFIX"), "{mode_row}");
     }
 
     #[tokio::test]

@@ -29,6 +29,12 @@
           "description": "Follow host terminal light/dark appearance and switch between theme names."
         },
         {
+          "key": "theme.auto_switch_poll_interval_seconds",
+          "type": "integer",
+          "default": "60",
+          "description": "Seconds between host background refreshes for auto-switching; clamped to 5–3600."
+        },
+        {
           "key": "theme.dark_name",
           "type": "string",
           "default": "unset",
@@ -51,6 +57,12 @@
           "type": "color",
           "default": "unset",
           "description": "Override the panel_bg color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.sidebar_bg",
+          "type": "color",
+          "default": "unset",
+          "description": "Set the desktop sidebar background without changing other panel surfaces. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
         },
         {
           "key": "theme.custom.surface0",
@@ -737,6 +749,12 @@
           "description": "Draw borders around split panes."
         },
         {
+          "key": "ui.pane_scrollbars",
+          "type": "boolean",
+          "default": "true",
+          "description": "Draw interactive scrollbars beside terminal panes. Disable to reclaim the scrollbar column and keep it out of terminal-native selections."
+        },
+        {
           "key": "ui.pane_gaps",
           "type": "boolean",
           "default": "true",
@@ -755,10 +773,26 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
+          "key": "ui.show_subscription_usage",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show local Codex and Claude Code subscription usage in the info panel."
+        },
+        {
           "key": "ui.status_bar.enabled",
           "type": "boolean",
           "default": "true",
           "description": "Show the full-width top status row on desktop layouts."
+        },
+        {
+          "key": "ui.tab_bar_position",
+          "type": "enum",
+          "default": "\"top\"",
+          "description": "Place the desktop tab row above or below the terminal panes.",
+          "values": [
+            "top",
+            "bottom"
+          ]
         },
         {
           "key": "ui.agent_panel_sort",
@@ -768,6 +802,16 @@
           "values": [
             "spaces",
             "priority"
+          ]
+        },
+        {
+          "key": "ui.status_indicators",
+          "type": "enum",
+          "default": "\"dots\"",
+          "description": "Choose compact color dots or distinct static symbols for agent states.",
+          "values": [
+            "dots",
+            "symbols"
           ]
         },
         {

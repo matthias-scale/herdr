@@ -237,6 +237,8 @@ impl Tab {
         )
     }
 
+    // Tab construction threads pane runtime geometry, host context, and render hooks.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         number: usize,
         initial_cwd: PathBuf,
@@ -244,6 +246,7 @@ impl Tab {
         cols: u16,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
@@ -257,6 +260,7 @@ impl Tab {
             cols,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             events,
@@ -266,6 +270,8 @@ impl Tab {
         )
     }
 
+    // Command tab construction mirrors the shell tab runtime arguments.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_argv_command(
         number: usize,
         initial_cwd: PathBuf,
@@ -274,6 +280,7 @@ impl Tab {
         argv: &[String],
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
@@ -286,6 +293,7 @@ impl Tab {
             cols,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             events,
@@ -303,6 +311,7 @@ impl Tab {
         cols: u16,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
@@ -322,6 +331,7 @@ impl Tab {
                 crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 events.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -334,6 +344,7 @@ impl Tab {
                 initial_cwd.clone(),
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 shell_config,
                 launch_env,
                 events.clone(),
@@ -412,6 +423,7 @@ impl Tab {
         }
     }
 
+    #[cfg(test)]
     pub fn split_focused(
         &mut self,
         direction: Direction,
@@ -420,10 +432,13 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
+        self.split_pane_with_runtime(
+            self.layout.focused(),
+            true,
             direction,
             None,
             rows,
@@ -431,6 +446,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             None,
@@ -439,6 +455,7 @@ impl Tab {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn split_focused_with_placement(
         &mut self,
         direction: Direction,
@@ -448,10 +465,13 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
+        self.split_pane_with_runtime(
+            self.layout.focused(),
+            true,
             direction,
             None,
             rows,
@@ -459,66 +479,11 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             None,
             before,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn split_focused_with_ratio_and_placement(
-        &mut self,
-        direction: Direction,
-        ratio: f32,
-        before: bool,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        shell_config: crate::pane::PaneShellConfig<'_>,
-        launch_env: &PaneLaunchEnv,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            Some(ratio),
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            shell_config,
-            launch_env,
-            None,
-            before,
-        )
-    }
-
-    pub fn split_focused_with_ratio(
-        &mut self,
-        direction: Direction,
-        ratio: f32,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        shell_config: crate::pane::PaneShellConfig<'_>,
-        launch_env: &PaneLaunchEnv,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            Some(ratio),
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            shell_config,
-            launch_env,
-            None,
-            false,
         )
     }
 
@@ -532,8 +497,11 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
     ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
+        self.split_pane_with_runtime(
+            self.layout.focused(),
+            true,
             direction,
             None,
             rows,
@@ -541,6 +509,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             Some(SplitCommand::Shell {
@@ -551,119 +520,14 @@ impl Tab {
         )
     }
 
-    pub fn split_focused_argv_command(
-        &mut self,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        argv: &[String],
-        launch_env: &PaneLaunchEnv,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            None,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            launch_env,
-            Some(SplitCommand::Argv { argv, launch_env }),
-            false,
-        )
-    }
-
+    /// Split `target` with a shell pane. Focus moves to the new pane only when
+    /// `focus_new_pane` is set; a spawn failure rolls the layout back without
+    /// touching focus or its history.
     #[allow(clippy::too_many_arguments)]
-    pub fn split_focused_argv_command_with_placement(
+    pub(crate) fn split_pane_shell(
         &mut self,
-        direction: Direction,
-        before: bool,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        argv: &[String],
-        launch_env: &PaneLaunchEnv,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            None,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            launch_env,
-            Some(SplitCommand::Argv { argv, launch_env }),
-            before,
-        )
-    }
-
-    pub fn split_focused_argv_command_with_ratio(
-        &mut self,
-        direction: Direction,
-        ratio: f32,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        argv: &[String],
-        launch_env: &PaneLaunchEnv,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            Some(ratio),
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            launch_env,
-            Some(SplitCommand::Argv { argv, launch_env }),
-            false,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn split_focused_argv_command_with_ratio_and_placement(
-        &mut self,
-        direction: Direction,
-        ratio: f32,
-        before: bool,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        argv: &[String],
-        launch_env: &PaneLaunchEnv,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            Some(ratio),
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            launch_env,
-            Some(SplitCommand::Argv { argv, launch_env }),
-            before,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)] // Split launch inputs remain explicit at the runtime boundary.
-    fn split_focused_with_runtime(
-        &mut self,
+        target: PaneId,
+        focus_new_pane: bool,
         direction: Direction,
         ratio: Option<f32>,
         rows: u16,
@@ -671,17 +535,93 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &PaneLaunchEnv,
+        before: bool,
+    ) -> std::io::Result<NewPane> {
+        self.split_pane_with_runtime(
+            target,
+            focus_new_pane,
+            direction,
+            ratio,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            shell_config,
+            launch_env,
+            None,
+            before,
+        )
+    }
+
+    /// Split `target` with an argv-command pane. Same focus contract as
+    /// `split_pane_shell`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn split_pane_argv(
+        &mut self,
+        target: PaneId,
+        focus_new_pane: bool,
+        direction: Direction,
+        ratio: Option<f32>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        launch_env: &PaneLaunchEnv,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+        before: bool,
+    ) -> std::io::Result<NewPane> {
+        self.split_pane_with_runtime(
+            target,
+            focus_new_pane,
+            direction,
+            ratio,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            launch_env,
+            Some(SplitCommand::Argv { argv, launch_env }),
+            before,
+        )
+    }
+
+    // Split construction threads geometry, host context, launch policy, and command state.
+    #[allow(clippy::too_many_arguments)]
+    fn split_pane_with_runtime(
+        &mut self,
+        target: PaneId,
+        focus_new_pane: bool,
+        direction: Direction,
+        ratio: Option<f32>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         command: Option<SplitCommand<'_>>,
         before: bool,
     ) -> std::io::Result<NewPane> {
-        let previous_focus = self.layout.focused();
-        let new_id = match ratio {
-            Some(ratio) => self
-                .layout
-                .split_focused_with_ratio_and_placement(direction, ratio, before),
-            None => self.layout.split_focused_with_placement(direction, before),
+        let Some(new_id) =
+            self.layout
+                .split_pane_with_placement(target, direction, ratio.unwrap_or(0.5), before)
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "split target pane is not in the layout",
+            ));
         };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -704,6 +644,7 @@ impl Tab {
                 crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
@@ -718,6 +659,7 @@ impl Tab {
                 crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
@@ -729,6 +671,7 @@ impl Tab {
                 actual_cwd.clone(),
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 shell_config,
                 launch_env,
                 self.events.clone(),
@@ -739,8 +682,7 @@ impl Tab {
         let runtime = match runtime {
             Ok(runtime) => runtime,
             Err(err) => {
-                self.layout.close_focused();
-                self.layout.focus_pane(previous_focus);
+                self.layout.close_pane(new_id);
                 return Err(err);
             }
         };
@@ -751,6 +693,9 @@ impl Tab {
             }
             None => TerminalState::new(terminal_id.clone(), actual_cwd),
         };
+        if focus_new_pane {
+            self.layout.focus_pane(new_id);
+        }
         self.panes.insert(new_id, PaneState::new(terminal_id));
         self.zoomed = false;
         Ok(NewPane {
@@ -809,14 +754,7 @@ impl Tab {
 
         if self.layout.pane_count() > 1 {
             let next_root = self.promoted_root_if_needed(pane_id);
-            if self.layout.focused() == pane_id {
-                self.layout.close_focused();
-            } else {
-                let prev_focus = self.layout.focused();
-                self.layout.focus_pane(pane_id);
-                self.layout.close_focused();
-                self.layout.focus_pane(prev_focus);
-            }
+            self.layout.close_pane(pane_id);
             if let Some(next_root) = next_root {
                 self.root_pane = next_root;
             }
@@ -837,11 +775,16 @@ impl Tab {
         direction: Direction,
         ratio: f32,
         before: bool,
+        focus: bool,
     ) -> Result<PaneId, MovedPane> {
-        if !self
-            .layout
-            .insert_pane_near(target_pane_id, moved.pane_id, direction, ratio, before)
-        {
+        if !self.layout.insert_pane_near_with_placement(
+            target_pane_id,
+            moved.pane_id,
+            direction,
+            ratio,
+            before,
+            focus,
+        ) {
             return Err(moved);
         }
         let pane_id = moved.pane_id;
@@ -857,14 +800,7 @@ impl Tab {
 
         let next_root = self.promoted_root_if_needed(pane_id);
 
-        if self.layout.focused() == pane_id {
-            self.layout.close_focused();
-        } else {
-            let prev_focus = self.layout.focused();
-            self.layout.focus_pane(pane_id);
-            self.layout.close_focused();
-            self.layout.focus_pane(prev_focus);
-        }
+        self.layout.close_pane(pane_id);
 
         let pane = self.panes.remove(&pane_id)?;
         let terminal_id = pane.attached_terminal_id;
