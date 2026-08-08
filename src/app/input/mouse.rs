@@ -37,6 +37,14 @@ pub(super) enum MouseAction {
         ws_idx: usize,
         tab_idx: usize,
     },
+    ToggleSidebarTabPrio {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
+    OpenSidebarTabInfo {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -591,6 +599,18 @@ impl AppState {
                             start_row: mouse.row,
                         });
                         return None;
+                    }
+
+                    if let Some((ws_idx, tab_idx)) =
+                        self.tab_prio_target_at(mouse.column, mouse.row)
+                    {
+                        return Some(MouseAction::ToggleSidebarTabPrio { ws_idx, tab_idx });
+                    }
+
+                    if let Some((ws_idx, tab_idx)) =
+                        self.tab_info_target_at(mouse.column, mouse.row)
+                    {
+                        return Some(MouseAction::OpenSidebarTabInfo { ws_idx, tab_idx });
                     }
 
                     if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
@@ -1154,6 +1174,12 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::SidebarTab { ws_idx, tab_idx }) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
+            }
+            Some(crate::ui::MobileSwitcherTarget::SidebarTabPrio { ws_idx, tab_idx }) => {
+                return MobileMouseResult::Action(MouseAction::ToggleSidebarTabPrio {
+                    ws_idx,
+                    tab_idx,
+                });
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
@@ -1915,6 +1941,194 @@ mod tests {
                 tab_idx: 0
             })
         ));
+    }
+
+    fn add_test_work_link(app: &mut crate::app::App, ws_idx: usize) {
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[ws_idx].tabs[0]
+            .terminal_id(pane_id)
+            .expect("test pane terminal")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                ..Default::default()
+            })
+            .expect("valid test work context");
+    }
+
+    #[test]
+    fn sidebar_prio_gutter_toggles_target_tab_without_focusing_it() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = crate::ui::tab_prio_rect(&cards[1]);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x,
+            target.y,
+        ));
+
+        assert!(app.state.workspaces[1].tabs[0].prio);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 0);
+        assert!(app.state.session_dirty);
+    }
+
+    #[test]
+    fn sidebar_tab_click_outside_gutters_still_focuses_the_tab() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let title_column = cards[1].rect.x.saturating_add(8);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            title_column,
+            cards[1].rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
+        assert!(!app.state.workspaces[1].tabs[0].prio);
+    }
+
+    #[test]
+    fn sidebar_info_gutter_focuses_tab_and_opens_panel_for_linked_pane() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        add_test_work_link(&mut app, 1);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = crate::ui::tab_info_rect(&cards[1]);
+        assert!(crate::ui::info_panel_affordance_available(&app.state));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x,
+            target.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
+        assert!(app.state.info_panel_expanded);
+    }
+
+    #[test]
+    fn sidebar_info_gutter_is_not_a_target_without_work_links() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let card = &crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)[0];
+        let target = crate::ui::tab_info_rect(card);
+
+        assert_eq!(
+            app.state.tab_info_target_at(target.x, target.y),
+            None,
+            "a no-link pane must leave the info gutter inert"
+        );
+    }
+
+    #[test]
+    fn sidebar_gutter_cells_act_on_their_trailing_spacer_column_too() {
+        for offset in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+            app.state.ensure_test_terminals();
+            add_test_work_link(&mut app, 1);
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.reconcile_sidebar_presentation();
+            let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+            let prio = crate::ui::tab_prio_rect(&cards[1]);
+            let info = crate::ui::tab_info_rect(&cards[1]);
+            assert_eq!(prio.width, crate::ui::TAB_PRIO_FIELD_WIDTH as u16);
+            assert_eq!(info.width, crate::ui::TAB_INFO_FIELD_WIDTH as u16);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                prio.x + offset,
+                prio.y,
+            ));
+            assert!(
+                app.state.workspaces[1].tabs[0].prio,
+                "prio column {offset} of the cell must toggle, not focus"
+            );
+            assert_eq!(app.state.active, Some(0), "prio must not focus the tab");
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                info.x + offset,
+                info.y,
+            ));
+            assert!(
+                app.state.info_panel_expanded,
+                "info column {offset} of the cell must open the panel"
+            );
+            assert_eq!(app.state.active, Some(1));
+        }
+    }
+
+    #[test]
+    fn sidebar_info_gutter_tracks_the_tabs_focused_pane_not_its_first() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("split");
+        let root = workspace.tabs[0].root_pane;
+        let focused = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        assert_ne!(root, focused);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // Link the root pane while the split pane holds focus: the panel would open on the split
+        // pane and show nothing, so the affordance must stay inert.
+        let root_terminal = app.state.workspaces[0].terminal_id(root).cloned().unwrap();
+        app.state
+            .terminals
+            .get_mut(&root_terminal)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-1".into()]),
+                ..Default::default()
+            })
+            .expect("valid test work context");
+        app.state.reconcile_sidebar_presentation();
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), focused);
+        let card = &crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)[0];
+        let target = crate::ui::tab_info_rect(card);
+        assert_eq!(
+            app.state.tab_info_target_at(target.x, target.y),
+            None,
+            "an unlinked focused pane must leave the info gutter inert"
+        );
+
+        // Focusing the linked pane must hand the affordance back.
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.reconcile_sidebar_presentation();
+        assert!(
+            app.state.tab_info_target_at(target.x, target.y).is_some(),
+            "the focused pane's links must drive the affordance"
+        );
     }
 
     #[test]
@@ -3782,6 +3996,65 @@ mod tests {
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn mobile_prio_gutter_click_toggles_through_dispatch_and_keeps_the_switcher_open() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert_ne!(
+            app.state.mode,
+            Mode::Terminal,
+            "the switcher should be open for this test"
+        );
+
+        // Locate the cell through the same projection the renderer uses, then drive the real
+        // dispatch path: both of its columns must toggle prio and leave the switcher open.
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let tab_row = viewport.y
+            + crate::ui::mobile_switcher_workspace_doc_range(&app.state, 0)
+                .expect("workspace row")
+                .start as u16
+            + 1;
+        let prio_col = (viewport.x..viewport.x + viewport.width)
+            .find(|col| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, *col, tab_row),
+                    Some(crate::ui::MobileSwitcherTarget::SidebarTabPrio { .. })
+                )
+            })
+            .expect("a prio cell on the tab row");
+        let switcher_mode = app.state.mode;
+
+        for column in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
+            let before = app.state.workspaces[0].tabs[0].prio;
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                prio_col + column,
+                tab_row,
+            ));
+            assert_eq!(
+                app.state.workspaces[0].tabs[0].prio, !before,
+                "column {column} must toggle prio through handle_mouse"
+            );
+            assert!(app.state.session_dirty, "the toggle must be persisted");
+            assert_eq!(
+                app.state.mode, switcher_mode,
+                "column {column} must not dismiss the switcher"
+            );
+        }
     }
 
     #[test]

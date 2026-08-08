@@ -20,6 +20,9 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+/// Gutter cell widths are asserted by mouse-dispatch tests that live outside this module.
+#[cfg(test)]
+pub(crate) use sidebar::{TAB_INFO_FIELD_WIDTH, TAB_PRIO_FIELD_WIDTH};
 mod status;
 mod tab_surface;
 mod tabs;
@@ -73,6 +76,16 @@ pub(crate) use self::tab_surface::{
 };
 use self::tabs::render_tab_bar;
 use self::work_link_picker::render_work_link_picker;
+
+pub(crate) fn info_panel_affordance_available(app: &crate::app::AppState) -> bool {
+    if app.view.layout == crate::app::state::ViewLayout::Mobile {
+        return false;
+    }
+    if app.view.info_panel_rect.width > 0 {
+        return true;
+    }
+    !app.info_panel_expanded && panel_width_for_main(app.view.terminal_area.width).is_some()
+}
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -93,8 +106,8 @@ pub(crate) use self::{
         normalized_workspace_scroll, prio_panel_chevron_rect, prio_panel_rect,
         relative_agent_navigation_entry, sidebar_header_new_space_rect,
         sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_thread_entries, tab_info_rect,
+        tab_prio_rect, workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarRow, WorkspaceListEntry,
