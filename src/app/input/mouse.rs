@@ -2048,6 +2048,44 @@ mod tests {
     }
 
     #[test]
+    fn a_missive_conversation_alone_earns_the_info_gutter() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        // Missive links are observation-only, so they arrive through the hook tier rather than a
+        // manual patch. A pane whose ONLY link is a conversation must still get the cell.
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[1].tabs[0]
+            .terminal_id(pane_id)
+            .expect("test pane terminal")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .replace_hook_work_context(crate::work_context::PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/c1".into()],
+                ..Default::default()
+            })
+            .expect("valid test work context");
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = crate::ui::tab_info_rect(&cards[1]);
+        assert!(app.state.tab_info_target_at(target.x, target.y).is_some());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x,
+            target.y,
+        ));
+        assert_eq!(app.state.active, Some(1));
+        assert!(app.state.info_panel_expanded);
+    }
+
+    #[test]
     fn sidebar_gutter_cells_act_on_their_trailing_spacer_column_too() {
         for offset in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
             let mut app = app_for_mouse_test();

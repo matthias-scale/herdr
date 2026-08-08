@@ -866,6 +866,7 @@
             "work_context": {
               "$ref": "#/schemas/event/$defs/PaneWorkContext",
               "default": {
+                "missive_urls": [],
                 "pr_urls": [],
                 "preview_urls": [],
                 "ticket_ids": []
@@ -1037,6 +1038,13 @@
                 "string",
                 "null"
               ]
+            },
+            "missive_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "pr_urls": {
               "default": [],
@@ -3227,6 +3235,13 @@
                 "string",
                 "null"
               ]
+            },
+            "missive_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "pr_urls": {
               "default": [],
@@ -6382,6 +6397,7 @@
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
               "default": {
+                "missive_urls": [],
                 "pr_urls": [],
                 "preview_urls": [],
                 "ticket_ids": []
@@ -7665,6 +7681,7 @@
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
               "default": {
+                "missive_urls": [],
                 "pr_urls": [],
                 "preview_urls": [],
                 "ticket_ids": []
@@ -8166,6 +8183,13 @@
                 "string",
                 "null"
               ]
+            },
+            "missive_urls": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "pr_urls": {
               "default": [],

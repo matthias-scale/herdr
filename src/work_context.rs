@@ -5,12 +5,17 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_PREVIEW_URLS: usize = 8;
+pub const MAX_MISSIVE_URLS: usize = 4;
+
+/// Missive conversations are always served from this single host.
+const MISSIVE_HOST: &str = "mail.missiveapp.com";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkLinkKind {
     Ticket,
     PullRequest,
     Preview,
+    Missive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +35,8 @@ pub struct PaneWorkContext {
     pub pr_urls: Vec<String>,
     #[serde(default)]
     pub preview_urls: Vec<String>,
+    #[serde(default)]
+    pub missive_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,7 +95,30 @@ pub(crate) fn work_link_candidates(context: &PaneWorkContext) -> Vec<WorkLinkCan
         }
     }
 
+    for raw_url in &context.missive_urls {
+        let Some(url) = normalize_missive_url(raw_url).ok() else {
+            continue;
+        };
+        if seen_urls.insert(url.clone()) {
+            candidates.push(WorkLinkCandidate {
+                kind: WorkLinkKind::Missive,
+                label: missive_link_label(&url),
+                copy_value: url.clone(),
+                url,
+            });
+        }
+    }
+
     candidates
+}
+
+/// Missive URLs are long and repetitive, so the panel shows the conversation
+/// segment rather than the whole hash route.
+fn missive_link_label(url: &str) -> String {
+    url.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(|segment| format!("missive/{segment}"))
+        .unwrap_or_else(|| url.to_string())
 }
 
 impl PaneWorkContext {
@@ -97,6 +127,7 @@ impl PaneWorkContext {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
             preview_urls: normalize_preview_urls(self.preview_urls)?,
+            missive_urls: normalize_missive_urls(self.missive_urls)?,
             branch: normalize_optional_text("branch", self.branch)?,
             work_title: normalize_optional_text("work title", self.work_title)?,
         })
@@ -231,6 +262,7 @@ impl PaneWorkContextState {
         };
         let mut manual = tiers.manual.normalized()?;
         manual.preview_urls.clear();
+        manual.missive_urls.clear();
         let hook_turn = tiers.hook_turn.normalized()?;
         let git_observation = tiers.git_observation.normalized()?;
         let restored_fallback = tiers.restored_fallback.normalized()?;
@@ -362,6 +394,15 @@ impl PaneWorkContextState {
             .into_iter()
             .take(MAX_PREVIEW_URLS)
             .collect(),
+            missive_urls: stable_merge([
+                &self.manual.missive_urls,
+                &self.hook_turn.missive_urls,
+                &self.git_observation.missive_urls,
+                &self.restored_fallback.missive_urls,
+            ])
+            .into_iter()
+            .take(MAX_MISSIVE_URLS)
+            .collect(),
             branch: first_present([
                 self.manual.branch.as_ref(),
                 self.hook_turn.branch.as_ref(),
@@ -438,6 +479,28 @@ pub fn extract_ticket_ids(text: &str) -> Vec<String> {
     tickets
 }
 
+/// Longest candidate a host-only preview URL may be; the preview normalizer rejects anything with a
+/// path, so these are always short.
+const MAX_PREVIEW_CANDIDATE_BYTES: usize = 128;
+/// Longest candidate a routed URL may be. Every extractor must bound its candidate: a hostile or
+/// merely pathological prompt (a log line of repeated `https://` with no whitespace) otherwise costs
+/// O(len) per match over O(len) matches, and the turn hook stalls before it reports any metadata.
+const MAX_ROUTED_CANDIDATE_BYTES: usize = 256;
+
+/// The token starting at a match, or `None` when it runs past `max_bytes` without ending.
+fn bounded_candidate(remaining: &str, max_bytes: usize) -> Option<&str> {
+    match remaining
+        .as_bytes()
+        .iter()
+        .take(max_bytes + 1)
+        .position(|byte| byte.is_ascii_whitespace())
+    {
+        Some(end) => Some(&remaining[..end]),
+        None if remaining.len() <= max_bytes => Some(remaining),
+        None => None,
+    }
+}
+
 pub fn extract_pr_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://github.com/";
 
@@ -447,10 +510,9 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
         }
-        let candidate = text[start..]
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default();
+        let Some(candidate) = bounded_candidate(&text[start..], MAX_ROUTED_CANDIDATE_BYTES) else {
+            continue;
+        };
         let Ok(url) = normalize_pr_url(candidate) else {
             continue;
         };
@@ -463,7 +525,6 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
 
 pub fn extract_preview_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://";
-    const MAX_CANDIDATE_BYTES: usize = 128;
 
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
@@ -471,16 +532,8 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
         if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
             continue;
         }
-        let remaining = &text[start..];
-        let candidate = match remaining
-            .as_bytes()
-            .iter()
-            .take(MAX_CANDIDATE_BYTES + 1)
-            .position(|byte| byte.is_ascii_whitespace())
-        {
-            Some(end) => &remaining[..end],
-            None if remaining.len() <= MAX_CANDIDATE_BYTES => remaining,
-            None => continue,
+        let Some(candidate) = bounded_candidate(&text[start..], MAX_PREVIEW_CANDIDATE_BYTES) else {
+            continue;
         };
         let Ok(url) = normalize_preview_url(candidate) else {
             continue;
@@ -493,6 +546,100 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
         }
     }
     urls
+}
+
+pub fn extract_missive_urls(text: &str) -> Vec<String> {
+    let prefix = format!("https://{MISSIVE_HOST}");
+    // Hosts are case-insensitive, so scan a lowered copy. `to_ascii_lowercase` maps bytes 1:1 and
+    // leaves non-ASCII untouched, so every index it yields is valid in the original text.
+    let lowered = text.to_ascii_lowercase();
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    for (start, _) in lowered.match_indices(prefix.as_str()) {
+        if start > 0 && is_ascii_token_char(text.as_bytes()[start - 1]) {
+            continue;
+        }
+        let Some(candidate) = bounded_candidate(&text[start..], MAX_ROUTED_CANDIDATE_BYTES) else {
+            continue;
+        };
+        let Ok(url) = normalize_missive_url(candidate) else {
+            continue;
+        };
+        if seen.insert(url.clone()) {
+            urls.push(url);
+            if urls.len() == MAX_MISSIVE_URLS {
+                break;
+            }
+        }
+    }
+    urls
+}
+
+pub fn normalize_missive_urls<I, S>(urls: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for url in urls {
+        let url = normalize_missive_url(url.as_ref())?;
+        if seen.insert(url.clone()) {
+            normalized.push(url);
+            if normalized.len() == MAX_MISSIVE_URLS {
+                break;
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+/// Missive conversation routes carry a hash path, so unlike preview URLs the
+/// path and fragment are significant and must survive normalization.
+fn normalize_missive_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '.' | '\'' | '"'
+        )
+    });
+    // The message never echoes the input: it reaches logs, and a rejected candidate is untrusted
+    // text of arbitrary length that may carry a token in its query.
+    let invalid = || "invalid Missive URL".to_string();
+    let authority_len = "https://".len() + MISSIVE_HOST.len();
+    if trimmed.len() > MAX_ROUTED_CANDIDATE_BYTES
+        || trimmed.len() <= authority_len
+        || !trimmed.is_char_boundary(authority_len)
+        || trimmed.chars().any(char::is_control)
+        || trimmed.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(invalid());
+    }
+    let (authority, rest) = trimmed.split_at(authority_len);
+    // Scheme and host are case-insensitive; the route after them is not and must survive verbatim.
+    if !authority.eq_ignore_ascii_case(&format!("https://{MISSIVE_HOST}")) {
+        return Err(invalid());
+    }
+    if !rest.starts_with('/') && !rest.starts_with('#') {
+        return Err(invalid());
+    }
+    if !missive_route_is_conversation(rest) {
+        return Err(invalid());
+    }
+    Ok(format!("https://{MISSIVE_HOST}{rest}"))
+}
+
+/// True for a route addressing one conversation, under any view: `#inbox/conversations/<id>`
+/// or `#custom/<team>/conversations/<id>`. Missive's other routes — settings, search, contacts
+/// — carry no pane-specific work context, and accepting them lets a handful of them exhaust
+/// `MAX_MISSIVE_URLS` before a real conversation link is reached.
+fn missive_route_is_conversation(route: &str) -> bool {
+    let route = route.split('?').next().unwrap_or(route);
+    let mut segments = route
+        .split(['/', '#'])
+        .filter(|segment| !segment.is_empty())
+        .skip_while(|segment| !segment.eq_ignore_ascii_case("conversations"));
+    segments.next().is_some() && segments.next().is_some()
 }
 
 pub(crate) fn hook_turn_context(
@@ -514,6 +661,7 @@ pub(crate) fn hook_turn_context(
         ticket_ids: normalize_ticket_ids(ticket_ids)?,
         pr_urls: prompt_context.pr_urls,
         preview_urls: prompt_context.preview_urls,
+        missive_urls: prompt_context.missive_urls,
         branch: None,
         work_title,
     })
@@ -803,6 +951,227 @@ mod tests {
     }
 
     #[test]
+    fn missive_urls_are_extracted_with_their_hash_route_and_bounded() {
+        let text = concat!(
+            "see https://mail.missiveapp.com/#inbox/conversations/abc123, ",
+            "https://mail.missiveapp.com/#inbox/conversations/abc123 ",
+            "https://mail.missiveapp.com/#custom/team/conversations/def456 ",
+            "https://mail.missiveapp.com ",
+            "https://evil.example.com/#inbox/conversations/zzz ",
+            "xhttps://mail.missiveapp.com/#inbox/conversations/prefixed"
+        );
+
+        assert_eq!(
+            extract_missive_urls(text),
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/abc123",
+                "https://mail.missiveapp.com/#custom/team/conversations/def456",
+            ]
+        );
+
+        let many = (0..MAX_MISSIVE_URLS + 2)
+            .map(|index| format!("https://mail.missiveapp.com/#inbox/conversations/c{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(extract_missive_urls(&many).len(), MAX_MISSIVE_URLS);
+        assert_eq!(
+            normalize_missive_urls(
+                (0..MAX_MISSIVE_URLS + 2).map(|index| format!(
+                    "https://mail.missiveapp.com/#inbox/conversations/c{index}"
+                ))
+            )
+            .unwrap()
+            .len(),
+            MAX_MISSIVE_URLS
+        );
+        assert!(normalize_missive_urls(["https://mail.missiveapp.com"]).is_err());
+        assert!(normalize_missive_urls([
+            "https://mail.missiveapp.com.evil.test/#inbox/conversations/abc123"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn url_extraction_stays_linear_on_a_whitespace_free_prefix_flood() {
+        // Each repeated prefix used to scan the entire remaining suffix, so a single pasted log
+        // line cost O(len^2) and stalled the turn hook for tens of seconds before reporting
+        // anything. Every extractor must bound its candidate.
+        let missive = "(https://mail.missiveapp.com/".repeat(20_000);
+        let previews = "(https://preview.example.com".repeat(20_000);
+        let prs = "(https://github.com/o/r/pull/1".repeat(20_000);
+        for (name, text) in [("missive", &missive), ("preview", &previews), ("pr", &prs)] {
+            let started = std::time::Instant::now();
+            let _ = match name {
+                "missive" => extract_missive_urls(text),
+                "preview" => extract_preview_urls(text),
+                _ => extract_pr_urls(text),
+            };
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{name} extraction took {elapsed:?} on a {} byte flood",
+                text.len()
+            );
+        }
+    }
+
+    #[test]
+    fn missive_host_matching_ignores_case_without_touching_the_route() {
+        assert_eq!(
+            extract_missive_urls("see HTTPS://MAIL.MissiveApp.com/#inbox/conversations/AbC123 now"),
+            vec!["https://mail.missiveapp.com/#inbox/conversations/AbC123"],
+            "the host folds to lowercase but the conversation id must survive verbatim"
+        );
+        assert!(
+            normalize_missive_urls(["https://MAIL.missiveapp.com/#inbox/conversations/x"]).is_ok()
+        );
+        // Case folding must not widen the host: a confusable neighbour still has to fail.
+        assert!(normalize_missive_urls([
+            "https://mail.missiveapp.com.evil.test/#inbox/conversations/x"
+        ])
+        .is_err());
+        assert!(normalize_missive_urls([
+            "https://mail.missiveapp.com@evil.test/#inbox/conversations/x"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn missive_non_conversation_routes_cannot_crowd_out_a_conversation_link() {
+        for route in [
+            "/#settings/organization",
+            "/#search/from:someone",
+            "/#contacts",
+            "/",
+            "/#inbox/conversations",
+        ] {
+            assert!(
+                normalize_missive_urls([format!("https://{MISSIVE_HOST}{route}")]).is_err(),
+                "{route} is not a conversation route"
+            );
+        }
+
+        // The cap is small, so a handful of settings links pasted ahead of the real
+        // conversation used to consume it and drop the only link worth showing.
+        let noise = (0..MAX_MISSIVE_URLS)
+            .map(|index| format!("https://{MISSIVE_HOST}/#settings/s{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = format!("{noise} https://{MISSIVE_HOST}/#inbox/conversations/kept");
+        assert_eq!(
+            extract_missive_urls(&text),
+            vec![format!("https://{MISSIVE_HOST}/#inbox/conversations/kept")]
+        );
+    }
+
+    #[test]
+    fn missive_rejection_never_echoes_the_candidate() {
+        let secret = "https://mail.missiveapp.com.evil.test/?token=SUPERSECRET";
+        let error = normalize_missive_urls([secret]).unwrap_err();
+        assert!(
+            !error.contains("SUPERSECRET") && !error.contains("evil.test"),
+            "a rejected candidate reaches logs and must not be echoed: {error}"
+        );
+    }
+
+    #[test]
+    fn missive_urls_survive_a_snapshot_round_trip_in_both_directions() {
+        let context = PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/c1".into()],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&context).unwrap();
+        assert!(encoded.contains("conversations/c1"));
+        assert_eq!(
+            serde_json::from_str::<PaneWorkContext>(&encoded).unwrap(),
+            context
+        );
+
+        // A snapshot written by an older build has no such key at all.
+        let legacy = r#"{"ticket_ids":["MAT-1"],"pr_urls":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<PaneWorkContext>(legacy)
+                .unwrap()
+                .missive_urls,
+            Vec::<String>::new()
+        );
+
+        // And a snapshot written by this build must still load on a build without the field.
+        #[derive(Default, serde::Deserialize)]
+        #[serde(default)]
+        struct OlderPaneWorkContext {
+            ticket_ids: Vec<String>,
+        }
+        let older: OlderPaneWorkContext = serde_json::from_str(&encoded)
+            .expect("an older build must ignore the field it does not know");
+        assert!(older.ticket_ids.is_empty());
+    }
+
+    #[test]
+    fn missive_links_follow_previews_and_copy_the_full_url() {
+        let candidates = work_link_candidates(&PaneWorkContext {
+            preview_urls: vec!["https://preview-1.vercel.app".into()],
+            missive_urls: vec![
+                "https://mail.missiveapp.com/#inbox/conversations/abc123".into(),
+                "not-a-missive-url".into(),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            candidates.iter().map(|c| c.kind).collect::<Vec<_>>(),
+            vec![WorkLinkKind::Preview, WorkLinkKind::Missive]
+        );
+        let missive = candidates.last().expect("missive candidate");
+        assert_eq!(missive.label, "missive/abc123");
+        assert_eq!(
+            missive.copy_value,
+            "https://mail.missiveapp.com/#inbox/conversations/abc123"
+        );
+        assert_eq!(missive.url, missive.copy_value);
+    }
+
+    #[test]
+    fn missive_urls_merge_across_tiers_and_never_persist_as_manual() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/hook".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/git".into()],
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.effective().missive_urls,
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/hook",
+                "https://mail.missiveapp.com/#inbox/conversations/git",
+            ]
+        );
+
+        let restored = PaneWorkContextState::from_restored_with_tiers(
+            PaneWorkContext::default(),
+            Some(PaneWorkContextTiers {
+                manual: PaneWorkContext {
+                    missive_urls: vec![
+                        "https://mail.missiveapp.com/#inbox/conversations/manual".into()
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert!(restored.effective().missive_urls.is_empty());
+    }
+
+    #[test]
     fn ac26_work_link_candidates_are_ordered_and_defensively_canonicalized() {
         let candidates = work_link_candidates(&PaneWorkContext {
             ticket_ids: vec!["mat-7".into(), "SCA-8".into()],
@@ -965,6 +1334,7 @@ mod tests {
                     ticket_ids: vec!["MAT-1".into()],
                     pr_urls: vec!["https://github.com/o/r/pull/2".into()],
                     preview_urls: Vec::new(),
+                    missive_urls: Vec::new(),
                     branch: Some("main".into()),
                     work_title: Some("Initial".into()),
                 },
@@ -1102,6 +1472,7 @@ mod tests {
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/2".into()],
             preview_urls: Vec::new(),
+            missive_urls: Vec::new(),
             branch: Some("old-branch".into()),
             work_title: Some("Old title".into()),
         })

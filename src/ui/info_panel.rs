@@ -148,6 +148,7 @@ fn link_prefix(kind: WorkLinkKind) -> &'static str {
         WorkLinkKind::Ticket => "ticket",
         WorkLinkKind::PullRequest => "pr",
         WorkLinkKind::Preview => "preview",
+        WorkLinkKind::Missive => "missive",
     }
 }
 
@@ -1793,13 +1794,20 @@ mod tests {
             .unwrap()
             .replace_hook_work_context(crate::work_context::PaneWorkContext {
                 preview_urls: vec!["https://preview.vercel.app".into()],
+                missive_urls: vec![
+                    "https://mail.missiveapp.com/#inbox/conversations/abc123".into(),
+                ],
                 ..Default::default()
             })
             .unwrap();
 
         let area = Rect::new(0, 0, 50, 12);
         let rows = compute_link_rows(&app, area);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows[3].copy_value,
+            "https://mail.missiveapp.com/#inbox/conversations/abc123"
+        );
         assert_eq!(rows[0].copy_value, "MAT-1");
         assert_eq!(rows[1].copy_value, "https://github.com/o/r/pull/2");
         assert_eq!(rows[2].copy_value, "https://preview.vercel.app");
