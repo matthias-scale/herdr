@@ -1652,7 +1652,7 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
     let p = &app.palette;
     let width = usize::from(rect.width);
     let prefix = "  ";
-    let state_icon = state_dot(entry.state, entry.seen, p);
+    let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
     let workspace = entry.primary_label.as_str();
     // The tab label already opens with the agent when the projection derived it, so
     // appending the provider here would repeat it in the same row.
