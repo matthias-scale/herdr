@@ -3574,7 +3574,10 @@ fn navigator_row_is_duplicate_of_its_pane(rows: &[NavigatorRow], row: &Navigator
     let Some(only_pane) = panes.next() else {
         return false;
     };
-    panes.next().is_none() && only_pane.label == row.label
+    // Only a pane that matched can stand in for the tab row. A tab can match on
+    // metadata its pane row does not carry (`"<label> N panes"`), and suppressing
+    // the tab row then would drop the query's only match.
+    panes.next().is_none() && only_pane.matched && only_pane.label == row.label
 }
 
 // ---------------------------------------------------------------------------
@@ -4277,6 +4280,37 @@ mod tests {
         assert!(matches!(
             selected.target,
             crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+        ));
+    }
+
+    #[test]
+    fn navigator_search_keeps_a_tab_matched_only_by_its_own_metadata() {
+        // Tab rows only render for multi-tab workspaces, and each tab here holds a
+        // single pane, so every tab label is derived from its own pane.
+        let mut state = app_with_workspaces(&["one"]);
+        state.workspaces[0].test_add_tab(Some("tests"));
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("pi ui build".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_navigator_from(&terminal_runtimes);
+        // "1 panes" lives in the tab row's metadata only; the pane row that shares
+        // the tab's derived label does not match, so the tab is the only match.
+        state.navigator.query = "1 panes".into();
+        state.select_first_navigator_match_from(&terminal_runtimes);
+
+        let rows = state.navigator_rows_from(&terminal_runtimes);
+        let selected = &rows[state.navigator.selected];
+        assert!(selected.matched, "selection landed on an unmatched row");
+        assert!(matches!(
+            selected.target,
+            crate::app::state::NavigatorTarget::Tab { tab_idx, .. } if tab_idx == 0
         ));
     }
 
