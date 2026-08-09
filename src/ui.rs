@@ -274,8 +274,8 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(body_area);
+    let [main_area, sidebar_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(sidebar_w)]).areas(body_area);
 
     let (content_area, info_panel_rect) = if app.info_panel_expanded {
         if let Some(panel_width) = panel_width_for_main(main_area.width) {
@@ -929,7 +929,7 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 100, 20));
 
         assert_eq!(app.view.layout, ViewLayout::Desktop);
-        assert!(app.view.terminal_area.x > 0);
+        assert!(app.view.terminal_area.x + app.view.terminal_area.width <= app.view.sidebar_rect.x);
         assert_eq!(app.view.toast_hit_area.x, 0);
         assert_eq!(app.view.toast_hit_area.y, 0);
     }
@@ -984,13 +984,13 @@ mod tests {
         app.mode = Mode::Prefix;
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 54, 18));
 
         app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 18));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 19, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 54, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 19, 54, 1));
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.y == 19));
         assert_eq!(app.view.new_tab_hit_area.y, 19);
 
@@ -1018,7 +1018,7 @@ mod tests {
         // Full-width status bar occupies row 0; chrome starts at y=1.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(single_tab_terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(single_tab_terminal_area, Rect::new(0, 1, 54, 19));
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
 
@@ -1026,8 +1026,8 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 54, 18));
         assert_eq!(app.view.tab_hit_areas.len(), 2);
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.width > 0));
         assert!(app.view.new_tab_hit_area.width > 0);
@@ -1053,7 +1053,7 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 54, 19));
 
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal.draw(|frame| render(&app, frame)).unwrap();
@@ -1212,7 +1212,7 @@ mod tests {
 
         // Status bar is full-width on row 0; sidebar/tabs/terminal sit below.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(app.view.sidebar_rect, Rect::new(0, 1, 0, 19));
+        assert_eq!(app.view.sidebar_rect, Rect::new(80, 1, 0, 19));
         assert_eq!(app.view.tab_bar_rect, Rect::new(0, 1, 80, 1));
         assert_eq!(app.view.terminal_area, Rect::new(0, 2, 80, 18));
         assert!(app.view.workspace_card_areas.is_empty());
@@ -1237,7 +1237,7 @@ mod tests {
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 100, 1));
         assert_eq!(app.view.sidebar_rect.y, 1);
         assert_eq!(app.view.sidebar_rect.height, 23);
-        assert!(app.view.sidebar_rect.x == 0);
+        assert_eq!(app.view.sidebar_rect.x, 74);
         assert_eq!(app.view.sidebar_rect.width, 26);
         // Terminal/tab chrome never occupy the status-bar row.
         assert!(app.view.terminal_area.y >= 1);
