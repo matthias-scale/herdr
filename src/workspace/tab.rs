@@ -62,16 +62,32 @@ impl TabDisplayProjection {
                 agent,
                 ticket,
                 title,
-            } => [agent, ticket, title]
-                .into_iter()
-                .filter_map(|part| part.as_deref())
-                .collect::<Vec<_>>()
-                .join(TAB_DISPLAY_SEPARATOR),
+            } => {
+                // The agent identity is surfaced separately (sidebar suffix, agent
+                // rows); it only stands in as the label when nothing else exists.
+                let label = [ticket, title]
+                    .into_iter()
+                    .filter_map(|part| part.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(TAB_DISPLAY_SEPARATOR);
+                if label.is_empty() {
+                    agent.clone().unwrap_or_default()
+                } else {
+                    label
+                }
+            }
         }
     }
 
     pub(crate) fn leads_with_agent_component(&self) -> bool {
-        matches!(self, Self::Derived { agent: Some(_), .. })
+        matches!(
+            self,
+            Self::Derived {
+                agent: Some(_),
+                ticket: None,
+                title: None,
+            }
+        )
     }
 }
 
