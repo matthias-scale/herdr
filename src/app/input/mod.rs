@@ -145,11 +145,21 @@ impl App {
         self.selection_autoscroll_deadline = None;
         self.state.update_dismissed = true;
         if let Some(ws_idx) = self.state.active {
-            if let Some(runtime) = self
+            let pane_id = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.focused_pane_id());
+            let sent = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-            {
-                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+                .is_some_and(|runtime| {
+                    runtime
+                        .try_send_bytes(Bytes::copy_from_slice(text.as_bytes()))
+                        .is_ok()
+                });
+            if let (true, Some(pane_id)) = (sent, pane_id) {
+                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }
         }
     }
@@ -175,11 +185,21 @@ impl App {
         self.selection_autoscroll_deadline = None;
         self.state.update_dismissed = true;
         if let Some(ws_idx) = self.state.active {
-            if let Some(runtime) = self
+            let pane_id = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.focused_pane_id());
+            let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
             {
-                let _ = runtime.send_bytes(Bytes::from(text)).await;
+                runtime.send_bytes(Bytes::from(text)).await.is_ok()
+            } else {
+                false
+            };
+            if let (true, Some(pane_id)) = (sent, pane_id) {
+                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }
         }
     }
@@ -199,11 +219,22 @@ impl App {
         }
 
         if let Some(ws_idx) = self.state.active {
-            if let Some(rt) = self
+            let pane_id = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.focused_pane_id());
+            let has_text = !text.is_empty();
+            let sent = if let Some(runtime) = self
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
             {
-                let _ = rt.send_paste(text).await;
+                runtime.send_paste(text).await.is_ok()
+            } else {
+                false
+            };
+            if let (true, Some(pane_id)) = (sent && has_text, pane_id) {
+                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }
         }
     }
@@ -979,6 +1010,47 @@ fn wait_for_file(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
 
+    fn terminal_app_with_blocked_hook() -> (
+        App,
+        crate::terminal::TerminalId,
+        tokio::sync::mpsc::Receiver<Bytes>,
+    ) {
+        let mut app = test_app();
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (runtime, rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        (app, terminal_id, rx)
+    }
+
+    fn assert_blocked_hook_retired(app: &App, terminal_id: &crate::terminal::TerminalId) {
+        assert_eq!(
+            app.state.terminals[terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
+        assert!(!app.state.terminals[terminal_id].full_lifecycle_hook_authority_active());
+    }
+
     fn test_app() -> App {
         App::new(
             &crate::config::Config::default(),
@@ -1003,6 +1075,29 @@ mod tests {
 
         assert_eq!(app.state.name_input, "feature/logs");
         assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paste_retires_blocked_hook_authority_after_forwarding() {
+        let (mut app, terminal_id, mut rx) = terminal_app_with_blocked_hook();
+
+        app.handle_paste("continue".into()).await;
+
+        assert!(rx.try_recv().is_ok());
+        assert_blocked_hook_retired(&app, &terminal_id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn text_commit_paths_retire_blocked_hook_authority_after_forwarding() {
+        let (mut app, terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.handle_text_commit("continue".into()).await;
+        assert!(rx.try_recv().is_ok());
+        assert_blocked_hook_retired(&app, &terminal_id);
+
+        let (mut app, terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.handle_text_commit_headless("continue");
+        assert!(rx.try_recv().is_ok());
+        assert_blocked_hook_retired(&app, &terminal_id);
     }
 
     #[tokio::test]
