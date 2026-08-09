@@ -1727,18 +1727,23 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
     let prefix = "  ";
     let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
     let workspace = entry.primary_label.as_str();
-    // The tab label already opens with the agent when the projection derived it, so
+    // A derived or manually named tab can already carry the agent identity, so
     // appending the provider here would repeat it in the same row.
-    let agent = (!entry.tab_label_leads_with_agent)
-        .then(|| {
-            entry
-                .agent_kind_label
-                .as_deref()
-                .or(entry.agent_label.as_deref())
-                .or_else(|| tab_agent_suffix(entry.agent))
-        })
-        .flatten()
-        .map(|label| format!(" · {label}"));
+    let tab_title = entry
+        .primary_tab_label
+        .as_deref()
+        .unwrap_or(DEFAULT_THREAD_TITLE);
+    let agent = (!entry.tab_label_leads_with_agent
+        && !title_repeats_agent_identity(entry, tab_title))
+    .then(|| {
+        entry
+            .agent_kind_label
+            .as_deref()
+            .or(entry.agent_label.as_deref())
+            .or_else(|| tab_agent_suffix(entry.agent))
+    })
+    .flatten()
+    .map(|label| format!(" · {label}"));
 
     let mut spans = Vec::new();
     let mut used = 0usize;
@@ -4559,7 +4564,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let entries = sidebar_thread_entries(&app);
         assert_eq!(
             entries[0].primary_tab_label.as_deref(),
-            Some("pi · Add Subabe management token to Doppler")
+            Some("Add Subabe management token to Doppler")
         );
 
         let area = Rect::new(0, 0, 40, 8);
@@ -4598,13 +4603,14 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             0,
             usize::from(area.width),
         );
-        assert_eq!(tab_bar_label, "pi · Fix billing");
+        assert_eq!(tab_bar_label, "Fix billing");
         assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
-        // The projection already names the agent, so the sidebar must not append
-        // the provider chip on top of it.
+        // The label no longer names the agent, so the sidebar appends the
+        // provider chip exactly once and never leads with it.
+        assert!(rendered.contains("Fix billing · pi"), "{rendered:?}");
         assert!(
-            !rendered.contains("Fix billing · pi"),
-            "sidebar repeated the agent identity: {rendered:?}"
+            !rendered.contains("pi · Fix billing"),
+            "sidebar led with the agent identity: {rendered:?}"
         );
     }
 
@@ -4645,7 +4651,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
                 _ => None,
             })
             .expect("split tab sidebar row");
-        assert!(sidebar_entry.tab_label_leads_with_agent);
+        assert!(!sidebar_entry.tab_label_leads_with_agent);
 
         let area = Rect::new(0, 0, 60, 10);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -4661,16 +4667,13 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             usize::from(area.width),
         );
 
-        assert_eq!(tab_bar_label, "Reviewer · Fix billing");
+        assert_eq!(tab_bar_label, "Fix billing");
         assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
-        assert!(
-            !rendered.contains("Reviewer · Fix billing · pi"),
-            "{rendered:?}"
-        );
+        assert!(!rendered.contains("Reviewer · Fix billing"), "{rendered:?}");
     }
 
     #[test]
-    fn prio_row_omits_the_provider_when_the_tab_label_already_leads_with_it() {
+    fn prio_row_appends_the_provider_once_after_the_workspace() {
         let mut app = AppState::test_new();
         let mut workspace = Workspace::test_new("one");
         let focused_pane = workspace.tabs[0].root_pane;
@@ -4695,7 +4698,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .into_iter()
             .next()
             .expect("prio entry");
-        assert!(entry.tab_label_leads_with_agent);
+        assert!(!entry.tab_label_leads_with_agent);
 
         let area = Rect::new(0, 0, 60, 16);
         let rows = compute_prio_panel_row_areas(&app, area);
@@ -4707,11 +4710,43 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
 
-        assert!(
-            rendered.contains("Reviewer · Fix billing · one"),
+        assert!(rendered.contains("Fix billing · one · pi"), "{rendered:?}");
+        assert!(!rendered.contains("Reviewer"), "{rendered:?}");
+    }
+
+    #[test]
+    fn prio_row_does_not_repeat_agent_identity_from_tab_title() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let focused_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].set_prio(true);
+        workspace.tabs[0].set_custom_name("Codex".into());
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let focused_terminal = app.workspaces[0].tabs[0].panes[&focused_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&focused_terminal)
+            .expect("focused terminal")
+            .detected_agent = Some(Agent::Codex);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 60, 16);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
+
+        assert_eq!(
+            rendered.to_ascii_lowercase().matches("codex").count(),
+            1,
             "{rendered:?}"
         );
-        assert!(!rendered.contains("one · "), "{rendered:?}");
     }
 
     #[test]
@@ -6427,7 +6462,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.title, "codex · Codex");
+        assert_eq!(layout.title, "Codex");
         assert_eq!(layout.state.as_deref(), Some("working"));
         // The derived projection already leads with the agent, so no provider chip.
         assert_eq!(layout.agent_suffix.as_deref(), None);
@@ -6449,8 +6484,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.title, "codex · manual pane");
+        assert_eq!(layout.title, "manual pane");
         assert_eq!(layout.state.as_deref(), Some("working"));
-        assert_eq!(layout.agent_suffix.as_deref(), None);
+        // The label no longer names the agent, so the provider chip returns.
+        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
     }
 }

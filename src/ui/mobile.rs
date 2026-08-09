@@ -1987,7 +1987,7 @@ mod tests {
 
         assert_eq!(
             mobile_tab_status(&app.workspaces[0], &app.terminals, 80),
-            "tab Claude · SCA-42 · repair login regression"
+            "tab SCA-42 · repair login regression"
         );
         assert_eq!(
             mobile_tab_status(&app.workspaces[0], &app.terminals, 10),
