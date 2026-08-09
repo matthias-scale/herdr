@@ -988,6 +988,14 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return false;
         };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.focused_pane_id())
+        else {
+            return false;
+        };
         let Some(rt) = self
             .state
             .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
@@ -1000,6 +1008,7 @@ impl App {
             return false;
         }
 
+        self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
         self.state.mode = Mode::Terminal;
         true
     }
@@ -2273,6 +2282,43 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prefix_pass_through_retires_blocked_hook_authority_after_forwarding() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ));
+
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
+        assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
     #[test]
