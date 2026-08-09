@@ -1920,7 +1920,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
-        let sidebar = Rect::new(66, 0, 40, 16);
+        let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
         let target = crate::ui::compute_prio_panel_row_areas(&app.state, sidebar)[0];
         app.state.view.prio_panel_row_areas = vec![target];
@@ -1929,7 +1929,7 @@ mod tests {
             &mut app.terminal_runtimes,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                target.rect.x.saturating_add(1),
+                target.rect.x,
                 target.rect.y,
             ),
         );
@@ -2507,10 +2507,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let info = app.state.view.pane_infos[0].clone();
-        assert!(
-            info.inner_rect.x < app.state.view.sidebar_rect.x,
-            "pane should remain left of the sidebar"
-        );
+        assert!(info.inner_rect.x > 0, "sidebar offset should be present");
         assert!(info.inner_rect.y > 0, "tab bar offset should be present");
 
         app.state.handle_pane_mouse_only(
@@ -2550,10 +2547,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let info = app.state.view.pane_infos[0].clone();
-        assert!(
-            info.inner_rect.x < app.state.view.sidebar_rect.x,
-            "pane should remain left of the sidebar"
-        );
+        assert!(info.inner_rect.x > 0, "sidebar offset should be present");
         assert!(info.inner_rect.y > 0, "tab bar offset should be present");
 
         app.handle_mouse(mouse(

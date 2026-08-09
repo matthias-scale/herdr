@@ -188,10 +188,8 @@ impl AppState {
             && col < toggle.x + toggle.width
             && row >= toggle.y
             && row < toggle.y + toggle.height;
-        sidebar.x > 0
-            && sidebar.width > 0
+        crate::ui::sidebar_separator_col(sidebar).is_some_and(|separator_col| col == separator_col)
             && !on_toggle
-            && col == sidebar.x
             && row >= sidebar.y
             && row < sidebar.y + sidebar.height
     }
@@ -211,10 +209,7 @@ impl AppState {
 
     pub(super) fn set_manual_sidebar_width(&mut self, divider_col: u16) {
         let sidebar = self.view.sidebar_rect;
-        let width = sidebar
-            .x
-            .saturating_add(sidebar.width)
-            .saturating_sub(divider_col);
+        let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
         self.sidebar_width = width.clamp(self.sidebar_min_width, self.sidebar_max_width);
         self.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
         self.mark_session_dirty();
@@ -1209,21 +1204,16 @@ mod tests {
         app.state.selected = 0;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let target_row = app.state.view.workspace_card_areas[1].rect.y;
-        let click_col = app.state.view.sidebar_rect.x.saturating_add(2);
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            click_col,
+            2,
             target_row,
         ));
         assert_eq!(app.state.active, Some(0));
         assert!(app.state.workspace_press.is_some());
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            click_col,
-            target_row,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
         assert!(app.state.workspace_press.is_none());
@@ -1363,7 +1353,6 @@ mod tests {
         );
 
         let source_row = app.state.view.workspace_card_areas[1].rect.y;
-        let click_col = app.state.view.sidebar_rect.x.saturating_add(2);
         let target_row = crate::ui::workspace_drop_indicator_row(
             &app.state,
             &app.state.view.workspace_card_areas,
@@ -1374,12 +1363,12 @@ mod tests {
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            click_col,
+            2,
             source_row,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            click_col,
+            2,
             target_row,
         ));
         assert!(matches!(
@@ -1389,11 +1378,7 @@ mod tests {
                 drop_target: Some(crate::app::state::WorkspaceDropTarget::Before(0)),
             })
         ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            click_col,
-            target_row,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
 
         let names: Vec<_> = app
             .state
@@ -1752,16 +1737,11 @@ mod tests {
         .unwrap();
         let active_id = app.state.workspaces[2].id.clone();
         let selected_id = app.state.workspaces[1].id.clone();
-        let click_col = app.state.view.sidebar_rect.x.saturating_add(2);
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            click_col,
-            parent.y,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, parent.y));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            click_col,
+            2,
             target_row,
         ));
         assert!(matches!(
@@ -1771,11 +1751,7 @@ mod tests {
                 drop_target: Some(crate::app::state::WorkspaceDropTarget::End),
             })
         ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            click_col,
-            target_row,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
 
         assert_eq!(
             app.state
@@ -1817,22 +1793,13 @@ mod tests {
             crate::app::state::WorkspaceDropTarget::End,
         )
         .unwrap();
-        let click_col = app.state.view.sidebar_rect.x.saturating_add(2);
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            click_col,
-            parent.y,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, parent.y));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            click_col,
+            2,
             target_row,
         ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            click_col,
-            target_row,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
 
         assert_eq!(
             app.state
@@ -1882,19 +1849,9 @@ mod tests {
     #[test]
     fn dragging_sidebar_divider_sets_manual_width() {
         let mut app = app_for_mouse_test();
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
-        let divider_col = app.state.view.sidebar_rect.x;
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            divider_col,
-            5,
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            divider_col - 5,
-            5,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
 
         assert_eq!(app.state.sidebar_width, 31);
         let snapshot = capture_snapshot(&app.state);
@@ -1902,10 +1859,22 @@ mod tests {
     }
 
     #[test]
+    fn drag_hit_column_matches_rendered_sidebar_separator() {
+        let app = app_for_mouse_test();
+        let sidebar = app.state.view.sidebar_rect;
+        let separator_col = crate::ui::sidebar_separator_col(sidebar).unwrap();
+        let row = sidebar.y + 2;
+
+        assert!(app.state.on_sidebar_divider(separator_col, row));
+        assert!(!app
+            .state
+            .on_sidebar_divider(separator_col.saturating_sub(1), row));
+    }
+
+    #[test]
     fn dragging_sidebar_bottom_divider_still_sets_manual_width() {
         let mut app = app_for_mouse_test();
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
-        let divider_col = app.state.view.sidebar_rect.x;
+        let divider_col = app.state.view.sidebar_rect.x + app.state.view.sidebar_rect.width - 1;
         let bottom_row = app.state.view.sidebar_rect.y + app.state.view.sidebar_rect.height - 1;
 
         app.handle_mouse(mouse(
@@ -1915,7 +1884,7 @@ mod tests {
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            divider_col - 5,
+            divider_col + 5,
             bottom_row,
         ));
 
@@ -1926,15 +1895,9 @@ mod tests {
     fn dragging_past_max_clamps_to_configured_max() {
         let mut app = app_for_mouse_test();
         app.state.sidebar_max_width = 30;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
-        let divider_col = app.state.view.sidebar_rect.x;
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            divider_col,
-            5,
-        ));
-        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 50, 5));
 
         assert_eq!(app.state.sidebar_width, 30);
     }
@@ -1943,15 +1906,9 @@ mod tests {
     fn dragging_below_min_clamps_to_configured_min() {
         let mut app = app_for_mouse_test();
         app.state.sidebar_min_width = 22;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
-        let divider_col = app.state.view.sidebar_rect.x;
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            divider_col,
-            5,
-        ));
-        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 105, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 5));
 
         assert_eq!(app.state.sidebar_width, 22);
     }
@@ -1983,20 +1940,10 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.default_sidebar_width = 26;
         app.state.sidebar_width = 30;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
-        let divider_col = app.state.view.sidebar_rect.x;
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            divider_col,
-            5,
-        ));
-        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), divider_col, 5));
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            divider_col,
-            5,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
 
         assert_eq!(app.state.sidebar_width, 26);
         assert!(app.state.drag.is_none());

@@ -29,6 +29,10 @@ pub(crate) const TAB_INFO_FIELD_WIDTH: usize = 2;
 pub(crate) const TAB_INFO_MARKER: &str = "↗";
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
+pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
+    (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
+}
+
 pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
     match agent {
         Some(Agent::Codex) => Some("cx"),
@@ -1439,7 +1443,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     } else {
         Style::default().fg(p.surface_dim)
     };
-    let sep_x = area.x + area.width.saturating_sub(1);
+    let Some(sep_x) = sidebar_separator_col(area) else {
+        return;
+    };
     let buf = frame.buffer_mut();
     for y in area.y..area.y + area.height {
         buf[(sep_x, y)].set_symbol("│");
@@ -1642,7 +1648,9 @@ pub(super) fn render_sidebar(
         Style::default().fg(p.surface_dim)
     };
 
-    let sep_x = area.x + area.width.saturating_sub(1);
+    let Some(sep_x) = sidebar_separator_col(area) else {
+        return;
+    };
     let buf = frame.buffer_mut();
     for y in area.y..area.y + area.height {
         buf[(sep_x, y)].set_symbol("│");
@@ -2580,6 +2588,31 @@ mod tests {
         workspace::Workspace,
     };
     use ratatui::{backend::TestBackend, layout::Direction, style::Color, Terminal};
+
+    #[test]
+    fn collapsed_and_expanded_sidebars_render_separator_on_shared_column() {
+        let app = AppState::test_new();
+        let area = Rect::new(3, 1, 26, 8);
+        let separator_col = sidebar_separator_col(area).expect("non-empty sidebar");
+
+        for collapsed in [true, false] {
+            let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    if collapsed {
+                        render_sidebar_collapsed(&app, frame, area);
+                    } else {
+                        render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area);
+                    }
+                })
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            for row in area.y..area.y + area.height {
+                assert_eq!(buffer[(separator_col, row)].symbol(), "│");
+            }
+        }
+    }
 
     #[test]
     fn active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks() {
