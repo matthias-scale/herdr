@@ -502,6 +502,11 @@ fn pane_detail(
             } else {
                 parts.push("shell".to_string());
             }
+            if terminal.state == crate::detect::AgentState::Blocked {
+                for gate in &terminal.closing_gates {
+                    parts.push(format!("gate: {}", gate.text));
+                }
+            }
         }
     }
     parts.join(" · ")
@@ -680,5 +685,34 @@ mod tests {
         let branch = detail.find("branch: feat/work-context-ui").unwrap();
         let provider = detail.find("Claude").unwrap();
         assert!(ticket < pr && pr < branch && branch < provider, "{detail}");
+    }
+
+    #[test]
+    fn blocked_pane_detail_includes_gate_text() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.state = crate::detect::AgentState::Blocked;
+        terminal
+            .closing_gates
+            .push(crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the open Herdr PR".into(),
+                pr: Some(2606),
+                ticket: Some("MAT-125".into()),
+                url: None,
+                default: None,
+                default_at: None,
+            });
+
+        let detail = pane_detail(&app, &TerminalRuntimeRegistry::new(), 0, 0, pane);
+        assert!(
+            detail.contains("gate: Approve the open Herdr PR"),
+            "{detail}"
+        );
     }
 }

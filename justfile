@@ -72,6 +72,7 @@ website-build:
 
 # Test bundled agent integration assets
 integration-assets-test:
+    python3 src/integration/assets/closing-block/test_closing_block.py
     bun test src/integration/assets/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
 

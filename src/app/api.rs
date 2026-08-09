@@ -137,14 +137,14 @@ impl App {
         changed
     }
 
-    pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+    pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
         if let AppEvent::StatusMetricsRefreshed { snapshot } = ev {
             self.status_metric_refresh
                 .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
             if let Some(snapshot) = snapshot {
                 self.state.status_metrics = Some(*snapshot);
             }
-            return;
+            return None;
         }
 
         if let AppEvent::ClipboardWrite { content } = ev {
@@ -153,7 +153,7 @@ impl App {
             #[cfg(test)]
             let _ = content;
             self.show_clipboard_feedback();
-            return;
+            return None;
         }
 
         if let AppEvent::PrefixInputSource { active } = ev {
@@ -162,14 +162,14 @@ impl App {
             // App-internal drain consume the event before the forwarding drain, the flag keeps the
             // switch out of the headless server process.
             if !self.local_input_source_switch {
-                return;
+                return None;
             }
             if active {
                 self.prefix_input_source.switch_to_ascii();
             } else {
                 self.prefix_input_source.restore();
             }
-            return;
+            return None;
         }
 
         if let AppEvent::GitStatusRefreshed {
@@ -179,7 +179,7 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(generation, results, cache_updates);
-            return;
+            return None;
         }
 
         if let AppEvent::GitWorkContextRefreshed {
@@ -189,7 +189,7 @@ impl App {
         } = ev
         {
             self.handle_git_work_context_refreshed(generation, observations, cache_updates);
-            return;
+            return None;
         }
 
         if let AppEvent::ForegroundProcessesRefreshed {
@@ -198,7 +198,7 @@ impl App {
         } = ev
         {
             self.handle_foreground_processes_refreshed(generation, observations);
-            return;
+            return None;
         }
 
         if let AppEvent::PluginCommandFinished {
@@ -229,17 +229,17 @@ impl App {
                     crate::api::schema::PluginCommandStatus::Failed
                 };
             }
-            return;
+            return None;
         }
 
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(*result);
-            return;
+            return None;
         }
 
         if let AppEvent::WorktreeRemoveFinished(result) = ev {
             self.handle_worktree_remove_finished(*result);
-            return;
+            return None;
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
@@ -250,7 +250,7 @@ impl App {
                 .is_some_and(|popup| popup.pane_id == *pane_id)
             {
                 self.close_popup_pane();
-                return;
+                return None;
             }
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
@@ -268,7 +268,7 @@ impl App {
                 self.overlay_panes.remove(pane_id);
                 self.render_dirty.request_generic();
                 self.render_notify.notify_one();
-                return;
+                return None;
             }
         }
 
@@ -345,7 +345,8 @@ impl App {
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
-        let pane_updates = self.state.handle_app_event(ev);
+        let (pane_updates, hook_state_report_accepted) =
+            self.state.handle_app_event_with_hook_report_status(ev);
         if pane_updates
             .iter()
             .any(|update| update.hook_work_context_changed)
@@ -423,6 +424,7 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+        hook_state_report_accepted
     }
 
     fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {

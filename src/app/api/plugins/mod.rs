@@ -2931,10 +2931,14 @@ action = "missing"
                 source: "test".into(),
                 agent: "codex".into(),
                 state: crate::api::schema::PaneAgentState::Working,
+                v: None,
                 message: None,
                 seq: None,
                 agent_session_id: None,
                 agent_session_path: None,
+                gates: None,
+                items: None,
+                decisions: None,
             },
         );
 

@@ -748,6 +748,9 @@ fn worktree_request_and_response_round_trip() {
                 agent_status: AgentStatus::Unknown,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
                 agent_session: None,
                 scroll: None,
                 revision: 0,
@@ -1214,6 +1217,9 @@ fn create_response_round_trips_with_root_pane() {
                 agent_status: AgentStatus::Unknown,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
                 agent_session: None,
                 scroll: None,
                 revision: 0,
@@ -1357,4 +1363,22 @@ fn popup_close_request_round_trips() {
 
     assert_eq!(json["method"], "popup.close");
     assert_eq!(json["params"], serde_json::json!({}));
+}
+
+#[test]
+fn closing_block_item_defaults_are_null_on_read_and_write() {
+    let item: ClosingBlockItem = serde_json::from_value(serde_json::json!({
+        "n": 1,
+        "label": "Gate",
+        "text": "approve",
+        "default": "approve",
+        "default_at": "2026-08-09T12:00:00Z"
+    }))
+    .unwrap();
+
+    assert_eq!(item.default, None);
+    assert_eq!(item.default_at, None);
+    let encoded = serde_json::to_value(item).unwrap();
+    assert_eq!(encoded["default"], serde_json::Value::Null);
+    assert_eq!(encoded["default_at"], serde_json::Value::Null);
 }

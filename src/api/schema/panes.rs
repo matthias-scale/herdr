@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{de::Deserializer, Deserialize, Serialize};
 
 pub(crate) const PANE_GRAPHICS_SET_MAX_BYTES: usize = 512 * 1024;
 pub(crate) const PANE_GRAPHICS_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -329,6 +329,8 @@ pub struct PaneReportAgentParams {
     pub agent: String,
     pub state: PaneAgentState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
@@ -336,6 +338,75 @@ pub struct PaneReportAgentParams {
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gates: Option<Vec<ClosingBlockItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<ClosingBlockItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<Vec<ClosingBlockDecision>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct ClosingBlockItem {
+    pub n: u32,
+    pub label: String,
+    pub text: String,
+    #[serde(default)]
+    pub pr: Option<u64>,
+    #[serde(default)]
+    pub ticket: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub default_at: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ClosingBlockItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            n: u32,
+            label: String,
+            text: String,
+            #[serde(default)]
+            pr: Option<u64>,
+            #[serde(default)]
+            ticket: Option<String>,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            default: Option<String>,
+            #[serde(default)]
+            default_at: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let _ = (wire.default, wire.default_at);
+        Ok(Self {
+            n: wire.n,
+            label: wire.label,
+            text: wire.text,
+            pr: wire.pr,
+            ticket: wire.ticket,
+            url: wire.url,
+            default: None,
+            default_at: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClosingBlockDecision {
+    pub n: u32,
+    pub text: String,
+    pub recommendation: String,
+    pub reversible: bool,
+    pub decided_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -436,6 +507,12 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[schemars(schema_with = "super::common::metadata_token_values_schema")]
     pub tokens: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<ClosingBlockItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<ClosingBlockItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<ClosingBlockDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
