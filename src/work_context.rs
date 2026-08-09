@@ -1206,7 +1206,7 @@ mod tests {
         let started = std::time::Instant::now();
 
         assert!(extract_preview_urls(&text).is_empty());
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

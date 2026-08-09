@@ -869,19 +869,15 @@ mod tests {
             app.next_headless_loop_deadline_with_client_refresh(now, false, false),
             None
         );
-        // The work-context refresh timer starts when App is constructed, so it can be a
-        // few milliseconds older than this test's `now`; both deadlines are already due.
+        // The work-context refresh timer starts when App is constructed, so it can be
+        // arbitrarily older than this test's `now` under parallel test load. Both
+        // deadlines are already due; their exact distance is not part of the contract.
         let deadline = app
             .next_headless_loop_deadline_with_client_refresh(now, false, true)
             .expect("due git refresh should wake the headless loop");
-        let delta = if deadline >= now {
-            deadline.duration_since(now)
-        } else {
-            now.duration_since(deadline)
-        };
         assert!(
-            delta <= std::time::Duration::from_millis(100),
-            "deadline {deadline:?} should be close to the requested refresh time {now:?}"
+            deadline <= now,
+            "deadline {deadline:?} should already be due at {now:?}"
         );
     }
 

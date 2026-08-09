@@ -188,9 +188,8 @@ impl AppState {
             && col < toggle.x + toggle.width
             && row >= toggle.y
             && row < toggle.y + toggle.height;
-        sidebar.width > 0
+        crate::ui::sidebar_separator_col(sidebar).is_some_and(|separator_col| col == separator_col)
             && !on_toggle
-            && col == sidebar.x + sidebar.width.saturating_sub(1)
             && row >= sidebar.y
             && row < sidebar.y + sidebar.height
     }
@@ -1857,6 +1856,19 @@ mod tests {
         assert_eq!(app.state.sidebar_width, 31);
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(31));
+    }
+
+    #[test]
+    fn drag_hit_column_matches_rendered_sidebar_separator() {
+        let app = app_for_mouse_test();
+        let sidebar = app.state.view.sidebar_rect;
+        let separator_col = crate::ui::sidebar_separator_col(sidebar).unwrap();
+        let row = sidebar.y + 2;
+
+        assert!(app.state.on_sidebar_divider(separator_col, row));
+        assert!(!app
+            .state
+            .on_sidebar_divider(separator_col.saturating_sub(1), row));
     }
 
     #[test]

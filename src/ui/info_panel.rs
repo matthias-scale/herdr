@@ -11,7 +11,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use serde::Deserialize;
@@ -82,7 +82,12 @@ fn info_panel_layout_line(inner: Rect, index: usize) -> Option<Rect> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InfoPanelLayout {
     inner: Rect,
+    title: Rect,
     link_rows: Vec<Rect>,
+    empty_links: Option<Rect>,
+    branch: Rect,
+    agent: Rect,
+    usage_start: usize,
 }
 
 impl InfoPanelLayout {
@@ -91,17 +96,64 @@ impl InfoPanelLayout {
     }
 }
 
-fn info_panel_layout(area: Rect, link_count: usize) -> Option<InfoPanelLayout> {
+fn wrapped_height(width: u16, prefix: &str, value: &str) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let width = usize::from(width);
+    let prefix_width = display_width(prefix);
+    let value_width = display_width(value);
+    let lines = if prefix_width.saturating_add(value_width) <= width {
+        1
+    } else {
+        1usize.saturating_add(value_width.div_ceil(width))
+    };
+    u16::try_from(lines).unwrap_or(u16::MAX).max(1)
+}
+
+fn info_panel_layout(
+    area: Rect,
+    title: &str,
+    candidates: &[crate::work_context::WorkLinkCandidate],
+    branch: &str,
+) -> Option<InfoPanelLayout> {
     if area.width < 2 || area.height < 3 {
         return None;
     }
     let inner = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .inner(area);
-    let link_rows = (0..link_count)
-        .filter_map(|index| info_panel_layout_line(inner, 2usize.saturating_add(index)))
+    let mut y = inner.y.saturating_add(1);
+    let mut allocate = |height: u16| {
+        let available = inner.y.saturating_add(inner.height).saturating_sub(y);
+        let rect = Rect::new(inner.x, y, inner.width, height.min(available));
+        y = y.saturating_add(height);
+        rect
+    };
+    let title = allocate(wrapped_height(inner.width, "title: ", title));
+    let link_rows = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let prefix = format!("{} {}: ", index + 1, link_prefix(candidate.kind));
+            allocate(wrapped_height(inner.width, &prefix, &candidate.label))
+        })
         .collect();
-    Some(InfoPanelLayout { inner, link_rows })
+    let empty_links = candidates
+        .is_empty()
+        .then(|| allocate(wrapped_height(inner.width, "links: ", "—")));
+    let branch = allocate(wrapped_height(inner.width, "branch: ", branch));
+    let agent = allocate(1);
+    let usage_start = usize::from(y.saturating_sub(inner.y));
+    Some(InfoPanelLayout {
+        inner,
+        title,
+        link_rows,
+        empty_links,
+        branch,
+        agent,
+        usage_start,
+    })
 }
 
 pub(crate) fn compute_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLinkRow> {
@@ -109,7 +161,10 @@ pub(crate) fn compute_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLink
         return Vec::new();
     };
     let candidates = visible_candidates(terminal);
-    let Some(layout) = info_panel_layout(area, candidates.len()) else {
+    let context = terminal.effective_work_context();
+    let title = context.work_title.as_deref().unwrap_or("untitled");
+    let branch = context.branch.as_deref().unwrap_or("—");
+    let Some(layout) = info_panel_layout(area, title, &candidates, branch) else {
         return Vec::new();
     };
     candidates
@@ -1131,12 +1186,12 @@ pub(super) fn render_info_panel(
 
     let context = terminal.effective_work_context();
     let candidates = visible_candidates(terminal);
-    let Some(layout) = info_panel_layout(area, candidates.len()) else {
+    let title = context.work_title.as_deref().unwrap_or("untitled");
+    let branch = context.branch.as_deref().unwrap_or("—");
+    let Some(layout) = info_panel_layout(area, title, &candidates, branch) else {
         return;
     };
     debug_assert_eq!(inner, layout.inner);
-    let title = context.work_title.as_deref().unwrap_or("untitled");
-    let branch = context.branch.as_deref().unwrap_or("—");
 
     if let Some(row) = layout.line(0) {
         frame.render_widget(
@@ -1149,10 +1204,10 @@ pub(super) fn render_info_panel(
             row,
         );
     }
-    if let Some(row) = layout.line(1) {
+    if layout.title.height > 0 {
         frame.render_widget(
-            Paragraph::new(field_line("title", title, &app.palette)),
-            row,
+            Paragraph::new(field_line("title", title, &app.palette)).wrap(Wrap { trim: false }),
+            layout.title,
         );
     }
     for (index, candidate) in candidates.iter().enumerate() {
@@ -1175,41 +1230,30 @@ pub(super) fn render_info_panel(
                     candidate.label.clone(),
                     Style::default().fg(app.palette.text),
                 ),
-            ])),
+            ]))
+            .wrap(Wrap { trim: false }),
             row,
         );
     }
-    if candidates.is_empty() {
-        if let Some(row) = layout.line(2) {
-            frame.render_widget(Paragraph::new(field_line("links", "—", &app.palette)), row);
-        }
+    if let Some(row) = layout.empty_links.filter(|row| row.height > 0) {
+        frame.render_widget(Paragraph::new(field_line("links", "—", &app.palette)), row);
     }
-    let footer_start = 2usize.saturating_add(candidates.len().max(1));
-    if let Some(row) = layout.line(footer_start) {
+    if layout.branch.height > 0 {
         frame.render_widget(
-            Paragraph::new(field_line("branch", branch, &app.palette)),
-            row,
+            Paragraph::new(field_line("branch", branch, &app.palette)).wrap(Wrap { trim: false }),
+            layout.branch,
         );
     }
-    if let Some(row) = layout.line(footer_start.saturating_add(1)) {
+    if layout.agent.height > 0 {
         frame.render_widget(
             Paragraph::new(field_line("agent", &state_label(terminal), &app.palette)),
-            row,
+            layout.agent,
         );
     }
 
     if app.show_subscription_usage {
-        render_subscription_usage(
-            app,
-            frame,
-            &layout,
-            footer_start.saturating_add(2),
-            render_handles,
-        );
+        render_subscription_usage(app, frame, &layout, layout.usage_start, render_handles);
     }
-
-    // Keep each link as one screen row so its hit target matches the rendered
-    // numbering even when a URL is longer than the desktop panel.
 }
 
 #[cfg(test)]
@@ -1785,7 +1829,9 @@ mod tests {
             .unwrap()
             .apply_manual_work_context_patch(PaneWorkContextPatch {
                 ticket_ids: Some(vec!["MAT-1".into()]),
-                pr_urls: Some(vec!["https://github.com/o/r/pull/2".into()]),
+                pr_urls: Some(vec![
+                    "https://github.com/scalable-so/scalable/pull/12345".into()
+                ]),
                 ..Default::default()
             })
             .unwrap();
@@ -1801,7 +1847,7 @@ mod tests {
             })
             .unwrap();
 
-        let area = Rect::new(0, 0, 50, 12);
+        let area = Rect::new(0, 0, 40, 16);
         let rows = compute_link_rows(&app, area);
         assert_eq!(rows.len(), 4);
         assert_eq!(
@@ -1809,8 +1855,13 @@ mod tests {
             "https://mail.missiveapp.com/#inbox/conversations/abc123"
         );
         assert_eq!(rows[0].copy_value, "MAT-1");
-        assert_eq!(rows[1].copy_value, "https://github.com/o/r/pull/2");
+        assert_eq!(
+            rows[1].copy_value,
+            "https://github.com/scalable-so/scalable/pull/12345"
+        );
         assert_eq!(rows[2].copy_value, "https://preview.vercel.app");
+        assert!(rows[1].rect.height > 1, "long URLs should wrap");
+        assert_eq!(rows[2].rect.y, rows[1].rect.y + rows[1].rect.height);
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -1818,12 +1869,16 @@ mod tests {
             .unwrap();
         for (row, label) in rows.iter().zip([
             "MAT-1",
-            "https://github.com/o/r/pull/2",
+            "https://github.com/scalable-so/scalable/pull/12345",
             "https://preview.vercel.app",
         ]) {
-            let rendered = (area.x..area.x + area.width)
-                .map(|x| terminal.backend().buffer()[(x, row.rect.y)].symbol())
-                .collect::<String>();
+            let mut rendered = String::new();
+            for y in row.rect.y..row.rect.y + row.rect.height {
+                for x in area.x + 1..area.x + area.width - 1 {
+                    rendered.push_str(terminal.backend().buffer()[(x, y)].symbol());
+                }
+            }
+            let rendered = rendered.replace(' ', "");
             assert!(rendered.contains(label), "row {}: {rendered}", row.rect.y);
         }
     }
