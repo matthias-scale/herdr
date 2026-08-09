@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HERDR_INTEGRATION_VERSION=2
 """Claude Code `Stop` hook -> herdr turn-end status.
 
 Installed *beside* herdr's managed `herdr-agent-state.sh`, which herdr overwrites
@@ -68,7 +69,9 @@ def main() -> int:
         agent="claude",
         blocking=block.blocking,
         agents=block.agents_running,
-        gates=[i.text for i in block.items if i.blocking],
+        gates=block.wire_gates(),
+        items=block.wire_items(),
+        decisions=block.wire_decisions(),
         agent_names=block.agents,
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),

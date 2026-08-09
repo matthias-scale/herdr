@@ -1,24 +1,16 @@
-"""Agent-agnostic turn-end status contract for herdr.
+"""Agent-agnostic v2 turn-end status contract for herdr.
 
-One payload, one transport, any coding agent.
+The closing-block adapter writes one payload:
 
-    {"v": 1, "agent": "claude", "blocking": 2, "agents": 3,
-     "gates": ["Merge #30"], "agent_names": ["reviewer A — round 4"]}
+    {"v": 2, "agent": "claude", "blocking": 1, "agents": 0,
+     "gates": [{"n": 1, "label": "Gate", "text": "...", "pr": null,
+                "ticket": null, "url": null, "default": null,
+                "default_at": null}],
+     "items": [], "decisions": [], "agent_names": []}
 
-`blocking` is the count of items only a human can clear (CLAUDE.md **Gate**
-items). `agents` is the count still working. They are independent: "nothing for
-you, but 3 agents are still running" is `blocking=0, agents=3`, which is exactly
-the state herdr could not previously see.
-
-Transport is the herdr socket at $HERDR_SOCKET_PATH -- already injected into
-every pane, already proven. A JSON mirror is written atomically to
-$XDG_STATE_HOME/herdr/agent-status/<pane_id>.json so the last known status
-survives herdr restarts and is inspectable without the socket.
-
-Any agent can report in one line from its own turn-end hook:
-
-    herdr-status --agent codex --blocking 1 --agents 2
-    echo '{"blocking":0,"agents":3}' | herdr-status --agent opencode
+The arrays are sent through the existing agent-report channel. The blocked state
+label carries the first gate so the existing sidebar/detail view is answerable
+in place. A turn-end hook never raises.
 """
 
 from __future__ import annotations
@@ -29,16 +21,14 @@ import random
 import socket
 import tempfile
 import time
+from datetime import datetime, timezone
+from typing import Any
 
-VERSION = 1
+# HERDR_INTEGRATION_VERSION=2
+VERSION = 2
 
 
 def state_for(blocking: int, agents: int) -> str:
-    """Collapse the channels to herdr's AgentState.
-
-    Only a human gate is genuinely *blocked*. Agents still working is *working*
-    -- keeping those apart is the whole point.
-    """
     if blocking > 0:
         return "blocked"
     if agents > 0:
@@ -46,9 +36,62 @@ def state_for(blocking: int, agents: int) -> str:
     return "idle"
 
 
-def message_for(blocking: int, agents: int, gates: list[str]) -> str | None:
+def _item_text(item: dict[str, Any]) -> str:
+    return str(item.get("text") or "").strip()
+
+
+def _normalize_item(
+    value: dict[str, Any] | str,
+    *,
+    index: int,
+    label: str,
+) -> dict[str, Any]:
+    if isinstance(value, str):
+        text = value
+        return {
+            "n": index,
+            "label": label,
+            "text": text,
+            "pr": None,
+            "ticket": None,
+            "url": None,
+            "default": None,
+            "default_at": None,
+        }
+    item = dict(value)
+    item.setdefault("n", index)
+    item.setdefault("label", label)
+    item.setdefault("text", "")
+    item.setdefault("pr", None)
+    item.setdefault("ticket", None)
+    item.setdefault("url", None)
+    item.setdefault("default", None)
+    item.setdefault("default_at", None)
+    return item
+
+
+def _normalize_decision(
+    value: dict[str, Any],
+    *,
+    index: int,
+) -> dict[str, Any]:
+    decision = dict(value)
+    decision.setdefault("n", index)
+    decision.setdefault("text", "")
+    decision.setdefault("recommendation", decision["text"])
+    decision["reversible"] = True
+    if decision.get("decided_at") is None:
+        decision["decided_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return decision
+
+
+def message_for(
+    blocking: int,
+    agents: int,
+    gates: list[dict[str, Any]],
+) -> str | None:
     if blocking > 0:
-        head = (gates[0] if gates else "").strip()
+        head = _item_text(gates[0]) if gates else ""
         extra = f" (+{blocking - 1})" if blocking > 1 else ""
         return ((head or f"{blocking} blocking")[:80]) + extra
     if agents > 0:
@@ -95,12 +138,22 @@ def _rpc(sock_path: str, source: str, method: str, params: dict) -> None:
         client.close()
 
 
+def accepts_payload(payload: object) -> bool:
+    """Return false for an old/new wire version without raising or reporting."""
+    if not isinstance(payload, dict):
+        return False
+    version = payload.get("v")
+    return version is None or version == VERSION
+
+
 def report(
     *,
     agent: str,
     blocking: int,
     agents: int,
-    gates: list[str] | None = None,
+    gates: list[dict[str, Any] | str] | None = None,
+    items: list[dict[str, Any] | str] | None = None,
+    decisions: list[dict[str, Any]] | None = None,
     agent_names: list[str] | None = None,
     session_id: str | None = None,
     session_path: str | None = None,
@@ -108,8 +161,19 @@ def report(
     pane_id: str | None = None,
     sock_path: str | None = None,
 ) -> dict:
-    """Push one turn-end status. Never raises; returns what it did."""
-    gates = gates or []
+    """Push one v2 turn-end status. Never raises; returns what it did."""
+    gate_objects = [
+        _normalize_item(value, index=index, label="Gate")
+        for index, value in enumerate(gates or [], start=1)
+    ]
+    item_objects = [
+        _normalize_item(value, index=index, label="Answer")
+        for index, value in enumerate(items or [], start=1)
+    ]
+    decision_objects = [
+        _normalize_decision(value, index=index)
+        for index, value in enumerate(decisions or [], start=1)
+    ]
     agent_names = agent_names or []
     pane_id = pane_id or os.environ.get("HERDR_PANE_ID") or ""
     sock_path = sock_path or os.environ.get("HERDR_SOCKET_PATH") or ""
@@ -123,7 +187,9 @@ def report(
         "state": state,
         "blocking": blocking,
         "agents": agents,
-        "gates": gates,
+        "gates": gate_objects,
+        "items": item_objects,
+        "decisions": decision_objects,
         "agent_names": agent_names,
     }
     if title:
@@ -136,36 +202,32 @@ def report(
         return outcome
 
     source = f"herdr:{agent}-closing-block"
-    # A full-lifecycle source must announce its own session before its state
-    # reports are honoured; sequences are tracked per source, so herdr's managed
-    # hook (which announces under `herdr:<agent>`) does not cover us. Without
-    # this the report is buffered and dropped with no error.
-    session_params = {"pane_id": pane_id, "source": source, "agent": agent,
-                      "seq": seq - 1}
+    session_params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": agent,
+        "seq": seq - 1,
+    }
     if session_id:
         session_params["agent_session_id"] = session_id
     if session_path:
         session_params["agent_session_path"] = session_path
 
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
-                    "state": state, "seq": seq}
-    message = message_for(blocking, agents, gates)
+                    "state": state, "seq": seq,
+                    "gates": gate_objects, "items": item_objects,
+                    "decisions": decision_objects}
+    message = message_for(blocking, agents, gate_objects)
     if message:
         agent_params["message"] = message
 
-    # Always write every token. Tokens persist across reports, so omitting one
-    # leaves the previous turn's value on screen -- a finished pane would keep
-    # advertising agents that already exited.
+    gate_texts = [_item_text(gate) for gate in gate_objects]
     tokens = {
         "closing_blocking": str(blocking),
         "closing_agents": str(agents),
         "closing_idle": "1" if state == "idle" else "0",
         "closing_agent_names": "; ".join(agent_names)[:200],
-        "closing_gates": "; ".join(gates)[:200],
-        # Codex publishes no session name -- its OSC title is just the cwd, and
-        # its rollout files carry no title either (the resume picker previews
-        # the first user message). So the agent that has one supplies it here.
-        # Render with a `$session_title` token in `rows_by_agent`.
+        "closing_gates": "; ".join(gate_texts)[:200],
         "session_title": (title or "")[:120],
     }
     meta_params = {
@@ -173,12 +235,8 @@ def report(
         "source": source,
         "applies_to_source": source,
         "tokens": tokens,
-        # Counts are noise in the sidebar. One gate or three, the action is the
-        # same -- go answer it; and running agents just mean "not done", which
-        # the plain working dot already says. The numbers still ride along in
-        # the `closing_*` tokens for anything that wants them.
         "state_labels": {
-            "blocked": "gate" if blocking else "blocked",
+            "blocked": message if blocking else "blocked",
             "working": "working",
         },
         "seq": seq,
@@ -190,5 +248,5 @@ def report(
         _rpc(sock_path, source, "pane.report_metadata", meta_params)
         outcome["socket"] = True
     except OSError:
-        pass  # mirror already written; a hook must never wedge a turn
+        pass
     return outcome

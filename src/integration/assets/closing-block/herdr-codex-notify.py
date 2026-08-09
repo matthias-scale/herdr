@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# HERDR_INTEGRATION_VERSION=2
 """Codex `notify` handler -> herdr turn-end status.
 
 Codex invokes the notify program with a single JSON argument. For a finished
@@ -21,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from closing_block import parse  # noqa: E402
-from herdr_status import mirror_path, report  # noqa: E402
+from herdr_status import accepts_payload, mirror_path, report  # noqa: E402
 
 # Codex has used both spellings across versions.
 TURN_DONE = {"agent-turn-complete", "agent_turn_complete", "turn-ended", "turn_ended"}
@@ -81,6 +82,8 @@ def main() -> int:
     if os.environ.get("HERDR_ENV") != "1" or not os.environ.get("HERDR_PANE_ID"):
         return 0
     payload = load_payload(sys.argv[1:])
+    if not accepts_payload(payload):
+        return 0
     kind = str(payload.get("type") or payload.get("event") or "")
     if kind and kind not in TURN_DONE:
         return 0
@@ -101,7 +104,9 @@ def main() -> int:
         agent="codex",
         blocking=block.blocking,
         agents=block.agents_running,
-        gates=[i.text for i in block.items if i.blocking],
+        gates=block.wire_gates(),
+        items=block.wire_items(),
+        decisions=block.wire_decisions(),
         agent_names=block.agents,
         session_id=payload.get("turn-id") or payload.get("turn_id"),
         title=title_from(payload, os.environ["HERDR_PANE_ID"]),

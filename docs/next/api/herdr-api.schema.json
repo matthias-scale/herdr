@@ -79,6 +79,93 @@
           ],
           "type": "string"
         },
+        "ClosingBlockDecision": {
+          "properties": {
+            "decided_at": {
+              "type": "string"
+            },
+            "n": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "recommendation": {
+              "type": "string"
+            },
+            "reversible": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "n",
+            "text",
+            "recommendation",
+            "reversible",
+            "decided_at"
+          ],
+          "type": "object"
+        },
+        "ClosingBlockItem": {
+          "properties": {
+            "default": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "n": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pr": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "ticket": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "n",
+            "label",
+            "text"
+          ],
+          "type": "object"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -784,6 +871,12 @@
                 "null"
               ]
             },
+            "decisions": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/ClosingBlockDecision"
+              },
+              "type": "array"
+            },
             "display_agent": {
               "type": [
                 "string",
@@ -798,6 +891,18 @@
                 "string",
                 "null"
               ]
+            },
+            "gates": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/ClosingBlockItem"
+              },
+              "type": "array"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/ClosingBlockItem"
+              },
+              "type": "array"
             },
             "label": {
               "type": [
@@ -1757,6 +1862,93 @@
           },
           "required": [
             "title"
+          ],
+          "type": "object"
+        },
+        "ClosingBlockDecision": {
+          "properties": {
+            "decided_at": {
+              "type": "string"
+            },
+            "n": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "recommendation": {
+              "type": "string"
+            },
+            "reversible": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "n",
+            "text",
+            "recommendation",
+            "reversible",
+            "decided_at"
+          ],
+          "type": "object"
+        },
+        "ClosingBlockItem": {
+          "properties": {
+            "default": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "n": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pr": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "ticket": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "n",
+            "label",
+            "text"
           ],
           "type": "object"
         },
@@ -2839,6 +3031,33 @@
             "agent_session_path": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "decisions": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ClosingBlockDecision"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "gates": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ClosingBlockItem"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "items": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ClosingBlockItem"
+              },
+              "type": [
+                "array",
                 "null"
               ]
             },
@@ -6310,6 +6529,12 @@
                 "null"
               ]
             },
+            "decisions": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ClosingBlockDecision"
+              },
+              "type": "array"
+            },
             "display_agent": {
               "type": [
                 "string",
@@ -6325,8 +6550,20 @@
                 "null"
               ]
             },
+            "gates": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ClosingBlockItem"
+              },
+              "type": "array"
+            },
             "interactive_ready": {
               "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ClosingBlockItem"
+              },
+              "type": "array"
             },
             "launch_pending": {
               "type": "boolean"
@@ -6526,6 +6763,93 @@
             "no_foreground_client"
           ],
           "type": "string"
+        },
+        "ClosingBlockDecision": {
+          "properties": {
+            "decided_at": {
+              "type": "string"
+            },
+            "n": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "recommendation": {
+              "type": "string"
+            },
+            "reversible": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "n",
+            "text",
+            "recommendation",
+            "reversible",
+            "decided_at"
+          ],
+          "type": "object"
+        },
+        "ClosingBlockItem": {
+          "properties": {
+            "default": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "n": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pr": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "ticket": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "n",
+            "label",
+            "text"
+          ],
+          "type": "object"
         },
         "ConfigReloadStatus": {
           "enum": [
@@ -7599,6 +7923,12 @@
                 "null"
               ]
             },
+            "decisions": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ClosingBlockDecision"
+              },
+              "type": "array"
+            },
             "display_agent": {
               "type": [
                 "string",
@@ -7613,6 +7943,18 @@
                 "string",
                 "null"
               ]
+            },
+            "gates": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ClosingBlockItem"
+              },
+              "type": "array"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ClosingBlockItem"
+              },
+              "type": "array"
             },
             "label": {
               "type": [

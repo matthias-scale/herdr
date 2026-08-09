@@ -1,81 +1,155 @@
-"""Parse the CLAUDE.md closing block into orthogonal herdr signals.
+"""Parse the existing closing block into herdr status channels.
 
-The closing-block spec (global CLAUDE.md, "## Closing block") guarantees two
-independent fields at the end of every interactive response:
-
-  1. an action-item header -- either
-         **Critical action points (N blocking)**
-     or  **Nothing to act on.**
-  2. a liveness line -- either
-         Done here.
-     or  N agents running: <name -- topic>; <name -- topic>
-     optionally followed by named waits.
-
-They are orthogonal: "Nothing to act on." only replaces the *item list*, never
-the liveness line. So "no human action needed, but 3 agents are still working"
-is a legal and common terminal state -- and today herdr cannot see it, because
-Claude/Codex lifecycle is inferred from screen scraping alone.
-
-This module turns the block into a ClosingBlock with three independent counts so
-herdr can render them as three channels instead of one collapsed status.
+The adapter deliberately keeps the authoring format unchanged. Critical action
+points retain their Gate/Answer/Verify labels; only Gate items block. The
+optional What to test section is non-blocking context, and auto-proceeded
+decisions are a separate delimited list.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
 
-# **Critical action points (3 blocking)** / (0 blocking) / bare header.
+# HERDR_INTEGRATION_VERSION=2
 _HEADER_RE = re.compile(
     r"^\s*\*\*Critical action points(?:\s*\((?P<n>\d+)\s+blocking\))?\*\*\s*$",
     re.MULTILINE,
 )
 _NOTHING_RE = re.compile(r"^\s*\*\*Nothing to act on\.?\*\*\s*$", re.MULTILINE)
-
-# "3 agents running: reviewer A -- round 4; reviewer B -- extra profile"
 _AGENTS_RE = re.compile(
     r"^\s*(?P<n>\d+)\s+agents?\s+running:\s*(?P<rest>.+?)\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
 _DONE_RE = re.compile(r"^\s*Done here\.\s*$", re.MULTILINE)
 
-# Numbered item carrying a bold label: "1. **Gate** -- ..." / "2. **Answer** ..."
+_ITEM_START = r"^\s*\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
 _ITEM_RE = re.compile(
-    r"^\s*(?P<idx>\d+)[.)]\s*\*\*(?P<label>Gate|Answer|Verify)\*\*\s*(?P<body>.*?)\s*$",
-    re.MULTILINE,
+    rf"^\s*(?P<idx>\d+)[.)]\s*\*\*(?P<label>Gate|Answer|Verify)\*\*"
+    rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\s*\*\*What to test\b|"
+    r"^\s*\*\*Auto-proceeded decisions\*\*|^\s*\d+\s+agents?\s+running:|"
+    r"^\s*Done here\.|\Z)",
+    re.MULTILINE | re.IGNORECASE | re.DOTALL,
+)
+_DECISIONS_RE = re.compile(
+    r"^\s*\*\*Auto-proceeded decisions\*\*\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_DECISION_ITEM_RE = re.compile(
+    r"^\s*(?P<idx>\d+)[.)]\s*(?P<body>.*?)(?=^\s*\d+[.)]\s+|"
+    r"^\s*\*\*What to test\b|^\s*\d+\s+agents?\s+running:|"
+    r"^\s*Done here\.|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_WHAT_RE = re.compile(
+    r"^\s*\*\*What to test(?P<meta>.*?)\*\*\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_LABEL_SEP = re.compile(r"\s+[-—–]\s+")
+_PR_RE = re.compile(r"(?<![A-Za-z0-9])#(?P<pr>\d+)\b")
+_TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+_URL_RE = re.compile(r"https?://[^\s)\]>]+", re.IGNORECASE)
+_RECOMMENDATION_RE = re.compile(
+    r"\b(?:recommend(?:ation|ed)?|proceed(?:ed)?\s+with)\s*[:\-]?\s*"
+    r"(?P<value>.+?)(?=\s+(?:because|at\s+\d{1,2}:\d{2}|decided\s+at)|$)",
+    re.IGNORECASE,
+)
+_DECIDED_AT_RE = re.compile(
+    r"\b(?:decided\s+at|at)\s+(?P<value>\d{1,2}:\d{2}(?:\s*[A-Z]{2})?)",
+    re.IGNORECASE,
 )
 
-_LABEL_SEP = re.compile(r"\s+[-—–]\s+")
+
+def _clean_body(body: str) -> str:
+    # Remove only the Markdown list separator. Keep the item wording and
+    # internal whitespace verbatim.
+    return body.strip().lstrip("-—–:").strip()
+
+
+def _metadata(text: str) -> dict[str, Any]:
+    url_match = _URL_RE.search(text)
+    url = url_match.group(0).rstrip(".,;:") if url_match else None
+    pr_match = _PR_RE.search(text)
+    ticket_match = _TICKET_RE.search(text)
+    return {
+        "pr": int(pr_match.group("pr")) if pr_match else None,
+        "ticket": ticket_match.group(0) if ticket_match else None,
+        "url": url,
+    }
 
 
 @dataclass
 class Item:
     index: int
-    label: str  # Gate | Answer | Verify
+    label: str  # Gate | Answer | Verify | What to test
     text: str
+    metadata: dict[str, Any] | None = None
 
     @property
     def blocking(self) -> bool:
-        # Spec: "Gates block."
         return self.label == "Gate"
+
+    def wire(self) -> dict[str, Any]:
+        metadata = _metadata(self.text)
+        if self.metadata:
+            metadata.update(self.metadata)
+        return {
+            "n": self.index,
+            "label": self.label,
+            "text": self.text,
+            **metadata,
+            "default": None,
+            "default_at": None,
+        }
+
+
+@dataclass
+class Decision:
+    index: int
+    text: str
+    recommendation: str
+    decided_at: str | None = None
+
+    def wire(self) -> dict[str, Any]:
+        decided_at = self.decided_at
+        if decided_at is None:
+            decided_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return {
+            "n": self.index,
+            "text": self.text,
+            "recommendation": self.recommendation,
+            "reversible": True,
+            "decided_at": decided_at,
+        }
 
 
 @dataclass
 class ClosingBlock:
     present: bool = False
     items: list[Item] = field(default_factory=list)
-    # Count declared in the header, when the header declares one.
+    decisions: list[Decision] = field(default_factory=list)
     declared_blocking: int | None = None
     agents: list[str] = field(default_factory=list)
     declared_agents: int | None = None
     done_here: bool = False
 
     @property
+    def gates(self) -> list[Item]:
+        return [item for item in self.items if item.blocking]
+
+    @property
+    def nonblocking_items(self) -> list[Item]:
+        return [item for item in self.items if not item.blocking]
+
+    @property
     def blocking(self) -> int:
-        """Number of blocking items. Header wins; item labels are the fallback."""
-        if self.declared_blocking is not None:
-            return self.declared_blocking
-        return sum(1 for i in self.items if i.blocking)
+        # Item labels are authoritative. Keep the header only as a fallback for
+        # an incomplete block, never as a source of phantom gates.
+        if self.items:
+            return len(self.gates)
+        return self.declared_blocking or 0
 
     @property
     def agents_running(self) -> int:
@@ -85,11 +159,6 @@ class ClosingBlock:
 
     @property
     def herdr_state(self) -> str:
-        """Collapse to herdr's AgentState for `pane.report_agent`.
-
-        Only blocking items are a genuine human gate. Agents still running is
-        *working*, not blocked -- that distinction is the whole point.
-        """
         if self.blocking > 0:
             return "blocked"
         if self.agents_running > 0:
@@ -97,36 +166,86 @@ class ClosingBlock:
         return "idle"
 
     def message(self) -> str | None:
-        """Short human string for the herdr status row."""
         if self.blocking > 0:
-            gates = [i for i in self.items if i.blocking]
-            head = gates[0].text if gates else ""
-            head = _LABEL_SEP.split(head, 1)[0].strip(" -—:") if head else ""
+            head = self.gates[0].text if self.gates else ""
             extra = f" (+{self.blocking - 1})" if self.blocking > 1 else ""
-            return (head or f"{self.blocking} blocking")[:80] + extra
+            return ((head or f"{self.blocking} blocking")[:80]) + extra
         if self.agents_running > 0:
             n = self.agents_running
             return f"{n} agent{'s' if n != 1 else ''} running"
         return None
 
+    def wire_gates(self) -> list[dict[str, Any]]:
+        return [item.wire() for item in self.gates]
+
+    def wire_items(self) -> list[dict[str, Any]]:
+        return [item.wire() for item in self.nonblocking_items]
+
+    def wire_decisions(self) -> list[dict[str, Any]]:
+        return [decision.wire() for decision in self.decisions]
+
+
+def _section_end(text: str, start: int) -> int:
+    candidates = [
+        match.start()
+        for pattern in (_DECISIONS_RE, _WHAT_RE)
+        for match in pattern.finditer(text, start)
+    ]
+    return min(candidates, default=len(text))
+
+
+def _parse_what_to_test(text: str, start: int, items: list[Item]) -> Item | None:
+    heading = next(_WHAT_RE.finditer(text, start), None)
+    if heading is None:
+        return None
+    end_candidates = [
+        match.start()
+        for pattern in (_DECISIONS_RE, _AGENTS_RE, _DONE_RE)
+        for match in pattern.finditer(text, heading.end())
+    ]
+    end = min(end_candidates, default=len(text))
+    body = text[heading.end() : end].strip()
+    if not body:
+        return None
+    gate_number = re.search(r"\bGate\s+(?P<n>\d+)\b", heading.group("meta"), re.I)
+    index = int(gate_number.group("n")) if gate_number else (
+        max((item.index for item in items), default=0) + 1
+    )
+    return Item(index, "What to test", body, _metadata(heading.group(0) + " " + body))
+
+
+def _decision_fields(body: str) -> tuple[str, str | None]:
+    recommendation_match = re.search(
+        r"\brecommendation\s*[:\-]\s*(?P<value>.+?)(?=\s+at\s+\d{1,2}:\d{2}|$)",
+        body,
+        re.IGNORECASE,
+    ) or _RECOMMENDATION_RE.search(body)
+    recommendation = (
+        recommendation_match.group("value").strip(" .")
+        if recommendation_match
+        else body
+    )
+    decided_match = _DECIDED_AT_RE.search(body)
+    decided_at = decided_match.group("value").strip() if decided_match else None
+    return recommendation, decided_at
+
 
 def parse(text: str) -> ClosingBlock:
-    """Parse the closing block out of a full assistant message."""
+    """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
-    header = None
-    for header in _HEADER_RE.finditer(text):
-        pass  # keep the last -- the closing block is at the end
-    nothing = None
-    for nothing in _NOTHING_RE.finditer(text):
-        pass
+    header = next(iter(_HEADER_RE.finditer(text)), None)
+    for candidate in _HEADER_RE.finditer(text):
+        header = candidate
+    nothing = next(iter(_NOTHING_RE.finditer(text)), None)
+    for candidate in _NOTHING_RE.finditer(text):
+        nothing = candidate
 
-    # Whichever marker appears last is the operative one.
     start = None
-    if header and (not nothing or header.start() > nothing.start()):
+    if header and (nothing is None or header.start() > nothing.start()):
         block.present = True
-        n = header.group("n")
-        block.declared_blocking = int(n) if n is not None else None
+        declared = header.group("n")
+        block.declared_blocking = int(declared) if declared is not None else None
         start = header.end()
     elif nothing:
         block.present = True
@@ -134,15 +253,34 @@ def parse(text: str) -> ClosingBlock:
         start = nothing.end()
 
     if start is not None and block.declared_blocking != 0:
-        for m in _ITEM_RE.finditer(text, start):
-            # Items read "1. **Gate** — <text>"; drop the leading separator so
-            # the gate text stands alone as a status line.
-            body = m.group("body").strip().lstrip("-—–:").strip()
-            block.items.append(Item(int(m.group("idx")), m.group("label"), body))
+        cap_end = _section_end(text, start)
+        for match in _ITEM_RE.finditer(text, start, cap_end):
+            block.items.append(
+                Item(
+                    int(match.group("idx")),
+                    match.group("label").capitalize(),
+                    _clean_body(match.group("body")),
+                )
+            )
+        what = _parse_what_to_test(text, start, block.items)
+        if what is not None:
+            block.items.append(what)
+
+    decisions_heading = next(iter(_DECISIONS_RE.finditer(text, start or 0)), None)
+    if decisions_heading:
+        block.present = True
+        for match in _DECISION_ITEM_RE.finditer(text, decisions_heading.end()):
+            body = _clean_body(match.group("body"))
+            if not body:
+                continue
+            recommendation, decided_at = _decision_fields(body)
+            block.decisions.append(
+                Decision(int(match.group("idx")), body, recommendation, decided_at)
+            )
 
     agents = None
-    for agents in _AGENTS_RE.finditer(text):
-        pass
+    for candidate in _AGENTS_RE.finditer(text):
+        agents = candidate
     if agents:
         block.declared_agents = int(agents.group("n"))
         block.agents = [

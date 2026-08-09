@@ -270,6 +270,9 @@ pub struct TerminalState {
     pub work_context: crate::work_context::PaneWorkContextState,
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
+    pub closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
+    pub closing_items: Vec<crate::api::schema::ClosingBlockItem>,
+    pub closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
@@ -316,6 +319,9 @@ impl TerminalState {
             work_context: crate::work_context::PaneWorkContextState::default(),
             work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            closing_gates: Vec::new(),
+            closing_items: Vec::new(),
+            closing_decisions: Vec::new(),
             persisted_agent_session: None,
             terminal_title: None,
             manual_label: None,
@@ -341,6 +347,25 @@ impl TerminalState {
             recent_agent_process_exit: None,
             pending_agent_resume_plan: None,
         }
+    }
+
+    pub(crate) fn apply_closing_block_payload(
+        &mut self,
+        gates: Vec<crate::api::schema::ClosingBlockItem>,
+        items: Vec<crate::api::schema::ClosingBlockItem>,
+        decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    ) -> bool {
+        if self.closing_gates == gates
+            && self.closing_items == items
+            && self.closing_decisions == decisions
+        {
+            return false;
+        }
+        self.closing_gates = gates;
+        self.closing_items = items;
+        self.closing_decisions = decisions;
+        self.revision = self.revision.saturating_add(1);
+        true
     }
 
     pub fn effective_work_context(&self) -> &crate::work_context::PaneWorkContext {
