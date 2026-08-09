@@ -616,7 +616,7 @@ mod tests {
 
         assert_eq!(
             app.tab_info(0, 0).unwrap().label,
-            "claude · Add Subabe management token to Doppler"
+            "Add Subabe management token to Doppler"
         );
     }
 
@@ -631,7 +631,7 @@ mod tests {
             Some("Write Poem"),
         );
 
-        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Write Poem");
     }
 
     #[test]
@@ -653,13 +653,13 @@ mod tests {
             );
 
             let label = app.tab_info(0, 0).unwrap().label;
-            assert_eq!(label, "codex · Write Poem", "title: {title:?}");
+            assert_eq!(label, "Write Poem", "title: {title:?}");
             assert!(!label.contains("codex · codex"), "title: {title:?}");
         }
     }
 
     #[test]
-    fn tab_info_label_keeps_composed_title_with_novel_segment() {
+    fn tab_info_label_strips_leading_agent_from_composed_title() {
         let home = std::path::PathBuf::from(
             std::env::var_os("HOME").expect("test environment should define HOME"),
         );
@@ -672,10 +672,21 @@ mod tests {
             Some("Fallback title"),
         );
 
-        assert_eq!(
-            app.tab_info(0, 0).unwrap().label,
-            "codex · codex — Write Poem"
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Write Poem");
+    }
+
+    #[test]
+    fn tab_info_label_keeps_nonleading_agent_word_in_composed_title() {
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "Deploy — codex helper",
+            Some("Fallback title"),
         );
+
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Deploy — codex helper");
     }
 
     #[test]
@@ -692,7 +703,7 @@ mod tests {
             Some("Write Poem"),
         );
 
-        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Write Poem");
     }
 
     #[test]
@@ -711,7 +722,7 @@ mod tests {
                 Some("Write Poem"),
             );
 
-            assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+            assert_eq!(app.tab_info(0, 0).unwrap().label, "Write Poem");
         }
     }
 
@@ -726,10 +737,7 @@ mod tests {
             Some("Write Poem"),
         );
 
-        assert_eq!(
-            app.tab_info(0, 0).unwrap().label,
-            "codex · Review the patch"
-        );
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Review the patch");
     }
 
     #[test]
@@ -739,7 +747,7 @@ mod tests {
         );
         let cwd = home.join("Repos/herdr-test");
         let relative = cwd.strip_prefix(&home).unwrap().display().to_string();
-        let expected = "codex · Write Poem";
+        let expected = "Write Poem";
 
         let (mut full_app, full_terminal_id) = title_test_app();
         configure_title_test_terminal(
@@ -773,7 +781,7 @@ mod tests {
             Some("Write Poem"),
         );
 
-        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex · Write Poem");
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Write Poem");
     }
 
     #[test]
@@ -792,7 +800,7 @@ mod tests {
             .get_mut(&manual_terminal_id)
             .unwrap()
             .set_manual_label("Pinned".into());
-        assert_eq!(manual_app.tab_info(0, 0).unwrap().label, "codex · Pinned");
+        assert_eq!(manual_app.tab_info(0, 0).unwrap().label, "Pinned");
 
         let (mut no_title_app, no_title_terminal_id) = title_test_app();
         configure_title_test_terminal(

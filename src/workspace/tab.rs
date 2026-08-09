@@ -62,16 +62,32 @@ impl TabDisplayProjection {
                 agent,
                 ticket,
                 title,
-            } => [agent, ticket, title]
-                .into_iter()
-                .filter_map(|part| part.as_deref())
-                .collect::<Vec<_>>()
-                .join(TAB_DISPLAY_SEPARATOR),
+            } => {
+                // The agent identity is surfaced separately (sidebar suffix, agent
+                // rows); it only stands in as the label when nothing else exists.
+                let label = [ticket, title]
+                    .into_iter()
+                    .filter_map(|part| part.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(TAB_DISPLAY_SEPARATOR);
+                if label.is_empty() {
+                    agent.clone().unwrap_or_default()
+                } else {
+                    label
+                }
+            }
         }
     }
 
     pub(crate) fn leads_with_agent_component(&self) -> bool {
-        matches!(self, Self::Derived { agent: Some(_), .. })
+        matches!(
+            self,
+            Self::Derived {
+                agent: Some(_),
+                ticket: None,
+                title: None,
+            }
+        )
     }
 }
 
@@ -150,9 +166,7 @@ impl Tab {
         let cwd = terminal.cwd.to_string_lossy();
         let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
 
-        if terminal.agent_name.as_deref().is_some_and(same_text)
-            || terminal.effective_agent_label().is_some_and(same_text)
-        {
+        if Self::is_agent_identity_segment(terminal, title) {
             return false;
         }
 
@@ -203,6 +217,30 @@ impl Tab {
         true
     }
 
+    fn is_agent_identity_segment(terminal: &TerminalState, segment: &str) -> bool {
+        let same_text = |candidate: &str| segment.trim().eq_ignore_ascii_case(candidate.trim());
+        terminal.agent_name.as_deref().is_some_and(same_text)
+            || terminal.effective_agent_label().is_some_and(same_text)
+            || terminal
+                .effective_display_agent()
+                .as_deref()
+                .is_some_and(same_text)
+    }
+
+    fn terminal_title_without_leading_agent(terminal: &TerminalState, title: &str) -> String {
+        let mut segments = title.splitn(2, ['—', '–', '·', '|']);
+        let leading = segments.next().unwrap_or_default().trim();
+        let remainder = segments
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if Self::is_agent_identity_segment(terminal, leading) {
+            remainder.unwrap_or(title).to_string()
+        } else {
+            title.to_string()
+        }
+    }
+
     pub(crate) fn work_context_display_projection(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
@@ -226,6 +264,7 @@ impl Tab {
                     .then(|| terminal.terminal_title_stripped())
                     .flatten()
                     .filter(|title| Self::is_informative_terminal_title(terminal, title))
+                    .map(|title| Self::terminal_title_without_leading_agent(terminal, &title))
             })
             .or_else(|| context.work_title.clone());
         (agent.is_some() || ticket.is_some() || title.is_some()).then_some(

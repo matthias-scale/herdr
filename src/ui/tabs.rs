@@ -48,25 +48,29 @@ pub(crate) fn fit_tab_display_projection(
             ticket,
             title,
         } => {
-            let full = [&agent, &ticket, &title]
+            let full = [&ticket, &title]
                 .into_iter()
                 .filter_map(|part| part.as_deref())
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let mut candidates = vec![full];
-            if agent.is_some() && ticket.is_some() && title.is_some() {
-                candidates.push(format!(
-                    "{} · {}",
-                    agent.as_deref().unwrap_or_default(),
-                    ticket.as_deref().unwrap_or_default()
-                ));
+            let mut candidates = Vec::new();
+            if !full.is_empty() {
+                candidates.push(full);
             }
             if let Some(ticket) = ticket {
-                candidates.push(ticket);
-            } else if let Some(title) = title {
-                candidates.push(title);
-            } else if let Some(agent) = agent {
-                candidates.push(agent);
+                if !candidates.contains(&ticket) {
+                    candidates.push(ticket);
+                }
+            }
+            if let Some(title) = title {
+                if !candidates.contains(&title) {
+                    candidates.push(title);
+                }
+            }
+            if let Some(agent) = agent {
+                if !candidates.contains(&agent) {
+                    candidates.push(agent);
+                }
             }
             candidates
         }
@@ -624,11 +628,11 @@ mod tests {
 
         assert_eq!(
             tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 80),
-            "Claude · SCA-42 · Add Subabe management token to Doppler"
+            "SCA-42 · Add Subabe management token to Doppler"
         );
         assert_eq!(
             tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 15),
-            "Claude · SCA-42"
+            "SCA-42"
         );
         assert_eq!(
             tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 8),
@@ -654,14 +658,43 @@ mod tests {
 
         assert_eq!(
             fit_tab_display_projection(projection.clone(), 80),
-            "Claude · SCA-42 · repair login regression"
-        );
-        assert_eq!(
-            fit_tab_display_projection(projection.clone(), 15),
-            "Claude · SCA-42"
+            "SCA-42 · repair login regression"
         );
         assert_eq!(fit_tab_display_projection(projection.clone(), 8), "SCA-42");
-        assert_eq!(fit_tab_display_projection(projection, 4), "SCA…");
+        assert_eq!(fit_tab_display_projection(projection, 4), "Cla…");
+
+        let narrow_projection = TabDisplayProjection::Derived {
+            agent: Some("cx".into()),
+            ticket: Some("LONG-TICKET".into()),
+            title: Some("task".into()),
+        };
+        assert_eq!(
+            fit_tab_display_projection(narrow_projection.clone(), 4),
+            "task"
+        );
+        assert_eq!(fit_tab_display_projection(narrow_projection, 2), "cx");
+    }
+
+    #[test]
+    fn derived_projection_never_prefixes_the_agent_onto_a_title() {
+        use crate::workspace::TabDisplayProjection;
+
+        let titled = TabDisplayProjection::Derived {
+            agent: Some("claude".into()),
+            ticket: None,
+            title: Some("Create Python Script".into()),
+        };
+        assert_eq!(
+            fit_tab_display_projection(titled, 80),
+            "Create Python Script"
+        );
+
+        let agent_only = TabDisplayProjection::Derived {
+            agent: Some("codex".into()),
+            ticket: None,
+            title: None,
+        };
+        assert_eq!(fit_tab_display_projection(agent_only, 80), "codex");
     }
 
     #[test]
