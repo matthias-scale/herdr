@@ -2154,4 +2154,3 @@ switch_workspace = "ctrl+1..9"
         assert_eq!(switch_workspace_key, "ctrl+1..9");
     }
 }
-
