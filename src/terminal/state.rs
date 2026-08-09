@@ -291,6 +291,7 @@ pub struct TerminalState {
     pub background_job_count: Option<u16>,
     /// Last background observation of the pane's distinct foreground process.
     pub(crate) foreground_process_name: Option<String>,
+    foreground_process_active: bool,
     pub last_agent_state_change_seq: Option<u64>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
@@ -337,6 +338,7 @@ impl TerminalState {
             state: AgentState::Unknown,
             background_job_count: None,
             foreground_process_name: None,
+            foreground_process_active: false,
             last_agent_state_change_seq: None,
             agent_active_since: None,
             agent_last_active_at: None,
@@ -448,12 +450,31 @@ impl TerminalState {
         true
     }
 
-    pub(crate) fn set_foreground_process_name(&mut self, name: Option<String>) -> bool {
-        if self.foreground_process_name == name {
-            return false;
+    pub(crate) fn set_foreground_process(
+        &mut self,
+        name: Option<String>,
+        active: bool,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if self.foreground_process_name == name && self.foreground_process_active == active {
+            return None;
         }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         self.foreground_process_name = name;
-        true
+        self.foreground_process_active = active;
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            ..TerminalStateMutation::default()
+        })
     }
 
     pub(crate) fn terminal_title_stripped(&self) -> Option<String> {
@@ -2578,7 +2599,7 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        let state = if self.visible_blocker_overrides_hook() {
+        let detected_state = if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
         } else if self.visible_working_overrides_idle_hook()
             || self.detected_working_overrides_idle_hook()
@@ -2592,6 +2613,14 @@ impl TerminalState {
                 })
                 .map(|authority| authority.state)
                 .unwrap_or(self.fallback_state)
+        };
+        let state = if detected_state == AgentState::Idle
+            && self.effective_agent_label().is_some()
+            && self.foreground_process_active
+        {
+            AgentState::Working
+        } else {
+            detected_state
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
@@ -2659,6 +2688,59 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn idle_detected_agent_with_foreground_process_is_working() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let mutation = terminal
+            .set_foreground_process(Some("codex".into()), true, Instant::now())
+            .expect("foreground process changed");
+
+        assert_eq!(terminal.fallback_state, AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(
+            mutation
+                .effective_state_change
+                .expect("effective state changed")
+                .state,
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn idle_detected_agent_returns_idle_when_foreground_process_clears() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_foreground_process(Some("cargo".into()), true, Instant::now());
+
+        terminal.set_foreground_process(None, false, Instant::now());
+
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn idle_detected_agent_without_active_child_stays_idle() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        terminal.set_foreground_process(Some("claude".into()), false, Instant::now());
+
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn foreground_process_does_not_override_non_idle_detection_states() {
+        for state in [AgentState::Working, AgentState::Blocked] {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(Agent::Claude), state);
+
+            terminal.set_foreground_process(Some("cargo".into()), true, Instant::now());
+
+            assert_eq!(terminal.state, state);
+        }
     }
 
     #[test]
