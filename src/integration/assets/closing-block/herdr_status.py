@@ -109,6 +109,20 @@ def mirror_path(pane_id: str) -> str:
 def write_mirror(pane_id: str, payload: dict) -> str | None:
     """Atomic write -- a torn status file is worse than a stale one."""
     path = mirror_path(pane_id)
+    # The server drops reports whose seq is not strictly newer; the mirror must
+    # apply the same ordering or a stale writer leaves it disagreeing with the
+    # server indefinitely.
+    try:
+        with open(path, encoding="utf-8") as fh:
+            prior_seq = json.load(fh).get("seq")
+        if (
+            isinstance(prior_seq, int)
+            and isinstance(payload.get("seq"), int)
+            and payload["seq"] <= prior_seq
+        ):
+            return None
+    except (OSError, ValueError):
+        pass
     try:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

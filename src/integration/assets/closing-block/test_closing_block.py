@@ -57,6 +57,22 @@ https://example.test/path_(a)
 """
 
 
+DECISIONS_BEFORE_CAP = """\
+Work summary goes here.
+
+**Auto-proceeded decisions**
+
+1. Proceed with the compact list; recommendation: compact list at 14:25.
+2. Kept the existing socket transport.
+
+**Critical action points (1 blocking)**
+
+1. **Gate** — Approve PR #2606 for MAT-125 before production rollout.
+
+Done here.
+"""
+
+
 class ClosingBlockV2Tests(unittest.TestCase):
     def test_cap_gate_becomes_nonempty_object_gate(self):
         block = closing_block.parse(REALISTIC_CAP)
@@ -104,6 +120,36 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(decisions[0]["recommendation"], "compact list")
         self.assertEqual(decisions[0]["decided_at"], "14:25")
         self.assertTrue(decisions[0]["reversible"])
+
+    def test_decisions_before_cap_block_are_parsed(self):
+        block = closing_block.parse(DECISIONS_BEFORE_CAP)
+
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0]["recommendation"], "compact list")
+        self.assertIn("socket transport", decisions[1]["text"])
+        self.assertNotIn("Critical action points", decisions[1]["text"])
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(len(block.wire_gates()), 1)
+
+    def test_mirror_write_keeps_newest_seq(self):
+        with mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            newer = {"v": 2, "seq": 200, "gates": [{"text": "newer"}]}
+            stale = {"v": 2, "seq": 100, "gates": [{"text": "stale"}]}
+            path = herdr_status.write_mirror("w9:p9", newer)
+            self.assertIsNotNone(path)
+            self.assertIsNone(herdr_status.write_mirror("w9:p9", stale))
+            self.assertIsNone(herdr_status.write_mirror("w9:p9", dict(newer)))
+            with open(path, encoding="utf-8") as fh:
+                kept = herdr_status.json.load(fh)
+            self.assertEqual(kept["seq"], 200)
+            self.assertEqual(kept["gates"][0]["text"], "newer")
+            fresher = {"v": 2, "seq": 300, "gates": [{"text": "fresher"}]}
+            self.assertIsNotNone(herdr_status.write_mirror("w9:p9", fresher))
 
     def test_v1_payload_is_skipped_without_error(self):
         self.assertFalse(herdr_status.accepts_payload({"v": 1}))
