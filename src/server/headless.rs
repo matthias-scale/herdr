@@ -4525,8 +4525,15 @@ impl HeadlessServer {
         if self.has_app_client() {
             // Work-context links matter only while a TUI is attached and viewing panes.
             self.app.start_git_work_context_refresh_if_due(now);
-            self.app.start_foreground_process_refresh_if_due(now);
             self.app.start_git_status_refresh_if_due(now);
+        }
+        // Without a TUI, only idle agents need foreground-child promotion. Keeping the
+        // target set narrow avoids recurring process-tree scans for ordinary API panes.
+        if has_app_client {
+            self.app.start_foreground_process_refresh_if_due(now);
+        } else {
+            self.app
+                .start_headless_foreground_process_refresh_if_due(now);
         }
 
         if self
@@ -7131,6 +7138,50 @@ next_tab = ""
 
         assert!(!server.handle_scheduled_tasks_headless(now, false));
         assert_eq!(server.app.next_agent_manifest_update_check, None);
+    }
+
+    #[test]
+    fn headless_scheduled_tasks_refresh_foreground_processes_without_app_client() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("api-only")];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0].tabs[0]
+            .terminal_id(server.app.state.workspaces[0].tabs[0].root_pane)
+            .cloned()
+            .expect("test pane terminal");
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test pane terminal")
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        let now = Instant::now();
+        server.app.next_foreground_process_refresh = now;
+
+        assert!(!server.has_app_client());
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert_eq!(server.app.last_foreground_process_refresh_generation, 1);
+        assert!(server.app.foreground_process_refresh_in_flight.is_some());
+    }
+
+    #[test]
+    fn headless_scheduled_tasks_skip_foreground_refresh_for_non_agent_panes() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("api-only")];
+        server.app.state.ensure_test_terminals();
+        let now = Instant::now();
+        server.app.next_foreground_process_refresh = now;
+
+        assert!(!server.has_app_client());
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert_eq!(server.app.last_foreground_process_refresh_generation, 0);
+        assert!(server.app.foreground_process_refresh_in_flight.is_none());
     }
 
     #[tokio::test]
