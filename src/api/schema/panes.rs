@@ -322,7 +322,9 @@ pub struct PaneGraphicsStreamParams {
     pub owner: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub const CLOSING_BLOCK_VERSION: u8 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PaneReportAgentParams {
     pub pane_id: String,
     pub source: String,
@@ -344,6 +346,69 @@ pub struct PaneReportAgentParams {
     pub items: Option<Vec<ClosingBlockItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decisions: Option<Vec<ClosingBlockDecision>>,
+}
+
+impl<'de> Deserialize<'de> for PaneReportAgentParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            pane_id: String,
+            source: String,
+            agent: String,
+            state: PaneAgentState,
+            #[serde(default)]
+            v: Option<u8>,
+            #[serde(default)]
+            message: Option<String>,
+            #[serde(default)]
+            seq: Option<u64>,
+            #[serde(default)]
+            agent_session_id: Option<String>,
+            #[serde(default)]
+            agent_session_path: Option<String>,
+            // The arrays stay untyped until the version is known: another wire
+            // version shapes them differently (v1 gates are strings), and a
+            // strict parse here would reject the whole request before the
+            // handler gets the chance to version-skip it.
+            #[serde(default)]
+            gates: Option<serde_json::Value>,
+            #[serde(default)]
+            items: Option<serde_json::Value>,
+            #[serde(default)]
+            decisions: Option<serde_json::Value>,
+        }
+
+        fn typed<T, E>(value: Option<serde_json::Value>, strict: bool) -> Result<Option<T>, E>
+        where
+            T: serde::de::DeserializeOwned,
+            E: serde::de::Error,
+        {
+            match value {
+                Some(value) if strict => serde_json::from_value(value).map(Some).map_err(E::custom),
+                _ => Ok(None),
+            }
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let strict = raw.v == Some(CLOSING_BLOCK_VERSION);
+        Ok(Self {
+            pane_id: raw.pane_id,
+            source: raw.source,
+            agent: raw.agent,
+            state: raw.state,
+            v: raw.v,
+            message: raw.message,
+            seq: raw.seq,
+            agent_session_id: raw.agent_session_id,
+            agent_session_path: raw.agent_session_path,
+            gates: typed(raw.gates, strict)?,
+            items: typed(raw.items, strict)?,
+            decisions: typed(raw.decisions, strict)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
