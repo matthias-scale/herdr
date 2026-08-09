@@ -225,12 +225,14 @@ pub(super) fn recent_agent_output(
 ) -> bool {
     if *last_output_seq != Some(output_seq) {
         *last_output_seq = Some(output_seq);
-        if agent.is_some() {
+        if agent == Some(Agent::Codex) {
             *last_output_at = Some(now);
+        } else {
+            *last_output_at = None;
         }
     }
 
-    if agent.is_none() {
+    if agent != Some(Agent::Codex) {
         *last_output_at = None;
         return false;
     }
@@ -724,6 +726,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn recent_non_codex_output_does_not_delay_done_state() {
+        let now = std::time::Instant::now();
+        let mut last_output_seq = None;
+        let mut last_output_at = None;
+
+        assert!(!recent_agent_output(
+            Some(Agent::Pi),
+            1,
+            &mut last_output_seq,
+            &mut last_output_at,
+            now,
+        ));
+        assert_eq!(last_output_seq, Some(1));
+        assert_eq!(last_output_at, None);
     }
 
     #[test]
