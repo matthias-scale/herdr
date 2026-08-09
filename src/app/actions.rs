@@ -3039,6 +3039,15 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::HookAuthorityRetired {
+                pane_id,
+                observed_at,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
+                })
+                .into_iter()
+                .collect(),
             AppEvent::HookAgentReleased {
                 pane_id,
                 source,

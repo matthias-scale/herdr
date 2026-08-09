@@ -104,6 +104,7 @@ impl App {
             return encode_error(id, "agent_prompt_failed", err.to_string());
         }
         runtime.send_bytes_after(Bytes::from(enter), AGENT_PROMPT_SUBMIT_DELAY);
+        self.retire_blocked_hook_authority_for_pane(resolved.pane_id, std::time::Instant::now());
         let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
             return agent_not_found(id, &params.target);
         };
@@ -260,8 +261,15 @@ impl App {
             }
         };
         let bytes: Vec<u8> = encoded.into_iter().flatten().collect();
+        let has_bytes = !bytes.is_empty();
         if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
             return encode_error(id, "agent_send_keys_failed", err.to_string());
+        }
+        if has_bytes {
+            self.retire_blocked_hook_authority_for_pane(
+                resolved.pane_id,
+                std::time::Instant::now(),
+            );
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -431,6 +439,80 @@ mod tests {
         assert!(matches!(success.result, ResponseResult::Ok {}));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x1b[A\r"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_prompt_retires_blocked_hook_authority_after_forwarding() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_agent_prompt(
+            "req".into(),
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "continue".into(),
+                wait: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_send_keys_retires_blocked_hook_authority_after_forwarding() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            Some(1),
+        );
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_agent_send_keys(
+            "req".into(),
+            AgentSendKeysParams {
+                target: "reviewer".into(),
+                keys: vec!["enter".into()],
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert!(matches!(success.result, ResponseResult::Ok {}));
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
     #[tokio::test]

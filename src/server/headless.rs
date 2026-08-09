@@ -1686,6 +1686,32 @@ impl HeadlessServer {
         self.app.terminal_runtimes.get(&terminal_id)
     }
 
+    fn forward_terminal_attach_bytes(
+        &mut self,
+        terminal_id: &str,
+        data: Vec<u8>,
+        reset_scroll: bool,
+    ) -> Option<Result<(), String>> {
+        let terminal_id = self.terminal_id_by_string(terminal_id)?;
+        let has_bytes = !data.is_empty();
+        let result = {
+            let runtime = self.app.terminal_runtimes.get(&terminal_id)?;
+            if reset_scroll {
+                runtime.scroll_reset();
+            }
+            runtime
+                .try_send_bytes(Bytes::from(data))
+                .map_err(|err| err.to_string())
+        };
+        if result.is_ok() && has_bytes {
+            self.app.retire_blocked_hook_authority_for_terminal(
+                &terminal_id,
+                std::time::Instant::now(),
+            );
+        }
+        Some(result)
+    }
+
     fn resolve_terminal_target_id_string(&self, target: &str) -> Option<String> {
         if self.terminal_id_by_string(target).is_some() {
             return Some(target.to_owned());
@@ -1711,14 +1737,19 @@ impl HeadlessServer {
     }
 
     fn paste_client_clipboard_image_path(&mut self, client_id: u64, path: String) -> bool {
-        if let Some(ClientConnection {
-            mode: ClientConnectionMode::TerminalAttach { terminal_id },
-            ..
-        }) = self.clients.get(&client_id)
-        {
-            if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
+        let attached_terminal_id = self.clients.get(&client_id).and_then(|client| {
+            if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
+                Some(terminal_id.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(terminal_id) = attached_terminal_id {
+            if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                 let payload = paste_payload_for_runtime(runtime, &path);
-                if let Err(err) = runtime.try_send_bytes(Bytes::from(payload)) {
+                if let Some(Err(err)) =
+                    self.forward_terminal_attach_bytes(&terminal_id, payload.into_bytes(), false)
+                {
                     warn!(client_id, terminal_id = %terminal_id, err = %err, "terminal attach clipboard image paste failed");
                 }
             }
@@ -2900,15 +2931,18 @@ impl HeadlessServer {
                     return false;
                 }
                 debug!(client_id, len = data.len(), "client input received");
-                if let Some(ClientConnection {
-                    mode: ClientConnectionMode::TerminalAttach { terminal_id },
-                    ..
-                }) = self.clients.get(&client_id)
-                {
-                    if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
-                        if let Err(err) = apply_terminal_attach_input(runtime, data) {
-                            warn!(client_id, terminal_id = %terminal_id, err = %err);
-                        }
+                let attached_terminal_id = self.clients.get(&client_id).and_then(|client| {
+                    if let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode {
+                        Some(terminal_id.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(terminal_id) = attached_terminal_id {
+                    if let Some(Err(err)) =
+                        self.forward_terminal_attach_bytes(&terminal_id, data, true)
+                    {
+                        warn!(client_id, terminal_id = %terminal_id, err = %err);
                     }
                     return true;
                 }
@@ -6816,6 +6850,57 @@ next_tab = ""
         drop(runtime);
         drop(_runtime_guard);
         rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn terminal_attach_client_input_retires_blocked_hook_authority_after_forwarding() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("attached");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal_id_string = terminal_id.to_string();
+        let (runtime, mut input_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            Some(1),
+        );
+
+        let mut client = test_app_client(Some(true), 1);
+        client.mode = ClientConnectionMode::TerminalAttach {
+            terminal_id: terminal_id_string,
+        };
+        server.clients.insert(1, client);
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"continue".to_vec(),
+        }));
+
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded attach input"),
+            Bytes::from_static(b"continue")
+        );
+        assert_eq!(
+            server.app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
+        assert!(!server.app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
     fn with_terminal_attach_page_key_runtime(

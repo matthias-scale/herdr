@@ -1906,7 +1906,14 @@ impl App {
                                         ws_idx,
                                         focused,
                                     ) {
-                                        let _ = runtime.try_send_paste(text);
+                                        let has_text = !text.is_empty();
+                                        let sent = runtime.try_send_paste(text).is_ok();
+                                        if sent && has_text {
+                                            self.retire_blocked_hook_authority_for_pane(
+                                                focused,
+                                                std::time::Instant::now(),
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -6749,6 +6756,41 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.name_input, "feature/logs");
         assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_client_paste_retires_blocked_hook_authority_after_forwarding() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            Some(1),
+        );
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste("continue".into())],
+            true,
+        );
+
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Idle);
+        assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
     }
 
     #[test]

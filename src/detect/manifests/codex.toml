@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.08.02.1"
+version = "2026.08.07.1"
 min_engine_version = 2
-updated_at = "2026-08-02T00:00:00Z"
+updated_at = "2026-08-07T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -60,11 +60,14 @@ any = [
 id = "screen_working_fallback"
 state = "working"
 priority = 500
-region = "bottom_non_empty_lines(3)"
+region = "bottom_non_empty_lines(6)"
 visible_working = true
-# Codex v0.146 keeps OSC title static while working and renders this progress
-# line without a bullet. Accept either current line decoration in the terminal
-# bottom buffer; blockers and interrupted-state checks above still outrank it.
+# Anchoring to a block marker looked tidier but empties the region on a real
+# turn: a codex 0.147 pane running a tool prints no bullet at all, so there is
+# nothing to anchor to and the only working rule the manifest has stops firing.
+# Six bottom lines clear the composer and status footer with room for a taller
+# one, and codex erases this line when it streams, so scrollback holds no stale
+# copy to match by accident.
 line_regex = ['^(?:[•◦]\s+)?Working \([^)]*esc to interrupt\)(?: · .*)?$']
 not = [{ contains = ["■ Conversation interrupted"] }]
 
@@ -73,7 +76,6 @@ id = "osc_title_idle"
 state = "idle"
 priority = 100
 region = "osc_title"
-visible_idle = true
 regex = ['\S']
 not = [
   { regex = ['(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)'] },

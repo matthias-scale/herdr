@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 // Effective state arbitration is intentionally centralized here. Full lifecycle
-// Herdr hook integrations are hook-authoritative while live; screen recovery
-// remains only for session-only/custom hook paths and fallback detection.
+// Herdr hook integrations are authoritative while live, except for settled
+// visible working evidence that can start a new turn after hook-reported idle.
 // Process-exit updates clear matching hook authority before recomputing state.
 
 use crate::detect::{Agent, AgentState};
@@ -24,6 +24,7 @@ pub struct HookAuthority {
     pub message: Option<String>,
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    pub retired_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +261,9 @@ pub struct TerminalState {
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
+    fallback_visible_working: bool,
+    fallback_visible_working_observed_at: Option<Instant>,
+    fallback_working_observed_at: Option<Instant>,
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
@@ -303,6 +307,9 @@ impl TerminalState {
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
+            fallback_visible_working: false,
+            fallback_visible_working_observed_at: None,
+            fallback_working_observed_at: None,
             fallback_observed_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
@@ -555,7 +562,7 @@ impl TerminalState {
         fallback_state: AgentState,
         visible_blocker: bool,
         _visible_idle: bool,
-        _visible_working: bool,
+        visible_working: bool,
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
@@ -565,6 +572,10 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
+        let visible_working_signal = visible_working && fallback_state == AgentState::Working;
+        self.fallback_visible_working = visible_working_signal;
+        self.fallback_visible_working_observed_at = visible_working_signal.then_some(now);
+        self.fallback_working_observed_at = (fallback_state == AgentState::Working).then_some(now);
         let newer_custom_authority = process_exited
             && self.hook_authority.as_ref().is_some_and(|authority| {
                 crate::detect::parse_agent_label(&authority.agent_label) == agent
@@ -920,7 +931,13 @@ impl TerminalState {
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
         }
-        let owner_conflicts = self.current_session_owner_conflicts(&source, &agent_label);
+        // A closing-block source claims no resume session, so it cannot contend
+        // for the pane's session identity — that stays owned by the agent's own
+        // integration (`herdr:claude`). Without this exemption the status report
+        // is rejected here on every pane where the real agent has already
+        // announced itself, which is every pane that matters.
+        let owner_conflicts = !crate::detect::is_closing_block_source(&source, &agent_label)
+            && self.current_session_owner_conflicts(&source, &agent_label);
         let foreground_takeover_allowed = owner_conflicts
             && self.foreground_agent_confirms_hook_authority_takeover(
                 &source,
@@ -986,6 +1003,7 @@ impl TerminalState {
             message,
             reported_at: now,
             session_ref,
+            retired_at: None,
         });
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
@@ -1158,6 +1176,23 @@ impl TerminalState {
                     .as_ref()
                     .is_none_or(|incoming| incoming == anchored)
             });
+        // A closing-block source reports what the agent just said, not where to
+        // resume it, so it never carries an `AgentSessionRef`
+        // (`agent_resume::session_ref_from_report` mints one only for official
+        // sources). Every path below admits a report by anchoring it to a
+        // session, so without this arm the report is unreachable: it falls to
+        // the `session_ref` bail-out and is stored as a pending replacement that
+        // nothing ever drains while the agent stays continuously detected.
+        //
+        // Presence of the agent's own process in the pane is the entire guard
+        // this source claims (see `detect::is_closing_block_source`), and
+        // `accept_hook_report` still enforces per-source sequence monotonicity
+        // downstream, so accepting on presence alone loses no protection.
+        if process_present && crate::detect::is_closing_block_source(source, agent_label) {
+            return FullLifecycleHookReportRoute::Accept {
+                reanchor_sequence: false,
+            };
+        }
         if let Some(suppressed) = self.suppressed_full_lifecycle_hook_reports.get(source) {
             if suppressed.agent_label != agent_label {
                 return FullLifecycleHookReportRoute::Ignore;
@@ -1236,6 +1271,7 @@ impl TerminalState {
                     message: message.map(str::to_string),
                     reported_at,
                     session_ref: Some(session_ref),
+                    retired_at: None,
                 },
                 seq,
             });
@@ -1976,6 +2012,47 @@ impl TerminalState {
         })
     }
 
+    pub fn retire_blocked_full_lifecycle_hook_authority_at(
+        &mut self,
+        observed_at: Instant,
+    ) -> Option<TerminalStateMutation> {
+        let should_retire = self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.state == AgentState::Blocked
+                && authority.retired_at.is_none()
+                && authority.reported_at <= observed_at
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::full_lifecycle_hook_authority(
+                    &authority.source,
+                    &authority.agent_label,
+                )
+        });
+        if !should_retire {
+            return None;
+        }
+
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let authority = self.hook_authority.as_mut()?;
+        authority.retired_at = Some(observed_at);
+
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            session_replaced: false,
+            hook_work_context_changed: false,
+            agent_released: false,
+        })
+    }
+
     pub fn release_agent_with_mutation(
         &mut self,
         source: &str,
@@ -2020,6 +2097,9 @@ impl TerminalState {
             self.detected_agent = None;
             self.fallback_state = AgentState::Unknown;
             self.fallback_visible_blocker = false;
+            self.fallback_visible_working = false;
+            self.fallback_visible_working_observed_at = None;
+            self.fallback_working_observed_at = None;
             self.fallback_observed_at = None;
             self.clear_agent_name();
         }
@@ -2160,9 +2240,51 @@ impl TerminalState {
             })
     }
 
+    fn visible_working_overrides_idle_hook(&self) -> bool {
+        let Some(authority) = self.hook_authority.as_ref() else {
+            return false;
+        };
+        authority.retired_at.is_none()
+            && self.hook_authority_is_effective(authority)
+            && authority.state == AgentState::Idle
+            && crate::detect::parse_agent_label(&authority.agent_label) == self.detected_agent
+            && self.fallback_visible_working
+            && self
+                .fallback_visible_working_observed_at
+                .is_some_and(|observed_at| {
+                    // Reuse the detector's stable-signal interval so one frame
+                    // left over from the hook report cannot start a new turn.
+                    authority
+                        .reported_at
+                        .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                        .is_some_and(|settled_at| observed_at >= settled_at)
+                })
+    }
+
+    fn detected_working_overrides_idle_hook(&self) -> bool {
+        let Some(authority) = self.hook_authority.as_ref() else {
+            return false;
+        };
+        authority.retired_at.is_none()
+            && self.hook_authority_is_effective(authority)
+            && authority.state == AgentState::Idle
+            && crate::detect::parse_agent_label(&authority.agent_label) == self.detected_agent
+            && self
+                .fallback_working_observed_at
+                .is_some_and(|observed_at| {
+                    // The same settled interval covers output-promoted working
+                    // evidence, so a stale frame cannot start a new turn.
+                    authority
+                        .reported_at
+                        .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                        .is_some_and(|settled_at| observed_at >= settled_at)
+                })
+    }
+
     fn live_full_lifecycle_hook_authority(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
-            self.hook_authority_is_effective(authority)
+            authority.retired_at.is_none()
+                && self.hook_authority_is_effective(authority)
                 && crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
                     &authority.agent_label,
@@ -2345,6 +2467,9 @@ impl TerminalState {
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
+        self.fallback_visible_working = false;
+        self.fallback_visible_working_observed_at = None;
+        self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
@@ -2430,10 +2555,16 @@ impl TerminalState {
     ) -> Option<EffectiveStateChange> {
         let state = if self.visible_blocker_overrides_hook() {
             AgentState::Blocked
+        } else if self.visible_working_overrides_idle_hook()
+            || self.detected_working_overrides_idle_hook()
+        {
+            AgentState::Working
         } else {
             self.hook_authority
                 .as_ref()
-                .filter(|authority| self.hook_authority_is_effective(authority))
+                .filter(|authority| {
+                    authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
+                })
                 .map(|authority| authority.state)
                 .unwrap_or(self.fallback_state)
         };
@@ -3618,6 +3749,77 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Working);
     }
 
+    /// The closing-block reporter must outrank the screen scraper.
+    ///
+    /// When a Claude turn ends, `manifests/claude.toml` `live_prompt_box` sees the
+    /// `❯` box and calls the pane idle. That is right about the harness and wrong
+    /// about the work: agents may still be running, or a Gate may be waiting on a
+    /// human. The `Stop` hook knows both, so its report has to win.
+    #[test]
+    fn closing_block_authority_outranks_visible_idle_prompt_box() {
+        let mut terminal = test_terminal();
+        let session_path = test_session_path("closing-block.jsonl");
+        let now = Instant::now();
+
+        // A real claude process is in the pane -- the precondition every
+        // full-lifecycle source must satisfy.
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        // The pane's session identity is already owned by claude's own
+        // integration, as it is on any pane running a real agent. The
+        // closing-block source must report *alongside* that owner, not fight it.
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::path(session_path),
+            Some(999),
+            Some("startup".into()),
+        );
+
+        // Exactly what the RPC produces: no session ref. `session_ref_from_report`
+        // mints one only for official sources, so a closing-block report always
+        // arrives with `None`. An earlier version of this test passed `Some(..)`
+        // here and stayed green while the live path silently dropped every report.
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            Some("Gate 1: merge #30".into()),
+            None,
+            Some(1000),
+            now,
+        );
+
+        // Screen scraping now reports the idle prompt box. It must not win.
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_millis(1),
+        );
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(
+            terminal.state,
+            AgentState::Blocked,
+            "visible idle prompt box must not clear a reported Gate"
+        );
+
+        // And once the process is gone, the stale authority must not outlive it.
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            true,
+            now + Duration::from_millis(2),
+        );
+        assert_ne!(terminal.state, AgentState::Blocked);
+    }
+
     #[test]
     fn rapid_restart_replays_reports_that_arrive_before_process_evidence() {
         let mut terminal = test_terminal();
@@ -4211,6 +4413,125 @@ mod tests {
     }
 
     #[test]
+    fn activity_retires_a_blocked_hook_and_returns_to_screen_state() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            observed,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        let mutation = terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(
+                observed + std::time::Duration::from_secs(1),
+            )
+            .expect("activity should retire the blocked report");
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert!(terminal.hook_authority.is_some());
+        assert_eq!(
+            mutation
+                .effective_state_change
+                .expect("retirement changes the effective state")
+                .state,
+            AgentState::Idle
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed + std::time::Duration::from_secs(2),
+        );
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn a_silent_blocked_hook_remains_authoritative_without_activity() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed + std::time::Duration::from_secs(30),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
+    }
+
+    #[test]
+    fn a_fresh_hook_report_after_activity_retirement_is_honoured() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(
+                observed + std::time::Duration::from_secs(1),
+            )
+            .expect("first report should retire");
+
+        let fresh = terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(8),
+            observed + std::time::Duration::from_secs(2),
+        );
+
+        assert!(fresh.is_some());
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(terminal.hook_authority.as_ref().unwrap().retired_at, None);
+    }
+
+    #[test]
     fn visible_blocker_does_not_override_different_agent_hook() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(None, AgentState::Unknown);
@@ -4363,6 +4684,90 @@ mod tests {
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(change.effective_state_change.is_none());
+    }
+
+    #[test]
+    fn settled_visible_working_overrides_full_lifecycle_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn unsettled_visible_working_does_not_override_full_lifecycle_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn settled_detected_working_overrides_full_lifecycle_hook_idle() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
     }
 
     #[test]

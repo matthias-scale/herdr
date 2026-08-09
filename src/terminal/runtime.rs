@@ -250,8 +250,8 @@ impl TerminalRuntime {
         self.0.agent_detection_enabled_for_test()
     }
 
-    pub fn set_full_lifecycle_authority_active(&self, active: bool) {
-        self.0.set_full_lifecycle_authority_active(active);
+    pub fn set_full_lifecycle_authority_state(&self, active: bool, blocked: bool) {
+        self.0.set_full_lifecycle_authority_state(active, blocked);
     }
 
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
