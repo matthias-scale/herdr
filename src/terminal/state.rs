@@ -2035,9 +2035,7 @@ impl TerminalState {
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        let Some(authority) = self.hook_authority.as_mut() else {
-            return None;
-        };
+        let authority = self.hook_authority.as_mut()?;
         authority.retired_at = Some(observed_at);
 
         Some(TerminalStateMutation {
@@ -2049,6 +2047,7 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed: false,
+            session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
         })
