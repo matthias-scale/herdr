@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_info_label_keeps_composed_title_with_novel_segment() {
+    fn tab_info_label_strips_leading_agent_from_composed_title() {
         let home = std::path::PathBuf::from(
             std::env::var_os("HOME").expect("test environment should define HOME"),
         );
@@ -672,7 +672,21 @@ mod tests {
             Some("Fallback title"),
         );
 
-        assert_eq!(app.tab_info(0, 0).unwrap().label, "codex — Write Poem");
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Write Poem");
+    }
+
+    #[test]
+    fn tab_info_label_keeps_nonleading_agent_word_in_composed_title() {
+        let (mut app, terminal_id) = title_test_app();
+        configure_title_test_terminal(
+            &mut app,
+            &terminal_id,
+            "/Users/example/Repos/herdr-test".into(),
+            "Deploy — codex helper",
+            Some("Fallback title"),
+        );
+
+        assert_eq!(app.tab_info(0, 0).unwrap().label, "Deploy — codex helper");
     }
 
     #[test]

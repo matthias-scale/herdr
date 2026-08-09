@@ -166,9 +166,7 @@ impl Tab {
         let cwd = terminal.cwd.to_string_lossy();
         let same_text = |candidate: &str| title.eq_ignore_ascii_case(candidate.trim());
 
-        if terminal.agent_name.as_deref().is_some_and(same_text)
-            || terminal.effective_agent_label().is_some_and(same_text)
-        {
+        if Self::is_agent_identity_segment(terminal, title) {
             return false;
         }
 
@@ -219,6 +217,30 @@ impl Tab {
         true
     }
 
+    fn is_agent_identity_segment(terminal: &TerminalState, segment: &str) -> bool {
+        let same_text = |candidate: &str| segment.trim().eq_ignore_ascii_case(candidate.trim());
+        terminal.agent_name.as_deref().is_some_and(same_text)
+            || terminal.effective_agent_label().is_some_and(same_text)
+            || terminal
+                .effective_display_agent()
+                .as_deref()
+                .is_some_and(same_text)
+    }
+
+    fn terminal_title_without_leading_agent(terminal: &TerminalState, title: &str) -> String {
+        let mut segments = title.splitn(2, ['—', '–', '·', '|']);
+        let leading = segments.next().unwrap_or_default().trim();
+        let remainder = segments
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if Self::is_agent_identity_segment(terminal, leading) {
+            remainder.unwrap_or(title).to_string()
+        } else {
+            title.to_string()
+        }
+    }
+
     pub(crate) fn work_context_display_projection(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
@@ -242,6 +264,7 @@ impl Tab {
                     .then(|| terminal.terminal_title_stripped())
                     .flatten()
                     .filter(|title| Self::is_informative_terminal_title(terminal, title))
+                    .map(|title| Self::terminal_title_without_leading_agent(terminal, &title))
             })
             .or_else(|| context.work_title.clone());
         (agent.is_some() || ticket.is_some() || title.is_some()).then_some(

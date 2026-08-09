@@ -58,11 +58,19 @@ pub(crate) fn fit_tab_display_projection(
                 candidates.push(full);
             }
             if let Some(ticket) = ticket {
-                candidates.push(ticket);
-            } else if let Some(title) = title {
-                candidates.push(title);
-            } else if let Some(agent) = agent {
-                candidates.push(agent);
+                if !candidates.contains(&ticket) {
+                    candidates.push(ticket);
+                }
+            }
+            if let Some(title) = title {
+                if !candidates.contains(&title) {
+                    candidates.push(title);
+                }
+            }
+            if let Some(agent) = agent {
+                if !candidates.contains(&agent) {
+                    candidates.push(agent);
+                }
             }
             candidates
         }
@@ -653,7 +661,18 @@ mod tests {
             "SCA-42 · repair login regression"
         );
         assert_eq!(fit_tab_display_projection(projection.clone(), 8), "SCA-42");
-        assert_eq!(fit_tab_display_projection(projection, 4), "SCA…");
+        assert_eq!(fit_tab_display_projection(projection, 4), "Cla…");
+
+        let narrow_projection = TabDisplayProjection::Derived {
+            agent: Some("cx".into()),
+            ticket: Some("LONG-TICKET".into()),
+            title: Some("task".into()),
+        };
+        assert_eq!(
+            fit_tab_display_projection(narrow_projection.clone(), 4),
+            "task"
+        );
+        assert_eq!(fit_tab_display_projection(narrow_projection, 2), "cx");
     }
 
     #[test]

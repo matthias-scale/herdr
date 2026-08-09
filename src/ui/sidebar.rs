@@ -1727,18 +1727,23 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
     let prefix = "  ";
     let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
     let workspace = entry.primary_label.as_str();
-    // The tab label already opens with the agent when the projection derived it, so
+    // A derived or manually named tab can already carry the agent identity, so
     // appending the provider here would repeat it in the same row.
-    let agent = (!entry.tab_label_leads_with_agent)
-        .then(|| {
-            entry
-                .agent_kind_label
-                .as_deref()
-                .or(entry.agent_label.as_deref())
-                .or_else(|| tab_agent_suffix(entry.agent))
-        })
-        .flatten()
-        .map(|label| format!(" · {label}"));
+    let tab_title = entry
+        .primary_tab_label
+        .as_deref()
+        .unwrap_or(DEFAULT_THREAD_TITLE);
+    let agent = (!entry.tab_label_leads_with_agent
+        && !title_repeats_agent_identity(entry, tab_title))
+    .then(|| {
+        entry
+            .agent_kind_label
+            .as_deref()
+            .or(entry.agent_label.as_deref())
+            .or_else(|| tab_agent_suffix(entry.agent))
+    })
+    .flatten()
+    .map(|label| format!(" · {label}"));
 
     let mut spans = Vec::new();
     let mut used = 0usize;
@@ -4707,6 +4712,41 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
 
         assert!(rendered.contains("Fix billing · one · pi"), "{rendered:?}");
         assert!(!rendered.contains("Reviewer"), "{rendered:?}");
+    }
+
+    #[test]
+    fn prio_row_does_not_repeat_agent_identity_from_tab_title() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("one");
+        let focused_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].set_prio(true);
+        workspace.tabs[0].set_custom_name("Codex".into());
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let focused_terminal = app.workspaces[0].tabs[0].panes[&focused_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&focused_terminal)
+            .expect("focused terminal")
+            .detected_agent = Some(Agent::Codex);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 60, 16);
+        let rows = compute_prio_panel_row_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
+
+        assert_eq!(
+            rendered.to_ascii_lowercase().matches("codex").count(),
+            1,
+            "{rendered:?}"
+        );
     }
 
     #[test]
