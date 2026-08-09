@@ -477,6 +477,10 @@ impl TerminalState {
         })
     }
 
+    pub(crate) fn foreground_process_active(&self) -> bool {
+        self.foreground_process_active
+    }
+
     pub(crate) fn terminal_title_stripped(&self) -> Option<String> {
         self.terminal_title
             .as_deref()

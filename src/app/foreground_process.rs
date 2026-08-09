@@ -48,7 +48,41 @@ fn process_is_active(shell_pid: u32, job: &ForegroundJob) -> bool {
         return false;
     }
 
-    crate::detect::identify_agent_in_job(job).is_none() || job.processes.len() > 1
+    let Some((agent, _)) = crate::detect::identify_agent_in_job(job) else {
+        return true;
+    };
+
+    job.processes.iter().any(|process| {
+        let single_process_job = ForegroundJob {
+            process_group_id: process.pid,
+            processes: vec![process.clone()],
+        };
+        match crate::detect::identify_agent_in_job(&single_process_job) {
+            Some((process_agent, _)) => process_agent != agent,
+            None => {
+                !crate::platform::is_pane_shell_process_name(&process.name)
+                    && !is_idle_agent_runtime(&process.name)
+            }
+        }
+    })
+}
+
+fn is_idle_agent_runtime(name: &str) -> bool {
+    let name = name
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
+        .unwrap_or(name)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    name == "node"
+        || name == "bun"
+        || name == "python"
+        || name.strip_prefix("python").is_some_and(|version| {
+            !version.is_empty()
+                && version
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        })
 }
 
 fn process_name(process: &ForegroundProcess) -> Option<String> {
@@ -78,7 +112,7 @@ where
     for target in targets {
         let (process_name, process_active) = match target.shell_pid {
             None => (None, false),
-            Some(_) if Instant::now() >= deadline => break,
+            Some(_) if Instant::now() >= deadline => (None, false),
             Some(shell_pid) => lookup(shell_pid)
                 .map(|job| {
                     (
@@ -221,14 +255,15 @@ impl crate::app::App {
             if current_shell_pid != observation.shell_pid {
                 continue;
             }
-            let process_name_changed =
-                self.state
-                    .terminals
-                    .get(&terminal_id)
-                    .is_some_and(|terminal| {
-                        terminal.foreground_process_name != observation.process_name
-                    });
-            let _ = self
+            let process_changed = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .is_some_and(|terminal| {
+                    terminal.foreground_process_name != observation.process_name
+                        || terminal.foreground_process_active() != observation.process_active
+                });
+            let update = self
                 .state
                 .update_terminal_state(observation.pane_id, |terminal| {
                     terminal.set_foreground_process(
@@ -237,7 +272,10 @@ impl crate::app::App {
                         now,
                     )
                 });
-            changed |= process_name_changed;
+            if let Some(update) = update {
+                self.emit_pane_state_update(&update);
+            }
+            changed |= process_changed;
         }
 
         if changed {
@@ -258,6 +296,16 @@ mod tests {
             name: name.into(),
             argv0: None,
             argv: None,
+            cmdline: None,
+        }
+    }
+
+    fn process_with_argv(pid: u32, name: &str, argv: &[&str]) -> ForegroundProcess {
+        ForegroundProcess {
+            pid,
+            name: name.into(),
+            argv0: argv.first().map(|value| (*value).to_string()),
+            argv: Some(argv.iter().map(|value| (*value).to_string()).collect()),
             cmdline: None,
         }
     }
@@ -308,6 +356,28 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_resting_agent_processes_are_not_active() {
+        assert!(!process_is_active(
+            10,
+            &job(
+                20,
+                vec![
+                    process_with_argv(20, "node", &["node", "/path/to/bin/codex"]),
+                    process(21, "bash"),
+                ],
+            ),
+        ));
+    }
+
+    #[test]
+    fn agent_with_plain_running_command_is_active() {
+        assert!(process_is_active(
+            10,
+            &job(20, vec![process(20, "claude"), process(21, "cargo")]),
+        ));
+    }
+
+    #[test]
     fn plain_foreground_command_is_active() {
         assert!(process_is_active(10, &job(20, vec![process(20, "cargo")])));
     }
@@ -334,6 +404,32 @@ mod tests {
         assert!(observations
             .iter()
             .all(|observation| observation.process_name.is_none()));
+    }
+
+    #[test]
+    fn timed_out_refresh_clears_every_omitted_target() {
+        let targets = [
+            ForegroundProcessTarget {
+                pane_id: PaneId::from_raw(1),
+                shell_pid: Some(10),
+            },
+            ForegroundProcessTarget {
+                pane_id: PaneId::from_raw(2),
+                shell_pid: Some(20),
+            },
+        ];
+
+        for _ in 0..2 {
+            let observations = refresh_foreground_processes(
+                &targets,
+                Instant::now() - Duration::from_millis(1),
+                |_pid| panic!("timed-out targets must not be inspected"),
+            );
+            assert_eq!(observations.len(), targets.len());
+            assert!(observations.iter().all(|observation| {
+                observation.process_name.is_none() && !observation.process_active
+            }));
+        }
     }
 
     fn app_with_test_pane(name: &str) -> (crate::app::App, PaneId, crate::terminal::TerminalId) {
@@ -426,6 +522,50 @@ mod tests {
         assert_eq!(
             app.state.terminals[&terminal_id].state,
             crate::detect::AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn same_process_name_activity_flip_requests_render_and_emits_status_event() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("same-name-activity");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test pane terminal")
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.last_foreground_process_refresh_generation = 1;
+        app.handle_foreground_processes_refreshed(
+            1,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("claude".into()),
+                process_active: false,
+            }],
+        );
+        let _ = app.render_dirty.take();
+        let event_count = app.event_hub.events_after(0).len();
+
+        app.last_foreground_process_refresh_generation = 2;
+        assert!(app.handle_foreground_processes_refreshed(
+            2,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("claude".into()),
+                process_active: true,
+            }],
+        ));
+
+        assert!(app.render_dirty.is_pending());
+        assert!(
+            app.event_hub.events_after(0)[event_count..]
+                .iter()
+                .any(|(_, event)| event.event
+                    == crate::api::schema::EventKind::PaneAgentStatusChanged)
         );
     }
 

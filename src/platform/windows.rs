@@ -906,7 +906,13 @@ fn select_pane_foreground_process_job(
 ) -> Option<ForegroundJob> {
     let selected = select_pane_foreground_job(shell_pid, entries)?;
     if selected.process_group_id != shell_pid {
-        return Some(selected);
+        let selected_entry = entries
+            .iter()
+            .find(|entry| entry.pid == selected.process_group_id)?;
+        return Some(foreground_job_from_entry_with_descendants(
+            selected_entry,
+            entries,
+        ));
     }
 
     let descendants = descendant_entries(shell_pid, entries);
@@ -949,6 +955,22 @@ fn foreground_job_from_entry(entry: &WindowsProcessEntry) -> ForegroundJob {
     ForegroundJob {
         process_group_id: entry.pid,
         processes: vec![foreground_process_from_entry(entry)],
+    }
+}
+
+fn foreground_job_from_entry_with_descendants(
+    entry: &WindowsProcessEntry,
+    entries: &[WindowsProcessEntry],
+) -> ForegroundJob {
+    let mut processes = vec![foreground_process_from_entry(entry)];
+    processes.extend(
+        descendant_entries(entry.pid, entries)
+            .into_iter()
+            .map(foreground_process_from_entry),
+    );
+    ForegroundJob {
+        process_group_id: entry.pid,
+        processes,
     }
 }
 
@@ -3059,6 +3081,21 @@ mod tests {
 
         assert_eq!(job.process_group_id, 20);
         assert_eq!(job.processes[0].name, "codex.exe");
+    }
+
+    #[test]
+    fn windows_sidebar_process_tree_includes_agent_descendants() {
+        let entries = vec![
+            test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+            test_entry(30, 20, "cargo.exe", &["cargo.exe", "check"]),
+        ];
+
+        let job = super::select_pane_foreground_process_job(10, &entries).unwrap();
+
+        assert_eq!(job.process_group_id, 20);
+        assert_eq!(job.processes.len(), 2);
+        assert!(job.processes.iter().any(|process| process.pid == 30));
     }
 
     #[test]

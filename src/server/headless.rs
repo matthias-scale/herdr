@@ -4525,9 +4525,10 @@ impl HeadlessServer {
         if self.has_app_client() {
             // Work-context links matter only while a TUI is attached and viewing panes.
             self.app.start_git_work_context_refresh_if_due(now);
-            self.app.start_foreground_process_refresh_if_due(now);
             self.app.start_git_status_refresh_if_due(now);
         }
+        // Foreground activity is server-owned pane state consumed by the API as well as the TUI.
+        self.app.start_foreground_process_refresh_if_due(now);
 
         if self
             .app
@@ -7131,6 +7132,21 @@ next_tab = ""
 
         assert!(!server.handle_scheduled_tasks_headless(now, false));
         assert_eq!(server.app.next_agent_manifest_update_check, None);
+    }
+
+    #[test]
+    fn headless_scheduled_tasks_refresh_foreground_processes_without_app_client() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("api-only")];
+        server.app.state.ensure_test_terminals();
+        let now = Instant::now();
+        server.app.next_foreground_process_refresh = now;
+
+        assert!(!server.has_app_client());
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert_eq!(server.app.last_foreground_process_refresh_generation, 1);
+        assert!(server.app.foreground_process_refresh_in_flight.is_some());
     }
 
     #[tokio::test]
