@@ -16,6 +16,7 @@ pub(crate) struct ForegroundProcessRefreshInFlight {
 pub(crate) struct ForegroundProcessTarget {
     pub(crate) pane_id: PaneId,
     pub(crate) shell_pid: Option<u32>,
+    pub(crate) idle_agent_context: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +25,12 @@ pub(crate) struct ForegroundProcessObservation {
     pub(crate) shell_pid: Option<u32>,
     pub(crate) process_name: Option<String>,
     pub(crate) process_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForegroundProcessRefreshScope {
+    AllPanes,
+    IdleAgents,
 }
 
 pub(crate) fn process_name_for_job(shell_pid: u32, job: &ForegroundJob) -> Option<String> {
@@ -41,9 +48,18 @@ pub(crate) fn process_name_for_job(shell_pid: u32, job: &ForegroundJob) -> Optio
     process_name(process)
 }
 
-fn process_is_active(shell_pid: u32, job: &ForegroundJob) -> bool {
+fn process_is_active(shell_pid: u32, job: &ForegroundJob, idle_agent_context: bool) -> bool {
     if job.process_group_id == shell_pid
         || job.processes.iter().any(|process| process.pid == shell_pid)
+    {
+        return false;
+    }
+
+    if idle_agent_context
+        && job
+            .processes
+            .iter()
+            .all(|process| is_idle_agent_runtime(&process.name))
     {
         return false;
     }
@@ -85,6 +101,7 @@ fn is_idle_agent_runtime(name: &str) -> bool {
         .to_ascii_lowercase();
     name == "node"
         || name == "bun"
+        || name == "sleep"
         || name == "python"
         || name.strip_prefix("python").is_some_and(|version| {
             !version.is_empty()
@@ -126,7 +143,7 @@ where
                 .map(|job| {
                     (
                         process_name_for_job(shell_pid, &job),
-                        process_is_active(shell_pid, &job),
+                        process_is_active(shell_pid, &job, target.idle_agent_context),
                     )
                 })
                 .unwrap_or((None, false)),
@@ -157,6 +174,24 @@ impl crate::app::App {
     }
 
     pub(crate) fn start_foreground_process_refresh_if_due(&mut self, now: Instant) {
+        self.start_foreground_process_refresh_if_due_for_scope(
+            now,
+            ForegroundProcessRefreshScope::AllPanes,
+        );
+    }
+
+    pub(crate) fn start_headless_foreground_process_refresh_if_due(&mut self, now: Instant) {
+        self.start_foreground_process_refresh_if_due_for_scope(
+            now,
+            ForegroundProcessRefreshScope::IdleAgents,
+        );
+    }
+
+    fn start_foreground_process_refresh_if_due_for_scope(
+        &mut self,
+        now: Instant,
+        scope: ForegroundProcessRefreshScope,
+    ) {
         if self
             .foreground_process_refresh_in_flight
             .as_ref()
@@ -172,7 +207,7 @@ impl crate::app::App {
         }
 
         self.next_foreground_process_refresh = now + FOREGROUND_PROCESS_REFRESH_INTERVAL;
-        let mut targets = self.foreground_process_targets();
+        let mut targets = self.foreground_process_targets(scope);
         if targets.is_empty() {
             return;
         }
@@ -205,16 +240,38 @@ impl crate::app::App {
             });
     }
 
-    fn foreground_process_targets(&self) -> Vec<ForegroundProcessTarget> {
+    fn foreground_process_targets(
+        &self,
+        scope: ForegroundProcessRefreshScope,
+    ) -> Vec<ForegroundProcessTarget> {
         let mut targets = Vec::new();
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for pane_id in tab.layout.pane_ids() {
+                    let Some(terminal_id) = workspace.terminal_id(pane_id) else {
+                        continue;
+                    };
+                    let idle_agent_context =
+                        self.state
+                            .terminals
+                            .get(terminal_id)
+                            .is_some_and(|terminal| {
+                                terminal.effective_agent_label().is_some()
+                                    && (terminal.state == crate::detect::AgentState::Idle
+                                        || terminal.foreground_process_active())
+                            });
+                    if scope == ForegroundProcessRefreshScope::IdleAgents && !idle_agent_context {
+                        continue;
+                    }
                     let shell_pid = self
                         .state
                         .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
                         .and_then(|runtime| runtime.child_pid());
-                    targets.push(ForegroundProcessTarget { pane_id, shell_pid });
+                    targets.push(ForegroundProcessTarget {
+                        pane_id,
+                        shell_pid,
+                        idle_agent_context,
+                    });
                 }
             }
         }
@@ -360,7 +417,8 @@ mod tests {
     fn resting_agent_process_is_not_active() {
         assert!(!process_is_active(
             10,
-            &job(20, vec![process(20, "claude")])
+            &job(20, vec![process(20, "claude")]),
+            false,
         ));
     }
 
@@ -369,6 +427,7 @@ mod tests {
         assert!(process_is_active(
             10,
             &job(20, vec![process(20, "claude"), process(21, "codex")]),
+            false,
         ));
     }
 
@@ -377,6 +436,7 @@ mod tests {
         assert!(process_is_active(
             10,
             &job(20, vec![process(20, "claude"), process(21, "claude")]),
+            false,
         ));
     }
 
@@ -391,6 +451,26 @@ mod tests {
                     process(21, "bash"),
                 ],
             ),
+            false,
+        ));
+    }
+
+    #[test]
+    fn agent_sleep_helper_is_not_active() {
+        assert!(!process_is_active(
+            10,
+            &job(20, vec![process(20, "pi"), process(21, "sleep")]),
+            false,
+        ));
+        assert!(!process_is_active(
+            10,
+            &job(20, vec![process(20, "sleep")]),
+            true,
+        ));
+        assert!(process_is_active(
+            10,
+            &job(20, vec![process(20, "sleep")]),
+            false,
         ));
     }
 
@@ -399,12 +479,17 @@ mod tests {
         assert!(process_is_active(
             10,
             &job(20, vec![process(20, "claude"), process(21, "cargo")]),
+            false,
         ));
     }
 
     #[test]
     fn plain_foreground_command_is_active() {
-        assert!(process_is_active(10, &job(20, vec![process(20, "cargo")])));
+        assert!(process_is_active(
+            10,
+            &job(20, vec![process(20, "cargo")]),
+            false,
+        ));
     }
 
     #[test]
@@ -413,10 +498,12 @@ mod tests {
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(1),
                 shell_pid: None,
+                idle_agent_context: false,
             },
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(2),
                 shell_pid: Some(10),
+                idle_agent_context: false,
             },
         ];
         let observations = refresh_foreground_processes(
@@ -437,10 +524,12 @@ mod tests {
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(1),
                 shell_pid: Some(10),
+                idle_agent_context: false,
             },
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(2),
                 shell_pid: Some(20),
+                idle_agent_context: false,
             },
         ];
 
@@ -460,14 +549,17 @@ mod tests {
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(1),
                 shell_pid: Some(10),
+                idle_agent_context: false,
             },
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(2),
                 shell_pid: Some(20),
+                idle_agent_context: false,
             },
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(3),
                 shell_pid: Some(30),
+                idle_agent_context: false,
             },
         ];
 
