@@ -11101,6 +11101,7 @@ next_tab = ""
                     source: "herdr:pi".into(),
                     agent: "pi".into(),
                     state: api::schema::PaneAgentState::Idle,
+                    v: None,
                     message: None,
                     seq: Some(19),
                     agent_session_id: None,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{de::Deserializer, Deserialize, Serialize};
 
 pub(crate) const PANE_GRAPHICS_SET_MAX_BYTES: usize = 512 * 1024;
 pub(crate) const PANE_GRAPHICS_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -329,6 +329,8 @@ pub struct PaneReportAgentParams {
     pub agent: String,
     pub state: PaneAgentState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
@@ -344,7 +346,7 @@ pub struct PaneReportAgentParams {
     pub decisions: Option<Vec<ClosingBlockDecision>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ClosingBlockItem {
     pub n: u32,
     pub label: String,
@@ -359,6 +361,43 @@ pub struct ClosingBlockItem {
     pub default: Option<String>,
     #[serde(default)]
     pub default_at: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ClosingBlockItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            n: u32,
+            label: String,
+            text: String,
+            #[serde(default)]
+            pr: Option<u64>,
+            #[serde(default)]
+            ticket: Option<String>,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            default: Option<String>,
+            #[serde(default)]
+            default_at: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let _ = (wire.default, wire.default_at);
+        Ok(Self {
+            n: wire.n,
+            label: wire.label,
+            text: wire.text,
+            pr: wire.pr,
+            ticket: wire.ticket,
+            url: wire.url,
+            default: None,
+            default_at: None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -3083,6 +3083,15 @@
             },
             "state": {
               "$ref": "#/schemas/request/$defs/PaneAgentState"
+            },
+            "v": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [

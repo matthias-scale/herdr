@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-# HERDR_INTEGRATION_VERSION=2
+# HERDR_INTEGRATION_VERSION=1
 VERSION = 2
 
 
@@ -65,8 +65,8 @@ def _normalize_item(
     item.setdefault("pr", None)
     item.setdefault("ticket", None)
     item.setdefault("url", None)
-    item.setdefault("default", None)
-    item.setdefault("default_at", None)
+    item["default"] = None
+    item["default_at"] = None
     return item
 
 
@@ -214,7 +214,7 @@ def report(
         session_params["agent_session_path"] = session_path
 
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
-                    "state": state, "seq": seq,
+                    "state": state, "seq": seq, "v": VERSION,
                     "gates": gate_objects, "items": item_objects,
                     "decisions": decision_objects}
     message = message_for(blocking, agents, gate_objects)

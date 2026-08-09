@@ -2861,6 +2861,71 @@ impl AppState {
         changed
     }
 
+    pub(crate) fn handle_app_event_with_hook_report_status(
+        &mut self,
+        event: AppEvent,
+    ) -> (Vec<PaneStateUpdate>, Option<bool>) {
+        match event {
+            AppEvent::HookStateReported {
+                pane_id,
+                source,
+                agent_label,
+                state,
+                message,
+                seq,
+                session_ref,
+            } => {
+                let (updates, accepted) = self.handle_hook_state_report(
+                    pane_id,
+                    source,
+                    agent_label,
+                    state,
+                    message,
+                    seq,
+                    session_ref,
+                );
+                (updates, Some(accepted))
+            }
+            event => (self.handle_app_event(event), None),
+        }
+    }
+
+    fn handle_hook_state_report(
+        &mut self,
+        pane_id: PaneId,
+        source: String,
+        agent_label: String,
+        state: AgentState,
+        message: Option<String>,
+        seq: Option<u64>,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    ) -> (Vec<PaneStateUpdate>, bool) {
+        let mut accepted = false;
+        let updates = if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label)
+        {
+            self.update_terminal_state(pane_id, |terminal| {
+                let mutation =
+                    terminal.set_agent_session_ref(source, agent_label, session_ref, seq);
+                accepted = mutation.is_some();
+                mutation
+            })
+        } else {
+            self.update_terminal_state(pane_id, |terminal| {
+                let mutation = terminal.set_hook_authority_with_session_ref(
+                    source,
+                    agent_label,
+                    state,
+                    message,
+                    session_ref,
+                    seq,
+                );
+                accepted = mutation.is_some();
+                mutation
+            })
+        };
+        (updates.into_iter().collect(), accepted)
+    }
+
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
             AppEvent::StatusMetricsRefreshed { .. } => Vec::new(),
@@ -2958,26 +3023,16 @@ impl AppState {
                 seq,
                 session_ref,
             } => {
-                if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
-                    self.update_terminal_state(pane_id, |terminal| {
-                        terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
-                    })
-                    .into_iter()
-                    .collect()
-                } else {
-                    self.update_terminal_state(pane_id, |terminal| {
-                        terminal.set_hook_authority_with_session_ref(
-                            source,
-                            agent_label,
-                            state,
-                            message,
-                            session_ref,
-                            seq,
-                        )
-                    })
-                    .into_iter()
-                    .collect()
-                }
+                self.handle_hook_state_report(
+                    pane_id,
+                    source,
+                    agent_label,
+                    state,
+                    message,
+                    seq,
+                    session_ref,
+                )
+                .0
             }
             AppEvent::AgentSessionReported {
                 pane_id,

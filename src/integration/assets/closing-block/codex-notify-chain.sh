@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HERDR_INTEGRATION_VERSION=2
+# HERDR_INTEGRATION_VERSION=1
 # Codex allows exactly one `notify` program, and this machine already uses it
 # for Computer Use. Chain instead of replacing: the original runs first and
 # unchanged, then the herdr closing-block handler gets the same payload.

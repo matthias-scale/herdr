@@ -1256,34 +1256,40 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
-        let closing_block = params.gates.zip(params.items).zip(params.decisions);
-        self.handle_internal_event(crate::events::AppEvent::HookStateReported {
-            pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
-            source: params.source,
-            agent_label,
-            state: detect_state_from_api(params.state),
-            message: params.message,
-            seq: params.seq,
-        });
-        if let Some(((gates, items), decisions)) = closing_block {
-            let changed = self
-                .state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|workspace| workspace.pane_state(pane_id))
-                .map(|pane| pane.attached_terminal_id.clone())
-                .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
-                .is_some_and(|terminal| {
-                    terminal.apply_closing_block_payload(gates, items, decisions)
-                });
-            if changed {
-                self.emit_pane_updated(ws_idx, pane_id);
+        let closing_block = (params.v == Some(2))
+            .then(|| params.gates.zip(params.items).zip(params.decisions))
+            .flatten();
+        let hook_state_report_accepted = self
+            .handle_internal_event(crate::events::AppEvent::HookStateReported {
+                pane_id,
+                session_ref: crate::agent_resume::session_ref_from_report(
+                    &params.source,
+                    &agent_label,
+                    params.agent_session_id,
+                    params.agent_session_path,
+                ),
+                source: params.source,
+                agent_label,
+                state: detect_state_from_api(params.state),
+                message: params.message,
+                seq: params.seq,
+            })
+            .unwrap_or(false);
+        if hook_state_report_accepted {
+            if let Some(((gates, items), decisions)) = closing_block {
+                let changed = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.pane_state(pane_id))
+                    .map(|pane| pane.attached_terminal_id.clone())
+                    .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
+                    .is_some_and(|terminal| {
+                        terminal.apply_closing_block_payload(gates, items, decisions)
+                    });
+                if changed {
+                    self.emit_pane_updated(ws_idx, pane_id);
+                }
             }
         }
         self.sync_terminal_titles();
@@ -4337,6 +4343,7 @@ mod tests {
                 source: "herdr:claude-closing-block".into(),
                 agent: "claude".into(),
                 state: crate::api::schema::PaneAgentState::Blocked,
+                v: Some(2),
                 message: Some("Approve the open Herdr PR".into()),
                 seq: Some(1),
                 agent_session_id: None,
@@ -4364,6 +4371,119 @@ mod tests {
         assert_eq!(pane.items[0].label, "Answer");
         assert_eq!(pane.decisions[0].recommendation, "proceed");
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn stale_v2_closing_block_report_does_not_replace_newer_gate_without_pty() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let report = |text: &str, seq: u64| PaneReportAgentParams {
+            pane_id: pane_id.clone(),
+            source: "herdr:claude-closing-block".into(),
+            agent: "claude".into(),
+            state: crate::api::schema::PaneAgentState::Blocked,
+            v: Some(2),
+            message: Some(text.into()),
+            seq: Some(seq),
+            agent_session_id: None,
+            agent_session_path: None,
+            gates: Some(vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: text.into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }]),
+            items: Some(Vec::new()),
+            decisions: Some(Vec::new()),
+        };
+
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent("newer".into(), report("newer gate", 10)),
+        )
+        .unwrap();
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_agent("stale".into(), report("stale gate", 9)),
+        )
+        .unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget { pane_id }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert_eq!(pane.gates[0].text, "newer gate");
+    }
+
+    #[test]
+    fn legacy_v1_report_skips_closing_block_arrays_without_pty() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let response = app.handle_pane_report_agent(
+            "legacy".into(),
+            PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude-closing-block".into(),
+                agent: "claude".into(),
+                state: crate::api::schema::PaneAgentState::Blocked,
+                v: Some(1),
+                message: Some("legacy gate".into()),
+                seq: Some(1),
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: Some(vec![crate::api::schema::ClosingBlockItem {
+                    n: 1,
+                    label: "Gate".into(),
+                    text: "legacy gate".into(),
+                    pr: None,
+                    ticket: None,
+                    url: None,
+                    default: Some("approve".into()),
+                    default_at: Some("2026-08-09T12:00:00Z".into()),
+                }]),
+                items: Some(Vec::new()),
+                decisions: Some(Vec::new()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget { pane_id }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert!(pane.gates.is_empty());
     }
 
     #[test]
@@ -5207,6 +5327,7 @@ mod tests {
                 source: "herdr:pi".into(),
                 agent: "pi".into(),
                 state: crate::api::schema::PaneAgentState::Working,
+                v: None,
                 message: None,
                 seq: Some(5),
                 agent_session_id: Some("session-pi".into()),

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-# HERDR_INTEGRATION_VERSION=2
+# HERDR_INTEGRATION_VERSION=1
 _HEADER_RE = re.compile(
     r"^\s*\*\*Critical action points(?:\s*\((?P<n>\d+)\s+blocking\))?\*\*\s*$",
     re.MULTILINE,
@@ -25,12 +25,12 @@ _AGENTS_RE = re.compile(
 )
 _DONE_RE = re.compile(r"^\s*Done here\.\s*$", re.MULTILINE)
 
-_ITEM_START = r"^\s*\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
+_ITEM_START = r"^\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
 _ITEM_RE = re.compile(
-    rf"^\s*(?P<idx>\d+)[.)]\s*\*\*(?P<label>Gate|Answer|Verify)\*\*"
-    rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\s*\*\*What to test\b|"
-    r"^\s*\*\*Auto-proceeded decisions\*\*|^\s*\d+\s+agents?\s+running:|"
-    r"^\s*Done here\.|\Z)",
+    rf"^(?P<idx>\d+)[.)]\s*\*\*(?P<label>Gate|Answer|Verify)\*\*"
+    rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\*\*What to test\b|"
+    r"^\*\*Auto-proceeded decisions\*\*|^\d+\s+agents?\s+running:|"
+    r"^Done here\.|\Z)",
     re.MULTILINE | re.IGNORECASE | re.DOTALL,
 )
 _DECISIONS_RE = re.compile(
@@ -38,19 +38,18 @@ _DECISIONS_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _DECISION_ITEM_RE = re.compile(
-    r"^\s*(?P<idx>\d+)[.)]\s*(?P<body>.*?)(?=^\s*\d+[.)]\s+|"
-    r"^\s*\*\*What to test\b|^\s*\d+\s+agents?\s+running:|"
-    r"^\s*Done here\.|\Z)",
+    r"^(?P<idx>\d+)[.)]\s*(?P<body>.*?)(?=^\d+[.)]\s+|"
+    r"^\*\*What to test\b|^\d+\s+agents?\s+running:|"
+    r"^Done here\.|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 _WHAT_RE = re.compile(
     r"^\s*\*\*What to test(?P<meta>.*?)\*\*\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
-_LABEL_SEP = re.compile(r"\s+[-—–]\s+")
 _PR_RE = re.compile(r"(?<![A-Za-z0-9])#(?P<pr>\d+)\b")
 _TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
-_URL_RE = re.compile(r"https?://[^\s)\]>]+", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://[^\s\]>]+", re.IGNORECASE)
 _RECOMMENDATION_RE = re.compile(
     r"\b(?:recommend(?:ation|ed)?|proceed(?:ed)?\s+with)\s*[:\-]?\s*"
     r"(?P<value>.+?)(?=\s+(?:because|at\s+\d{1,2}:\d{2}|decided\s+at)|$)",
@@ -71,6 +70,8 @@ def _clean_body(body: str) -> str:
 def _metadata(text: str) -> dict[str, Any]:
     url_match = _URL_RE.search(text)
     url = url_match.group(0).rstrip(".,;:") if url_match else None
+    while url and url.endswith(")") and url.count(")") > url.count("("):
+        url = url[:-1]
     pr_match = _PR_RE.search(text)
     ticket_match = _TICKET_RE.search(text)
     return {
@@ -194,24 +195,29 @@ def _section_end(text: str, start: int) -> int:
     return min(candidates, default=len(text))
 
 
-def _parse_what_to_test(text: str, start: int, items: list[Item]) -> Item | None:
-    heading = next(_WHAT_RE.finditer(text, start), None)
-    if heading is None:
-        return None
-    end_candidates = [
-        match.start()
-        for pattern in (_DECISIONS_RE, _AGENTS_RE, _DONE_RE)
-        for match in pattern.finditer(text, heading.end())
-    ]
-    end = min(end_candidates, default=len(text))
-    body = text[heading.end() : end].strip()
-    if not body:
-        return None
-    gate_number = re.search(r"\bGate\s+(?P<n>\d+)\b", heading.group("meta"), re.I)
-    index = int(gate_number.group("n")) if gate_number else (
-        max((item.index for item in items), default=0) + 1
-    )
-    return Item(index, "What to test", body, _metadata(heading.group(0) + " " + body))
+def _parse_what_to_test(text: str, start: int, items: list[Item]) -> list[Item]:
+    headings = list(_WHAT_RE.finditer(text, start))
+    parsed: list[Item] = []
+    for position, heading in enumerate(headings):
+        end_candidates = [
+            match.start()
+            for pattern in (_DECISIONS_RE, _AGENTS_RE, _DONE_RE)
+            for match in pattern.finditer(text, heading.end())
+        ]
+        if position + 1 < len(headings):
+            end_candidates.append(headings[position + 1].start())
+        end = min(end_candidates, default=len(text))
+        body = text[heading.end() : end].strip()
+        if not body:
+            continue
+        gate_number = re.search(r"\bGate\s+(?P<n>\d+)\b", heading.group("meta"), re.I)
+        index = int(gate_number.group("n")) if gate_number else (
+            max((item.index for item in [*items, *parsed]), default=0) + 1
+        )
+        parsed.append(
+            Item(index, "What to test", body, _metadata(heading.group(0) + " " + body))
+        )
+    return parsed
 
 
 def _decision_fields(body: str) -> tuple[str, str | None]:
@@ -252,7 +258,7 @@ def parse(text: str) -> ClosingBlock:
         block.declared_blocking = 0
         start = nothing.end()
 
-    if start is not None and block.declared_blocking != 0:
+    if start is not None:
         cap_end = _section_end(text, start)
         for match in _ITEM_RE.finditer(text, start, cap_end):
             block.items.append(
@@ -262,9 +268,7 @@ def parse(text: str) -> ClosingBlock:
                     _clean_body(match.group("body")),
                 )
             )
-        what = _parse_what_to_test(text, start, block.items)
-        if what is not None:
-            block.items.append(what)
+        block.items.extend(_parse_what_to_test(text, start, block.items))
 
     decisions_heading = next(iter(_DECISIONS_RE.finditer(text, start or 0)), None)
     if decisions_heading:

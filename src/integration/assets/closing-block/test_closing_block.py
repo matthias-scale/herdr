@@ -27,6 +27,35 @@ https://mat125-gates-v2.vercel.app/preview
 1 agent running: reviewer — v2 payload.
 """
 
+ZERO_COUNT_GATE = """\
+**Critical action points (0 blocking)**
+
+1. **Gate** — Approve the zero-count correction.
+
+Done here.
+"""
+
+MULTI_WHAT = """\
+**Critical action points (2 blocking)**
+
+1. **Gate** — First gate.
+2. **Gate** — Second gate.
+
+**What to test — Gate 1 · #1 (MAT-1)**
+
+https://example.test/path_(a)
+1. Verify the first gate.
+
+**What to test — Gate 2 · #2 (MAT-2)**
+
+1. Verify the second gate.
+
+**Auto-proceeded decisions**
+
+1. Proceed with the correction.
+   1. Nested detail remains part of the decision.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
     def test_cap_gate_becomes_nonempty_object_gate(self):
@@ -47,6 +76,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 "default_at": None,
             },
         )
+
+    def test_zero_declared_count_does_not_hide_gate_item(self):
+        block = closing_block.parse(ZERO_COUNT_GATE)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.wire_gates()[0]["text"], "Approve the zero-count correction.")
 
     def test_answer_and_what_to_test_are_nonblocking_items(self):
         block = closing_block.parse(REALISTIC_CAP)
@@ -75,6 +110,17 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertTrue(herdr_status.accepts_payload({"v": 2}))
         self.assertFalse(herdr_status.accepts_payload({"v": 3}))
 
+    def test_what_to_test_urls_and_nested_decisions_are_not_collapsed(self):
+        block = closing_block.parse(MULTI_WHAT)
+
+        items = block.wire_items()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["url"], "https://example.test/path_(a)")
+        self.assertIn("Verify the second gate.", items[1]["text"])
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 1)
+        self.assertIn("Nested detail remains part of the decision.", decisions[0]["text"])
+
     def test_report_emits_v2_arrays_and_existing_blocked_channel(self):
         with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
             herdr_status.os.environ,
@@ -98,6 +144,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertTrue(outcome["payload"]["decisions"][0]["reversible"])
         report = rpc.call_args_list[1].args
         self.assertEqual(report[2], "pane.report_agent")
+        self.assertEqual(report[3]["v"], 2)
         self.assertEqual(report[3]["gates"], outcome["payload"]["gates"])
         self.assertEqual(report[3]["items"], outcome["payload"]["items"])
         self.assertEqual(report[3]["decisions"], outcome["payload"]["decisions"])
@@ -106,6 +153,24 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(metadata[2], "pane.report_metadata")
         params = metadata[3]
         self.assertIn("Approve PR #2606", params["state_labels"]["blocked"])
+
+    def test_emit_forces_legacy_default_fields_to_null(self):
+        outcome = herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=0,
+            gates=[
+                {
+                    "text": "Gate text",
+                    "default": "approve",
+                    "default_at": "2026-08-09T12:00:00Z",
+                }
+            ],
+        )
+
+        gate = outcome["payload"]["gates"][0]
+        self.assertIsNone(gate["default"])
+        self.assertIsNone(gate["default_at"])
 
     @staticmethod
     def _state_dir():
