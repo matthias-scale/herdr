@@ -51,6 +51,15 @@ fn process_is_active(shell_pid: u32, job: &ForegroundJob) -> bool {
     let Some((agent, _)) = crate::detect::identify_agent_in_job(job) else {
         return true;
     };
+    let selected_agent_pid = job.processes.iter().find_map(|process| {
+        let single_process_job = ForegroundJob {
+            process_group_id: process.pid,
+            processes: vec![process.clone()],
+        };
+        crate::detect::identify_agent_in_job(&single_process_job)
+            .is_some_and(|(process_agent, _)| process_agent == agent)
+            .then_some(process.pid)
+    });
 
     job.processes.iter().any(|process| {
         let single_process_job = ForegroundJob {
@@ -58,7 +67,7 @@ fn process_is_active(shell_pid: u32, job: &ForegroundJob) -> bool {
             processes: vec![process.clone()],
         };
         match crate::detect::identify_agent_in_job(&single_process_job) {
-            Some((process_agent, _)) => process_agent != agent,
+            Some(_) => Some(process.pid) != selected_agent_pid,
             None => {
                 !crate::platform::is_pane_shell_process_name(&process.name)
                     && !is_idle_agent_runtime(&process.name)
@@ -112,7 +121,7 @@ where
     for target in targets {
         let (process_name, process_active) = match target.shell_pid {
             None => (None, false),
-            Some(_) if Instant::now() >= deadline => (None, false),
+            Some(_) if Instant::now() >= deadline => continue,
             Some(shell_pid) => lookup(shell_pid)
                 .map(|job| {
                     (
@@ -130,6 +139,13 @@ where
         });
     }
     observations
+}
+
+fn rotate_targets_for_generation(targets: &mut [ForegroundProcessTarget], generation: u64) {
+    let target_count = targets.len();
+    if target_count > 1 {
+        targets.rotate_left(generation as usize % target_count);
+    }
 }
 
 impl crate::app::App {
@@ -156,7 +172,7 @@ impl crate::app::App {
         }
 
         self.next_foreground_process_refresh = now + FOREGROUND_PROCESS_REFRESH_INTERVAL;
-        let targets = self.foreground_process_targets();
+        let mut targets = self.foreground_process_targets();
         if targets.is_empty() {
             return;
         }
@@ -165,6 +181,7 @@ impl crate::app::App {
             .last_foreground_process_refresh_generation
             .wrapping_add(1);
         let generation = self.last_foreground_process_refresh_generation;
+        rotate_targets_for_generation(&mut targets, generation);
         let deadline = now + FOREGROUND_PROCESS_REFRESH_TIMEOUT;
         self.foreground_process_refresh_in_flight = Some(ForegroundProcessRefreshInFlight {
             generation,
@@ -356,6 +373,14 @@ mod tests {
     }
 
     #[test]
+    fn same_agent_nested_child_is_active() {
+        assert!(process_is_active(
+            10,
+            &job(20, vec![process(20, "claude"), process(21, "claude")]),
+        ));
+    }
+
+    #[test]
     fn wrapped_resting_agent_processes_are_not_active() {
         assert!(!process_is_active(
             10,
@@ -407,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_out_refresh_clears_every_omitted_target() {
+    fn timed_out_refresh_omits_unobserved_targets() {
         let targets = [
             ForegroundProcessTarget {
                 pane_id: PaneId::from_raw(1),
@@ -425,11 +450,34 @@ mod tests {
                 Instant::now() - Duration::from_millis(1),
                 |_pid| panic!("timed-out targets must not be inspected"),
             );
-            assert_eq!(observations.len(), targets.len());
-            assert!(observations.iter().all(|observation| {
-                observation.process_name.is_none() && !observation.process_active
-            }));
+            assert!(observations.is_empty());
         }
+    }
+
+    #[test]
+    fn refresh_target_order_rotates_between_generations() {
+        let targets = vec![
+            ForegroundProcessTarget {
+                pane_id: PaneId::from_raw(1),
+                shell_pid: Some(10),
+            },
+            ForegroundProcessTarget {
+                pane_id: PaneId::from_raw(2),
+                shell_pid: Some(20),
+            },
+            ForegroundProcessTarget {
+                pane_id: PaneId::from_raw(3),
+                shell_pid: Some(30),
+            },
+        ];
+
+        let mut first_generation = targets.clone();
+        rotate_targets_for_generation(&mut first_generation, 1);
+        assert_eq!(first_generation[0].pane_id, PaneId::from_raw(2));
+
+        let mut second_generation = targets;
+        rotate_targets_for_generation(&mut second_generation, 2);
+        assert_eq!(second_generation[0].pane_id, PaneId::from_raw(3));
     }
 
     fn app_with_test_pane(name: &str) -> (crate::app::App, PaneId, crate::terminal::TerminalId) {
@@ -451,6 +499,26 @@ mod tests {
             .cloned()
             .expect("test pane terminal");
         (app, pane_id, terminal_id)
+    }
+
+    #[test]
+    fn unobserved_refresh_leaves_process_state_and_events_unchanged() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("unobserved-foreground");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test pane terminal")
+            .set_foreground_process(Some("cargo".into()), true, Instant::now());
+        let event_count = app.event_hub.events_after(0).len();
+        app.last_foreground_process_refresh_generation = 1;
+
+        assert!(!app.handle_foreground_processes_refreshed(1, Vec::new()));
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.foreground_process_name.as_deref(), Some("cargo"));
+        assert!(terminal.foreground_process_active());
+        assert_eq!(app.event_hub.events_after(0).len(), event_count);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
     }
 
     #[test]
