@@ -23,6 +23,7 @@ pub(crate) struct ForegroundProcessObservation {
     pub(crate) pane_id: PaneId,
     pub(crate) shell_pid: Option<u32>,
     pub(crate) process_name: Option<String>,
+    pub(crate) process_active: bool,
 }
 
 pub(crate) fn process_name_for_job(shell_pid: u32, job: &ForegroundJob) -> Option<String> {
@@ -38,6 +39,16 @@ pub(crate) fn process_name_for_job(shell_pid: u32, job: &ForegroundJob) -> Optio
         .find(|process| process.pid == job.process_group_id)
         .or_else(|| job.processes.first())?;
     process_name(process)
+}
+
+fn process_is_active(shell_pid: u32, job: &ForegroundJob) -> bool {
+    if job.process_group_id == shell_pid
+        || job.processes.iter().any(|process| process.pid == shell_pid)
+    {
+        return false;
+    }
+
+    crate::detect::identify_agent_in_job(job).is_none() || job.processes.len() > 1
 }
 
 fn process_name(process: &ForegroundProcess) -> Option<String> {
@@ -65,17 +76,23 @@ where
 {
     let mut observations = Vec::with_capacity(targets.len());
     for target in targets {
-        let process_name = match target.shell_pid {
-            None => None,
+        let (process_name, process_active) = match target.shell_pid {
+            None => (None, false),
             Some(_) if Instant::now() >= deadline => break,
-            Some(shell_pid) => {
-                lookup(shell_pid).and_then(|job| process_name_for_job(shell_pid, &job))
-            }
+            Some(shell_pid) => lookup(shell_pid)
+                .map(|job| {
+                    (
+                        process_name_for_job(shell_pid, &job),
+                        process_is_active(shell_pid, &job),
+                    )
+                })
+                .unwrap_or((None, false)),
         };
         observations.push(ForegroundProcessObservation {
             pane_id: target.pane_id,
             shell_pid: target.shell_pid,
             process_name,
+            process_active,
         });
     }
     observations
@@ -204,10 +221,23 @@ impl crate::app::App {
             if current_shell_pid != observation.shell_pid {
                 continue;
             }
-            let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
-                continue;
-            };
-            changed |= terminal.set_foreground_process_name(observation.process_name);
+            let process_name_changed =
+                self.state
+                    .terminals
+                    .get(&terminal_id)
+                    .is_some_and(|terminal| {
+                        terminal.foreground_process_name != observation.process_name
+                    });
+            let _ = self
+                .state
+                .update_terminal_state(observation.pane_id, |terminal| {
+                    terminal.set_foreground_process(
+                        observation.process_name,
+                        observation.process_active,
+                        now,
+                    )
+                });
+            changed |= process_name_changed;
         }
 
         if changed {
@@ -259,6 +289,27 @@ mod tests {
             process_name_for_job(10, &job(20, vec![process(10, "zsh")])),
             None
         );
+    }
+
+    #[test]
+    fn resting_agent_process_is_not_active() {
+        assert!(!process_is_active(
+            10,
+            &job(20, vec![process(20, "claude")])
+        ));
+    }
+
+    #[test]
+    fn agent_child_process_is_active() {
+        assert!(process_is_active(
+            10,
+            &job(20, vec![process(20, "claude"), process(21, "codex")]),
+        ));
+    }
+
+    #[test]
+    fn plain_foreground_command_is_active() {
+        assert!(process_is_active(10, &job(20, vec![process(20, "cargo")])));
     }
 
     #[test]
@@ -321,6 +372,7 @@ mod tests {
                 pane_id,
                 shell_pid: None,
                 process_name: Some("cargo".into()),
+                process_active: true,
             }],
         );
 
@@ -332,6 +384,49 @@ mod tests {
         );
         assert!(app.foreground_process_refresh_in_flight.is_none());
         assert!(app.next_foreground_process_refresh > Instant::now());
+    }
+
+    #[test]
+    fn foreground_process_refresh_promotes_idle_agent_until_process_clears() {
+        let (mut app, pane_id, terminal_id) = app_with_test_pane("active-agent-child");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test pane terminal")
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+
+        app.last_foreground_process_refresh_generation = 1;
+        assert!(app.handle_foreground_processes_refreshed(
+            1,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("codex".into()),
+                process_active: true,
+            }],
+        ));
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Working
+        );
+
+        app.last_foreground_process_refresh_generation = 2;
+        assert!(app.handle_foreground_processes_refreshed(
+            2,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: None,
+                process_active: false,
+            }],
+        ));
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
     }
 
     #[test]
@@ -365,6 +460,7 @@ mod tests {
                 pane_id,
                 shell_pid: None,
                 process_name: Some("cargo".into()),
+                process_active: true,
             }],
         ));
         assert_eq!(
@@ -380,6 +476,7 @@ mod tests {
                 pane_id,
                 shell_pid: None,
                 process_name: Some("stale-process".into()),
+                process_active: true,
             }],
         ));
         assert_eq!(
@@ -417,6 +514,7 @@ mod tests {
                 pane_id,
                 shell_pid: None,
                 process_name: Some("stale-process".into()),
+                process_active: true,
             }],
         ));
         assert_eq!(
@@ -453,6 +551,7 @@ mod tests {
                 pane_id,
                 shell_pid: None,
                 process_name: Some("stale-process".into()),
+                process_active: true,
             }],
         );
 
