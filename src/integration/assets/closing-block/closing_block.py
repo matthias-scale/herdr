@@ -195,6 +195,18 @@ def _section_end(text: str, start: int) -> int:
     return min(candidates, default=len(text))
 
 
+def _decisions_end(text: str, start: int) -> int:
+    # The decisions list may sit before the critical-action-points block (the
+    # authoring rules put the closing block last), so the item scan must stop
+    # at whichever section opens next or the CAP items parse as decisions.
+    candidates = [
+        match.start()
+        for pattern in (_HEADER_RE, _NOTHING_RE, _WHAT_RE, _AGENTS_RE, _DONE_RE)
+        for match in pattern.finditer(text, start)
+    ]
+    return min(candidates, default=len(text))
+
+
 def _parse_what_to_test(text: str, start: int, items: list[Item]) -> list[Item]:
     headings = list(_WHAT_RE.finditer(text, start))
     parsed: list[Item] = []
@@ -240,12 +252,10 @@ def parse(text: str) -> ClosingBlock:
     """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
-    header = next(iter(_HEADER_RE.finditer(text)), None)
-    for candidate in _HEADER_RE.finditer(text):
-        header = candidate
-    nothing = next(iter(_NOTHING_RE.finditer(text)), None)
-    for candidate in _NOTHING_RE.finditer(text):
-        nothing = candidate
+    headers = list(_HEADER_RE.finditer(text))
+    nothings = list(_NOTHING_RE.finditer(text))
+    header = headers[-1] if headers else None
+    nothing = nothings[-1] if nothings else None
 
     start = None
     if header and (nothing is None or header.start() > nothing.start()):
@@ -270,10 +280,17 @@ def parse(text: str) -> ClosingBlock:
             )
         block.items.extend(_parse_what_to_test(text, start, block.items))
 
-    decisions_heading = next(iter(_DECISIONS_RE.finditer(text, start or 0)), None)
+    closing_markers = sorted([*headers, *nothings], key=lambda match: match.start())
+    decisions_start = closing_markers[-1].end() if len(closing_markers) > 1 else 0
+    decisions_heading = None
+    for candidate in _DECISIONS_RE.finditer(text, decisions_start):
+        decisions_heading = candidate
     if decisions_heading:
         block.present = True
-        for match in _DECISION_ITEM_RE.finditer(text, decisions_heading.end()):
+        decisions_end = _decisions_end(text, decisions_heading.end())
+        for match in _DECISION_ITEM_RE.finditer(
+            text, decisions_heading.end(), decisions_end
+        ):
             body = _clean_body(match.group("body"))
             if not body:
                 continue

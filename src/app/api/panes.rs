@@ -1250,13 +1250,22 @@ impl App {
         id: String,
         params: PaneReportAgentParams,
     ) -> String {
+        // A report from another closing-block wire version is skipped whole and
+        // silently: mismatched versions must degrade to a no-op, never to an
+        // error or a misparsed state change.
+        if params
+            .v
+            .is_some_and(|version| version != crate::api::schema::panes::CLOSING_BLOCK_VERSION)
+        {
+            return encode_success(id, ResponseResult::Ok {});
+        }
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
-        let closing_block = (params.v == Some(2))
+        let closing_block = (params.v == Some(crate::api::schema::panes::CLOSING_BLOCK_VERSION))
             .then(|| params.gates.zip(params.items).zip(params.decisions))
             .flatten();
         let hook_state_report_accepted = self
@@ -4484,6 +4493,73 @@ mod tests {
             panic!("expected pane info");
         };
         assert!(pane.gates.is_empty());
+    }
+
+    #[test]
+    fn foreign_version_report_is_a_silent_no_op_without_pty() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let response = app.handle_pane_report_agent(
+            "foreign-version".into(),
+            PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude-closing-block".into(),
+                agent: "claude".into(),
+                state: crate::api::schema::PaneAgentState::Blocked,
+                v: Some(1),
+                message: Some("a v1 gate".into()),
+                seq: Some(1),
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: None,
+                items: None,
+                decisions: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        // Even a missing pane answers success: the skip happens before any
+        // lookup, so a foreign version can never surface an error.
+        let response = app.handle_pane_report_agent(
+            "foreign-version-missing-pane".into(),
+            PaneReportAgentParams {
+                pane_id: "w9:p9".into(),
+                source: "herdr:claude-closing-block".into(),
+                agent: "claude".into(),
+                state: crate::api::schema::PaneAgentState::Blocked,
+                v: Some(3),
+                message: None,
+                seq: Some(2),
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: None,
+                items: None,
+                decisions: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget { pane_id }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert!(pane.gates.is_empty());
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
     }
 
     #[test]
