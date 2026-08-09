@@ -1382,3 +1382,50 @@ fn closing_block_item_defaults_are_null_on_read_and_write() {
     assert_eq!(encoded["default"], serde_json::Value::Null);
     assert_eq!(encoded["default_at"], serde_json::Value::Null);
 }
+
+#[test]
+fn report_agent_params_with_foreign_version_arrays_still_parse() {
+    let params: PaneReportAgentParams = serde_json::from_value(serde_json::json!({
+        "pane_id": "w1:p1",
+        "source": "herdr:claude-closing-block",
+        "agent": "claude",
+        "state": "blocked",
+        "seq": 7,
+        "v": 1,
+        "gates": ["a v1 string gate"],
+        "message": "a v1 string gate"
+    }))
+    .unwrap();
+
+    assert_eq!(params.v, Some(1));
+    assert_eq!(params.gates, None);
+    assert_eq!(params.items, None);
+    assert_eq!(params.decisions, None);
+}
+
+#[test]
+fn report_agent_params_with_current_version_keep_strict_arrays() {
+    let malformed = serde_json::from_value::<PaneReportAgentParams>(serde_json::json!({
+        "pane_id": "w1:p1",
+        "source": "herdr:claude-closing-block",
+        "agent": "claude",
+        "state": "blocked",
+        "v": 2,
+        "gates": ["not an object"]
+    }));
+    assert!(malformed.is_err());
+
+    let params: PaneReportAgentParams = serde_json::from_value(serde_json::json!({
+        "pane_id": "w1:p1",
+        "source": "herdr:claude-closing-block",
+        "agent": "claude",
+        "state": "blocked",
+        "v": 2,
+        "gates": [{"n": 1, "label": "Gate", "text": "approve"}],
+        "items": [],
+        "decisions": []
+    }))
+    .unwrap();
+    assert_eq!(params.gates.as_deref().unwrap().len(), 1);
+    assert_eq!(params.items.as_deref(), Some(&[][..]));
+}
