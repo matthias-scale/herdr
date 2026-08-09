@@ -252,12 +252,10 @@ def parse(text: str) -> ClosingBlock:
     """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
-    header = next(iter(_HEADER_RE.finditer(text)), None)
-    for candidate in _HEADER_RE.finditer(text):
-        header = candidate
-    nothing = next(iter(_NOTHING_RE.finditer(text)), None)
-    for candidate in _NOTHING_RE.finditer(text):
-        nothing = candidate
+    headers = list(_HEADER_RE.finditer(text))
+    nothings = list(_NOTHING_RE.finditer(text))
+    header = headers[-1] if headers else None
+    nothing = nothings[-1] if nothings else None
 
     start = None
     if header and (nothing is None or header.start() > nothing.start()):
@@ -282,8 +280,10 @@ def parse(text: str) -> ClosingBlock:
             )
         block.items.extend(_parse_what_to_test(text, start, block.items))
 
+    closing_markers = sorted([*headers, *nothings], key=lambda match: match.start())
+    decisions_start = closing_markers[-1].end() if len(closing_markers) > 1 else 0
     decisions_heading = None
-    for candidate in _DECISIONS_RE.finditer(text):
+    for candidate in _DECISIONS_RE.finditer(text, decisions_start):
         decisions_heading = candidate
     if decisions_heading:
         block.present = True

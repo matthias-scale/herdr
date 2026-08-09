@@ -1,4 +1,5 @@
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -72,6 +73,18 @@ Work summary goes here.
 Done here.
 """
 
+STALE_DECISIONS_BEFORE_FINAL_CAP = """\
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. Proceed with the stale decision.
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
     def test_cap_gate_becomes_nonempty_object_gate(self):
@@ -132,6 +145,11 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(block.blocking, 1)
         self.assertEqual(len(block.wire_gates()), 1)
 
+    def test_decisions_from_earlier_cap_block_are_not_attached(self):
+        block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)
+
+        self.assertEqual(block.wire_decisions(), [])
+
     def test_mirror_write_keeps_newest_seq(self):
         with mock.patch.dict(
             herdr_status.os.environ,
@@ -150,6 +168,61 @@ class ClosingBlockV2Tests(unittest.TestCase):
             self.assertEqual(kept["gates"][0]["text"], "newer")
             fresher = {"v": 2, "seq": 300, "gates": [{"text": "fresher"}]}
             self.assertIsNotNone(herdr_status.write_mirror("w9:p9", fresher))
+
+    def test_concurrent_mirror_writes_keep_newest_seq(self):
+        stale_inside_replace = threading.Event()
+        release_stale = threading.Event()
+        original_replace = herdr_status.os.replace
+
+        def ordered_replace(source, destination):
+            with open(source, encoding="utf-8") as fh:
+                seq = herdr_status.json.load(fh)["seq"]
+            if seq == 100:
+                stale_inside_replace.set()
+                self.assertTrue(release_stale.wait(2))
+            original_replace(source, destination)
+
+        with mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ), mock.patch.object(herdr_status.os, "replace", side_effect=ordered_replace):
+            stale = threading.Thread(
+                target=herdr_status.write_mirror,
+                args=("w9:p10", {"v": 2, "seq": 100}),
+            )
+            newer = threading.Thread(
+                target=herdr_status.write_mirror,
+                args=("w9:p10", {"v": 2, "seq": 200}),
+            )
+            stale.start()
+            self.assertTrue(stale_inside_replace.wait(2))
+            newer.start()
+            release_stale.set()
+            stale.join(2)
+            newer.join(2)
+            self.assertFalse(stale.is_alive())
+            self.assertFalse(newer.is_alive())
+
+            with open(herdr_status.mirror_path("w9:p10"), encoding="utf-8") as fh:
+                self.assertEqual(herdr_status.json.load(fh)["seq"], 200)
+
+    def test_mirror_write_replaces_non_dict_json(self):
+        with mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            path = herdr_status.mirror_path("w9:p11")
+            with open(path, "w", encoding="utf-8") as fh:
+                herdr_status.json.dump([1, 2], fh)
+
+            self.assertEqual(
+                herdr_status.write_mirror("w9:p11", {"v": 2, "seq": 100}),
+                path,
+            )
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(herdr_status.json.load(fh)["seq"], 100)
 
     def test_v1_payload_is_skipped_without_error(self):
         self.assertFalse(herdr_status.accepts_payload({"v": 1}))
