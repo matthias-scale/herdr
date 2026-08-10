@@ -4503,6 +4503,7 @@ impl HeadlessServer {
             self.app.agent_activity_refresh_deadline = None;
             false
         };
+        changed |= self.app.handle_loop_receipt_fallback(now);
         changed |= if self.app.status_metrics_visible {
             self.app.schedule_status_metrics(now)
         } else {
