@@ -67,9 +67,10 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
     ) {
         entries.sort_by_key(|entry| {
             (
-                std::cmp::Reverse(super::api_helpers::tab_attention_priority(
+                std::cmp::Reverse(super::api_helpers::tab_attention_priority_with_stale(
                     entry.state,
                     entry.seen,
+                    entry.stale,
                 )),
                 std::cmp::Reverse(entry.last_agent_state_change_seq),
             )
@@ -374,7 +375,11 @@ fn sort_value(
                 .and_then(|workspace| workspace.public_pane_number(entry.pane_id))
                 .map(|number| EvalValue::Number(number as u64)),
             AgentViewBuiltinSortField::Attention => Some(EvalValue::Number(u64::from(
-                super::api_helpers::tab_attention_priority(entry.state, entry.seen),
+                super::api_helpers::tab_attention_priority_with_stale(
+                    entry.state,
+                    entry.seen,
+                    entry.stale,
+                ),
             ))),
             AgentViewBuiltinSortField::Status => Some(EvalValue::String(status_name(
                 entry.state,
@@ -393,17 +398,7 @@ fn sort_value(
 }
 
 fn status_name(state: crate::detect::AgentState, seen: bool, stale: bool) -> String {
-    if stale {
-        return "stale".to_string();
-    }
-    let status = match (state, seen) {
-        (crate::detect::AgentState::Idle, false) => AgentStatus::Done,
-        (crate::detect::AgentState::Idle, true) => AgentStatus::Idle,
-        (crate::detect::AgentState::Working, _) => AgentStatus::Working,
-        (crate::detect::AgentState::Blocked, _) => AgentStatus::Blocked,
-        (crate::detect::AgentState::Unknown, _) => AgentStatus::Unknown,
-    };
-    match status {
+    match super::api_helpers::pane_agent_status_with_stale(state, seen, stale) {
         AgentStatus::Idle => "idle",
         AgentStatus::Working => "working",
         AgentStatus::Blocked => "blocked",
@@ -558,6 +553,58 @@ mod tests {
         let entries = crate::ui::agent_panel_entries(&state);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_kind_label.as_deref(), Some("custom-agent"));
+    }
+
+    #[test]
+    fn priority_sort_surfaces_stale_agents_before_blocked_agents() {
+        let mut state = state_with_agents();
+        let blocked_pane = state.workspaces[0].tabs[0].root_pane;
+        let blocked_terminal = state.workspaces[0].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&blocked_terminal).unwrap().state = AgentState::Blocked;
+
+        let stale_pane = state.workspaces[1].tabs[0].root_pane;
+        let stale_terminal = state.workspaces[1].tabs[0].panes[&stale_pane]
+            .attached_terminal_id
+            .clone();
+        let stale = state.terminals.get_mut(&stale_terminal).unwrap();
+        stale.state = AgentState::Working;
+        stale.supervisor_stale = true;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+
+        let entries = crate::ui::agent_panel_entries(&state);
+        assert!(entries[0].stale);
+    }
+
+    #[test]
+    fn declarative_attention_sort_surfaces_stale_agents_before_blocked_agents() {
+        let mut state = state_with_agents();
+        let blocked_pane = state.workspaces[0].tabs[0].root_pane;
+        let blocked_terminal = state.workspaces[0].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&blocked_terminal).unwrap().state = AgentState::Blocked;
+
+        let stale_pane = state.workspaces[1].tabs[0].root_pane;
+        let stale_terminal = state.workspaces[1].tabs[0].panes[&stale_pane]
+            .attached_terminal_id
+            .clone();
+        let stale = state.terminals.get_mut(&stale_terminal).unwrap();
+        stale.state = AgentState::Working;
+        stale.supervisor_stale = true;
+        state.agent_view_override = Some(AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: None,
+            filter: None,
+            sort: vec![AgentViewSort {
+                field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::Attention),
+                order: AgentViewSortOrder::Desc,
+            }],
+        });
+
+        let entries = crate::ui::agent_panel_entries(&state);
+        assert!(entries[0].stale);
     }
 
     #[test]

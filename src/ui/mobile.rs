@@ -1183,15 +1183,16 @@ struct GlobalAgentCounts {
     done: usize,
     working: usize,
     idle: usize,
+    stale: usize,
 }
 
 impl GlobalAgentCounts {
     fn total(&self) -> usize {
-        self.blocked + self.done + self.working + self.idle
+        self.blocked + self.done + self.working + self.idle + self.stale
     }
 
     fn any_pending(&self) -> bool {
-        self.blocked > 0 || self.done > 0 || self.working > 0
+        self.blocked > 0 || self.done > 0 || self.working > 0 || self.stale > 0
     }
 }
 
@@ -1207,6 +1208,7 @@ fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
             "done" => counts.done += 1,
             "working" => counts.working += 1,
             "idle" => counts.idle += 1,
+            "stale" => counts.stale += 1,
             _ => {}
         }
     }
@@ -1219,6 +1221,7 @@ enum SummaryTone {
     Done,
     Working,
     Idle,
+    Stale,
     Muted,
 }
 
@@ -1235,6 +1238,9 @@ fn agent_summary_segments(
         return vec![("all idle".to_string(), SummaryTone::Muted)];
     }
     let mut segments = Vec::new();
+    if counts.stale > 0 {
+        segments.push((format!("! {} stale", counts.stale), SummaryTone::Stale));
+    }
     if counts.blocked > 0 {
         segments.push((
             agent_summary_text(
@@ -1364,12 +1370,13 @@ fn summary_tone_color(tone: SummaryTone, p: &Palette) -> Color {
     match tone {
         SummaryTone::Blocked => p.red,
         SummaryTone::Done | SummaryTone::Working => p.blue,
+        SummaryTone::Stale => p.peach,
         SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
     }
 }
 
 fn summary_tone_style(tone: SummaryTone, p: &Palette, leading: bool) -> Style {
-    let color = if leading || tone == SummaryTone::Working {
+    let color = if leading || matches!(tone, SummaryTone::Stale | SummaryTone::Working) {
         summary_tone_color(tone, p)
     } else {
         p.overlay1
@@ -1509,6 +1516,8 @@ mod tests {
 
         let counts = global_agent_counts(&app);
         assert_eq!(counts.working, 0);
+        assert_eq!(counts.stale, 1);
+        assert_eq!(counts.total(), 1);
     }
 
     #[test]
@@ -1518,6 +1527,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            ..Default::default()
         };
         let segments = agent_summary_segments(counts, StatusIndicatorStyle::Dots);
         let labels: Vec<&str> = segments.iter().map(|(text, _)| text.as_str()).collect();
@@ -1535,6 +1545,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            stale: 1,
         };
         let labels: Vec<String> = agent_summary_segments(counts, StatusIndicatorStyle::Symbols)
             .into_iter()
@@ -1542,7 +1553,13 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["× 2 blocked", "✓ 1 done", "◐ 2 working", "○ 1 idle"]
+            [
+                "! 1 stale",
+                "× 2 blocked",
+                "✓ 1 done",
+                "◐ 2 working",
+                "○ 1 idle"
+            ]
         );
     }
 
@@ -1646,6 +1663,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            ..Default::default()
         };
         let (shown, truncated) = fit_summary_segments(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
@@ -1663,6 +1681,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            ..Default::default()
         };
         let (shown, truncated) = fit_summary_segments(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
@@ -1677,6 +1696,19 @@ mod tests {
         assert_eq!(
             agent_summary_segments(GlobalAgentCounts::default(), StatusIndicatorStyle::Dots),
             vec![("no agents".to_string(), SummaryTone::Muted)]
+        );
+    }
+
+    #[test]
+    fn agent_summary_renders_stale_as_a_distinct_segment() {
+        let counts = GlobalAgentCounts {
+            stale: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            agent_summary_segments(counts, StatusIndicatorStyle::Dots),
+            vec![("! 1 stale".to_string(), SummaryTone::Stale)]
         );
     }
 

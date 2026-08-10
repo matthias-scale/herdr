@@ -8,6 +8,18 @@ pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: boo
     }
 }
 
+pub(super) fn tab_attention_priority_with_stale(
+    state: crate::detect::AgentState,
+    seen: bool,
+    stale: bool,
+) -> u8 {
+    if stale {
+        5
+    } else {
+        tab_attention_priority(state, seen)
+    }
+}
+
 fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
     let normalized = normalize_api_key_alias(key.trim());
     let (code, modifiers) = crate::config::parse_key_combo(normalized)?;
