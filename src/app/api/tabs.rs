@@ -234,9 +234,7 @@ impl App {
             TabPinMode::Toggle => !tab.pinned,
         };
         self.schedule_session_save();
-        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
-
-        encode_success(id, ResponseResult::TabInfo { tab })
+        tab_info_response(id, &params.tab_id, self.tab_info(ws_idx, tab_idx))
     }
 
     pub(super) fn handle_tab_move(&mut self, id: String, params: TabMoveParams) -> String {
@@ -394,6 +392,13 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 
 fn tab_not_found(id: String, tab_id: &str) -> String {
     encode_error(id, "tab_not_found", format!("tab {tab_id} not found"))
+}
+
+fn tab_info_response(id: String, tab_id: &str, tab: Option<crate::api::schema::TabInfo>) -> String {
+    let Some(tab) = tab else {
+        return tab_not_found(id, tab_id);
+    };
+    encode_success(id, ResponseResult::TabInfo { tab })
 }
 
 #[cfg(test)]
@@ -703,6 +708,13 @@ mod tests {
             },
         );
         assert!(app.state.workspaces[0].tabs[0].pinned);
+    }
+
+    #[test]
+    fn api_tab_pin_projection_divergence_returns_structured_error() {
+        let response = tab_info_response("req".into(), "w1_tabs:t1", None);
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "tab_not_found");
     }
 
     #[tokio::test]

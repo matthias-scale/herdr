@@ -116,6 +116,54 @@ pub(crate) fn mobile_switcher_max_scroll_for_height(app: &AppState, viewport_hei
     mobile_switcher_content_height(app).saturating_sub(viewport_height as usize)
 }
 
+fn mobile_switcher_target_for_row(
+    content: Rect,
+    col: u16,
+    doc_row: usize,
+    cursor: usize,
+    entry: &SidebarRow,
+) -> Option<MobileSwitcherTarget> {
+    let on_title_line = doc_row == cursor;
+    Some(match entry {
+        SidebarRow::Workspace { ws_idx, .. } => {
+            let on_disclosure = on_title_line
+                && mobile_space_disclosure_columns(content)
+                    .is_some_and(|columns| columns.contains(&col));
+            if on_disclosure {
+                MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
+            } else {
+                MobileSwitcherTarget::Workspace(*ws_idx)
+            }
+        }
+        SidebarRow::Agent { entry, .. } => MobileSwitcherTarget::Agent {
+            ws_idx: entry.ws_idx,
+            tab_idx: entry.tab_idx,
+            pane_id: entry.pane_id,
+        },
+        SidebarRow::Tab { entry, depth } => {
+            let indent_width = 2usize.saturating_add(usize::from(*depth) * 3);
+            let prio_col = content.x.saturating_add(indent_width as u16);
+            // The cell is two columns wide (marker plus spacer); both must toggle, or the
+            // spacer silently focuses the tab and closes the switcher instead.
+            let prio_end = prio_col
+                .saturating_add(crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16)
+                .min(content.x.saturating_add(content.width));
+            if on_title_line && (prio_col..prio_end).contains(&col) {
+                MobileSwitcherTarget::SidebarTabPrio {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                }
+            } else {
+                MobileSwitcherTarget::SidebarTab {
+                    ws_idx: entry.ws_idx,
+                    tab_idx: entry.tab_idx,
+                }
+            }
+        }
+        SidebarRow::SectionHeader { .. } => return None,
+    })
+}
+
 /// Doc row the sidebar row list starts at: the section title, plus the
 /// "+ new workspace" affordance in the Spaces tree or the empty-state line in a
 /// flat projection with no rows.
@@ -236,45 +284,7 @@ pub(crate) fn mobile_switcher_target_at(
             if let SidebarRow::SectionHeader { .. } = entry {
                 return None;
             }
-            let on_title_line = doc_row == cursor;
-            return Some(match entry {
-                SidebarRow::Workspace { ws_idx, .. } => {
-                    let on_disclosure = on_title_line
-                        && mobile_space_disclosure_columns(content)
-                            .is_some_and(|columns| columns.contains(&col));
-                    if on_disclosure {
-                        MobileSwitcherTarget::WorkspaceDisclosure(*ws_idx)
-                    } else {
-                        MobileSwitcherTarget::Workspace(*ws_idx)
-                    }
-                }
-                SidebarRow::Agent { entry, .. } => MobileSwitcherTarget::Agent {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                    pane_id: entry.pane_id,
-                },
-                SidebarRow::Tab { entry, depth } => {
-                    let indent_width = 2usize.saturating_add(usize::from(*depth) * 3);
-                    let prio_col = content.x.saturating_add(indent_width as u16);
-                    // The cell is two columns wide (marker plus spacer); both must toggle, or the
-                    // spacer silently focuses the tab and closes the switcher instead.
-                    let prio_end = prio_col
-                        .saturating_add(crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16)
-                        .min(content.x.saturating_add(content.width));
-                    if on_title_line && (prio_col..prio_end).contains(&col) {
-                        MobileSwitcherTarget::SidebarTabPrio {
-                            ws_idx: entry.ws_idx,
-                            tab_idx: entry.tab_idx,
-                        }
-                    } else {
-                        MobileSwitcherTarget::SidebarTab {
-                            ws_idx: entry.ws_idx,
-                            tab_idx: entry.tab_idx,
-                        }
-                    }
-                }
-                SidebarRow::SectionHeader { .. } => unreachable!("returned above"),
-            });
+            return mobile_switcher_target_for_row(content, col, doc_row, cursor, entry);
         }
         cursor += row_height;
     }
@@ -1934,6 +1944,19 @@ mod tests {
                 .expect("workspace row")
                 .start,
             2
+        );
+    }
+
+    #[test]
+    fn mobile_switcher_section_header_is_non_panicking() {
+        let entry = SidebarRow::SectionHeader {
+            title: "Agents",
+            count: 1,
+            collapsed: false,
+        };
+        assert_eq!(
+            mobile_switcher_target_for_row(Rect::new(0, 0, 20, 1), 0, 0, 0, &entry),
+            None
         );
     }
 
