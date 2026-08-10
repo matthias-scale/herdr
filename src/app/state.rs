@@ -1710,6 +1710,13 @@ pub(crate) struct LoopRunHistoryDetail {
 }
 
 impl AppState {
+    pub(crate) fn swap_loop_run_history_detail(
+        &mut self,
+        other: &mut Option<LoopRunHistoryDetail>,
+    ) {
+        std::mem::swap(&mut self.loop_run_history_detail, other);
+    }
+
     pub(crate) fn show_loop_run_history(
         &mut self,
         loop_id: String,
@@ -1725,6 +1732,21 @@ impl AppState {
 
     pub(crate) fn clear_loop_run_history(&mut self) {
         self.loop_run_history_detail = None;
+    }
+
+    pub(crate) fn toggle_loop_run_history(&mut self) {
+        if self.loop_run_history_detail.is_some() {
+            self.clear_loop_run_history();
+            return;
+        }
+        self.show_loop_run_history(
+            crate::loop_runs::ALL_LOOPS_ID.to_string(),
+            crate::loop_runs::RunHistory {
+                runs: crate::loop_runs::runs_for_loop(&self.loop_run_history, None),
+                skipped_lines: self.loop_run_history.skipped_lines,
+            },
+            std::time::SystemTime::now(),
+        );
     }
 }
 

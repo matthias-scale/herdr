@@ -72,12 +72,17 @@ pub(crate) fn render_loop_run_history(
     frame: &mut Frame,
 ) {
     let projection = project_loop_run_history(history, loop_id, now);
+    let display_loop_id = if projection.loop_id == crate::loop_runs::ALL_LOOPS_ID {
+        "all loops"
+    } else {
+        projection.loop_id.as_str()
+    };
     let title = if projection.skipped_lines == 0 {
-        format!(" loop: {} · run history ", projection.loop_id)
+        format!(" loop: {display_loop_id} · run history ")
     } else {
         format!(
-            " loop: {} · run history · skipped {} malformed lines ",
-            projection.loop_id, projection.skipped_lines
+            " loop: {display_loop_id} · run history · skipped {} malformed lines ",
+            projection.skipped_lines
         )
     };
     let rows = projection.rows.iter().map(|row| {
