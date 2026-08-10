@@ -1587,6 +1587,50 @@ mod tests {
         std::fs::remove_file(path).expect("remove temporary receipt fixture");
     }
 
+    #[test]
+    fn loop_history_refreshes_when_receipt_watcher_is_unavailable() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-loop-runs-app-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temporary receipt directory");
+        let path = dir.join("run-receipts.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"event\":\"start\",\"run_id\":\"fallback\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n",
+        )
+        .expect("write temporary receipt fixture");
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.loop_history_reader = Some(crate::loop_runs::ReceiptReader::new(path));
+        app._loop_receipt_watcher = None;
+        app.loop_receipt_fallback_deadline = Some(std::time::Instant::now());
+
+        assert!(app.handle_scheduled_tasks(
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            false,
+        ));
+        assert_eq!(app.state.loop_run_history.runs.len(), 1);
+        assert_eq!(app.state.loop_run_history.runs[0].run_id, "fallback");
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("low-frequency fallback refresh")));
+
+        std::fs::remove_dir_all(dir).expect("remove temporary receipt directory");
+    }
+
     #[tokio::test]
     async fn status_focus_transition_uses_cached_cwd_without_runtime_queries() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
