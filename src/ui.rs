@@ -1239,7 +1239,7 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 19));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 53, 19));
 
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal.draw(|frame| render(&app, frame)).unwrap();
