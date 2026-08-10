@@ -2819,6 +2819,10 @@ impl HeadlessServer {
             self.sync_foreground_client_state();
         }
 
+        if let Some(width) = self.app.state.take_dock_width_persistence_request() {
+            self.send_to_client(client_id, ServerMessage::DockWidth { width });
+        }
+
         if self.app.state.detach_requested {
             self.app.state.detach_requested = false;
             info!(client_id, "client detach requested via keybind");
@@ -3003,6 +3007,17 @@ impl HeadlessServer {
                     .map(crate::protocol::ClientInputEvent::to_raw_input_event)
                     .collect();
                 self.handle_client_input_events(client_id, events)
+            }
+            ServerEvent::ClientDockWidth { client_id, width } => {
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                if !client.is_full_app_client() {
+                    return false;
+                }
+                client.dock_presentation.width =
+                    width.clamp(crate::ui::DOCK_MIN_WIDTH, crate::ui::DOCK_MAX_WIDTH);
+                true
             }
             ServerEvent::ClientPasteRejected {
                 client_id,

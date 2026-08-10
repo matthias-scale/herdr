@@ -2465,7 +2465,10 @@ mod tests {
             ActionContext::Prefix,
         );
         assert!(!state.dock_collapsed);
-        assert!(state.session_dirty);
+        assert!(
+            !state.session_dirty,
+            "client-local dock presentation must not dirty shared session state"
+        );
     }
 
     #[test]

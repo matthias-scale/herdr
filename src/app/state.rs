@@ -1595,6 +1595,8 @@ pub struct AppState {
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
+    /// Width to persist in the attached client's local presentation state.
+    pub(crate) dock_width_persistence_request: Option<u16>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -1781,6 +1783,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn set_dock_width(&mut self, width: u16) {
+        if self.dock_width != width {
+            self.dock_width = width;
+            self.dock_width_persistence_request = Some(width);
+        }
+    }
+
+    pub(crate) fn take_dock_width_persistence_request(&mut self) -> Option<u16> {
+        self.dock_width_persistence_request.take()
+    }
+
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
@@ -2154,6 +2167,7 @@ impl AppState {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            dock_width_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,

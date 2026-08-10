@@ -2364,7 +2364,12 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 55, 5));
 
         assert_eq!(app.state.dock_width, 25);
-        assert!(app.state.session_dirty);
+        assert_eq!(
+            app.state.take_dock_width_persistence_request(),
+            Some(25),
+            "dock resize must emit the client-local persistence update"
+        );
+        assert!(!app.state.session_dirty);
     }
 
     #[test]

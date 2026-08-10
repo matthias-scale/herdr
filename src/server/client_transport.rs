@@ -300,6 +300,8 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         events: Vec<crate::protocol::ClientInputEvent>,
     },
+    /// A client reported its persisted local dock width after connecting.
+    ClientDockWidth { client_id: u64, width: u16 },
     /// A fully decoded interactive paste exceeded the text-input limit.
     ClientPasteRejected {
         client_id: u64,
@@ -776,6 +778,9 @@ fn client_read_loop(
                     target,
                     takeover,
                 }
+            }
+            ClientMessage::SetDockWidth { width } => {
+                ServerEvent::ClientDockWidth { client_id, width }
             }
             ClientMessage::ClipboardImage { extension, data } => {
                 if data.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {

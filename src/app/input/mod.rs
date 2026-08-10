@@ -463,7 +463,7 @@ impl App {
             });
             self.last_dock_divider_click = Some(now);
             if double_click {
-                self.state.dock_width = crate::ui::DOCK_DEFAULT_WIDTH;
+                self.state.set_dock_width(crate::ui::DOCK_DEFAULT_WIDTH);
                 self.state.drag = None;
             } else {
                 self.state.drag = Some(crate::app::state::DragState {

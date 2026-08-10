@@ -596,6 +596,7 @@ impl App {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            dock_width_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -1192,6 +1193,9 @@ impl App {
             let now = Instant::now();
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
+            if let Some(width) = self.state.take_dock_width_persistence_request() {
+                crate::client::presentation::save_dock_width(width);
+            }
 
             if needs_render && self.can_render_now(now) {
                 self.sync_status_context_before_render();

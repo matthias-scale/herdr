@@ -27,9 +27,7 @@ impl AppState {
         let right = screen.x.saturating_add(screen.width);
         let width = right.saturating_sub(divider_col);
         let width = width.clamp(crate::ui::DOCK_MIN_WIDTH, crate::ui::DOCK_MAX_WIDTH);
-        if self.dock_width != width {
-            self.dock_width = width;
-        }
+        self.set_dock_width(width);
     }
 }
 
