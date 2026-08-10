@@ -2910,6 +2910,7 @@ mod tests {
     fn declared_wait_is_ignored_for_non_working_reports() {
         let started = Instant::now();
         let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
         terminal
             .set_hook_authority_report_at(
                 "herdr:claude-closing-block".into(),
