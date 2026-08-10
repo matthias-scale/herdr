@@ -133,18 +133,7 @@ pub(crate) fn watch_receipts(
     Some(watcher)
 }
 
-pub(crate) fn read_receipts(path: &Path) -> RunHistory {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RunHistory::default(),
-        Err(error) => {
-            tracing::warn!(path = %path.display(), error = %error, "failed to read loop run receipts");
-            return RunHistory::default();
-        }
-    };
-    parse_receipt_bytes(&bytes)
-}
-
+#[cfg(test)]
 pub(crate) fn parse_receipts(contents: &str) -> RunHistory {
     parse_receipt_bytes(contents.as_bytes())
 }
@@ -253,6 +242,7 @@ impl ReceiptReader {
     }
 }
 
+#[cfg(test)]
 fn parse_receipt_bytes(bytes: &[u8]) -> RunHistory {
     let mut history = RunHistory::default();
     let mut indexes = HashMap::new();
@@ -798,7 +788,9 @@ not-json
         let bytes = b"{\"event\":\"start\",\"run_id\":\"valid\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n{\"event\":\"start\",\"run_id\":\"bad\",\"skill\":\"bad\xFFskill\",\"start\":\"2026-08-10T10:01:00Z\"}\n";
         fs::write(&path, bytes).expect("write temporary receipt fixture");
 
-        let history = read_receipts(&path);
+        let mut reader = ReceiptReader::new(path.clone());
+        assert!(reader.refresh());
+        let history = reader.history();
 
         assert_eq!(history.runs.len(), 1);
         assert_eq!(history.runs[0].run_id, "valid");
@@ -889,10 +881,9 @@ not-json
 
     #[test]
     fn ac5_absent_and_empty_files_are_empty_histories() {
-        assert_eq!(
-            read_receipts(Path::new("/definitely/missing/receipts.jsonl")),
-            RunHistory::default()
-        );
+        let mut reader = ReceiptReader::new(PathBuf::from("/definitely/missing/receipts.jsonl"));
+        assert!(!reader.refresh());
+        assert_eq!(reader.history(), &RunHistory::default());
         assert_eq!(parse_receipts("\n"), RunHistory::default());
     }
     #[test]
