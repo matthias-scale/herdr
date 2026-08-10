@@ -10,8 +10,6 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 mod editor;
 
-pub(crate) use editor::{dock_editor_cursor, dock_editor_has_focus};
-
 pub(super) fn render_dock(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,

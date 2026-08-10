@@ -769,6 +769,9 @@ fn client_read_loop(
                     break;
                 }
             },
+            ClientMessage::SetDockWidth { width } => {
+                ServerEvent::ClientDockWidth { client_id, width }
+            }
             ClientMessage::ObserveTerminal { target } => {
                 ServerEvent::ClientObserveTerminal { client_id, target }
             }
@@ -778,9 +781,6 @@ fn client_read_loop(
                     target,
                     takeover,
                 }
-            }
-            ClientMessage::SetDockWidth { width } => {
-                ServerEvent::ClientDockWidth { client_id, width }
             }
             ClientMessage::ClipboardImage { extension, data } => {
                 if data.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {

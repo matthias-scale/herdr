@@ -139,19 +139,6 @@ use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
-/// UI-owned dock cursor projection. Server rendering consumes this client
-/// presentation result without depending on the dock implementation module.
-pub(crate) fn dock_editor_is_focused(app: &AppState) -> bool {
-    dock::dock_editor_has_focus(app)
-}
-
-pub(crate) fn dock_editor_cursor_state(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-) -> Option<crate::protocol::CursorState> {
-    dock::dock_editor_cursor(app, terminal_runtimes)
-}
-
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
 pub(crate) const DOCK_COLLAPSED_WIDTH: u16 = 1;
 pub(crate) const DOCK_DEFAULT_WIDTH: u16 = 32;

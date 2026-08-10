@@ -12,7 +12,6 @@ use crate::{
     app::{App, AppState, DockTab, Mode},
     layout::PaneId,
     pane::{AgentDetection, PaneLaunchEnv},
-    protocol::CursorState,
     terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry},
 };
 
@@ -57,28 +56,6 @@ fn editor_terminal_id_for_focused_agent(app: &AppState) -> Option<TerminalId> {
     app.dock_editor_sessions
         .get(&agent_pane_id)
         .map(|session| session.terminal_id.clone())
-}
-
-pub(crate) fn dock_editor_has_focus(app: &AppState) -> bool {
-    focused_editor_terminal_id(app).is_some()
-}
-
-pub(crate) fn dock_editor_cursor(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-) -> Option<CursorState> {
-    let terminal_id = focused_editor_terminal_id(app)?;
-    let runtime = terminal_runtimes.get(&terminal_id)?;
-    if runtime.synchronized_output_active() {
-        return None;
-    }
-    let cursor = runtime.cursor_state(app.view.dock_body_rect, true)?;
-    Some(CursorState {
-        x: cursor.x,
-        y: cursor.y,
-        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
-        shape: cursor.shape,
-    })
 }
 
 pub(super) fn render_editor_body(
