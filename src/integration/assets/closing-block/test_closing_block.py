@@ -36,6 +36,12 @@ ZERO_COUNT_GATE = """\
 Done here.
 """
 
+DECLARED_BLOCKING_WITHOUT_ITEMS = """\
+**Critical action points (2 blocking)**
+
+Done here.
+"""
+
 MULTI_WHAT = """\
 **Critical action points (2 blocking)**
 
@@ -150,6 +156,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
         self.assertEqual(block.blocking, 1)
         self.assertEqual(block.wire_gates()[0]["text"], "Approve the zero-count correction.")
+
+    def test_declared_blocking_without_items_does_not_create_phantom_gates(self):
+        block = closing_block.parse(DECLARED_BLOCKING_WITHOUT_ITEMS)
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
 
     def test_answer_and_what_to_test_are_nonblocking_items(self):
         block = closing_block.parse(REALISTIC_CAP)
