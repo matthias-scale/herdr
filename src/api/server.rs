@@ -1026,6 +1026,35 @@ mod tests {
     }
 
     #[test]
+    fn malformed_missing_version_report_returns_invalid_request() {
+        let (mut client, server, _path) = local_stream_pair("missing-version-report");
+        let request = serde_json::json!({
+            "id": "missing-v",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": "w1:p1",
+                "source": "herdr:claude-closing-block",
+                "agent": "claude",
+                "state": "blocked",
+                "gates": ["not an object"]
+            }
+        });
+        client
+            .write_all(serde_json::to_string(&request).unwrap().as_bytes())
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        drop(api_rx);
+        let running = Arc::new(AtomicBool::new(true));
+        handle_connection(server, &api_tx, &EventHub::default(), &running, None).unwrap();
+
+        let response: ErrorResponse = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response.error.code, "invalid_request");
+    }
+
+    #[test]
     fn request_dispatches_to_app_channel() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let request = Request {

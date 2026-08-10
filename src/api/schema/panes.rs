@@ -436,7 +436,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
 
         let raw = Raw::deserialize(value).map_err(D::Error::custom)?;
         let version_compatible = raw.v.is_none_or(|version| version == CLOSING_BLOCK_VERSION);
-        let strict = raw.v == Some(CLOSING_BLOCK_VERSION);
+        let strict = version_compatible;
         Ok(Self {
             pane_id: raw.pane_id,
             source: raw.source,

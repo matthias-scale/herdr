@@ -1471,3 +1471,21 @@ fn report_agent_params_with_current_version_keep_strict_arrays() {
     assert_eq!(params.gates.as_deref().unwrap().len(), 1);
     assert_eq!(params.items.as_deref(), Some(&[][..]));
 }
+
+#[test]
+fn report_agent_params_without_version_keep_strict_arrays() {
+    for field in ["gates", "items", "decisions"] {
+        let mut payload = serde_json::json!({
+            "pane_id": "w1:p1",
+            "source": "herdr:claude-closing-block",
+            "agent": "claude",
+            "state": "blocked"
+        });
+        payload[field] = serde_json::json!(["not an object"]);
+
+        assert!(
+            serde_json::from_value::<PaneReportAgentParams>(payload).is_err(),
+            "missing v must strictly reject malformed {field}"
+        );
+    }
+}
