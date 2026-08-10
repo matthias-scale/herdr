@@ -29,7 +29,6 @@ impl AppState {
         let width = width.clamp(crate::ui::DOCK_MIN_WIDTH, crate::ui::DOCK_MAX_WIDTH);
         if self.dock_width != width {
             self.dock_width = width;
-            self.mark_session_dirty();
         }
     }
 }

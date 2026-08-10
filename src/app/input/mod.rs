@@ -464,7 +464,6 @@ impl App {
             self.last_dock_divider_click = Some(now);
             if double_click {
                 self.state.dock_width = crate::ui::DOCK_DEFAULT_WIDTH;
-                self.state.mark_session_dirty();
                 self.state.drag = None;
             } else {
                 self.state.drag = Some(crate::app::state::DragState {
@@ -998,8 +997,6 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
         state.prio_panel_collapsed,
-        state.dock_width,
-        state.dock_collapsed,
     )
 }
 

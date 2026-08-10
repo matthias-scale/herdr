@@ -428,7 +428,6 @@ impl App {
             }
             NavigateAction::ToggleDock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
-                self.state.mark_session_dirty();
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
@@ -2118,7 +2117,6 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ToggleDock => {
             state.dock_collapsed = !state.dock_collapsed;
-            state.mark_session_dirty();
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {

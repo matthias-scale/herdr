@@ -296,8 +296,6 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             prio_panel_collapsed: false,
-            dock_width: None,
-            dock_collapsed: None,
         }
     }
 

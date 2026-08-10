@@ -428,8 +428,6 @@ impl App {
             sidebar_section_split,
             collapsed_space_keys,
             prio_panel_collapsed,
-            dock_width,
-            dock_collapsed,
         ) = if no_session {
             (
                 Vec::new(),
@@ -440,8 +438,6 @@ impl App {
                 0.5_f32,
                 std::collections::HashSet::new(),
                 false,
-                crate::ui::DOCK_DEFAULT_WIDTH,
-                true,
             )
         } else if let Some(snap) = crate::persist::load() {
             let history = config
@@ -479,8 +475,6 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                     snap.prio_panel_collapsed,
-                    snap.dock_width.unwrap_or(crate::ui::DOCK_DEFAULT_WIDTH),
-                    snap.dock_collapsed.unwrap_or(true),
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -499,8 +493,6 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                     snap.prio_panel_collapsed,
-                    snap.dock_width.unwrap_or(crate::ui::DOCK_DEFAULT_WIDTH),
-                    snap.dock_collapsed.unwrap_or(true),
                 )
             }
         } else {
@@ -513,8 +505,6 @@ impl App {
                 0.5_f32,
                 std::collections::HashSet::new(),
                 false,
-                crate::ui::DOCK_DEFAULT_WIDTH,
-                true,
             )
         };
 
@@ -691,8 +681,8 @@ impl App {
             sidebar_width,
             sidebar_min_width,
             sidebar_max_width,
-            dock_width,
-            dock_collapsed,
+            dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
+            dock_collapsed: true,
             dock_tab: state::DockTab::Editor,
             dock_scroll: 0,
             dock_editor_focused: false,
@@ -954,12 +944,6 @@ impl App {
         }
         if let Some(split) = snapshot.sidebar_section_split {
             app.state.sidebar_section_split = split;
-        }
-        if let Some(width) = snapshot.dock_width {
-            app.state.dock_width = width;
-        }
-        if let Some(collapsed) = snapshot.dock_collapsed {
-            app.state.dock_collapsed = collapsed;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
         app.state.prio_panel_collapsed = snapshot.prio_panel_collapsed;

@@ -56,6 +56,8 @@ pub(crate) struct ClientConnection {
     pub(crate) render_state: ClientRenderState,
     /// Sidebar disclosure, projection escape, and scroll state for this attach.
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
+    /// Dock layout and focus state for this attach; editor PTYs are server-owned.
+    pub(crate) dock_presentation: crate::app::state::DockPresentationState,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
@@ -127,6 +129,7 @@ impl ClientConnection {
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
+            dock_presentation: crate::app::state::DockPresentationState::default(),
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             graphics_surface_reset_pending: false,
             render_pending: false,

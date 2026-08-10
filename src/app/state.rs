@@ -699,6 +699,30 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) projection_revision: u64,
 }
 
+/// Attach-local dock presentation. The headless server swaps one instance into
+/// `AppState` while routing input or rendering that client; editor PTYs remain
+/// server-owned runtime resources in `AppState`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockPresentationState {
+    pub(crate) width: u16,
+    pub(crate) collapsed: bool,
+    pub(crate) tab: DockTab,
+    pub(crate) scroll: u16,
+    pub(crate) editor_focused: bool,
+}
+
+impl Default for DockPresentationState {
+    fn default() -> Self {
+        Self {
+            width: crate::ui::DOCK_DEFAULT_WIDTH,
+            collapsed: true,
+            tab: DockTab::Editor,
+            scroll: 0,
+            editor_focused: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -1779,6 +1803,14 @@ impl AppState {
             &mut self.sidebar_presentation.projection_revision,
             &mut other.projection_revision,
         );
+    }
+
+    pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
+        std::mem::swap(&mut self.dock_width, &mut other.width);
+        std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
+        std::mem::swap(&mut self.dock_tab, &mut other.tab);
+        std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
+        std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {

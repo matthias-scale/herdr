@@ -349,7 +349,7 @@ fn render_virtual_with_runtime_registry_inner(
     render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     let popup_visible = app_state.popup_pane.is_some();
-    let dock_editor_focused = !popup_visible && crate::ui::dock::dock_editor_has_focus(app_state);
+    let dock_editor_focused = !popup_visible && crate::ui::dock_editor_is_focused(app_state);
     let pre_compute_suppresses_focused_terminal_cursor = !dock_editor_focused
         && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
     if resize_panes {
@@ -385,7 +385,7 @@ fn render_virtual_with_runtime_registry_inner(
     let cursor = if popup_visible {
         popup_terminal_cursor(app_state, terminal_runtimes)
     } else if dock_editor_focused {
-        crate::ui::dock::dock_editor_cursor(app_state, terminal_runtimes)
+        crate::ui::dock_editor_cursor_state(app_state, terminal_runtimes)
     } else if suppress_focused_terminal_cursor {
         None
     } else {
@@ -463,8 +463,8 @@ pub(crate) fn focused_terminal_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<CursorState> {
-    if crate::ui::dock::dock_editor_has_focus(app_state) {
-        return crate::ui::dock::dock_editor_cursor(app_state, terminal_runtimes);
+    if crate::ui::dock_editor_is_focused(app_state) {
+        return crate::ui::dock_editor_cursor_state(app_state, terminal_runtimes);
     }
     crate::ui::tab_surface_cursor(app_state, terminal_runtimes, app_state.view.tab_surface())
 }
@@ -473,7 +473,7 @@ fn focused_terminal_owns_host_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal || crate::ui::dock::dock_editor_has_focus(app_state) {
+    if app_state.mode != Mode::Terminal || crate::ui::dock_editor_is_focused(app_state) {
         return false;
     }
 
@@ -501,7 +501,7 @@ fn focused_terminal_suppresses_host_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal || crate::ui::dock::dock_editor_has_focus(app_state) {
+    if app_state.mode != Mode::Terminal || crate::ui::dock_editor_is_focused(app_state) {
         return false;
     }
 
