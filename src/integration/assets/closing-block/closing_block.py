@@ -146,11 +146,8 @@ class ClosingBlock:
 
     @property
     def blocking(self) -> int:
-        # Item labels are authoritative. Keep the header only as a fallback for
-        # an incomplete block, never as a source of phantom gates.
-        if self.items:
-            return len(self.gates)
-        return self.declared_blocking or 0
+        # Item labels are authoritative; a declared count cannot create gates.
+        return len(self.gates)
 
     @property
     def agents_running(self) -> int:
