@@ -157,6 +157,14 @@ UNCLOSED_FENCE = """\
 1. **Gate** — Incomplete example.
 """
 
+BOM_PREFIXED_CAP = """\
+\ufeff**Critical action points (1 blocking)**
+
+1. **Gate** — BOM-prefixed gate.
+
+Done here.
+"""
+
 STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 **Critical action points (0 blocking)**
 
@@ -452,6 +460,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertFalse(block.present)
         self.assertEqual(block.blocking, 0)
         self.assertEqual(block.wire_gates(), [])
+
+    def test_bom_prefixed_cap_is_recognized(self):
+        block = closing_block.parse(BOM_PREFIXED_CAP)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.wire_gates()[0]["text"], "BOM-prefixed gate.")
 
     def test_decisions_from_earlier_cap_block_are_not_attached(self):
         block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)
