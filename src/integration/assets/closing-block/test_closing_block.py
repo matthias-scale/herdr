@@ -150,6 +150,13 @@ FENCED_NOTHING_BETWEEN_DECISIONS_AND_REAL_CAP = """\
 Done here.
 """
 
+UNCLOSED_FENCE = """\
+```markdown
+**Critical action points (1 blocking)**
+
+1. **Gate** — Incomplete example.
+"""
+
 STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 **Critical action points (0 blocking)**
 
@@ -428,18 +435,23 @@ class ClosingBlockV2Tests(unittest.TestCase):
     def test_fenced_cap_does_not_drop_pre_cap_decisions(self):
         block = closing_block.parse(FENCED_CAP_BETWEEN_DECISIONS_AND_REAL_CAP)
 
-        self.assertEqual(
-            [decision["text"] for decision in block.wire_decisions()],
-            ["Live pre-CAP decision."],
-        )
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 1)
+        self.assertIn("Live pre-CAP decision.", decisions[0]["text"])
 
     def test_fenced_nothing_does_not_drop_pre_cap_decisions(self):
         block = closing_block.parse(FENCED_NOTHING_BETWEEN_DECISIONS_AND_REAL_CAP)
 
-        self.assertEqual(
-            [decision["text"] for decision in block.wire_decisions()],
-            ["Live pre-CAP decision."],
-        )
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 1)
+        self.assertIn("Live pre-CAP decision.", decisions[0]["text"])
+
+    def test_unclosed_fence_suppresses_tail_markers(self):
+        block = closing_block.parse(UNCLOSED_FENCE)
+
+        self.assertFalse(block.present)
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
 
     def test_decisions_from_earlier_cap_block_are_not_attached(self):
         block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)

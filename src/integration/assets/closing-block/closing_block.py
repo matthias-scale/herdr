@@ -24,6 +24,8 @@ _AGENTS_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _DONE_RE = re.compile(r"^Done here\.[ \t]*\r?$", re.MULTILINE)
+_FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 
 _ITEM_START = r"^\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
 _ITEM_RE = re.compile(
@@ -191,16 +193,67 @@ class ClosingBlock:
         return [decision.wire() for decision in self.decisions]
 
 
-def _section_end(text: str, start: int, end: int) -> int:
+def _fence_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    fence_start: int | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    offset = 0
+
+    for line in text.splitlines(keepends=True):
+        line_end = offset + len(line)
+        content = line.rstrip("\r\n")
+        if fence_start is None:
+            opener = _FENCE_OPEN_RE.fullmatch(content)
+            if opener:
+                marker = opener.group("marker")
+                fence_start = offset
+                fence_char = marker[0]
+                fence_length = len(marker)
+        else:
+            closer = _FENCE_CLOSE_RE.fullmatch(content)
+            if closer:
+                marker = closer.group("marker")
+                if marker[0] == fence_char and len(marker) >= fence_length:
+                    ranges.append((fence_start, line_end))
+                    fence_start = None
+                    fence_char = None
+                    fence_length = 0
+        offset = line_end
+
+    if fence_start is not None:
+        # An unfinished example is treated as fenced through end-of-message;
+        # an ambiguous tail must not fabricate live status markers.
+        ranges.append((fence_start, len(text)))
+    return ranges
+
+
+def _visible_matches(
+    pattern: re.Pattern[str],
+    text: str,
+    start: int,
+    end: int,
+    fences: list[tuple[int, int]],
+):
+    for match in pattern.finditer(text, start, end):
+        if not any(fence_start <= match.start() < fence_end for fence_start, fence_end in fences):
+            yield match
+
+
+def _section_end(
+    text: str, start: int, end: int, fences: list[tuple[int, int]]
+) -> int:
     candidates = [
         match.start()
         for pattern in (_DECISIONS_RE, _NOTHING_RE, _WHAT_RE)
-        for match in pattern.finditer(text, start, end)
+        for match in _visible_matches(pattern, text, start, end, fences)
     ]
     return min(candidates, default=end)
 
 
-def _decisions_end(text: str, start: int, end: int) -> int:
+def _decisions_end(
+    text: str, start: int, end: int, fences: list[tuple[int, int]]
+) -> int:
     # The decisions list may sit before the critical-action-points block (the
     # authoring rules put the closing block last), so the item scan must stop
     # at whichever section opens next or the CAP items parse as decisions.
@@ -214,12 +267,12 @@ def _decisions_end(text: str, start: int, end: int) -> int:
             _AGENTS_RE,
             _DONE_RE,
         )
-        for match in pattern.finditer(text, start, end)
+        for match in _visible_matches(pattern, text, start, end, fences)
     ]
     return min(candidates, default=end)
 
 
-def _closing_blocks(text: str) -> list[_ClosingBlock]:
+def _closing_blocks(text: str, fences: list[tuple[int, int]]) -> list[_ClosingBlock]:
     """Split top-level CAP sections into blocks and bound their decisions.
 
     The first CAP belongs to the initial block so valid pre-CAP decisions are
@@ -228,8 +281,8 @@ def _closing_blocks(text: str) -> list[_ClosingBlock]:
     one structural block. A Nothing before the first CAP closes the preamble,
     so that stale decisions cannot flow into the later CAP block.
     """
-    headers = list(_HEADER_RE.finditer(text))
-    nothings = list(_NOTHING_RE.finditer(text))
+    headers = list(_visible_matches(_HEADER_RE, text, 0, len(text), fences))
+    nothings = list(_visible_matches(_NOTHING_RE, text, 0, len(text), fences))
     if not headers:
         if not nothings:
             return []
@@ -258,15 +311,21 @@ def _closing_blocks(text: str) -> list[_ClosingBlock]:
 
 
 def _parse_what_to_test(
-    text: str, start: int, end: int, items: list[Item]
+    text: str,
+    start: int,
+    end: int,
+    items: list[Item],
+    fences: list[tuple[int, int]],
 ) -> list[Item]:
-    headings = list(_WHAT_RE.finditer(text, start, end))
+    headings = list(_visible_matches(_WHAT_RE, text, start, end, fences))
     parsed: list[Item] = []
     for position, heading in enumerate(headings):
         end_candidates = [
             match.start()
             for pattern in (_DECISIONS_RE, _NOTHING_RE, _AGENTS_RE, _DONE_RE)
-            for match in pattern.finditer(text, heading.end(), end)
+            for match in _visible_matches(
+                pattern, text, heading.end(), end, fences
+            )
         ]
         if position + 1 < len(headings):
             end_candidates.append(headings[position + 1].start())
@@ -304,7 +363,8 @@ def parse(text: str) -> ClosingBlock:
     """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
-    blocks = _closing_blocks(text)
+    fences = _fence_ranges(text)
+    blocks = _closing_blocks(text, fences)
     selected = blocks[-1] if blocks else None
     start = None
     if selected:
@@ -317,8 +377,10 @@ def parse(text: str) -> ClosingBlock:
             block.declared_blocking = 0
 
         if start is not None:
-            cap_end = _section_end(text, start, selected.end)
-            for match in _ITEM_RE.finditer(text, start, cap_end):
+            cap_end = _section_end(text, start, selected.end, fences)
+            for match in _visible_matches(
+                _ITEM_RE, text, start, cap_end, fences
+            ):
                 block.items.append(
                     Item(
                         int(match.group("idx")),
@@ -327,11 +389,19 @@ def parse(text: str) -> ClosingBlock:
                     )
                 )
             block.items.extend(
-                _parse_what_to_test(text, start, selected.end, block.items)
+                _parse_what_to_test(
+                    text, start, selected.end, block.items, fences
+                )
             )
 
         decision_headings = list(
-            _DECISIONS_RE.finditer(text, selected.start, selected.decisions_end)
+            _visible_matches(
+                _DECISIONS_RE,
+                text,
+                selected.start,
+                selected.decisions_end,
+                fences,
+            )
         )
         if selected.header:
             post_cap_headings = [
@@ -349,10 +419,17 @@ def parse(text: str) -> ClosingBlock:
 
         for decisions_heading in decision_headings:
             decisions_end = _decisions_end(
-                text, decisions_heading.end(), selected.decisions_end
+                text,
+                decisions_heading.end(),
+                selected.decisions_end,
+                fences,
             )
-            for match in _DECISION_ITEM_RE.finditer(
-                text, decisions_heading.end(), decisions_end
+            for match in _visible_matches(
+                _DECISION_ITEM_RE,
+                text,
+                decisions_heading.end(),
+                decisions_end,
+                fences,
             ):
                 body = _clean_body(match.group("body"))
                 if not body:
@@ -363,7 +440,7 @@ def parse(text: str) -> ClosingBlock:
                 )
 
     agents = None
-    for candidate in _AGENTS_RE.finditer(text):
+    for candidate in _visible_matches(_AGENTS_RE, text, 0, len(text), fences):
         agents = candidate
     if agents:
         block.declared_agents = int(agents.group("n"))
@@ -371,7 +448,7 @@ def parse(text: str) -> ClosingBlock:
             part.strip() for part in agents.group("rest").split(";") if part.strip()
         ]
         block.present = True
-    elif _DONE_RE.search(text):
+    elif next(_visible_matches(_DONE_RE, text, 0, len(text), fences), None):
         block.done_here = True
         block.declared_agents = 0
         block.present = True
