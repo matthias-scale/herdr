@@ -330,9 +330,24 @@ def parse(text: str) -> ClosingBlock:
                 _parse_what_to_test(text, start, selected.end, block.items)
             )
 
-        for decisions_heading in _DECISIONS_RE.finditer(
-            text, selected.start, selected.decisions_end
-        ):
+        decision_headings = list(
+            _DECISIONS_RE.finditer(text, selected.start, selected.decisions_end)
+        )
+        if selected.header:
+            post_cap_headings = [
+                heading
+                for heading in decision_headings
+                if heading.start() >= selected.header.end()
+            ]
+            if post_cap_headings:
+                # Pre-CAP decisions are a supported authoring order when no
+                # later section exists. Once a selected CAP has a post-CAP
+                # section, that section is operative and supersedes all
+                # earlier pre-CAP sections. Keep every heading on the
+                # operative side so repeated sections in one block survive.
+                decision_headings = post_cap_headings
+
+        for decisions_heading in decision_headings:
             decisions_end = _decisions_end(
                 text, decisions_heading.end(), selected.decisions_end
             )
