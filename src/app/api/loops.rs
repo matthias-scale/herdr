@@ -26,8 +26,8 @@ impl App {
         id: String,
         params: LoopRunHistoryParams,
     ) -> String {
-        let history = self.state.loop_run_history.clone();
-        let selected_runs = crate::loop_runs::runs_for_loop(&history, params.loop_id.as_deref());
+        let history = &self.state.loop_run_history;
+        let selected_runs = crate::loop_runs::runs_for_loop(history, params.loop_id.as_deref());
         let runs = selected_runs
             .iter()
             .map(crate::loop_runs::run_info)
@@ -43,22 +43,22 @@ impl App {
         )
     }
 
-    pub(super) fn refresh_loop_run_history(&mut self) -> bool {
+    pub(crate) fn refresh_loop_run_history(&mut self) -> bool {
         let Some(reader) = self.loop_history_reader.as_mut() else {
             return false;
         };
         if !reader.refresh() {
             return false;
         }
-        let history = reader.history().clone();
-        if self.state.loop_run_history == history {
+        if self.state.loop_run_history == *reader.history() {
             return false;
         }
-        self.state.loop_run_history = history.clone();
+        self.state.loop_run_history = reader.history().clone();
+        let history = &self.state.loop_run_history;
         if let Some(detail) = self.state.loop_run_history_detail.as_mut() {
             detail.history = crate::loop_runs::RunHistory {
                 runs: crate::loop_runs::runs_for_loop(
-                    &history,
+                    history,
                     (detail.loop_id != crate::loop_runs::ALL_LOOPS_ID)
                         .then_some(detail.loop_id.as_str()),
                 ),

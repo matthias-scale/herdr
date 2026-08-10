@@ -1,14 +1,90 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::hash::{Hash, Hasher};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+#[cfg(not(any(unix, windows)))]
+use std::time::SystemTime;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 
 use crate::events::AppEvent;
 use notify::Watcher;
 
 const RECEIPT_RELATIVE_PATH: &str = ".local/state/herdr/run-receipts.jsonl";
 const LOOP_REGISTRY_RELATIVE_PATH: &str = "workspaces/scalable/loops.md";
+const RECEIPT_CONTENT_GUARD_BYTES: u64 = 4096;
+const MAX_HISTORY_RUNS: usize = 10_000;
+const MAX_PENDING_LINE_BYTES: usize = 1_048_576;
+const RECEIPT_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const ALL_LOOPS_ID: &str = "__all__";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: Option<u32>,
+    #[cfg(windows)]
+    file_index: Option<u64>,
+    #[cfg(not(any(unix, windows)))]
+    modified: Option<SystemTime>,
+    #[cfg(not(any(unix, windows)))]
+    length: u64,
+}
+
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        FileIdentity {
+            volume_serial_number: metadata.volume_serial_number(),
+            file_index: metadata.file_index(),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        FileIdentity {
+            modified: metadata.modified().ok(),
+            length: metadata.len(),
+        }
+    }
+}
+
+fn receipt_content_guard(file: &mut File, offset: u64) -> io::Result<u64> {
+    let mut hasher = DefaultHasher::new();
+    let prefix_len = offset.min(RECEIPT_CONTENT_GUARD_BYTES);
+    0u8.hash(&mut hasher);
+    file.seek(SeekFrom::Start(0))?;
+    let mut prefix = file.take(prefix_len);
+    let mut bytes = Vec::with_capacity(prefix_len as usize);
+    prefix.read_to_end(&mut bytes)?;
+    bytes.hash(&mut hasher);
+
+    if offset > RECEIPT_CONTENT_GUARD_BYTES {
+        1u8.hash(&mut hasher);
+        file.seek(SeekFrom::Start(offset - RECEIPT_CONTENT_GUARD_BYTES))?;
+        let mut cursor = file.take(RECEIPT_CONTENT_GUARD_BYTES);
+        bytes.clear();
+        cursor.read_to_end(&mut bytes)?;
+        bytes.hash(&mut hasher);
+    }
+
+    Ok(hasher.finish())
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct RunHistory {
@@ -97,17 +173,78 @@ pub(crate) fn default_loop_registry_path() -> Option<PathBuf> {
     home_dir().map(|home| home.join(LOOP_REGISTRY_RELATIVE_PATH))
 }
 
+#[derive(Debug)]
+pub(crate) struct ReceiptWatchHealth {
+    fallback_requested: AtomicBool,
+}
+
+impl ReceiptWatchHealth {
+    fn new(fallback_requested: bool) -> Arc<Self> {
+        Arc::new(Self {
+            fallback_requested: AtomicBool::new(fallback_requested),
+        })
+    }
+
+    fn request_fallback(&self) {
+        self.fallback_requested.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_fallback_request(&self) -> bool {
+        self.fallback_requested.swap(false, Ordering::AcqRel)
+    }
+}
+
+fn queue_receipt_change(
+    event_tx: &tokio::sync::mpsc::Sender<AppEvent>,
+    health: &ReceiptWatchHealth,
+) {
+    if let Err(error) = event_tx.try_send(AppEvent::LoopRunHistoryChanged) {
+        tracing::warn!(
+            error = %error,
+            "dropped loop run receipt change event; enabling fallback refresh"
+        );
+        health.request_fallback();
+    }
+}
+
+pub(crate) struct ReceiptWatch {
+    pub(crate) watcher: Option<notify::RecommendedWatcher>,
+    pub(crate) health: Arc<ReceiptWatchHealth>,
+    pub(crate) fallback_enabled: bool,
+}
+
 pub(crate) fn watch_receipts(
     path: Option<PathBuf>,
     event_tx: tokio::sync::mpsc::Sender<AppEvent>,
-) -> Option<notify::RecommendedWatcher> {
-    let path = path?;
-    let parent = path.parent()?.to_path_buf();
+) -> ReceiptWatch {
+    let health = ReceiptWatchHealth::new(false);
+    let Some(path) = path else {
+        return ReceiptWatch {
+            watcher: None,
+            health,
+            fallback_enabled: false,
+        };
+    };
+    let Some(parent) = path.parent().map(Path::to_path_buf) else {
+        tracing::warn!(path = %path.display(), "loop run receipt watcher has no parent directory");
+        health.request_fallback();
+        return ReceiptWatch {
+            watcher: None,
+            health,
+            fallback_enabled: true,
+        };
+    };
     let target = path.clone();
     let watched_parent = parent.clone();
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        let Ok(event) = result else {
-            return;
+    let callback_health = health.clone();
+    let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let event = match result {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!(error = %error, "loop run receipt watcher backend failed");
+                callback_health.request_fallback();
+                return;
+            }
         };
         let relevant = matches!(
             event.kind,
@@ -123,14 +260,44 @@ pub(crate) fn watch_receipts(
                     || candidate.file_name() == target.file_name()
             })
         {
-            let _ = event_tx.try_send(AppEvent::LoopRunHistoryChanged);
+            queue_receipt_change(&event_tx, &callback_health);
         }
-    })
-    .ok()?;
-    watcher
-        .watch(&parent, notify::RecursiveMode::NonRecursive)
-        .ok()?;
-    Some(watcher)
+    });
+    let Ok(mut watcher) = watcher else {
+        tracing::warn!(path = %path.display(), "failed to construct loop run receipt watcher");
+        health.request_fallback();
+        return ReceiptWatch {
+            watcher: None,
+            health,
+            fallback_enabled: true,
+        };
+    };
+    if let Err(error) = watcher.watch(&parent, notify::RecursiveMode::NonRecursive) {
+        tracing::warn!(
+            path = %parent.display(),
+            error = %error,
+            "failed to register loop run receipt watcher"
+        );
+        health.request_fallback();
+        return ReceiptWatch {
+            watcher: None,
+            health,
+            fallback_enabled: true,
+        };
+    }
+    ReceiptWatch {
+        watcher: Some(watcher),
+        health,
+        fallback_enabled: false,
+    }
+}
+
+pub(crate) fn disabled_receipt_watch() -> ReceiptWatch {
+    ReceiptWatch {
+        watcher: None,
+        health: ReceiptWatchHealth::new(false),
+        fallback_enabled: false,
+    }
 }
 
 #[cfg(test)]
@@ -142,7 +309,10 @@ pub(crate) fn parse_receipts(contents: &str) -> RunHistory {
 pub(crate) struct ReceiptReader {
     path: PathBuf,
     offset: u64,
+    identity: Option<FileIdentity>,
+    content_guard: Option<u64>,
     pending: Vec<u8>,
+    discarding_overlong_line: bool,
     history: RunHistory,
     indexes: HashMap<String, usize>,
 }
@@ -152,7 +322,10 @@ impl ReceiptReader {
         Self {
             path,
             offset: 0,
+            identity: None,
+            content_guard: None,
             pending: Vec::new(),
+            discarding_overlong_line: false,
             history: RunHistory::default(),
             indexes: HashMap::new(),
         }
@@ -163,32 +336,11 @@ impl ReceiptReader {
     }
 
     pub(crate) fn refresh(&mut self) -> bool {
-        let length = match fs::metadata(&self.path) {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let changed = self.offset != 0 || !self.history.runs.is_empty();
-                self.reset();
-                return changed;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    error = %error,
-                    "failed to stat loop run receipts"
-                );
-                return false;
-            }
-        };
-
-        if length < self.offset {
-            self.reset();
-        }
-        if length == self.offset {
-            return false;
-        }
-
         let mut file = match File::open(&self.path) {
             Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return self.reset();
+            }
             Err(error) => {
                 tracing::warn!(
                     path = %self.path.display(),
@@ -198,30 +350,122 @@ impl ReceiptReader {
                 return false;
             }
         };
-        if file.seek(SeekFrom::Start(self.offset)).is_err() {
-            return false;
-        }
-        let mut bytes = Vec::new();
-        if let Err(error) = file.read_to_end(&mut bytes) {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %error,
-                "failed to read appended loop run receipts"
-            );
-            return false;
-        }
-        self.offset = length;
-        self.pending.extend(bytes);
 
-        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let line = self.pending.drain(..=newline).collect::<Vec<_>>();
-            process_receipt_line(&mut self.history, &mut self.indexes, &line[..newline]);
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "failed to read loop run receipts metadata"
+                );
+                return false;
+            }
+        };
+        let identity = file_identity(&metadata);
+        let mut changed = false;
+        if self.identity.is_some_and(|previous| previous != identity)
+            || self.offset > metadata.len()
+        {
+            changed |= self.reset();
+        } else if self.offset > 0 {
+            match self.content_guard {
+                Some(previous_guard) => match receipt_content_guard(&mut file, self.offset) {
+                    Ok(current_guard) if current_guard != previous_guard => {
+                        changed |= self.reset();
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %self.path.display(),
+                            error = %error,
+                            "failed to verify loop run receipt cursor"
+                        );
+                        changed |= self.reset();
+                    }
+                },
+                None => changed |= self.reset(),
+            }
+        }
+        self.identity = Some(identity);
+
+        if metadata.len() == self.offset {
+            self.content_guard = receipt_content_guard(&mut file, self.offset).ok();
+            return changed;
+        }
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return changed;
+        }
+        let mut read_bytes = 0u64;
+        let mut buffer = [0u8; RECEIPT_READ_CHUNK_BYTES];
+        loop {
+            let count = match file.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        error = %error,
+                        "failed to read appended loop run receipts"
+                    );
+                    self.content_guard = receipt_content_guard(&mut file, self.offset).ok();
+                    return changed || read_bytes != 0;
+                }
+            };
+            if count == 0 {
+                break;
+            }
+            read_bytes = read_bytes.saturating_add(count as u64);
+            self.offset = self.offset.saturating_add(count as u64);
+            self.pending.extend_from_slice(&buffer[..count]);
+            self.consume_pending();
         }
         self.history
             .runs
             .sort_by(|left, right| right.start.cmp(&left.start));
+        self.history.runs.truncate(MAX_HISTORY_RUNS);
         self.rebuild_indexes();
-        true
+        self.content_guard = receipt_content_guard(&mut file, self.offset).ok();
+        changed || read_bytes != 0
+    }
+
+    fn consume_pending(&mut self) {
+        loop {
+            if self.discarding_overlong_line {
+                let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') else {
+                    self.pending.clear();
+                    return;
+                };
+                self.pending.drain(..=newline);
+                self.discarding_overlong_line = false;
+                continue;
+            }
+
+            let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') else {
+                if self.pending.len() > MAX_PENDING_LINE_BYTES {
+                    self.pending = Vec::new();
+                    self.discarding_overlong_line = true;
+                    self.history.skipped_lines += 1;
+                }
+                return;
+            };
+            if newline > MAX_PENDING_LINE_BYTES {
+                self.pending.drain(..=newline);
+                self.history.skipped_lines += 1;
+            } else {
+                let line = self.pending.drain(..=newline).collect::<Vec<_>>();
+                process_receipt_line(&mut self.history, &mut self.indexes, &line[..newline]);
+                self.enforce_history_cap();
+            }
+        }
+    }
+
+    fn enforce_history_cap(&mut self) {
+        let excess = self.history.runs.len().saturating_sub(MAX_HISTORY_RUNS);
+        if excess == 0 {
+            return;
+        }
+        self.history.runs.drain(..excess);
+        self.rebuild_indexes();
     }
 
     fn rebuild_indexes(&mut self) {
@@ -234,11 +478,21 @@ impl ReceiptReader {
             .collect();
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self) -> bool {
+        let changed = self.offset != 0
+            || self.identity.is_some()
+            || self.content_guard.is_some()
+            || !self.pending.is_empty()
+            || !self.history.runs.is_empty()
+            || self.history.skipped_lines != 0;
         self.offset = 0;
+        self.identity = None;
+        self.content_guard = None;
         self.pending.clear();
+        self.discarding_overlong_line = false;
         self.history = RunHistory::default();
         self.indexes.clear();
+        changed
     }
 }
 
@@ -718,8 +972,27 @@ pub(crate) fn loop_info(definition: &LoopDefinition) -> crate::api::schema::Loop
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     use std::fs::OpenOptions;
     use std::io::Write;
+
+    fn temporary_receipt_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-loop-runs-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temporary receipt directory");
+        path
+    }
+
+    fn remove_temporary_receipt_dir(path: &Path) {
+        fs::remove_dir_all(path).expect("remove temporary receipt directory");
+    }
+
     const RECEIPTS: &str = r#"
 {"v":1,"event":"start","run_id":"run-1","skill":"aship","session":"s","pr":800,"start":"2026-08-10T10:00:00Z"}
 not-json
@@ -877,6 +1150,111 @@ not-json
         assert_eq!(second.outcome, RunOutcome::InFlight);
         assert!(!reader.refresh());
         fs::remove_file(path).expect("remove temporary receipt fixture");
+    }
+
+    #[test]
+    fn incremental_reader_resets_after_equal_length_atomic_replacement() {
+        let dir = temporary_receipt_dir("rotation");
+        let path = dir.join("run-receipts.jsonl");
+        let replacement = dir.join("run-receipts.jsonl.new");
+        let original = b"{\"event\":\"start\",\"run_id\":\"old-run\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n";
+        let rotated = b"{\"event\":\"start\",\"run_id\":\"new-run\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n";
+        assert_eq!(original.len(), rotated.len());
+        fs::write(&path, original).expect("write original receipt fixture");
+
+        let mut reader = ReceiptReader::new(path.clone());
+        assert!(reader.refresh());
+        assert_eq!(reader.history().runs[0].run_id, "old-run");
+
+        fs::write(&replacement, rotated).expect("write rotated receipt fixture");
+        fs::rename(&replacement, &path).expect("atomically replace receipt fixture");
+
+        assert!(reader.refresh());
+        assert_eq!(reader.history().runs.len(), 1);
+        assert_eq!(reader.history().runs[0].run_id, "new-run");
+        remove_temporary_receipt_dir(&dir);
+    }
+
+    #[test]
+    fn incremental_reader_resets_after_equal_length_truncate_and_regrow() {
+        let dir = temporary_receipt_dir("truncate-regrow");
+        let path = dir.join("run-receipts.jsonl");
+        let original = b"{\"event\":\"start\",\"run_id\":\"old-run\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n";
+        let replacement = b"{\"event\":\"start\",\"run_id\":\"new-run\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n";
+        assert_eq!(original.len(), replacement.len());
+        fs::write(&path, original).expect("write original receipt fixture");
+
+        let mut reader = ReceiptReader::new(path.clone());
+        assert!(reader.refresh());
+        assert_eq!(reader.history().runs[0].run_id, "old-run");
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .expect("truncate receipt fixture");
+        file.write_all(replacement).expect("regrow receipt fixture");
+        drop(file);
+
+        assert!(reader.refresh());
+        assert_eq!(reader.history().runs.len(), 1);
+        assert_eq!(reader.history().runs[0].run_id, "new-run");
+        remove_temporary_receipt_dir(&dir);
+    }
+
+    #[test]
+    fn incremental_reader_bounds_retained_history_and_indexes() {
+        let dir = temporary_receipt_dir("history-cap");
+        let path = dir.join("run-receipts.jsonl");
+        let mut contents = String::new();
+        for index in 0..10_001 {
+            writeln!(
+                contents,
+                "{{\"event\":\"start\",\"run_id\":\"run-{index}\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}}"
+            )
+            .expect("format receipt fixture");
+        }
+        fs::write(&path, contents).expect("write history-cap receipt fixture");
+
+        let mut reader = ReceiptReader::new(path);
+        assert!(reader.refresh());
+        assert!(reader.history().runs.len() <= MAX_HISTORY_RUNS);
+        assert!(reader.indexes.len() <= MAX_HISTORY_RUNS);
+        remove_temporary_receipt_dir(&dir);
+    }
+
+    #[test]
+    fn incremental_reader_counts_an_overlong_unterminated_line_as_skipped() {
+        let dir = temporary_receipt_dir("pending-cap");
+        let path = dir.join("run-receipts.jsonl");
+        fs::write(&path, vec![b'x'; MAX_PENDING_LINE_BYTES + 1])
+            .expect("write overlong receipt fixture");
+
+        let mut reader = ReceiptReader::new(path);
+        assert!(reader.refresh());
+        assert_eq!(reader.history().skipped_lines, 1);
+        assert!(reader.pending.len() <= MAX_PENDING_LINE_BYTES);
+        remove_temporary_receipt_dir(&dir);
+    }
+
+    #[test]
+    fn dropped_receipt_change_event_requests_a_fallback_refresh() {
+        let dir = temporary_receipt_dir("watch-drop");
+        let path = dir.join("run-receipts.jsonl");
+        fs::write(&path, b"initial\n").expect("write watcher receipt fixture");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        let watch = watch_receipts(Some(path.clone()), event_tx.clone());
+        assert!(watch.watcher.is_some());
+        event_tx
+            .try_send(AppEvent::LoopRunHistoryChanged)
+            .expect("fill bounded app event channel");
+        queue_receipt_change(&event_tx, &watch.health);
+        assert!(watch.health.take_fallback_request());
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::LoopRunHistoryChanged)
+        ));
+        remove_temporary_receipt_dir(&dir);
     }
 
     #[test]
