@@ -26,38 +26,12 @@ impl App {
         id: String,
         params: LoopRunHistoryParams,
     ) -> String {
-        let history = crate::loop_runs::read_default_receipts();
+        let history = self.state.loop_run_history.clone();
         let selected_runs = crate::loop_runs::runs_for_loop(&history, params.loop_id.as_deref());
         let runs = selected_runs
             .iter()
             .map(crate::loop_runs::run_info)
             .collect::<Vec<_>>();
-        let changed = self.state.loop_run_history != history;
-        self.state.loop_run_history = history.clone();
-
-        if let Some(loop_id) = params.loop_id.as_ref() {
-            self.state.show_loop_run_history(
-                loop_id.clone(),
-                crate::loop_runs::RunHistory {
-                    runs: selected_runs,
-                    skipped_lines: history.skipped_lines,
-                },
-                std::time::SystemTime::now(),
-            );
-        } else {
-            self.state.clear_loop_run_history();
-        }
-
-        if changed {
-            self.emit_event(EventEnvelope {
-                event: EventKind::LoopRunHistoryUpdated,
-                data: EventData::LoopRunHistoryUpdated {
-                    loop_id: params.loop_id.clone(),
-                    runs: runs.clone(),
-                    skipped_lines: history.skipped_lines,
-                },
-            });
-        }
 
         encode_success(
             id,
@@ -67,5 +41,43 @@ impl App {
                 skipped_lines: history.skipped_lines,
             },
         )
+    }
+
+    pub(super) fn refresh_loop_run_history(&mut self) -> bool {
+        let Some(reader) = self.loop_history_reader.as_mut() else {
+            return false;
+        };
+        if !reader.refresh() {
+            return false;
+        }
+        let history = reader.history().clone();
+        if self.state.loop_run_history == history {
+            return false;
+        }
+        self.state.loop_run_history = history.clone();
+        if let Some(detail) = self.state.loop_run_history_detail.as_mut() {
+            detail.history = crate::loop_runs::RunHistory {
+                runs: crate::loop_runs::runs_for_loop(
+                    &history,
+                    (detail.loop_id != crate::loop_runs::ALL_LOOPS_ID)
+                        .then_some(detail.loop_id.as_str()),
+                ),
+                skipped_lines: history.skipped_lines,
+            };
+            detail.observed_at = std::time::SystemTime::now();
+        }
+        self.emit_event(EventEnvelope {
+            event: EventKind::LoopRunHistoryUpdated,
+            data: EventData::LoopRunHistoryUpdated {
+                loop_id: None,
+                runs: history
+                    .runs
+                    .iter()
+                    .map(crate::loop_runs::run_info)
+                    .collect(),
+                skipped_lines: history.skipped_lines,
+            },
+        });
+        true
     }
 }

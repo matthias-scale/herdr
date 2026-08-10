@@ -54,6 +54,8 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// The append-only loop receipt source changed; refresh its cursor.
+    LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.
     StatusMetricsRefreshed {
         snapshot: Option<Box<crate::platform::status_metrics::StatusMetricsSnapshot>>,

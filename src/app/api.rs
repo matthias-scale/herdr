@@ -61,6 +61,7 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
                     .status_metric_refresh
@@ -139,6 +140,10 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        if let AppEvent::LoopRunHistoryChanged = ev {
+            return Some(self.refresh_loop_run_history());
+        }
+
         if let AppEvent::StatusMetricsRefreshed { snapshot } = ev {
             self.status_metric_refresh
                 .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
@@ -1522,6 +1527,64 @@ mod tests {
             },
         );
         app
+    }
+
+    #[test]
+    fn loop_run_history_read_does_not_change_the_detail_surface() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.show_loop_run_history(
+            "already-open".into(),
+            crate::loop_runs::RunHistory::default(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let before = app.state.loop_run_history_detail.clone();
+
+        app.dispatch_api_request(
+            "read",
+            crate::api::schema::Method::LoopRunHistory(crate::api::schema::LoopRunHistoryParams {
+                loop_id: Some("requested".into()),
+            }),
+        );
+
+        assert_eq!(app.state.loop_run_history_detail, before);
+    }
+
+    #[test]
+    fn loop_receipt_change_event_refreshes_cache_and_publishes_update() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-loop-runs-app-refresh-{}-{}.jsonl",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(
+            &path,
+            b"{\"event\":\"start\",\"run_id\":\"refreshed\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n",
+        )
+        .expect("write temporary receipt fixture");
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        app.loop_history_reader = Some(crate::loop_runs::ReceiptReader::new(path.clone()));
+        let sequence = event_hub.current_sequence();
+
+        assert!(app.handle_internal_event_with_render_impact(AppEvent::LoopRunHistoryChanged));
+        assert_eq!(app.state.loop_run_history.runs.len(), 1);
+        assert_eq!(event_hub.events_after(sequence).len(), 1);
+
+        std::fs::remove_file(path).expect("remove temporary receipt fixture");
     }
 
     #[tokio::test]
