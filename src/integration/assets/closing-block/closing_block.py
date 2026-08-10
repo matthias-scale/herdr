@@ -24,7 +24,9 @@ _AGENTS_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _DONE_RE = re.compile(r"^Done here\.[ \t]*\r?$", re.MULTILINE)
-_FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_OPEN_RE = re.compile(
+    r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$"
+)
 _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 
 _ITEM_START = r"^\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
@@ -236,7 +238,10 @@ def _visible_matches(
     fences: list[tuple[int, int]],
 ):
     for match in pattern.finditer(text, start, end):
-        if not any(fence_start <= match.start() < fence_end for fence_start, fence_end in fences):
+        if not any(
+            fence_start <= match.start() < fence_end
+            for fence_start, fence_end in fences
+        ):
             yield match
 
 
@@ -272,7 +277,9 @@ def _decisions_end(
     return min(candidates, default=end)
 
 
-def _closing_blocks(text: str, fences: list[tuple[int, int]]) -> list[_ClosingBlock]:
+def _closing_blocks(
+    text: str, fences: list[tuple[int, int]]
+) -> list[_ClosingBlock]:
     """Split top-level CAP sections into blocks and bound their decisions.
 
     The first CAP belongs to the initial block so valid pre-CAP decisions are
@@ -343,6 +350,78 @@ def _parse_what_to_test(
     return parsed
 
 
+def _parse_items(
+    text: str, start: int, end: int, fences: list[tuple[int, int]]
+) -> list[Item]:
+    section_end = _section_end(text, start, end, fences)
+    matches = list(_visible_matches(_ITEM_RE, text, start, section_end, fences))
+    parsed: list[Item] = []
+    for position, match in enumerate(matches):
+        end_candidates = [section_end]
+        if position + 1 < len(matches):
+            end_candidates.append(matches[position + 1].start())
+        for pattern in (_AGENTS_RE, _DONE_RE):
+            end_candidates.extend(
+                candidate.start()
+                for candidate in _visible_matches(
+                    pattern, text, match.end(), section_end, fences
+                )
+            )
+        item_end = min(end_candidates)
+        body = text[match.start("body") : item_end]
+        parsed.append(
+            Item(
+                int(match.group("idx")),
+                match.group("label").capitalize(),
+                _clean_body(body),
+            )
+        )
+    return parsed
+
+
+def _parse_decisions(
+    text: str,
+    headings: list[re.Match[str]],
+    end: int,
+    fences: list[tuple[int, int]],
+) -> list[Decision]:
+    parsed: list[Decision] = []
+    for decisions_heading in headings:
+        decisions_end = _decisions_end(
+            text, decisions_heading.end(), end, fences
+        )
+        matches = list(
+            _visible_matches(
+                _DECISION_ITEM_RE,
+                text,
+                decisions_heading.end(),
+                decisions_end,
+                fences,
+            )
+        )
+        for position, match in enumerate(matches):
+            end_candidates = [decisions_end]
+            if position + 1 < len(matches):
+                end_candidates.append(matches[position + 1].start())
+            for pattern in (_AGENTS_RE, _DONE_RE):
+                end_candidates.extend(
+                    candidate.start()
+                    for candidate in _visible_matches(
+                        pattern, text, match.end(), decisions_end, fences
+                    )
+                )
+            body = _clean_body(
+                text[match.start("body") : min(end_candidates)]
+            )
+            if not body:
+                continue
+            recommendation, decided_at = _decision_fields(body)
+            parsed.append(
+                Decision(int(match.group("idx")), body, recommendation, decided_at)
+            )
+    return parsed
+
+
 def _decision_fields(body: str) -> tuple[str, str | None]:
     recommendation_match = re.search(
         r"\brecommendation\s*[:\-]\s*(?P<value>.+?)(?=\s+at\s+\d{1,2}:\d{2}|$)",
@@ -379,17 +458,7 @@ def parse(text: str) -> ClosingBlock:
             block.declared_blocking = 0
 
         if start is not None:
-            cap_end = _section_end(text, start, selected.end, fences)
-            for match in _visible_matches(
-                _ITEM_RE, text, start, cap_end, fences
-            ):
-                block.items.append(
-                    Item(
-                        int(match.group("idx")),
-                        match.group("label").capitalize(),
-                        _clean_body(match.group("body")),
-                    )
-                )
+            block.items.extend(_parse_items(text, start, selected.end, fences))
             block.items.extend(
                 _parse_what_to_test(
                     text, start, selected.end, block.items, fences
@@ -419,27 +488,11 @@ def parse(text: str) -> ClosingBlock:
                 # operative side so repeated sections in one block survive.
                 decision_headings = post_cap_headings
 
-        for decisions_heading in decision_headings:
-            decisions_end = _decisions_end(
-                text,
-                decisions_heading.end(),
-                selected.decisions_end,
-                fences,
+        block.decisions.extend(
+            _parse_decisions(
+                text, decision_headings, selected.decisions_end, fences
             )
-            for match in _visible_matches(
-                _DECISION_ITEM_RE,
-                text,
-                decisions_heading.end(),
-                decisions_end,
-                fences,
-            ):
-                body = _clean_body(match.group("body"))
-                if not body:
-                    continue
-                recommendation, decided_at = _decision_fields(body)
-                block.decisions.append(
-                    Decision(int(match.group("idx")), body, recommendation, decided_at)
-                )
+        )
 
     agents = None
     for candidate in _visible_matches(_AGENTS_RE, text, 0, len(text), fences):
