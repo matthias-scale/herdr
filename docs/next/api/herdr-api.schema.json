@@ -75,6 +75,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -795,8 +796,22 @@
                     "null"
                   ]
                 },
+                "eta_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "reported_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "state_labels": {
                   "additionalProperties": {
@@ -813,6 +828,12 @@
                 "type": {
                   "const": "pane_agent_status_changed",
                   "type": "string"
+                },
+                "wait": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "workspace_id": {
                   "type": "string"
@@ -1050,6 +1071,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -1079,6 +1108,12 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -1134,6 +1169,12 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "work_context": {
               "$ref": "#/schemas/event/$defs/PaneWorkContext",
@@ -1704,6 +1745,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -3222,6 +3264,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "gates": {
               "items": {
                 "$ref": "#/schemas/request/$defs/ClosingBlockItem"
@@ -3249,6 +3299,12 @@
             "pane_id": {
               "type": "string"
             },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "seq": {
               "format": "uint64",
               "minimum": 0,
@@ -3269,6 +3325,12 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "wait": {
+              "type": [
+                "string",
                 "null"
               ]
             }
@@ -6527,6 +6589,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -6548,8 +6611,22 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "state_labels": {
               "additionalProperties": {
@@ -6558,6 +6635,12 @@
               "type": "object"
             },
             "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wait": {
               "type": [
                 "string",
                 "null"
@@ -6773,6 +6856,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -6808,6 +6899,12 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -6862,6 +6959,12 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
@@ -6984,6 +7087,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -7720,8 +7824,22 @@
                     "null"
                   ]
                 },
+                "eta_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "reported_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "state_labels": {
                   "additionalProperties": {
@@ -7738,6 +7856,12 @@
                 "type": {
                   "const": "pane_agent_status_changed",
                   "type": "string"
+                },
+                "wait": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "workspace_id": {
                   "type": "string"
@@ -8400,6 +8524,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -8429,6 +8561,12 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -8484,6 +8622,12 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",

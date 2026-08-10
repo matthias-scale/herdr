@@ -15,7 +15,7 @@ mod tabs;
 mod workspaces;
 mod worktrees;
 
-use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKind};
+use super::{api_helpers::pane_agent_status_with_stale, App, Mode, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
@@ -720,16 +720,17 @@ impl App {
             });
         }
 
-        let previous_agent_status = pane_agent_status(update.previous_state, update.previous_seen);
-        let agent_status = self
-            .state
-            .workspaces
-            .get(update.ws_idx)
-            .and_then(|ws| ws.pane_state(update.pane_id))
-            .map(|pane| pane_agent_status(update.state, pane.seen))
-            .unwrap_or_else(|| pane_agent_status(update.state, update.seen));
+        let previous_agent_status = pane_agent_status_with_stale(
+            update.previous_state,
+            update.previous_seen,
+            update.previous_stale,
+        );
+        let agent_status = pane_agent_status_with_stale(update.state, update.seen, update.stale);
 
         if previous_agent_status != agent_status
+            || update.previous_wait != update.wait
+            || update.previous_eta_s != update.eta_s
+            || update.previous_reported_at != update.reported_at
             || update.previous_presentation != update.presentation
         {
             let presentation = update.presentation.clone();
@@ -739,6 +740,9 @@ impl App {
                     pane_id,
                     workspace_id,
                     agent_status,
+                    wait: update.wait.clone(),
+                    eta_s: update.eta_s,
+                    reported_at: update.reported_at.clone(),
                     agent: update.agent_label.clone(),
                     title: presentation.title,
                     display_agent: presentation.display_agent,

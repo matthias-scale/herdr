@@ -12,7 +12,9 @@ use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace,
     sidebar_space_member_indices, tab_row_layout, AgentPanelEntry, SidebarRow,
 };
-use super::status::{state_icon, state_icon_symbol, state_label_color};
+use super::status::{
+    state_icon, state_icon_symbol, state_icon_with_stale, state_label_color_with_stale,
+};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -188,16 +190,15 @@ pub(crate) fn visible_tab_activity_instants_from(
                 return None;
             };
             let indent = " ".repeat(2 + usize::from(*depth) * 3);
-            tab_row_layout(
+            let layout = tab_row_layout(
                 entry,
                 app.view_observed_at,
                 usize::from(content.width),
                 display_width(&indent),
                 &app.palette,
                 app.status_indicators,
-            )
-            .activity_age
-            .and(entry.activity_at)
+            );
+            layout.activity_age.and(layout.activity_instant)
         })
         .collect()
 }
@@ -415,7 +416,14 @@ fn render_header_status(
     };
 
     let (state, seen) = ws.aggregate_state(&app.terminals);
-    let (dot, dot_style) = state_icon(state, seen, app.status_indicators, p);
+    let stale = ws.tabs.iter().any(|tab| {
+        tab.panes.values().any(|pane| {
+            app.terminals
+                .get(&pane.attached_terminal_id)
+                .is_some_and(|terminal| terminal.supervisor_stale)
+        })
+    });
+    let (dot, dot_style) = state_icon_with_stale(state, seen, stale, app.status_indicators, p);
     let tab_label = mobile_tab_status(ws, &app.terminals, area.width.saturating_sub(6) as usize);
     let row1 = Rect::new(area.x, area.y, area.width, 1);
     let tab_w = display_width_u16(&tab_label)
@@ -700,8 +708,13 @@ fn render_mobile_switcher_content(
                     entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
                 });
                 let bg = mobile_item_bg(false, active, p);
-                let (icon, icon_style) =
-                    state_icon(entry.state, entry.seen, app.status_indicators, p);
+                let (icon, icon_style) = state_icon_with_stale(
+                    entry.state,
+                    entry.seen,
+                    entry.stale,
+                    app.status_indicators,
+                    p,
+                );
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
                 let title = Line::from(vec![
                     Span::styled(indent, Style::default().bg(bg)),
@@ -760,15 +773,25 @@ fn render_mobile_switcher_content(
                     spans.push(Span::styled("  ", Style::default().bg(bg)));
                 }
                 if let Some(state) = layout.state.as_deref() {
-                    let (icon, icon_style) =
-                        state_icon(entry.state, entry.seen, app.status_indicators, p);
+                    let (icon, icon_style) = state_icon_with_stale(
+                        entry.state,
+                        entry.seen,
+                        entry.stale,
+                        app.status_indicators,
+                        p,
+                    );
                     spans.push(Span::styled(icon, icon_style.bg(bg)));
                     if layout.show_state_label {
                         spans.extend([
                             Span::styled(
                                 format!(" {state}"),
                                 Style::default()
-                                    .fg(state_label_color(entry.state, entry.seen, p))
+                                    .fg(state_label_color_with_stale(
+                                        entry.state,
+                                        entry.seen,
+                                        entry.stale,
+                                        p,
+                                    ))
                                     .bg(bg),
                             ),
                             Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
@@ -808,7 +831,7 @@ fn render_mobile_switcher_content(
                         .saturating_sub(used_width)
                         .saturating_sub(display_width(&activity_age));
                     spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
-                    let activity_color = if entry.state == AgentState::Working {
+                    let activity_color = if entry.state == AgentState::Working && !entry.stale {
                         p.blue
                     } else {
                         p.green
@@ -918,12 +941,14 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
     let status = entry
         .state_labels
-        .get(super::sidebar::agent_panel_status_key(
+        .get(super::sidebar::agent_panel_status_key_with_stale(
             entry.state,
             entry.seen,
+            entry.stale,
         ))
         .cloned()
         .unwrap_or_else(|| match entry.state {
+            _ if entry.stale => "stale".to_string(),
             AgentState::Idle => "done".to_string(),
             _ => super::status::state_label(entry.state, entry.seen).to_string(),
         });
@@ -1158,27 +1183,33 @@ struct GlobalAgentCounts {
     done: usize,
     working: usize,
     idle: usize,
+    stale: usize,
 }
 
 impl GlobalAgentCounts {
     fn total(&self) -> usize {
-        self.blocked + self.done + self.working + self.idle
+        self.blocked + self.done + self.working + self.idle + self.stale
     }
 
     fn any_pending(&self) -> bool {
-        self.blocked > 0 || self.done > 0 || self.working > 0
+        self.blocked > 0 || self.done > 0 || self.working > 0 || self.stale > 0
     }
 }
 
 fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
     let mut counts = GlobalAgentCounts::default();
     for entry in crate::ui::all_agent_panel_entries(app) {
-        match (entry.state, entry.seen) {
-            (AgentState::Blocked, _) => counts.blocked += 1,
-            (AgentState::Idle, false) => counts.done += 1,
-            (AgentState::Working, _) => counts.working += 1,
-            (AgentState::Idle, true) => counts.idle += 1,
-            (AgentState::Unknown, _) => {}
+        match super::sidebar::agent_panel_status_key_with_stale(
+            entry.state,
+            entry.seen,
+            entry.stale,
+        ) {
+            "blocked" => counts.blocked += 1,
+            "done" => counts.done += 1,
+            "working" => counts.working += 1,
+            "idle" => counts.idle += 1,
+            "stale" => counts.stale += 1,
+            _ => {}
         }
     }
     counts
@@ -1190,6 +1221,7 @@ enum SummaryTone {
     Done,
     Working,
     Idle,
+    Stale,
     Muted,
 }
 
@@ -1206,6 +1238,9 @@ fn agent_summary_segments(
         return vec![("all idle".to_string(), SummaryTone::Muted)];
     }
     let mut segments = Vec::new();
+    if counts.stale > 0 {
+        segments.push((format!("! {} stale", counts.stale), SummaryTone::Stale));
+    }
     if counts.blocked > 0 {
         segments.push((
             agent_summary_text(
@@ -1335,12 +1370,13 @@ fn summary_tone_color(tone: SummaryTone, p: &Palette) -> Color {
     match tone {
         SummaryTone::Blocked => p.red,
         SummaryTone::Done | SummaryTone::Working => p.blue,
+        SummaryTone::Stale => p.peach,
         SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
     }
 }
 
 fn summary_tone_style(tone: SummaryTone, p: &Palette, leading: bool) -> Style {
-    let color = if leading || tone == SummaryTone::Working {
+    let color = if leading || matches!(tone, SummaryTone::Stale | SummaryTone::Working) {
         summary_tone_color(tone, p)
     } else {
         p.overlay1
@@ -1420,6 +1456,8 @@ mod tests {
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,
+            stale: false,
+            reported_at: None,
             last_agent_state_change_seq: None,
             activity_at: None,
             state_labels: std::collections::HashMap::new(),
@@ -1463,12 +1501,33 @@ mod tests {
     }
 
     #[test]
+    fn global_agent_counts_exclude_supervisor_stale_working_agents() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("stale")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = AgentState::Working;
+        terminal.supervisor_stale = true;
+
+        let counts = global_agent_counts(&app);
+        assert_eq!(counts.working, 0);
+        assert_eq!(counts.stale, 1);
+        assert_eq!(counts.total(), 1);
+    }
+
+    #[test]
     fn agent_summary_leads_with_attention_states_in_priority_order() {
         let counts = GlobalAgentCounts {
             blocked: 2,
             done: 1,
             working: 2,
             idle: 1,
+            ..Default::default()
         };
         let segments = agent_summary_segments(counts, StatusIndicatorStyle::Dots);
         let labels: Vec<&str> = segments.iter().map(|(text, _)| text.as_str()).collect();
@@ -1486,6 +1545,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            stale: 1,
         };
         let labels: Vec<String> = agent_summary_segments(counts, StatusIndicatorStyle::Symbols)
             .into_iter()
@@ -1493,7 +1553,13 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["× 2 blocked", "✓ 1 done", "◐ 2 working", "○ 1 idle"]
+            [
+                "! 1 stale",
+                "× 2 blocked",
+                "✓ 1 done",
+                "◐ 2 working",
+                "○ 1 idle"
+            ]
         );
     }
 
@@ -1523,6 +1589,24 @@ mod tests {
             terminal.backend().buffer()[(area.width - 1, 0)].symbol(),
             "×"
         );
+    }
+
+    #[test]
+    fn stale_mobile_agent_detail_uses_the_stale_bucket() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("stale")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = AgentState::Working;
+        terminal.supervisor_stale = true;
+
+        let entry = agent_panel_entries(&app).remove(0);
+        assert_eq!(mobile_agent_detail(&entry), "  stale · claude");
     }
 
     #[test]
@@ -1579,6 +1663,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            ..Default::default()
         };
         let (shown, truncated) = fit_summary_segments(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
@@ -1596,6 +1681,7 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
+            ..Default::default()
         };
         let (shown, truncated) = fit_summary_segments(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
@@ -1610,6 +1696,19 @@ mod tests {
         assert_eq!(
             agent_summary_segments(GlobalAgentCounts::default(), StatusIndicatorStyle::Dots),
             vec![("no agents".to_string(), SummaryTone::Muted)]
+        );
+    }
+
+    #[test]
+    fn agent_summary_renders_stale_as_a_distinct_segment() {
+        let counts = GlobalAgentCounts {
+            stale: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            agent_summary_segments(counts, StatusIndicatorStyle::Dots),
+            vec![("! 1 stale".to_string(), SummaryTone::Stale)]
         );
     }
 

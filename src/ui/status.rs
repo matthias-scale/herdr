@@ -406,6 +406,20 @@ pub(super) fn state_icon(
     )
 }
 
+pub(super) fn state_icon_with_stale(
+    state: AgentState,
+    seen: bool,
+    stale: bool,
+    indicator_style: StatusIndicatorStyle,
+    p: &Palette,
+) -> (&'static str, Style) {
+    if stale {
+        ("!", Style::default().fg(p.peach))
+    } else {
+        state_icon(state, seen, indicator_style, p)
+    }
+}
+
 pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
     match (state, seen) {
         (AgentState::Blocked, _) => "blocked",
@@ -424,6 +438,49 @@ pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> C
         (AgentState::Idle, true) => p.green,
         (AgentState::Unknown, _) => p.overlay0,
     }
+}
+
+pub(super) fn state_label_color_with_stale(
+    state: AgentState,
+    seen: bool,
+    stale: bool,
+    p: &Palette,
+) -> Color {
+    if stale {
+        p.peach
+    } else {
+        state_label_color(state, seen, p)
+    }
+}
+
+pub(super) fn status_report_age_label(
+    reported_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<String> {
+    let age = now.checked_duration_since(reported_at?)?;
+    (age >= std::time::Duration::from_secs(60)).then(|| {
+        let minutes = age.as_secs() / 60;
+        if minutes >= 60 {
+            format!("reported {}h ago", minutes / 60)
+        } else {
+            format!("reported {minutes}m ago")
+        }
+    })
+}
+
+pub(super) fn status_report_age_compact_label(
+    reported_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<String> {
+    let age = now.checked_duration_since(reported_at?)?;
+    (age >= std::time::Duration::from_secs(60)).then(|| {
+        let minutes = age.as_secs() / 60;
+        if minutes >= 60 {
+            format!("{}h", minutes / 60)
+        } else {
+            format!("{minutes}m")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -490,6 +547,35 @@ mod tests {
                 assert_eq!(style.fg, Some(color));
             }
         }
+    }
+
+    #[test]
+    fn status_report_age_projection_distinguishes_recent_and_aged_reports() {
+        let reported_at = std::time::Instant::now();
+        let recent = reported_at + std::time::Duration::from_secs(30);
+        let aged = reported_at + std::time::Duration::from_secs(90);
+        let old = reported_at + std::time::Duration::from_secs(3660);
+
+        assert_eq!(status_report_age_label(Some(reported_at), recent), None);
+        assert_eq!(
+            status_report_age_label(Some(reported_at), aged).as_deref(),
+            Some("reported 1m ago")
+        );
+        assert_eq!(
+            status_report_age_compact_label(Some(reported_at), old).as_deref(),
+            Some("1h")
+        );
+        assert_eq!(
+            state_icon_with_stale(
+                AgentState::Working,
+                true,
+                true,
+                StatusIndicatorStyle::Dots,
+                &Palette::catppuccin(),
+            )
+            .0,
+            "!"
+        );
     }
 
     #[test]

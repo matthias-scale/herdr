@@ -337,6 +337,17 @@ impl App {
         }
 
         if self
+            .state
+            .next_agent_watchdog_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            for update in self.state.mark_due_agent_status_stale_at(now) {
+                self.emit_pane_state_update(&update);
+                changed = true;
+            }
+        }
+
+        if self
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -716,6 +727,7 @@ impl App {
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
+            self.state.next_agent_watchdog_deadline(),
             self.copy_feedback_deadline,
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh

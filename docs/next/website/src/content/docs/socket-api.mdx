@@ -697,12 +697,20 @@ Integrations report agent state with `pane.report_agent`.
     "source": "custom:docs",
     "agent": "docs-bot",
     "state": "working",
-    "message": "building docs"
+    "message": "building docs",
+    "wait": "CI run 4123",
+    "eta_s": 720,
+    "reported_at": "2026-08-10T10:00:00Z"
   }
 }
 ```
 
-`state` is semantic. It affects waits, notifications, and rollups. Report display-only values separately through metadata.
+`state` is semantic. It affects waits, notifications, and rollups. A working
+turn may declare a wait and its deadline with `wait` and `eta_s`. Every accepted
+report may carry `reported_at`, which Herdr exposes back through pane/agent
+responses and status events. `stale` is supervisor-derived after a missed
+deadline or prolonged silence; integrations must never report it. Report
+display-only values separately through metadata.
 
 Session-only official integrations report native session references with `pane.report_agent_session`. State-reporting integrations can still include native session references in `pane.report_agent`. State-independent session reports do not affect waits, notifications, or rollups.
 
@@ -764,7 +772,7 @@ Use `pane.report_metadata` when a user hook wants to customize presentation with
 }
 ```
 
-Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, visible state labels, and arbitrary named tokens. `working`, `blocked`, `idle`, waits, notifications, and rollups still come from semantic state. Native session restore comes from stored official session references. `agent` is an optional guard for presentation fields against the authoritative agent label; `applies_to_source` similarly guards presentation fields against the active lifecycle authority source. These guards do not apply to token patches: token reporters own clearing and TTL refresh. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`.
+Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, visible state labels, and arbitrary named tokens. `working`, `blocked`, `idle`, waits, notifications, and rollups still come from semantic state. Native session restore comes from stored official session references. `agent` is an optional guard for presentation fields against the authoritative agent label; `applies_to_source` similarly guards presentation fields against the active lifecycle authority source. These guards do not apply to token patches: token reporters own clearing and TTL refresh. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, `stale`, or `unknown`.
 
 Token maps are per-resource patches. A string sets a key, JSON `null` clears it, and omitted keys remain unchanged. The latest accepted update wins. Optional TTL applies independently to token keys updated by that report. Pane tokens are exposed by pane and agent get/list responses and can be rendered as `$name` in Agent sidebar rows. A report may mention at most 16 token keys, and a pane or workspace may retain at most 32 keys. Token names are 1–32 ASCII letters, digits, underscores, or hyphens.
 
@@ -821,6 +829,10 @@ updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
 
+`pane.agent_status_changed` includes `wait`, `eta_s`, and `reported_at` when
+the report supplied them. Its `agent_status` may be `stale` when the
+server-side watchdog finds a reporting violation.
+
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 
 ## Reading panes
@@ -844,6 +856,7 @@ Use waits to coordinate agents and scripts.
 ```bash
 herdr agent wait w1:p1 --until done
 herdr agent wait w1:p1 --until blocked
+herdr agent wait w1:p1 --until stale
 ```
 
 Agent waits observe semantic state, not arbitrary command completion.

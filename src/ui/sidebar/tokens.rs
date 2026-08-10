@@ -182,6 +182,8 @@ mod tests {
             state: AgentState::Working,
             background_job_count: None,
             seen: true,
+            stale: false,
+            reported_at: None,
             last_agent_state_change_seq: None,
             activity_at: None,
             state_labels: std::collections::HashMap::new(),

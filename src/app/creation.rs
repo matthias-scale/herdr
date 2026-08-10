@@ -5,7 +5,7 @@ use crate::api::schema::{EventData, EventEnvelope, EventKind};
 use tracing::error;
 
 use super::{
-    api_helpers::{pane_agent_status, tab_attention_priority},
+    api_helpers::{pane_agent_status, pane_agent_status_with_stale, tab_attention_priority},
     App, Mode,
 };
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
@@ -342,7 +342,7 @@ impl App {
             prio: tab.prio,
             focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
             pane_count: tab.panes.len(),
-            agent_status: pane_agent_status(agg_state, seen),
+            agent_status: aggregate_tab_agent_status(tab, &self.state.terminals, agg_state, seen),
         })
     }
 
@@ -465,7 +465,23 @@ impl App {
             terminal_title: terminal.terminal_title.clone(),
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
-            agent_status: pane_agent_status(terminal.state, pane.seen),
+            agent_status: pane_agent_status_with_stale(
+                terminal.state,
+                pane.seen,
+                terminal.supervisor_stale,
+            ),
+            wait: terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|report| report.wait.clone()),
+            eta_s: terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|report| report.eta_s),
+            reported_at: terminal
+                .hook_authority
+                .as_ref()
+                .and_then(|report| report.reported_at_wire.clone()),
             state_labels: presentation.state_labels,
             tokens: terminal.metadata_tokens.values(),
             gates: terminal.closing_gates.clone(),
@@ -500,6 +516,14 @@ impl App {
     pub(super) fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
         let ws = &self.state.workspaces[index];
         let (agg_state, seen) = ws.aggregate_state(&self.state.terminals);
+        let stale = ws.tabs.iter().any(|tab| {
+            tab.panes.values().any(|pane| {
+                self.state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_some_and(|terminal| terminal.supervisor_stale)
+            })
+        });
         crate::api::schema::WorkspaceInfo {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
@@ -510,7 +534,11 @@ impl App {
             active_tab_id: self.public_tab_id(index, ws.active_tab).unwrap_or_else(|| {
                 crate::workspace::public_tab_id_for_number(&ws.id, ws.active_tab + 1)
             }),
-            agent_status: pane_agent_status(agg_state, seen),
+            agent_status: if stale {
+                crate::api::schema::AgentStatus::Stale
+            } else {
+                pane_agent_status(agg_state, seen)
+            },
             tokens: ws.metadata_tokens.values(),
             worktree: ws
                 .worktree_space()
@@ -548,6 +576,23 @@ fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+fn aggregate_tab_agent_status(
+    tab: &crate::workspace::Tab,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    state: crate::detect::AgentState,
+    seen: bool,
+) -> crate::api::schema::AgentStatus {
+    let stale = tab.panes.values().any(|pane| {
+        terminals
+            .get(&pane.attached_terminal_id)
+            .is_some_and(|terminal| terminal.supervisor_stale)
+    });
+    pane_agent_status_with_stale(state, seen, stale)
 }
 
 #[cfg(test)]

@@ -1288,6 +1288,9 @@ fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
         v: None,
         message,
         seq,
+        wait: None,
+        eta_s: None,
+        reported_at: None,
         agent_session_id,
         agent_session_path,
         gates: None,
@@ -1550,7 +1553,7 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
                 let status = status.trim().to_ascii_lowercase();
                 if !matches!(
                     status.as_str(),
-                    "idle" | "working" | "blocked" | "done" | "unknown"
+                    "idle" | "working" | "blocked" | "done" | "stale" | "unknown"
                 ) {
                     eprintln!("unknown state label: {status}");
                     return Ok(2);

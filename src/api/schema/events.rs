@@ -406,6 +406,12 @@ pub struct PaneAgentStatusChangedEvent {
     pub workspace_id: String,
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -552,6 +558,12 @@ pub enum EventData {
         pane_id: String,
         workspace_id: String,
         agent_status: AgentStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        eta_s: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_at: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -10,7 +10,10 @@ use ratatui::{
 
 use self::tokens::{ResolvedToken, ResolvedTokenKind};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
-use super::status::{state_icon, state_label, state_label_color};
+use super::status::{
+    state_icon_with_stale, state_label, state_label_color_with_stale,
+    status_report_age_compact_label, status_report_age_label,
+};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
@@ -60,7 +63,7 @@ fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
 }
 
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
-    entry.has_agent && (entry.state != AgentState::Idle || !entry.seen)
+    entry.has_agent && (entry.stale || entry.state != AgentState::Idle || !entry.seen)
 }
 
 pub(super) struct TabRowLayout {
@@ -71,6 +74,7 @@ pub(super) struct TabRowLayout {
     pub foreground_process: Option<String>,
     pub background_jobs: Option<String>,
     pub activity_age: Option<String>,
+    pub activity_instant: Option<std::time::Instant>,
 }
 
 /// The prio cell is reserved on every row so its click target never moves; the info cell only
@@ -95,16 +99,32 @@ pub(super) fn tab_row_layout(
     let state = tab_lifecycle_visible(entry).then(|| {
         entry
             .state_labels
-            .get(agent_panel_status_key(entry.state, entry.seen))
+            .get(agent_panel_status_key_with_stale(
+                entry.state,
+                entry.seen,
+                entry.stale,
+            ))
             .cloned()
             .unwrap_or_else(|| match entry.state {
+                _ if entry.stale => "stale".to_string(),
                 AgentState::Idle if !entry.seen => "done".to_string(),
                 _ => state_label(entry.state, entry.seen).to_string(),
             })
     });
     let dot_width = state
         .as_ref()
-        .map(|_| display_width(state_icon(entry.state, entry.seen, indicator_style, palette).0))
+        .map(|_| {
+            display_width(
+                state_icon_with_stale(
+                    entry.state,
+                    entry.seen,
+                    entry.stale,
+                    indicator_style,
+                    palette,
+                )
+                .0,
+            )
+        })
         .unwrap_or_default();
     let full_status_width = state
         .as_deref()
@@ -129,12 +149,20 @@ pub(super) fn tab_row_layout(
         .background_job_count
         .filter(|count| *count > 0)
         .map(|count| format!("  {count} >_"));
-    let mut activity_age = entry.activity_at.map(|activity_at| {
-        format!(
-            "{} ago",
-            crate::activity_age::compact_label(Some(activity_at), now)
-        )
-    });
+    let (mut activity_age, mut activity_instant) =
+        if let Some(label) = status_report_age_label(entry.reported_at, now) {
+            (Some(label), entry.reported_at)
+        } else if let Some(activity_at) = entry.activity_at {
+            (
+                Some(format!(
+                    "{} ago",
+                    crate::activity_age::compact_label(Some(activity_at), now)
+                )),
+                Some(activity_at),
+            )
+        } else {
+            (None, None)
+        };
 
     let background_width = background_jobs
         .as_deref()
@@ -181,6 +209,7 @@ pub(super) fn tab_row_layout(
                 + display_width(label)
     }) {
         activity_age = None;
+        activity_instant = None;
     }
     let activity_width = activity_age
         .as_deref()
@@ -231,6 +260,7 @@ pub(super) fn tab_row_layout(
         foreground_process,
         background_jobs,
         activity_age,
+        activity_instant,
     }
 }
 
@@ -279,6 +309,8 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub background_job_count: Option<u16>,
     pub seen: bool,
+    pub stale: bool,
+    pub reported_at: Option<std::time::Instant>,
     pub last_agent_state_change_seq: Option<u64>,
     pub activity_at: Option<std::time::Instant>,
     pub state_labels: std::collections::HashMap<String, String>,
@@ -515,6 +547,8 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
+                        stale: detail.stale,
+                        reported_at: detail.reported_at,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
                         activity_at: detail.activity_at,
                         state_labels: detail.state_labels,
@@ -550,6 +584,18 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
         (AgentState::Working, _) => "working",
         (AgentState::Blocked, _) => "blocked",
         (AgentState::Unknown, _) => "unknown",
+    }
+}
+
+pub(super) fn agent_panel_status_key_with_stale(
+    state: AgentState,
+    seen: bool,
+    stale: bool,
+) -> &'static str {
+    if stale {
+        "stale"
+    } else {
+        agent_panel_status_key(state, seen)
     }
 }
 
@@ -611,11 +657,14 @@ fn aggregate_tab_entries(
                     if tab_entry.foreground_process_name.is_none() {
                         tab_entry.foreground_process_name = first_foreground_process_name.clone();
                     }
-                    if tab_lifecycle_priority(candidate.0, candidate.1)
-                        > tab_lifecycle_priority(tab_entry.state, tab_entry.seen)
+                    if !tab_entry.stale
+                        && (entry.stale
+                            || tab_lifecycle_priority(candidate.0, candidate.1)
+                                > tab_lifecycle_priority(tab_entry.state, tab_entry.seen))
                     {
                         tab_entry.state = candidate.0;
                         tab_entry.seen = candidate.1;
+                        tab_entry.stale = entry.stale;
                         tab_entry.state_labels = entry.state_labels.clone();
                         tab_entry.foreground_process_name = entry
                             .foreground_process_name
@@ -1119,9 +1168,14 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
-        .get(agent_panel_status_key(entry.state, entry.seen))
+        .get(agent_panel_status_key_with_stale(
+            entry.state,
+            entry.seen,
+            entry.stale,
+        ))
         .map(String::as_str)
         .unwrap_or_else(|| match entry.state {
+            _ if entry.stale => "stale",
             AgentState::Idle => "done",
             _ => state_label(entry.state, entry.seen),
         });
@@ -1470,7 +1524,15 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     continue;
                 };
                 let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-                let (icon, icon_style) = state_icon(agg_state, agg_seen, app.status_indicators, p);
+                let stale = ws.tabs.iter().any(|tab| {
+                    tab.panes.values().any(|pane| {
+                        app.terminals
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(|terminal| terminal.supervisor_stale)
+                    })
+                });
+                let (icon, icon_style) =
+                    state_icon_with_stale(agg_state, agg_seen, stale, app.status_indicators, p);
                 let is_selected = *ws_idx == app.selected && is_navigating;
                 let is_active = Some(*ws_idx) == app.active;
                 let row_style = Style::default();
@@ -1499,8 +1561,13 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 );
             }
             SidebarRow::Agent { entry, depth } => {
-                let (icon, icon_style) =
-                    state_icon(entry.state, entry.seen, app.status_indicators, p);
+                let (icon, icon_style) = state_icon_with_stale(
+                    entry.state,
+                    entry.seen,
+                    entry.stale,
+                    app.status_indicators,
+                    p,
+                );
                 let row_style = Style::default();
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -1522,8 +1589,13 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 );
             }
             SidebarRow::Tab { entry, .. } => {
-                let (icon, icon_style) =
-                    state_icon(entry.state, entry.seen, app.status_indicators, p);
+                let (icon, icon_style) = state_icon_with_stale(
+                    entry.state,
+                    entry.seen,
+                    entry.stale,
+                    app.status_indicators,
+                    p,
+                );
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::raw("  "),
@@ -1725,7 +1797,13 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
     let p = &app.palette;
     let width = usize::from(rect.width);
     let prefix = "  ";
-    let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
+    let state_icon = state_icon_with_stale(
+        entry.state,
+        entry.seen,
+        entry.stale,
+        app.status_indicators,
+        p,
+    );
     let workspace = entry.primary_label.as_str();
     // A derived or manually named tab can already carry the agent identity, so
     // appending the provider here would repeat it in the same row.
@@ -2290,13 +2368,24 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         ]);
     }
     if let Some(state) = layout.state.as_deref() {
-        let state_icon = state_icon(entry.state, entry.seen, app.status_indicators, p);
+        let state_icon = state_icon_with_stale(
+            entry.state,
+            entry.seen,
+            entry.stale,
+            app.status_indicators,
+            p,
+        );
         spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
         if layout.show_state_label {
             spans.extend([
                 Span::styled(
                     format!(" {state}"),
-                    Style::default().fg(state_label_color(entry.state, entry.seen, p)),
+                    Style::default().fg(state_label_color_with_stale(
+                        entry.state,
+                        entry.seen,
+                        entry.stale,
+                        p,
+                    )),
                 ),
                 Span::styled(" · ", Style::default().fg(p.overlay0)),
             ]);
@@ -2329,7 +2418,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             .saturating_sub(used_width)
             .saturating_sub(display_width(&activity_age));
         spans.push(Span::raw(" ".repeat(padding)));
-        let activity_style = if entry.state == AgentState::Working {
+        let activity_style = if entry.state == AgentState::Working && !entry.stale {
             Style::default().fg(p.blue)
         } else {
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
@@ -2347,7 +2436,7 @@ fn render_agent_card(
     depth: u16,
 ) {
     let p = &app.palette;
-    let label_color = state_label_color(detail.state, detail.seen, p);
+    let label_color = state_label_color_with_stale(detail.state, detail.seen, detail.stale, p);
     let rows = resolved_agent_rows(app, detail);
     let header_height = 0;
     let height = (rows.len().max(1) as u16)
@@ -2366,7 +2455,13 @@ fn render_agent_card(
         Modifier::DIM
     });
     let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+    let state_icon = state_icon_with_stale(
+        detail.state,
+        detail.seen,
+        detail.stale,
+        app.status_indicators,
+        p,
+    );
     let indent = usize::from(depth) * 3;
 
     for (row_index, resolved) in rows
@@ -2397,8 +2492,10 @@ fn render_agent_card(
         let baseline_token_spans = resolve_tokens(content_width);
         let mut activity_field = None;
         let token_spans = if row_index == 0 && agent_activity_age_fits(app, detail, rect, depth) {
-            let label =
-                crate::activity_age::compact_label(detail.activity_at, app.view_observed_at);
+            let label = status_report_age_compact_label(detail.reported_at, app.view_observed_at)
+                .unwrap_or_else(|| {
+                    crate::activity_age::compact_label(detail.activity_at, app.view_observed_at)
+                });
             activity_field = Some(format!(" {label:>4}"));
             resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH))
         } else {
@@ -2421,7 +2518,7 @@ fn render_agent_card(
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(usize::from(padding))));
             }
-            let activity_style = if detail.state == AgentState::Working {
+            let activity_style = if detail.state == AgentState::Working && !detail.stale {
                 Style::default().fg(p.blue)
             } else {
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
@@ -2455,7 +2552,7 @@ fn agent_activity_age_fits(
         return false;
     }
     let p = &app.palette;
-    let label_color = state_label_color(detail.state, detail.seen, p);
+    let label_color = state_label_color_with_stale(detail.state, detail.seen, detail.stale, p);
     let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
     let name_style = if is_active {
         Style::default().fg(p.text).add_modifier(Modifier::BOLD)
@@ -2468,7 +2565,13 @@ fn agent_activity_age_fits(
         Modifier::DIM
     });
     let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+    let state_icon = state_icon_with_stale(
+        detail.state,
+        detail.seen,
+        detail.stale,
+        app.status_indicators,
+        p,
+    );
     let resolve_tokens = |max_width| {
         resolved_token_spans(
             &resolved,
@@ -2512,16 +2615,15 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            tab_row_layout(
+            let layout = tab_row_layout(
                 entry,
                 app.view_observed_at,
                 usize::from(card.rect.width),
                 usize::from(depth) * 3 + 1,
                 &app.palette,
                 app.status_indicators,
-            )
-            .activity_age
-            .and(entry.activity_at)
+            );
+            layout.activity_age.and(layout.activity_instant)
         })
         .collect()
 }
@@ -2712,6 +2814,8 @@ mod tests {
             state,
             background_job_count: None,
             seen,
+            stale: false,
+            reported_at: None,
             last_agent_state_change_seq: None,
             activity_at: None,
             state_labels,
@@ -4417,6 +4521,47 @@ row_gap = 1
         assert!(layout.foreground_process.is_none());
         assert!(layout.activity_age.is_none());
         assert!(layout.background_jobs.is_some());
+    }
+
+    #[test]
+    fn reported_at_age_refresh_uses_the_reported_instant_on_desktop_and_mobile() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let reported_at = std::time::Instant::now();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_report_at(
+                "herdr:pi-closing-block".into(),
+                "pi".into(),
+                AgentState::Blocked,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(1),
+                reported_at,
+            )
+            .expect("blocked report accepted");
+        app.view_observed_at = reported_at
+            .checked_add(std::time::Duration::from_secs(60))
+            .expect("observation timestamp after report");
+
+        let runtimes = TerminalRuntimeRegistry::new();
+        let area = Rect::new(0, 0, 80, 20);
+        let cards = compute_tab_card_areas(&app, area);
+        assert_eq!(
+            visible_tab_activity_instants_from(&app, &runtimes, &cards),
+            vec![reported_at]
+        );
+        assert_eq!(
+            crate::ui::mobile::visible_tab_activity_instants_from(&app, &runtimes, area),
+            vec![reported_at]
+        );
     }
 
     #[test]

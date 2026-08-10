@@ -735,6 +735,47 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertIsNone(gate["default"])
         self.assertIsNone(gate["default_at"])
 
+    def test_report_emits_reported_at_and_declared_wait_for_working_state(self):
+        with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=1,
+                wait="CI run 4123",
+                eta_s=720,
+                pane_id="w1:p1",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        payload = outcome["payload"]
+        self.assertRegex(payload["reported_at"], r"^20\d{2}-\d{2}-\d{2}T.*Z$")
+        self.assertEqual(payload["wait"], "CI run 4123")
+        self.assertEqual(payload["eta_s"], 720)
+        report_params = rpc.call_args_list[1].args[3]
+        self.assertEqual(report_params["reported_at"], payload["reported_at"])
+        self.assertEqual(report_params["wait"], "CI run 4123")
+        self.assertEqual(report_params["eta_s"], 720)
+
+    def test_declared_wait_is_omitted_when_state_is_not_working(self):
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                wait="human approval",
+                eta_s=720,
+                pane_id="w9:p14",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertIn("reported_at", outcome["payload"])
+        self.assertNotIn("wait", outcome["payload"])
+        self.assertNotIn("eta_s", outcome["payload"])
+
     def test_blocked_state_label_never_carries_gate_text(self):
         self.assertEqual(herdr_status.blocked_state_label(0), "blocked")
         self.assertEqual(herdr_status.blocked_state_label(1), "gate")

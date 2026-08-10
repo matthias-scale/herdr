@@ -796,6 +796,9 @@ fn worktree_request_and_response_round_trip() {
                 terminal_title_stripped: None,
                 display_agent: None,
                 agent_status: AgentStatus::Unknown,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
                 gates: Vec::new(),
@@ -1265,6 +1268,9 @@ fn create_response_round_trips_with_root_pane() {
                 terminal_title_stripped: None,
                 display_agent: None,
                 agent_status: AgentStatus::Unknown,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
                 gates: Vec::new(),
@@ -1454,6 +1460,42 @@ fn report_agent_params_with_foreign_version_arrays_still_parse() {
 }
 
 #[test]
+fn report_agent_params_with_foreign_version_defers_typed_fields() {
+    let params: PaneReportAgentParams = serde_json::from_value(serde_json::json!({
+        "pane_id": "w1:p1",
+        "source": "herdr:claude-closing-block",
+        "agent": "claude",
+        "state": {"phase": "paused"},
+        "v": 3,
+        "wait": {"until": "ci"},
+        "eta_s": {"seconds": 120},
+        "reported_at": {"at": "2026-08-10T10:00:00Z"}
+    }))
+    .expect("foreign versions must defer incompatible typed fields");
+
+    assert_eq!(params.v, Some(3));
+    assert_eq!(params.wait, None);
+    assert_eq!(params.eta_s, None);
+    assert_eq!(params.reported_at, None);
+
+    let legacy: PaneReportAgentParams = serde_json::from_value(serde_json::json!({
+        "pane_id": "w1:p1",
+        "source": "herdr:claude-closing-block",
+        "agent": "claude",
+        "state": "blocked",
+        "v": 1,
+        "wait": ["legacy"],
+        "eta_s": "legacy",
+        "reported_at": ["legacy"]
+    }))
+    .expect("v1 reports must keep skipping version-dependent fields");
+
+    assert_eq!(legacy.wait, None);
+    assert_eq!(legacy.eta_s, None);
+    assert_eq!(legacy.reported_at, None);
+}
+
+#[test]
 fn report_agent_params_with_current_version_keep_strict_arrays() {
     let malformed = serde_json::from_value::<PaneReportAgentParams>(serde_json::json!({
         "pane_id": "w1:p1",
@@ -1478,4 +1520,22 @@ fn report_agent_params_with_current_version_keep_strict_arrays() {
     .unwrap();
     assert_eq!(params.gates.as_deref().unwrap().len(), 1);
     assert_eq!(params.items.as_deref(), Some(&[][..]));
+}
+
+#[test]
+fn report_agent_params_without_version_keep_strict_arrays() {
+    for field in ["gates", "items", "decisions"] {
+        let mut payload = serde_json::json!({
+            "pane_id": "w1:p1",
+            "source": "herdr:claude-closing-block",
+            "agent": "claude",
+            "state": "blocked"
+        });
+        payload[field] = serde_json::json!(["not an object"]);
+
+        assert!(
+            serde_json::from_value::<PaneReportAgentParams>(payload).is_err(),
+            "missing v must strictly reject malformed {field}"
+        );
+    }
 }
