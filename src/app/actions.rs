@@ -434,11 +434,12 @@ impl AppState {
             let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
             let activity = workspace_activity_summary(ws, &self.terminals);
             let workspace_search_text = format!("{workspace_label} {activity}").to_lowercase();
+            let stale = workspace_has_stale_agent(ws, &self.terminals);
             let workspace_matches = match query_kind {
                 NavigatorQueryKind::Empty => true,
                 NavigatorQueryKind::State(filter) => {
                     let (state, seen) = ws.aggregate_state(&self.terminals);
-                    navigator_state_filter_matches(filter, state, seen)
+                    navigator_state_filter_matches(filter, state, seen, stale)
                 }
                 NavigatorQueryKind::Text => navigator_matches(&query, &workspace_search_text),
             };
@@ -452,7 +453,6 @@ impl AppState {
             let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
                 || self.navigator.expanded_workspaces.contains(&ws.id);
             let (state, seen) = ws.aggregate_state(&self.terminals);
-            let stale = workspace_has_stale_agent(ws, &self.terminals);
             let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
             rows.push(NavigatorRow {
                 target: NavigatorTarget::Workspace { ws_idx },
@@ -492,9 +492,12 @@ impl AppState {
             let mut tab_row = self.navigator_tab_row(ws_idx, tab_idx);
             let tab_matches = match query_kind {
                 NavigatorQueryKind::Empty => true,
-                NavigatorQueryKind::State(filter) => {
-                    navigator_state_filter_matches(filter, tab_row.status, tab_row.seen)
-                }
+                NavigatorQueryKind::State(filter) => navigator_state_filter_matches(
+                    filter,
+                    tab_row.status,
+                    tab_row.seen,
+                    tab_row.stale,
+                ),
                 NavigatorQueryKind::Text => navigator_matches(
                     query,
                     if multi_tab {
@@ -512,7 +515,9 @@ impl AppState {
                 NavigatorQueryKind::Empty => pane_rows,
                 NavigatorQueryKind::State(filter) => pane_rows
                     .into_iter()
-                    .filter(|row| navigator_state_filter_matches(filter, row.status, row.seen))
+                    .filter(|row| {
+                        navigator_state_filter_matches(filter, row.status, row.seen, row.stale)
+                    })
                     .collect::<Vec<_>>(),
                 // A matching workspace or tab shows its whole subtree; panes
                 // keep their own match flag so context rows can be dimmed.
@@ -936,7 +941,11 @@ fn navigator_state_filter_matches(
     filter: NavigatorStateFilter,
     state: AgentState,
     seen: bool,
+    stale: bool,
 ) -> bool {
+    if stale {
+        return false;
+    }
     match filter {
         NavigatorStateFilter::Blocked => state == AgentState::Blocked,
         NavigatorStateFilter::Working => state == AgentState::Working,
@@ -4406,6 +4415,26 @@ mod tests {
             )),
             "literal one-letter search may still match visible state text"
         );
+    }
+
+    #[test]
+    fn navigator_working_filter_excludes_supervisor_stale_rows() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        terminal.supervisor_stale = true;
+
+        state.open_navigator();
+        state.navigator.state_filter = Some(NavigatorStateFilter::Working);
+        let rows = state.navigator_rows();
+
+        assert!(!rows.iter().any(|row| matches!(
+            row.target,
+            crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
+        )));
     }
 
     #[test]

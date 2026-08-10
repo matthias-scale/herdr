@@ -587,7 +587,11 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
-fn agent_panel_status_key_with_stale(state: AgentState, seen: bool, stale: bool) -> &'static str {
+pub(super) fn agent_panel_status_key_with_stale(
+    state: AgentState,
+    seen: bool,
+    stale: bool,
+) -> &'static str {
     if stale {
         "stale"
     } else {

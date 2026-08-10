@@ -941,12 +941,14 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
     let status = entry
         .state_labels
-        .get(super::sidebar::agent_panel_status_key(
+        .get(super::sidebar::agent_panel_status_key_with_stale(
             entry.state,
             entry.seen,
+            entry.stale,
         ))
         .cloned()
         .unwrap_or_else(|| match entry.state {
+            _ if entry.stale => "stale".to_string(),
             AgentState::Idle => "done".to_string(),
             _ => super::status::state_label(entry.state, entry.seen).to_string(),
         });
@@ -1548,6 +1550,24 @@ mod tests {
             terminal.backend().buffer()[(area.width - 1, 0)].symbol(),
             "×"
         );
+    }
+
+    #[test]
+    fn stale_mobile_agent_detail_uses_the_stale_bucket() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("stale")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = AgentState::Working;
+        terminal.supervisor_stale = true;
+
+        let entry = agent_panel_entries(&app).remove(0);
+        assert_eq!(mobile_agent_detail(&entry), "  stale · claude");
     }
 
     #[test]
