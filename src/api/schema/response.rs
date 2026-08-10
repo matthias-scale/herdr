@@ -6,6 +6,7 @@ use super::events::EventEnvelope;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
+use super::loops::{LoopInfo, LoopRunInfo};
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
@@ -61,6 +62,15 @@ pub enum ResponseResult {
     },
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
+    },
+    LoopList {
+        loops: Vec<LoopInfo>,
+    },
+    LoopRunHistory {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_id: Option<String>,
+        runs: Vec<LoopRunInfo>,
+        skipped_lines: u64,
     },
     WorktreeList {
         source: WorktreeSourceInfo,

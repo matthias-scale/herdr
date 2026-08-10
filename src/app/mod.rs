@@ -40,6 +40,7 @@ const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const GIT_REPO_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const GIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+const LOOP_RECEIPT_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -115,6 +116,11 @@ pub struct App {
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
+    pub(crate) loop_history_reader: Option<crate::loop_runs::ReceiptReader>,
+    pub(crate) loop_receipt_watch_health: Arc<crate::loop_runs::ReceiptWatchHealth>,
+    pub(crate) _loop_receipt_watcher: Option<notify::RecommendedWatcher>,
+    pub(crate) loop_receipt_fallback_deadline: Option<Instant>,
+    pub(crate) loop_receipt_watch_degraded: bool,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) status_context_focus: Option<(String, usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
@@ -414,6 +420,26 @@ impl App {
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(crate::render_signal::RenderSignal::new());
+        let receipt_path = crate::loop_runs::default_receipt_path();
+        let mut loop_history_reader = receipt_path
+            .clone()
+            .map(crate::loop_runs::ReceiptReader::new);
+        let initial_loop_history = if let Some(reader) = loop_history_reader.as_mut() {
+            reader.refresh();
+            reader.history().clone()
+        } else {
+            crate::loop_runs::RunHistory::default()
+        };
+        let loop_receipt_watch = if cfg!(test) {
+            crate::loop_runs::disabled_receipt_watch()
+        } else {
+            crate::loop_runs::watch_receipts(receipt_path, event_tx.clone())
+        };
+        let loop_receipt_watch_health = loop_receipt_watch.health.clone();
+        let loop_receipt_fallback_deadline = loop_receipt_watch
+            .fallback_enabled
+            .then_some(Instant::now());
+        let loop_receipt_watcher = loop_receipt_watch.watcher;
 
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
@@ -564,6 +590,9 @@ impl App {
 
         let mut state = AppState {
             view_observed_at: Instant::now(),
+            loop_run_history: initial_loop_history,
+            loop_registry: crate::loop_runs::LoopRegistry::default(),
+            loop_run_history_detail: None,
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,
@@ -804,6 +833,11 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,
+            loop_history_reader,
+            loop_receipt_watch_health,
+            _loop_receipt_watcher: loop_receipt_watcher,
+            loop_receipt_fallback_deadline,
+            loop_receipt_watch_degraded: false,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             last_git_repo_discovery_refresh: Instant::now(),
             git_refresh_in_flight: None,
@@ -1964,6 +1998,9 @@ impl App {
     /// since the server doesn't have the async context of the monolithic App.
     fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
+        if self.handle_loop_run_history_key(key_event) {
+            return;
+        }
         if input::modal_paste_target_active(&self.state)
             && input::is_modal_paste_shortcut(&key_event)
         {

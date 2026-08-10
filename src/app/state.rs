@@ -1482,6 +1482,12 @@ pub struct AppState {
     /// Clock snapshot captured during `compute_view`; renderers consume it
     /// without reading the clock or mutating shared runtime state.
     pub(crate) view_observed_at: Instant,
+    /// Server-owned observation facts loaded from the fleet receipt and loop
+    /// registry files. The UI detail projection reads these values without
+    /// touching the filesystem during render.
+    pub(crate) loop_run_history: crate::loop_runs::RunHistory,
+    pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
+    pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
@@ -1694,6 +1700,54 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoopRunHistoryDetail {
+    pub(crate) loop_id: String,
+    pub(crate) history: crate::loop_runs::RunHistory,
+    pub(crate) observed_at: std::time::SystemTime,
+}
+
+impl AppState {
+    pub(crate) fn swap_loop_run_history_detail(
+        &mut self,
+        other: &mut Option<LoopRunHistoryDetail>,
+    ) {
+        std::mem::swap(&mut self.loop_run_history_detail, other);
+    }
+
+    pub(crate) fn show_loop_run_history(
+        &mut self,
+        loop_id: String,
+        history: crate::loop_runs::RunHistory,
+        observed_at: std::time::SystemTime,
+    ) {
+        self.loop_run_history_detail = Some(LoopRunHistoryDetail {
+            loop_id,
+            history,
+            observed_at,
+        });
+    }
+
+    pub(crate) fn clear_loop_run_history(&mut self) {
+        self.loop_run_history_detail = None;
+    }
+
+    pub(crate) fn toggle_loop_run_history(&mut self) {
+        if self.loop_run_history_detail.is_some() {
+            self.clear_loop_run_history();
+            return;
+        }
+        self.show_loop_run_history(
+            crate::loop_runs::ALL_LOOPS_ID.to_string(),
+            crate::loop_runs::RunHistory {
+                runs: crate::loop_runs::runs_for_loop(&self.loop_run_history, None),
+                skipped_lines: self.loop_run_history.skipped_lines,
+            },
+            std::time::SystemTime::now(),
+        );
+    }
 }
 
 impl AppState {
@@ -2029,6 +2083,9 @@ impl AppState {
     pub fn test_new() -> Self {
         Self {
             view_observed_at: std::time::Instant::now(),
+            loop_run_history: crate::loop_runs::RunHistory::default(),
+            loop_registry: crate::loop_runs::LoopRegistry::default(),
+            loop_run_history_detail: None,
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),
