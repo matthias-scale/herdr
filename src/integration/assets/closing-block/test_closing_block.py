@@ -94,6 +94,22 @@ Work summary goes here.
 Done here.
 """
 
+STALE_DECISIONS_BEFORE_OPERATIVE_CAP = """\
+**Auto-proceeded decisions**
+
+1. Stale earlier decision.
+
+**Critical action points (1 blocking)**
+
+1. **Gate** — Operative gate.
+
+**Auto-proceeded decisions**
+
+1. Live later decision.
+
+Done here.
+"""
+
 STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 **Critical action points (0 blocking)**
 
@@ -354,6 +370,14 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertIn("socket transport", decisions[1]["text"])
         self.assertEqual(block.blocking, 0)
         self.assertEqual(block.wire_gates(), [])
+
+    def test_stale_pre_cap_decisions_are_superseded_by_operative_cap(self):
+        block = closing_block.parse(STALE_DECISIONS_BEFORE_OPERATIVE_CAP)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            ["Live later decision."],
+        )
 
     def test_decisions_from_earlier_cap_block_are_not_attached(self):
         block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)
