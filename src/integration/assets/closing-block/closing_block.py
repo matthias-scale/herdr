@@ -363,6 +363,8 @@ def parse(text: str) -> ClosingBlock:
     """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
+    if text.startswith("\ufeff"):
+        text = text[1:]
     fences = _fence_ranges(text)
     blocks = _closing_blocks(text, fences)
     selected = blocks[-1] if blocks else None
