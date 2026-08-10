@@ -414,10 +414,6 @@ impl ReceiptReader {
         }
         self.identity = Some(identity);
 
-        if metadata.len() == self.offset {
-            self.content_guard = receipt_content_guard(&mut file, self.offset).ok();
-            return changed;
-        }
         if file.seek(SeekFrom::Start(self.offset)).is_err() {
             return changed;
         }
