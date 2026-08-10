@@ -5,6 +5,7 @@ mod agents;
 mod env;
 mod integrations;
 mod layouts;
+mod loops;
 mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
@@ -60,6 +61,7 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
                     .status_metric_refresh
@@ -138,6 +140,10 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        if let AppEvent::LoopRunHistoryChanged = ev {
+            return Some(self.refresh_loop_run_history());
+        }
+
         if let AppEvent::StatusMetricsRefreshed { snapshot } = ev {
             self.status_metric_refresh
                 .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
@@ -1113,6 +1119,10 @@ impl App {
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
+            Method::LoopList(_) => return self.handle_loop_list(request.id),
+            Method::LoopRunHistory(params) => {
+                return self.handle_loop_run_history(request.id, params)
+            }
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }
@@ -1521,6 +1531,108 @@ mod tests {
             },
         );
         app
+    }
+
+    #[test]
+    fn loop_run_history_read_does_not_change_the_detail_surface() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.show_loop_run_history(
+            "already-open".into(),
+            crate::loop_runs::RunHistory::default(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let before = app.state.loop_run_history_detail.clone();
+
+        app.dispatch_api_request(
+            "read",
+            crate::api::schema::Method::LoopRunHistory(crate::api::schema::LoopRunHistoryParams {
+                loop_id: Some("requested".into()),
+            }),
+        );
+
+        assert_eq!(app.state.loop_run_history_detail, before);
+    }
+
+    #[test]
+    fn loop_receipt_change_event_refreshes_cache_and_publishes_update() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-loop-runs-app-refresh-{}-{}.jsonl",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(
+            &path,
+            b"{\"event\":\"start\",\"run_id\":\"refreshed\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n",
+        )
+        .expect("write temporary receipt fixture");
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        app.loop_history_reader = Some(crate::loop_runs::ReceiptReader::new(path.clone()));
+        let sequence = event_hub.current_sequence();
+
+        assert!(app.handle_internal_event_with_render_impact(AppEvent::LoopRunHistoryChanged));
+        assert_eq!(app.state.loop_run_history.runs.len(), 1);
+        assert_eq!(event_hub.events_after(sequence).len(), 1);
+
+        std::fs::remove_file(path).expect("remove temporary receipt fixture");
+    }
+
+    #[test]
+    fn loop_history_refreshes_when_receipt_watcher_is_unavailable() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-loop-runs-app-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temporary receipt directory");
+        let path = dir.join("run-receipts.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"event\":\"start\",\"run_id\":\"fallback\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n",
+        )
+        .expect("write temporary receipt fixture");
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.loop_history_reader = Some(crate::loop_runs::ReceiptReader::new(path));
+        app._loop_receipt_watcher = None;
+        app.loop_receipt_fallback_deadline = Some(std::time::Instant::now());
+
+        assert!(app.handle_scheduled_tasks(
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            false,
+        ));
+        assert_eq!(app.state.loop_run_history.runs.len(), 1);
+        assert_eq!(app.state.loop_run_history.runs[0].run_id, "fallback");
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("low-frequency fallback refresh")));
+
+        std::fs::remove_dir_all(dir).expect("remove temporary receipt directory");
     }
 
     #[tokio::test]

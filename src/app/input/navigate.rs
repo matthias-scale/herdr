@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Direction;
 
 use crate::{
@@ -74,6 +74,12 @@ impl App {
         }
 
         if key.code == KeyCode::Esc {
+            leave_command_mode(&mut self.state);
+            return;
+        }
+
+        if key.code == KeyCode::Char('h') && key.modifiers == KeyModifiers::CONTROL {
+            self.state.toggle_loop_run_history();
             leave_command_mode(&mut self.state);
             return;
         }
@@ -2319,6 +2325,22 @@ mod tests {
             crate::detect::AgentState::Idle
         );
         assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+    }
+
+    #[test]
+    fn prefix_ctrl_h_opens_and_escape_closes_run_history_detail() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+
+        assert!(app.state.loop_run_history_detail.is_some());
+
+        assert!(
+            app.handle_loop_run_history_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty(),))
+        );
+
+        assert!(app.state.loop_run_history_detail.is_none());
     }
 
     #[test]

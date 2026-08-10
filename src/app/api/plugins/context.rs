@@ -78,6 +78,7 @@ impl App {
                     context.workspace_id = Some(workspace_id.clone());
                     context
                 }),
+            EventData::LoopRunHistoryUpdated { .. } => empty_plugin_context(correlation_id),
             EventData::WorktreeRemoved {
                 workspace_id,
                 workspace,

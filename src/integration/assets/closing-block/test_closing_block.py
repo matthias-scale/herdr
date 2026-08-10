@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import threading
 import unittest
@@ -32,6 +33,12 @@ ZERO_COUNT_GATE = """\
 **Critical action points (0 blocking)**
 
 1. **Gate** — Approve the zero-count correction.
+
+Done here.
+"""
+
+DECLARED_BLOCKING_WITHOUT_ITEMS = """\
+**Critical action points (2 blocking)**
 
 Done here.
 """
@@ -73,6 +80,92 @@ Work summary goes here.
 Done here.
 """
 
+DECISIONS_BEFORE_EMPTY_CAP = """\
+Work summary goes here.
+
+**Auto-proceeded decisions**
+
+1. Proceed with the compact list; recommendation: compact list at 14:25.
+2. Kept the existing socket transport.
+
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+Done here.
+"""
+
+STALE_DECISIONS_BEFORE_OPERATIVE_CAP = """\
+**Auto-proceeded decisions**
+
+1. Stale earlier decision.
+
+**Critical action points (1 blocking)**
+
+1. **Gate** — Operative gate.
+
+**Auto-proceeded decisions**
+
+1. Live later decision.
+
+Done here.
+"""
+
+FENCED_ONLY_CAP = """\
+```markdown
+**Critical action points (1 blocking)**
+
+1. **Gate** — Example only.
+```
+
+Done here.
+"""
+
+FENCED_CAP_BETWEEN_DECISIONS_AND_REAL_CAP = """\
+**Auto-proceeded decisions**
+
+1. Live pre-CAP decision.
+
+````markdown
+**Critical action points (99 blocking)**
+
+1. **Gate** — Example only.
+````
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
+FENCED_NOTHING_BETWEEN_DECISIONS_AND_REAL_CAP = """\
+**Auto-proceeded decisions**
+
+1. Live pre-CAP decision.
+
+~~~markdown
+**Nothing to act on.**
+~~~
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
+UNCLOSED_FENCE = """\
+```markdown
+**Critical action points (1 blocking)**
+
+1. **Gate** — Incomplete example.
+"""
+
+BOM_PREFIXED_CAP = """\
+\ufeff**Critical action points (1 blocking)**
+
+1. **Gate** — BOM-prefixed gate.
+
+Done here.
+"""
+
 STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 **Critical action points (0 blocking)**
 
@@ -84,6 +177,179 @@ STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 
 Done here.
 """
+
+STALE_DECISIONS_AFTER_TERMINATION = """\
+**Auto-proceeded decisions**
+
+1. Stale decision.
+
+**Nothing to act on.**
+
+Intervening prose.
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
+DECISIONS_AFTER_FINAL_NOTHING = """\
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+**Auto-proceeded decisions**
+
+1. Stale decision after termination.
+"""
+
+ADVERSARIAL_MULTIPLE_DECISIONS_ONE_CAP = """\
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. First decision in this block.
+
+**Auto-proceeded decisions**
+
+2. Second decision in this block.
+
+Done here.
+"""
+
+ADVERSARIAL_MULTIPLE_DECISIONS_BEFORE_EMPTY_CAP = """\
+Work summary goes here.
+
+**Auto-proceeded decisions**
+
+1. First pre-CAP decision.
+
+**Auto-proceeded decisions**
+
+2. Second pre-CAP decision.
+
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+Done here.
+"""
+
+ADVERSARIAL_REPEATED_NOTHING = """\
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+**Auto-proceeded decisions**
+
+1. Decision between repeated Nothing markers.
+
+**Nothing to act on.**
+"""
+
+ADVERSARIAL_DECISION_BETWEEN_CAPS = """\
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. Decision belonging to the earlier CAP.
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
+ADVERSARIAL_INDENTED_CAP_IN_DECISION = """\
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. The explanation quotes this example:
+   **Critical action points (99 blocking)**
+   and the quoted marker is content.
+
+Done here.
+"""
+
+ADVERSARIAL_INDENTED_NOTHING_IN_DECISION = """\
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. The explanation quotes this example:
+   **Nothing to act on.**
+   and the decision continues after it.
+
+Done here.
+"""
+
+ADVERSARIAL_REPEATED_CAPS_FINAL_DECISIONS = """\
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. Stale decision from the earlier CAP.
+
+**Critical action points (0 blocking)**
+
+**Auto-proceeded decisions**
+
+1. Decision from the final CAP.
+
+Done here.
+"""
+
+ADVERSARIAL_CRLF = (
+    "**Critical action points (0 blocking)**\r\n"
+    "\r\n"
+    "**Auto-proceeded decisions**\r\n"
+    "\r\n"
+    "1. CRLF decision; recommendation: retain at 10:00.\r\n"
+    "\r\n"
+    "Done here.\r\n"
+)
+
+ADVERSARIAL_DECISIONS_WITHOUT_BLOCK = """\
+**Auto-proceeded decisions**
+
+1. Orphan decision without a closing-block marker.
+
+Done here.
+"""
+
+ADVERSARIAL_STALE_BEFORE_INTERVENING_NOTHING = """\
+**Auto-proceeded decisions**
+
+1. Stale decision before the intervening Nothing marker.
+
+**Nothing to act on.**
+
+Intervening prose.
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
+ADVERSARIAL_DECISION_AFTER_FINAL_NOTHING = """\
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+**Auto-proceeded decisions**
+
+1. Decision after the final Nothing marker.
+"""
+
+DECLARED_COUNT_WITH_ONLY_NONBLOCKING_ITEMS = {
+    count: f"""**Critical action points ({count} blocking)**
+
+1. **Answer** — A nonblocking answer.
+2. **Verify** — A nonblocking verification.
+
+Done here.
+"""
+    for count in (0, 1, 2, 99)
+}
 
 
 class ClosingBlockV2Tests(unittest.TestCase):
@@ -111,6 +377,12 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
         self.assertEqual(block.blocking, 1)
         self.assertEqual(block.wire_gates()[0]["text"], "Approve the zero-count correction.")
+
+    def test_declared_blocking_without_items_does_not_create_phantom_gates(self):
+        block = closing_block.parse(DECLARED_BLOCKING_WITHOUT_ITEMS)
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
 
     def test_answer_and_what_to_test_are_nonblocking_items(self):
         block = closing_block.parse(REALISTIC_CAP)
@@ -145,10 +417,175 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(block.blocking, 1)
         self.assertEqual(len(block.wire_gates()), 1)
 
+    def test_decisions_before_empty_cap_block_are_parsed(self):
+        block = closing_block.parse(DECISIONS_BEFORE_EMPTY_CAP)
+
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0]["recommendation"], "compact list")
+        self.assertIn("socket transport", decisions[1]["text"])
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
+
+    def test_stale_pre_cap_decisions_are_superseded_by_operative_cap(self):
+        block = closing_block.parse(STALE_DECISIONS_BEFORE_OPERATIVE_CAP)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            ["Live later decision."],
+        )
+
+    def test_fenced_cap_is_not_a_live_gate(self):
+        block = closing_block.parse(FENCED_ONLY_CAP)
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
+
+    def test_fenced_cap_does_not_drop_pre_cap_decisions(self):
+        block = closing_block.parse(FENCED_CAP_BETWEEN_DECISIONS_AND_REAL_CAP)
+
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 1)
+        self.assertIn("Live pre-CAP decision.", decisions[0]["text"])
+
+    def test_fenced_nothing_does_not_drop_pre_cap_decisions(self):
+        block = closing_block.parse(FENCED_NOTHING_BETWEEN_DECISIONS_AND_REAL_CAP)
+
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 1)
+        self.assertIn("Live pre-CAP decision.", decisions[0]["text"])
+
+    def test_unclosed_fence_suppresses_tail_markers(self):
+        block = closing_block.parse(UNCLOSED_FENCE)
+
+        self.assertFalse(block.present)
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
+
+    def test_bom_prefixed_cap_is_recognized(self):
+        block = closing_block.parse(BOM_PREFIXED_CAP)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.wire_gates()[0]["text"], "BOM-prefixed gate.")
+
     def test_decisions_from_earlier_cap_block_are_not_attached(self):
         block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)
 
         self.assertEqual(block.wire_decisions(), [])
+
+    def test_decisions_after_nothing_are_not_attached_to_final_cap(self):
+        block = closing_block.parse(STALE_DECISIONS_AFTER_TERMINATION)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_decisions_after_final_nothing_are_not_parsed_as_payload(self):
+        block = closing_block.parse(DECISIONS_AFTER_FINAL_NOTHING)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_adversarial_valid_decisions_before_empty_cap(self):
+        block = closing_block.parse(DECISIONS_BEFORE_EMPTY_CAP)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            [
+                "Proceed with the compact list; recommendation: compact list at 14:25.",
+                "Kept the existing socket transport.",
+            ],
+        )
+
+    def test_adversarial_stale_decisions_before_intervening_nothing(self):
+        block = closing_block.parse(ADVERSARIAL_STALE_BEFORE_INTERVENING_NOTHING)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_adversarial_decision_heading_after_final_nothing(self):
+        block = closing_block.parse(ADVERSARIAL_DECISION_AFTER_FINAL_NOTHING)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_adversarial_repeated_nothing_markers_keep_the_final_section(self):
+        block = closing_block.parse(ADVERSARIAL_REPEATED_NOTHING)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            ["Decision between repeated Nothing markers."],
+        )
+
+    def test_adversarial_decision_between_caps_belongs_to_earlier_block(self):
+        block = closing_block.parse(ADVERSARIAL_DECISION_BETWEEN_CAPS)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_adversarial_multiple_decision_sections_in_one_cap(self):
+        block = closing_block.parse(ADVERSARIAL_MULTIPLE_DECISIONS_ONE_CAP)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            [
+                "First decision in this block.",
+                "Second decision in this block.",
+            ],
+        )
+
+    def test_adversarial_multiple_decision_sections_before_empty_cap(self):
+        block = closing_block.parse(ADVERSARIAL_MULTIPLE_DECISIONS_BEFORE_EMPTY_CAP)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            ["First pre-CAP decision.", "Second pre-CAP decision."],
+        )
+
+    def test_adversarial_indented_cap_header_is_decision_content(self):
+        block = closing_block.parse(ADVERSARIAL_INDENTED_CAP_IN_DECISION)
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(len(block.wire_decisions()), 1)
+        self.assertIn(
+            "**Critical action points (99 blocking)**",
+            block.wire_decisions()[0]["text"],
+        )
+        self.assertIn("and the quoted marker is content.", block.wire_decisions()[0]["text"])
+
+    def test_adversarial_indented_nothing_marker_is_decision_content(self):
+        block = closing_block.parse(ADVERSARIAL_INDENTED_NOTHING_IN_DECISION)
+
+        self.assertEqual(len(block.wire_decisions()), 1)
+        self.assertIn("**Nothing to act on.**", block.wire_decisions()[0]["text"])
+        self.assertIn("and the decision continues after it.", block.wire_decisions()[0]["text"])
+
+    def test_adversarial_repeated_caps_keep_final_block_decisions(self):
+        block = closing_block.parse(ADVERSARIAL_REPEATED_CAPS_FINAL_DECISIONS)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            ["Decision from the final CAP."],
+        )
+
+    def test_adversarial_crlf_closing_block(self):
+        block = closing_block.parse(ADVERSARIAL_CRLF)
+
+        self.assertEqual(
+            [decision["text"] for decision in block.wire_decisions()],
+            ["CRLF decision; recommendation: retain at 10:00."],
+        )
+
+    def test_adversarial_decisions_without_cap_or_nothing_are_ignored(self):
+        block = closing_block.parse(ADVERSARIAL_DECISIONS_WITHOUT_BLOCK)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_adversarial_declared_counts_do_not_create_gates(self):
+        for count, text in DECLARED_COUNT_WITH_ONLY_NONBLOCKING_ITEMS.items():
+            with self.subTest(count=count):
+                block = closing_block.parse(text)
+
+                self.assertEqual(block.blocking, 0)
+                self.assertEqual(block.wire_gates(), [])
+                self.assertEqual(
+                    [item["label"] for item in block.wire_items()],
+                    ["Answer", "Verify"],
+                )
 
     def test_mirror_write_keeps_newest_seq(self):
         with mock.patch.dict(
@@ -225,9 +662,10 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 self.assertEqual(herdr_status.json.load(fh)["seq"], 100)
 
     def test_v1_payload_is_skipped_without_error(self):
-        self.assertFalse(herdr_status.accepts_payload({"v": 1}))
+        for payload in (None, [], "malformed", {"v": 1}, {"v": 3}):
+            with self.subTest(payload=payload):
+                self.assertFalse(herdr_status.accepts_payload(payload))
         self.assertTrue(herdr_status.accepts_payload({"v": 2}))
-        self.assertFalse(herdr_status.accepts_payload({"v": 3}))
 
     def test_what_to_test_urls_and_nested_decisions_are_not_collapsed(self):
         block = closing_block.parse(MULTI_WHAT)
@@ -271,21 +709,27 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(metadata[1], "herdr:claude-closing-block")
         self.assertEqual(metadata[2], "pane.report_metadata")
         params = metadata[3]
-        self.assertIn("Approve PR #2606", params["state_labels"]["blocked"])
+        # The state label names the state; the gate body stays in the token.
+        self.assertEqual(params["state_labels"]["blocked"], "gate")
+        self.assertNotIn("Approve PR #2606", params["state_labels"]["blocked"])
+        self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
 
     def test_emit_forces_legacy_default_fields_to_null(self):
-        outcome = herdr_status.report(
-            agent="claude",
-            blocking=1,
-            agents=0,
-            gates=[
-                {
-                    "text": "Gate text",
-                    "default": "approve",
-                    "default_at": "2026-08-09T12:00:00Z",
-                }
-            ],
-        )
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                gates=[
+                    {
+                        "text": "Gate text",
+                        "default": "approve",
+                        "default_at": "2026-08-09T12:00:00Z",
+                    }
+                ],
+                pane_id="w9:p12",
+                sock_path="/tmp/herdr-test.sock",
+            )
 
         gate = outcome["payload"]["gates"][0]
         self.assertIsNone(gate["default"])
@@ -317,17 +761,67 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(report_params["eta_s"], 720)
 
     def test_declared_wait_is_omitted_when_state_is_not_working(self):
-        outcome = herdr_status.report(
-            agent="claude",
-            blocking=1,
-            agents=0,
-            wait="human approval",
-            eta_s=720,
-        )
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                wait="human approval",
+                eta_s=720,
+                pane_id="w9:p14",
+                sock_path="/tmp/herdr-test.sock",
+            )
 
         self.assertIn("reported_at", outcome["payload"])
         self.assertNotIn("wait", outcome["payload"])
         self.assertNotIn("eta_s", outcome["payload"])
+
+    def test_blocked_state_label_never_carries_gate_text(self):
+        self.assertEqual(herdr_status.blocked_state_label(0), "blocked")
+        self.assertEqual(herdr_status.blocked_state_label(1), "gate")
+        self.assertEqual(herdr_status.blocked_state_label(2), "2 gates")
+        self.assertEqual(herdr_status.blocked_state_label(9), "9 gates")
+        # A negative count is nonsense but must not render as a gate.
+        self.assertEqual(herdr_status.blocked_state_label(-1), "blocked")
+
+    def test_blocked_state_label_is_independent_of_gate_bodies(self):
+        long_gate = [{"text": "x" * 300, "label": "Gate", "n": 1}]
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                gates=long_gate,
+                pane_id="w9:p13",
+                sock_path="/tmp/herdr-test.sock",
+            )
+        self.assertNotIn("x" * 20, outcome["payload"].get("message", ""))
+
+    def test_report_never_falls_back_to_the_ambient_pane(self):
+        # `report()` defaults pane and socket from HERDR_PANE_ID /
+        # HERDR_SOCKET_PATH, so a test that omits them talks to whatever server
+        # owns the shell running the suite. That is how this suite once posted
+        # the fixture gate "Gate text" onto a live daily-driver pane. Every
+        # `report()` call in this file must name both, and this test fails if
+        # the ambient values would have been reachable.
+        import inspect
+
+        source = inspect.getsource(type(self))
+        calls = source.count("herdr_status.report(")
+        self.assertEqual(calls, source.count('sock_path="/tmp/herdr-test.sock"'))
+        self.assertEqual(calls, source.count('pane_id="w'))
+
+    @contextlib.contextmanager
+    def _isolated(self):
+        """No ambient pane, no ambient socket, no live state directory."""
+        with mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            herdr_status.os.environ.pop("HERDR_PANE_ID", None)
+            herdr_status.os.environ.pop("HERDR_SOCKET_PATH", None)
+            yield
 
     @staticmethod
     def _state_dir():

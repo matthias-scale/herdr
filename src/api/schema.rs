@@ -4,6 +4,7 @@ pub mod agents;
 pub mod common;
 pub mod events;
 pub mod integrations;
+pub mod loops;
 pub mod panes;
 pub mod plugins;
 pub mod response;
@@ -17,6 +18,7 @@ pub use agents::*;
 pub use common::*;
 pub use events::*;
 pub use integrations::*;
+pub use loops::*;
 pub use panes::*;
 pub use plugins::*;
 pub use response::*;
@@ -81,6 +83,10 @@ pub enum Method {
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
+    #[serde(rename = "loop.list")]
+    LoopList(EmptyParams),
+    #[serde(rename = "loop.run_history")]
+    LoopRunHistory(LoopRunHistoryParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

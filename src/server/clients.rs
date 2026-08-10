@@ -56,6 +56,8 @@ pub(crate) struct ClientConnection {
     pub(crate) render_state: ClientRenderState,
     /// Sidebar disclosure, projection escape, and scroll state for this attach.
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
+    /// Client-local run-history detail surface, separate from server-owned receipt facts.
+    pub(crate) loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
@@ -127,6 +129,7 @@ impl ClientConnection {
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
+            loop_run_history_detail: None,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             graphics_surface_reset_pending: false,
             render_pending: false,

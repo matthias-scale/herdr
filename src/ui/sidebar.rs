@@ -523,8 +523,8 @@ fn collect_agent_panel_entries_with_runtimes(
                     let tab_label_leads_with_agent = projection
                         .as_ref()
                         .is_some_and(|projection| projection.leads_with_agent_component());
-                    let thread_title = projection
-                        .map(|projection| projection.full_label())
+                    let thread_title = ws
+                        .tab_display_name_from(&app.terminals, detail.tab_idx)
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
                     AgentPanelEntry {
                         ws_idx,
@@ -4734,6 +4734,19 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .unwrap()
             .set_terminal_title(Some("Fix billing".into()));
 
+        let expected = app.workspaces[0]
+            .tab_display_name_from(&app.terminals, 0)
+            .expect("canonical tab name");
+        // Anchor the canonical name to a literal as well as to the other
+        // consumers: comparing two derivations to each other alone would still
+        // pass if both regressed the same way.
+        assert_eq!(expected, "Fix billing");
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("sidebar tab entry");
+        assert_eq!(entry.primary_tab_label.as_deref(), Some(expected.as_str()));
+
         let area = Rect::new(0, 0, 60, 8);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -4742,13 +4755,9 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
 
-        let tab_bar_label = crate::ui::tabs::tab_chrome_label(
-            &app.workspaces[0],
-            &app.terminals,
-            0,
-            usize::from(area.width),
-        );
-        assert_eq!(tab_bar_label, "Fix billing");
+        let tab_bar_label =
+            crate::ui::tabs::tab_chrome_label(&app.workspaces[0], &app.terminals, 0, usize::MAX);
+        assert_eq!(tab_bar_label, expected);
         assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
         // The label no longer names the agent, so the sidebar appends the
         // provider chip exactly once and never leads with it.
@@ -4757,6 +4766,21 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             !rendered.contains("pi · Fix billing"),
             "sidebar led with the agent identity: {rendered:?}"
         );
+
+        app.workspaces[0].tabs[0].set_user_custom_name("Human title".into());
+        let expected = app.workspaces[0]
+            .tab_display_name_from(&app.terminals, 0)
+            .expect("human canonical tab name");
+        // A human rename must win over every automatic source.
+        assert_eq!(expected, "Human title");
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("sidebar tab entry after rename");
+        assert_eq!(entry.primary_tab_label.as_deref(), Some(expected.as_str()));
+        let custom_tab_bar_label =
+            crate::ui::tabs::tab_chrome_label(&app.workspaces[0], &app.terminals, 0, usize::MAX);
+        assert_eq!(custom_tab_bar_label, expected);
     }
 
     #[test]
