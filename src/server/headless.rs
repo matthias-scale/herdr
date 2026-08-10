@@ -4214,8 +4214,13 @@ impl HeadlessServer {
                             &self.app.render_notify,
                             &self.app.render_dirty,
                         );
-                    self.app.ensure_dock_editor();
-                    self.app.resize_dock_editor();
+                    // The editor PTY is a shared runtime resource. Its size follows the
+                    // foreground client's layout, while every app client still renders its
+                    // own dock geometry above.
+                    if is_foreground {
+                        self.app.ensure_dock_editor();
+                        self.app.resize_dock_editor();
+                    }
                     if let Some(deadline) = self
                         .app
                         .state
@@ -5623,6 +5628,106 @@ mod tests {
             .expect("editor runtime")
             .current_size();
         assert_eq!(after, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_app_background_client_does_not_resize_shared_dock_editor_runtime() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let agent_terminal_id = workspace
+            .terminal_id(pane_id)
+            .expect("agent terminal id")
+            .clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&agent_terminal_id)
+            .expect("agent terminal state")
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+            );
+
+        let editor_terminal_id = crate::terminal::TerminalId::alloc();
+        server.app.state.dock_editor_sessions.insert(
+            pane_id,
+            crate::app::state::DockEditorSession {
+                pane_id: crate::layout::PaneId::alloc(),
+                terminal_id: editor_terminal_id.clone(),
+            },
+        );
+        server.app.terminal_runtimes.insert(
+            editor_terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 2, b"EDITOR"),
+        );
+        let before = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .current_size();
+        let before_resize_count = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .test_resize_count();
+
+        let mut render_receivers = Vec::new();
+        for (client_id, terminal_size, dock_width, editor_focused) in [
+            (1_u64, (100, 30), 24_u16, true),
+            (2_u64, (160, 45), 48_u16, true),
+        ] {
+            let (client_tx, _control_rx, render_rx) = test_client_writer();
+            render_receivers.push(render_rx);
+            let mut client = ClientConnection::new(
+                terminal_size,
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                client_id,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            );
+            client.dock_presentation = crate::app::state::DockPresentationState {
+                width: dock_width,
+                collapsed: false,
+                tab: crate::app::DockTab::Editor,
+                scroll: 0,
+                editor_focused,
+            };
+            server.clients.insert(client_id, client);
+        }
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.render_and_stream();
+
+        let after = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .current_size();
+        let after_resize_count = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .test_resize_count();
+        assert_eq!(
+            after_resize_count,
+            before_resize_count + 1,
+            "background client resized shared editor PTY: before_size={before:?}, after_size={after:?}, before_resize_count={before_resize_count}, after_resize_count={after_resize_count}"
+        );
+        drop(render_receivers);
+        shutdown_test_runtimes(&mut server);
     }
 
     fn hidden_pty_visibility_test_server(
