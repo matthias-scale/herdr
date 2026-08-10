@@ -190,16 +190,15 @@ pub(crate) fn visible_tab_activity_instants_from(
                 return None;
             };
             let indent = " ".repeat(2 + usize::from(*depth) * 3);
-            tab_row_layout(
+            let layout = tab_row_layout(
                 entry,
                 app.view_observed_at,
                 usize::from(content.width),
                 display_width(&indent),
                 &app.palette,
                 app.status_indicators,
-            )
-            .activity_age
-            .and(entry.activity_at)
+            );
+            layout.activity_age.and(layout.activity_instant)
         })
         .collect()
 }

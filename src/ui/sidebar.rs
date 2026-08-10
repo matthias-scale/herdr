@@ -74,6 +74,7 @@ pub(super) struct TabRowLayout {
     pub foreground_process: Option<String>,
     pub background_jobs: Option<String>,
     pub activity_age: Option<String>,
+    pub activity_instant: Option<std::time::Instant>,
 }
 
 /// The prio cell is reserved on every row so its click target never moves; the info cell only
@@ -148,14 +149,20 @@ pub(super) fn tab_row_layout(
         .background_job_count
         .filter(|count| *count > 0)
         .map(|count| format!("  {count} >_"));
-    let mut activity_age = status_report_age_label(entry.reported_at, now).or_else(|| {
-        entry.activity_at.map(|activity_at| {
-            format!(
-                "{} ago",
-                crate::activity_age::compact_label(Some(activity_at), now)
+    let (mut activity_age, mut activity_instant) =
+        if let Some(label) = status_report_age_label(entry.reported_at, now) {
+            (Some(label), entry.reported_at)
+        } else if let Some(activity_at) = entry.activity_at {
+            (
+                Some(format!(
+                    "{} ago",
+                    crate::activity_age::compact_label(Some(activity_at), now)
+                )),
+                Some(activity_at),
             )
-        })
-    });
+        } else {
+            (None, None)
+        };
 
     let background_width = background_jobs
         .as_deref()
@@ -202,6 +209,7 @@ pub(super) fn tab_row_layout(
                 + display_width(label)
     }) {
         activity_age = None;
+        activity_instant = None;
     }
     let activity_width = activity_age
         .as_deref()
@@ -252,6 +260,7 @@ pub(super) fn tab_row_layout(
         foreground_process,
         background_jobs,
         activity_age,
+        activity_instant,
     }
 }
 
@@ -2602,16 +2611,15 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            tab_row_layout(
+            let layout = tab_row_layout(
                 entry,
                 app.view_observed_at,
                 usize::from(card.rect.width),
                 usize::from(depth) * 3 + 1,
                 &app.palette,
                 app.status_indicators,
-            )
-            .activity_age
-            .and(entry.activity_at)
+            );
+            layout.activity_age.and(layout.activity_instant)
         })
         .collect()
 }
@@ -4509,6 +4517,47 @@ row_gap = 1
         assert!(layout.foreground_process.is_none());
         assert!(layout.activity_age.is_none());
         assert!(layout.background_jobs.is_some());
+    }
+
+    #[test]
+    fn reported_at_age_refresh_uses_the_reported_instant_on_desktop_and_mobile() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let reported_at = std::time::Instant::now();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_report_at(
+                "herdr:pi-closing-block".into(),
+                "pi".into(),
+                AgentState::Blocked,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(1),
+                reported_at,
+            )
+            .expect("blocked report accepted");
+        app.view_observed_at = reported_at
+            .checked_add(std::time::Duration::from_secs(60))
+            .expect("observation timestamp after report");
+
+        let runtimes = TerminalRuntimeRegistry::new();
+        let area = Rect::new(0, 0, 80, 20);
+        let cards = compute_tab_card_areas(&app, area);
+        assert_eq!(
+            visible_tab_activity_instants_from(&app, &runtimes, &cards),
+            vec![reported_at]
+        );
+        assert_eq!(
+            crate::ui::mobile::visible_tab_activity_instants_from(&app, &runtimes, area),
+            vec![reported_at]
+        );
     }
 
     #[test]
