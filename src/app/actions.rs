@@ -624,9 +624,15 @@ impl AppState {
             let stale = terminal.is_some_and(|terminal| terminal.supervisor_stale);
             let status_label = terminal
                 .map(|terminal| terminal.effective_presentation().state_labels)
-                .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
-            let status = status_label
-                .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
+                .and_then(|labels| {
+                    labels
+                        .get(state_label_text_with_stale(state, pane.seen, stale))
+                        .cloned()
+                });
+            let status = status_label.or_else(|| {
+                agent_label
+                    .map(|_| state_label_text_with_stale(state, pane.seen, stale).to_string())
+            });
             let mut meta_parts = Vec::new();
             if let Some(context) = terminal.map(|terminal| terminal.effective_work_context()) {
                 meta_parts.extend(context.ticket_ids.iter().cloned());
@@ -978,6 +984,14 @@ fn state_label_text(state: AgentState, seen: bool) -> &'static str {
     }
 }
 
+fn state_label_text_with_stale(state: AgentState, seen: bool, stale: bool) -> &'static str {
+    if stale {
+        "stale"
+    } else {
+        state_label_text(state, seen)
+    }
+}
+
 fn tab_has_stale_agent(
     tab: &crate::workspace::Tab,
     terminals: &std::collections::HashMap<
@@ -1070,10 +1084,14 @@ fn activity_summary_for_panes<'a>(
         let Some(terminal) = terminals.get(&pane.attached_terminal_id) else {
             continue;
         };
-        match (terminal.state, pane.seen) {
-            (AgentState::Blocked, _) => blocked += 1,
-            (AgentState::Working, _) => working += 1,
-            (AgentState::Idle, false) => done += 1,
+        match crate::app::api_helpers::pane_agent_status_with_stale(
+            terminal.state,
+            pane.seen,
+            terminal.supervisor_stale,
+        ) {
+            crate::api::schema::AgentStatus::Blocked => blocked += 1,
+            crate::api::schema::AgentStatus::Working => working += 1,
+            crate::api::schema::AgentStatus::Done => done += 1,
             _ => {}
         }
     }
@@ -4435,6 +4453,20 @@ mod tests {
             row.target,
             crate::app::state::NavigatorTarget::Pane { pane_id, .. } if pane_id == pane
         )));
+    }
+
+    #[test]
+    fn workspace_activity_summary_excludes_supervisor_stale_working_panes() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        terminal.supervisor_stale = true;
+
+        let summary = workspace_activity_summary(&state.workspaces[0], &state.terminals);
+        assert!(!summary.contains("working"));
     }
 
     #[test]

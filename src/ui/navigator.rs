@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
-    status::{state_icon, state_icon_with_stale, state_label_color},
+    status::{state_icon, state_icon_with_stale, state_label_color, state_label_color_with_stale},
     text::{display_width_u16, middle_elide, truncate_end},
     widgets::{panel_contrast_fg, render_panel_shell},
 };
@@ -262,7 +262,9 @@ fn render_row(
             Style::default().fg(p.overlay0).bg(p.panel_bg)
         } else {
             Style::default()
-                .fg(state_label_color(row.status, row.seen, p))
+                .fg(state_label_color_with_stale(
+                    row.status, row.seen, row.stale, p,
+                ))
                 .bg(p.panel_bg)
         };
         frame.render_widget(

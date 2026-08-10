@@ -2418,7 +2418,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             .saturating_sub(used_width)
             .saturating_sub(display_width(&activity_age));
         spans.push(Span::raw(" ".repeat(padding)));
-        let activity_style = if entry.state == AgentState::Working {
+        let activity_style = if entry.state == AgentState::Working && !entry.stale {
             Style::default().fg(p.blue)
         } else {
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
@@ -2518,7 +2518,7 @@ fn render_agent_card(
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(usize::from(padding))));
             }
-            let activity_style = if detail.state == AgentState::Working {
+            let activity_style = if detail.state == AgentState::Working && !detail.stale {
                 Style::default().fg(p.blue)
             } else {
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
