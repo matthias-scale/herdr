@@ -271,7 +271,10 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(metadata[1], "herdr:claude-closing-block")
         self.assertEqual(metadata[2], "pane.report_metadata")
         params = metadata[3]
-        self.assertIn("Approve PR #2606", params["state_labels"]["blocked"])
+        # The state label names the state; the gate body stays in the token.
+        self.assertEqual(params["state_labels"]["blocked"], "gate")
+        self.assertNotIn("Approve PR #2606", params["state_labels"]["blocked"])
+        self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
 
     def test_emit_forces_legacy_default_fields_to_null(self):
         outcome = herdr_status.report(
@@ -290,6 +293,21 @@ class ClosingBlockV2Tests(unittest.TestCase):
         gate = outcome["payload"]["gates"][0]
         self.assertIsNone(gate["default"])
         self.assertIsNone(gate["default_at"])
+
+    def test_blocked_state_label_never_carries_gate_text(self):
+        self.assertEqual(herdr_status.blocked_state_label(0), "blocked")
+        self.assertEqual(herdr_status.blocked_state_label(1), "gate")
+        self.assertEqual(herdr_status.blocked_state_label(2), "2 gates")
+        self.assertEqual(herdr_status.blocked_state_label(9), "9 gates")
+        # A negative count is nonsense but must not render as a gate.
+        self.assertEqual(herdr_status.blocked_state_label(-1), "blocked")
+
+    def test_blocked_state_label_is_independent_of_gate_bodies(self):
+        long_gate = [{"text": "x" * 300, "label": "Gate", "n": 1}]
+        outcome = herdr_status.report(
+            agent="claude", blocking=1, agents=0, gates=long_gate
+        )
+        self.assertNotIn("x" * 20, outcome["payload"].get("message", ""))
 
     @staticmethod
     def _state_dir():

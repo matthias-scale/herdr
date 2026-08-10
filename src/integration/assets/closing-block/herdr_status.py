@@ -86,6 +86,19 @@ def _normalize_decision(
     return decision
 
 
+def blocked_state_label(blocking: int) -> str:
+    """The sidebar state label names the STATE, never the gate's text.
+
+    Row width is scarce and the pane's own title already sits beside it, so a
+    truncated copy of the gate body crowds out the identity that says which
+    agent is asking. The full text stays available in the `closing_gates`
+    token and in `gates[]`.
+    """
+    if blocking <= 0:
+        return "blocked"
+    return "gate" if blocking == 1 else f"{blocking} gates"
+
+
 def message_for(
     blocking: int,
     agents: int,
@@ -255,7 +268,7 @@ def report(
         "applies_to_source": source,
         "tokens": tokens,
         "state_labels": {
-            "blocked": message if blocking else "blocked",
+            "blocked": blocked_state_label(blocking),
             "working": "working",
         },
         "seq": seq,
