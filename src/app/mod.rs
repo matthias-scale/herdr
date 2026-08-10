@@ -564,6 +564,9 @@ impl App {
 
         let mut state = AppState {
             view_observed_at: Instant::now(),
+            loop_run_history: crate::loop_runs::RunHistory::default(),
+            loop_registry: crate::loop_runs::LoopRegistry::default(),
+            loop_run_history_detail: None,
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,

@@ -5,6 +5,7 @@ mod agents;
 mod env;
 mod integrations;
 mod layouts;
+mod loops;
 mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
@@ -1109,6 +1110,10 @@ impl App {
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
+            Method::LoopList(_) => return self.handle_loop_list(request.id),
+            Method::LoopRunHistory(params) => {
+                return self.handle_loop_run_history(request.id, params)
+            }
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }

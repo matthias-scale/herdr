@@ -62,6 +62,56 @@ fn request_uses_dot_method_names() {
 }
 
 #[test]
+fn ac1_loop_run_history_is_typed_on_the_json_api() {
+    let request = Request {
+        id: "loop-history".into(),
+        method: Method::LoopRunHistory(LoopRunHistoryParams {
+            loop_id: Some("daily".into()),
+        }),
+    };
+    let request_json = serde_json::to_value(&request).unwrap();
+    assert_eq!(request_json["method"], "loop.run_history");
+    assert_eq!(
+        serde_json::from_value::<Request>(request_json).unwrap(),
+        request
+    );
+
+    let response = SuccessResponse {
+        id: "loop-history".into(),
+        result: ResponseResult::LoopRunHistory {
+            loop_id: Some("daily".into()),
+            runs: vec![LoopRunInfo {
+                run_id: "run-1".into(),
+                skill: "aship".into(),
+                session: Some("session".into()),
+                pr: Some(800),
+                ticket: None,
+                loop_id: Some("daily".into()),
+                start: "2026-08-10T10:00:00Z".into(),
+                end: None,
+                wall_min: None,
+                blocked_min: None,
+                gates: vec![LoopGateInfo {
+                    kind: "preference".into(),
+                    defaulted: true,
+                    recommendation_matched: None,
+                }],
+                human_touches: Some(2),
+                touches_by_type: Default::default(),
+                interrupted_focus: None,
+                review_rounds: None,
+                out_tokens: None,
+                outcome: "in_flight".into(),
+            }],
+            skipped_lines: 1,
+        },
+    };
+    let restored: SuccessResponse =
+        serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
 fn agent_start_and_prompt_requests_round_trip() {
     let start = Request {
         id: "start".into(),
