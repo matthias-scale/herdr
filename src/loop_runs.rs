@@ -8,10 +8,17 @@ use std::sync::Arc;
 #[cfg(not(any(unix, windows)))]
 use std::time::SystemTime;
 
+#[cfg(windows)]
+use std::mem::MaybeUninit;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::io::AsRawHandle;
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+};
 
 use crate::events::AppEvent;
 use notify::Watcher;
@@ -31,37 +38,45 @@ struct FileIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(windows)]
-    volume_serial_number: Option<u32>,
+    volume_serial_number: u32,
     #[cfg(windows)]
-    file_index: Option<u64>,
+    file_index: u64,
     #[cfg(not(any(unix, windows)))]
     modified: Option<SystemTime>,
     #[cfg(not(any(unix, windows)))]
     length: u64,
 }
 
-fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
-    #[cfg(unix)]
-    {
+#[cfg(windows)]
+fn file_identity(file: &File, _metadata: &fs::Metadata) -> io::Result<FileIdentity> {
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    let result =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let information = unsafe { information.assume_init() };
+    Ok(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(not(windows))]
+fn file_identity(_file: &File, metadata: &fs::Metadata) -> io::Result<FileIdentity> {
+    Ok(
+        #[cfg(unix)]
         FileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
-        }
-    }
-    #[cfg(windows)]
-    {
-        FileIdentity {
-            volume_serial_number: metadata.volume_serial_number(),
-            file_index: metadata.file_index(),
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
+        },
+        #[cfg(not(any(unix, windows)))]
         FileIdentity {
             modified: metadata.modified().ok(),
             length: metadata.len(),
-        }
-    }
+        },
+    )
 }
 
 fn receipt_content_guard(file: &mut File, offset: u64) -> io::Result<u64> {
@@ -362,7 +377,17 @@ impl ReceiptReader {
                 return false;
             }
         };
-        let identity = file_identity(&metadata);
+        let identity = match file_identity(&file, &metadata) {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "failed to read loop run receipt file identity"
+                );
+                return false;
+            }
+        };
         let mut changed = false;
         if self.identity.is_some_and(|previous| previous != identity)
             || self.offset > metadata.len()
