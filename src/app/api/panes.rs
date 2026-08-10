@@ -4733,6 +4733,29 @@ mod tests {
     }
 
     #[test]
+    fn foreign_version_with_reshaped_state_is_a_silent_no_op() {
+        let (mut app, _) = app_with_test_workspace();
+        let request = serde_json::from_value::<crate::api::schema::Request>(serde_json::json!({
+            "id": "foreign-reshaped-state",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": "w9:p9",
+                "source": "herdr:claude-closing-block",
+                "agent": "claude",
+                "state": {"phase": "paused"},
+                "v": 3,
+                "wait": {"until": "ci"}
+            }
+        }))
+        .expect("foreign versions must parse before the handler skips them");
+
+        let response = app.handle_api_request(request);
+        let success: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).expect("foreign versions must return success");
+        assert_eq!(success.result, ResponseResult::Ok {});
+    }
+
+    #[test]
     fn pane_tokens_are_independent_from_presentation_guards() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();

@@ -1415,7 +1415,7 @@ fn report_agent_params_with_foreign_version_defers_typed_fields() {
         "pane_id": "w1:p1",
         "source": "herdr:claude-closing-block",
         "agent": "claude",
-        "state": "blocked",
+        "state": {"phase": "paused"},
         "v": 3,
         "wait": {"until": "ci"},
         "eta_s": {"seconds": 120},

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use serde::{de::Deserializer, Deserialize, Serialize};
+use serde::{
+    de::{Deserializer, Error},
+    Deserialize, Serialize,
+};
 
 pub(crate) const PANE_GRAPHICS_SET_MAX_BYTES: usize = 512 * 1024;
 pub(crate) const PANE_GRAPHICS_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -404,7 +407,34 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             }
         }
 
-        let raw = Raw::deserialize(deserializer)?;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let version = value
+            .get("v")
+            .cloned()
+            .map(|value| serde_json::from_value::<Option<u8>>(value).map_err(D::Error::custom))
+            .transpose()?
+            .flatten();
+        if version.is_some_and(|version| version != CLOSING_BLOCK_VERSION) {
+            return Ok(Self {
+                pane_id: String::new(),
+                source: String::new(),
+                agent: String::new(),
+                state: PaneAgentState::Unknown,
+                v: version,
+                message: None,
+                seq: None,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: None,
+                items: None,
+                decisions: None,
+            });
+        }
+
+        let raw = Raw::deserialize(value).map_err(D::Error::custom)?;
         let version_compatible = raw.v.is_none_or(|version| version == CLOSING_BLOCK_VERSION);
         let strict = raw.v == Some(CLOSING_BLOCK_VERSION);
         Ok(Self {
