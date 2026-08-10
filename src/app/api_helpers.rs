@@ -109,6 +109,18 @@ pub(super) fn pane_agent_status(
     }
 }
 
+pub(super) fn pane_agent_status_with_stale(
+    state: crate::detect::AgentState,
+    seen: bool,
+    stale: bool,
+) -> crate::api::schema::AgentStatus {
+    if stale {
+        crate::api::schema::AgentStatus::Stale
+    } else {
+        pane_agent_status(state, seen)
+    }
+}
+
 pub(super) fn read_terminal_snapshot(
     terminal: &crate::terminal::TerminalRuntime,
     source: crate::api::schema::ReadSource,

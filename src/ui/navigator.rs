@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
-    status::{state_icon, state_label_color},
+    status::{state_icon, state_icon_with_stale, state_label_color},
     text::{display_width_u16, middle_elide, truncate_end},
     widgets::{panel_contrast_fg, render_panel_shell},
 };
@@ -201,7 +201,8 @@ fn render_row(
     } else {
         Style::default().fg(p.subtext0).bg(p.panel_bg)
     };
-    let (status_icon, status_style) = state_icon(row.status, row.seen, app.status_indicators, p);
+    let (status_icon, status_style) =
+        state_icon_with_stale(row.status, row.seen, row.stale, app.status_indicators, p);
     let status_style = if selected {
         base_style.add_modifier(Modifier::BOLD)
     } else if context_only {
@@ -493,11 +494,12 @@ fn pane_detail(
                     .map(|pane| pane.seen)
                     .unwrap_or(true);
                 let state = row_state(app, ws_idx, tab_idx, pane_id);
+                let stale = terminal.supervisor_stale;
                 let status = presentation
                     .state_labels
-                    .get(display_state(state, seen))
+                    .get(display_state_with_stale(state, seen, stale))
                     .cloned()
-                    .unwrap_or_else(|| display_state(state, seen).to_string());
+                    .unwrap_or_else(|| display_state_with_stale(state, seen, stale).to_string());
                 parts.push(status);
             } else {
                 parts.push("shell".to_string());
@@ -549,6 +551,18 @@ fn display_state(state: crate::detect::AgentState, seen: bool) -> &'static str {
     }
 }
 
+fn display_state_with_stale(
+    state: crate::detect::AgentState,
+    seen: bool,
+    stale: bool,
+) -> &'static str {
+    if stale {
+        "stale"
+    } else {
+        display_state(state, seen)
+    }
+}
+
 fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
@@ -597,6 +611,7 @@ mod tests {
             meta: String::new(),
             status: AgentState::Idle,
             seen: true,
+            stale: false,
             is_current: false,
             is_workspace,
             is_tab: false,

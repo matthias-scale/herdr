@@ -67,6 +67,9 @@ struct PanePresentationSnapshot {
     title: Option<String>,
     display_agent: Option<String>,
     state_labels: std::collections::HashMap<String, String>,
+    wait: Option<String>,
+    eta_s: Option<u64>,
+    reported_at: Option<String>,
 }
 
 impl PanePresentationSnapshot {
@@ -75,6 +78,9 @@ impl PanePresentationSnapshot {
             title: pane.title.clone(),
             display_agent: pane.display_agent.clone(),
             state_labels: pane.state_labels.clone(),
+            wait: pane.wait.clone(),
+            eta_s: pane.eta_s,
+            reported_at: pane.reported_at.clone(),
         }
     }
 
@@ -82,11 +88,17 @@ impl PanePresentationSnapshot {
         title: &Option<String>,
         display_agent: &Option<String>,
         state_labels: &std::collections::HashMap<String, String>,
+        wait: &Option<String>,
+        eta_s: Option<u64>,
+        reported_at: &Option<String>,
     ) -> Self {
         Self {
             title: title.clone(),
             display_agent: display_agent.clone(),
             state_labels: state_labels.clone(),
+            wait: wait.clone(),
+            eta_s,
+            reported_at: reported_at.clone(),
         }
     }
 }
@@ -266,6 +278,9 @@ impl ActiveSubscription {
                         pane_id: probe.pane_id.clone(),
                         workspace_id: probe.workspace_id,
                         agent_status: probe.agent_status,
+                        wait: probe.wait,
+                        eta_s: probe.eta_s,
+                        reported_at: probe.reported_at,
                         agent: probe.agent,
                         title: probe.title,
                         display_agent: probe.display_agent,
@@ -398,6 +413,9 @@ impl ActiveAgentStatusChangedSubscription {
                 pane_id,
                 workspace_id,
                 agent_status,
+                wait,
+                eta_s,
+                reported_at,
                 agent,
                 title,
                 display_agent,
@@ -414,8 +432,14 @@ impl ActiveAgentStatusChangedSubscription {
             }
             saw_status_event = true;
 
-            let current_presentation =
-                PanePresentationSnapshot::from_event(&title, &display_agent, &state_labels);
+            let current_presentation = PanePresentationSnapshot::from_event(
+                &title,
+                &display_agent,
+                &state_labels,
+                &wait,
+                eta_s,
+                &reported_at,
+            );
             self.last_status = Some(agent_status);
             self.last_presentation = Some(current_presentation);
             if self
@@ -432,6 +456,9 @@ impl ActiveAgentStatusChangedSubscription {
                     pane_id,
                     workspace_id,
                     agent_status,
+                    wait,
+                    eta_s,
+                    reported_at,
                     agent,
                     title,
                     display_agent,
@@ -498,6 +525,9 @@ impl ActiveAgentStatusChangedSubscription {
                 pane_id: pane.pane_id,
                 workspace_id: pane.workspace_id,
                 agent_status: current_status,
+                wait: pane.wait,
+                eta_s: pane.eta_s,
+                reported_at: pane.reported_at,
                 agent: pane.agent,
                 title: pane.title,
                 display_agent: pane.display_agent,
@@ -644,6 +674,9 @@ mod tests {
                 pane_id: "pane_1".into(),
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent: Some("pi".into()),
                 title: title.map(str::to_string),
                 display_agent: None,
@@ -669,6 +702,9 @@ mod tests {
             terminal_title_stripped: None,
             display_agent: None,
             agent_status: AgentStatus::Unknown,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             gates: Vec::new(),
@@ -747,6 +783,9 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -784,12 +823,18 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
                 pane_id: "pane_1".into(),
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent: Some("pi".into()),
                 title: None,
                 display_agent: None,
@@ -829,12 +874,18 @@ mod tests {
                 title: Some("short lived".into()),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
                 pane_id: "pane_1".into(),
                 workspace_id: "workspace_1".into(),
                 agent_status: AgentStatus::Working,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent: Some("pi".into()),
                 title: Some("short lived".into()),
                 display_agent: None,

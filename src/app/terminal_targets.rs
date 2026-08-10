@@ -1,4 +1,4 @@
-use super::{api_helpers::pane_agent_status, App};
+use super::App;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalTarget {
@@ -189,7 +189,11 @@ impl App {
             cwd: ws.tabs[tab_idx]
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
-            agent_status: pane_agent_status(terminal.state, pane.seen),
+            agent_status: crate::app::api_helpers::pane_agent_status_with_stale(
+                terminal.state,
+                pane.seen,
+                terminal.supervisor_stale,
+            ),
         })
     }
 }

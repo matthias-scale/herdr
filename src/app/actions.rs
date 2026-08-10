@@ -246,11 +246,19 @@ pub struct PaneStateUpdate {
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
     pub previous_seen: bool,
+    pub previous_wait: Option<String>,
+    pub previous_eta_s: Option<u64>,
+    pub previous_reported_at: Option<String>,
+    pub previous_stale: bool,
     pub previous_presentation: crate::terminal::EffectivePresentation,
     pub agent_label: Option<String>,
     pub known_agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
+    pub wait: Option<String>,
+    pub eta_s: Option<u64>,
+    pub reported_at: Option<String>,
+    pub stale: bool,
     pub presentation: crate::terminal::EffectivePresentation,
     pub agent_name_changed: bool,
     pub session_ref_changed: bool,
@@ -444,6 +452,7 @@ impl AppState {
             let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
                 || self.navigator.expanded_workspaces.contains(&ws.id);
             let (state, seen) = ws.aggregate_state(&self.terminals);
+            let stale = workspace_has_stale_agent(ws, &self.terminals);
             let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
             rows.push(NavigatorRow {
                 target: NavigatorTarget::Workspace { ws_idx },
@@ -452,6 +461,7 @@ impl AppState {
                 meta: activity,
                 status: state,
                 seen,
+                stale,
                 is_current: self.active == Some(ws_idx),
                 is_workspace: true,
                 is_tab: false,
@@ -534,6 +544,7 @@ impl AppState {
             .map(|projection| projection.full_label())
             .unwrap_or_else(|| (tab_idx + 1).to_string());
         let (status, seen) = tab_aggregate_state(tab, &self.terminals);
+        let stale = tab_has_stale_agent(tab, &self.terminals);
         let activity = tab_activity_summary(tab, &self.terminals);
         let pane_count = tab.panes.len();
         let meta = if activity.is_empty() {
@@ -549,6 +560,7 @@ impl AppState {
             meta,
             status,
             seen,
+            stale,
             is_current: false,
             is_workspace: false,
             is_tab: true,
@@ -604,6 +616,7 @@ impl AppState {
             let state = terminal
                 .map(|terminal| terminal.state)
                 .unwrap_or(AgentState::Unknown);
+            let stale = terminal.is_some_and(|terminal| terminal.supervisor_stale);
             let status_label = terminal
                 .map(|terminal| terminal.effective_presentation().state_labels)
                 .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
@@ -639,6 +652,7 @@ impl AppState {
                 meta,
                 status: state,
                 seen: pane.seen,
+                stale,
                 is_current,
                 is_workspace: false,
                 is_tab: false,
@@ -955,6 +969,33 @@ fn state_label_text(state: AgentState, seen: bool) -> &'static str {
     }
 }
 
+fn tab_has_stale_agent(
+    tab: &crate::workspace::Tab,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+) -> bool {
+    tab.panes.values().any(|pane| {
+        terminals
+            .get(&pane.attached_terminal_id)
+            .is_some_and(|terminal| terminal.supervisor_stale)
+    })
+}
+
+fn workspace_has_stale_agent(
+    workspace: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+) -> bool {
+    workspace
+        .tabs
+        .iter()
+        .any(|tab| tab_has_stale_agent(tab, terminals))
+}
+
 fn tab_aggregate_state(
     tab: &crate::workspace::Tab,
     terminals: &std::collections::HashMap<
@@ -1101,11 +1142,19 @@ impl AppState {
                     previous_known_agent: change.previous_known_agent,
                     previous_state: change.previous_state,
                     previous_seen,
+                    previous_wait: None,
+                    previous_eta_s: None,
+                    previous_reported_at: None,
+                    previous_stale: false,
                     previous_presentation: change.previous_presentation.clone(),
                     agent_label: change.agent_label.clone(),
                     known_agent: change.known_agent,
                     state: change.state,
                     seen,
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
+                    stale: false,
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
                     session_ref_changed: mutation.session_ref_changed,
@@ -2873,6 +2922,9 @@ impl AppState {
                 state,
                 message,
                 seq,
+                wait,
+                eta_s,
+                reported_at,
                 session_ref,
             } => {
                 let (updates, accepted) = self.handle_hook_state_report(
@@ -2882,6 +2934,9 @@ impl AppState {
                     state,
                     message,
                     seq,
+                    wait,
+                    eta_s,
+                    reported_at,
                     session_ref,
                 );
                 (updates, Some(accepted))
@@ -2898,6 +2953,9 @@ impl AppState {
         state: AgentState,
         message: Option<String>,
         seq: Option<u64>,
+        wait: Option<String>,
+        eta_s: Option<u64>,
+        reported_at: Option<String>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
     ) -> (Vec<PaneStateUpdate>, bool) {
         let mut accepted = false;
@@ -2911,13 +2969,17 @@ impl AppState {
             })
         } else {
             self.update_terminal_state(pane_id, |terminal| {
-                let mutation = terminal.set_hook_authority_with_session_ref(
+                let mutation = terminal.set_hook_authority_report_at(
                     source,
                     agent_label,
                     state,
                     message,
+                    wait,
+                    eta_s,
+                    reported_at,
                     session_ref,
                     seq,
+                    Instant::now(),
                 );
                 accepted = mutation.is_some();
                 mutation
@@ -3021,6 +3083,9 @@ impl AppState {
                 state,
                 message,
                 seq,
+                wait,
+                eta_s,
+                reported_at,
                 session_ref,
             } => {
                 self.handle_hook_state_report(
@@ -3030,6 +3095,9 @@ impl AppState {
                     state,
                     message,
                     seq,
+                    wait,
+                    eta_s,
+                    reported_at,
                     session_ref,
                 )
                 .0
@@ -3169,6 +3237,18 @@ impl AppState {
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
+        self.update_terminal_state_at(pane_id, Instant::now(), update)
+    }
+
+    pub(crate) fn update_terminal_state_at<F>(
+        &mut self,
+        pane_id: PaneId,
+        now: Instant,
+        update: F,
+    ) -> Option<PaneStateUpdate>
+    where
+        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
+    {
         let ws_idx = self
             .workspaces
             .iter()
@@ -3178,23 +3258,35 @@ impl AppState {
             .attached_terminal_id
             .clone();
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
-        let now = Instant::now();
-        let (mutation, managed_changed, agent_name_changed, unchanged_change) = {
+        let (
+            mutation,
+            managed_changed,
+            agent_name_changed,
+            unchanged_change,
+            previous_report,
+            report,
+        ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
+            let previous_report = terminal.status_report_snapshot();
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let agent_name_changed = terminal.agent_name != previous_agent_name;
+            let report = terminal.status_report_snapshot();
+            let report_changed = previous_report != report;
             let unchanged_change = (mutation.agent_released
                 || mutation.session_ref_changed
                 || agent_name_changed
-                || mutation.hook_work_context_changed)
+                || mutation.hook_work_context_changed
+                || report_changed)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
             (
                 mutation,
                 managed_changed,
                 agent_name_changed,
                 unchanged_change,
+                previous_report,
+                report,
             )
         };
         if mutation.session_ref_changed
@@ -3225,6 +3317,10 @@ impl AppState {
             previous_known_agent: change.previous_known_agent,
             previous_state: change.previous_state,
             previous_seen,
+            previous_wait: previous_report.0,
+            previous_eta_s: previous_report.1,
+            previous_reported_at: previous_report.2,
+            previous_stale: previous_report.3,
             previous_presentation: change.previous_presentation.clone(),
             agent_label: if agent_released {
                 change.previous_agent_label.clone()
@@ -3238,6 +3334,10 @@ impl AppState {
             },
             state: change.state,
             seen,
+            wait: report.0,
+            eta_s: report.1,
+            reported_at: report.2,
+            stale: report.3,
             presentation: change.presentation.clone(),
             agent_name_changed,
             session_ref_changed: mutation.session_ref_changed,
@@ -3254,6 +3354,37 @@ impl AppState {
             .values()
             .filter_map(crate::terminal::TerminalState::next_managed_agent_deadline)
             .min()
+    }
+
+    pub(crate) fn next_agent_watchdog_deadline(&self) -> Option<Instant> {
+        self.terminals
+            .values()
+            .filter_map(crate::terminal::TerminalState::agent_status_watchdog_deadline)
+            .min()
+    }
+
+    pub(crate) fn mark_due_agent_status_stale_at(&mut self, now: Instant) -> Vec<PaneStateUpdate> {
+        let pane_ids = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|(pane_id, pane)| {
+                self.terminals
+                    .get(&pane.attached_terminal_id)
+                    .and_then(|terminal| terminal.agent_status_watchdog_deadline())
+                    .filter(|deadline| now >= *deadline)
+                    .map(|_| *pane_id)
+            })
+            .collect::<Vec<_>>();
+        pane_ids
+            .into_iter()
+            .filter_map(|pane_id| {
+                self.update_terminal_state_at(pane_id, now, |terminal| {
+                    terminal.mark_agent_status_stale_at(now)
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn reconcile_managed_agents_at(&mut self, now: Instant) -> Vec<(usize, PaneId)> {
@@ -5725,6 +5856,9 @@ mod tests {
             state: AgentState::Blocked,
             message: None,
             seq: None,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: None,
         });
 
@@ -5763,6 +5897,9 @@ mod tests {
             state: AgentState::Working,
             message: None,
             seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: None,
         });
         state.handle_app_event(AppEvent::StateChanged {
@@ -5811,6 +5948,9 @@ mod tests {
             state: AgentState::Blocked,
             message: None,
             seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session"),
         });
         let terminal = state.terminals.get(&terminal_id).unwrap();
@@ -5920,6 +6060,9 @@ mod tests {
             state: AgentState::Working,
             message: None,
             seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
         });
 
@@ -5944,6 +6087,9 @@ mod tests {
             state: AgentState::Working,
             message: None,
             seq: Some(20),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
         });
         assert_eq!(first_updates.len(), 1);
@@ -5956,6 +6102,9 @@ mod tests {
             state: AgentState::Working,
             message: None,
             seq: Some(21),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });
 
@@ -5994,6 +6143,9 @@ mod tests {
             state: AgentState::Working,
             message: None,
             seq: Some(20),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: crate::agent_resume::AgentSessionRef::path(first_session),
         });
         assert_eq!(
@@ -6012,6 +6164,9 @@ mod tests {
             state: AgentState::Working,
             message: None,
             seq: Some(21),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             session_ref: crate::agent_resume::AgentSessionRef::path(second_session),
         });
         assert_eq!(
@@ -6049,6 +6204,9 @@ mod tests {
                 state: AgentState::Working,
                 message: None,
                 seq: Some(seq),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 session_ref,
             });
         }

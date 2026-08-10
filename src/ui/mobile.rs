@@ -12,7 +12,9 @@ use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace,
     sidebar_space_member_indices, tab_row_layout, AgentPanelEntry, SidebarRow,
 };
-use super::status::{state_icon, state_icon_symbol, state_label_color};
+use super::status::{
+    state_icon, state_icon_symbol, state_icon_with_stale, state_label_color_with_stale,
+};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -415,7 +417,14 @@ fn render_header_status(
     };
 
     let (state, seen) = ws.aggregate_state(&app.terminals);
-    let (dot, dot_style) = state_icon(state, seen, app.status_indicators, p);
+    let stale = ws.tabs.iter().any(|tab| {
+        tab.panes.values().any(|pane| {
+            app.terminals
+                .get(&pane.attached_terminal_id)
+                .is_some_and(|terminal| terminal.supervisor_stale)
+        })
+    });
+    let (dot, dot_style) = state_icon_with_stale(state, seen, stale, app.status_indicators, p);
     let tab_label = mobile_tab_status(ws, &app.terminals, area.width.saturating_sub(6) as usize);
     let row1 = Rect::new(area.x, area.y, area.width, 1);
     let tab_w = display_width_u16(&tab_label)
@@ -700,8 +709,13 @@ fn render_mobile_switcher_content(
                     entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
                 });
                 let bg = mobile_item_bg(false, active, p);
-                let (icon, icon_style) =
-                    state_icon(entry.state, entry.seen, app.status_indicators, p);
+                let (icon, icon_style) = state_icon_with_stale(
+                    entry.state,
+                    entry.seen,
+                    entry.stale,
+                    app.status_indicators,
+                    p,
+                );
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
                 let title = Line::from(vec![
                     Span::styled(indent, Style::default().bg(bg)),
@@ -760,15 +774,25 @@ fn render_mobile_switcher_content(
                     spans.push(Span::styled("  ", Style::default().bg(bg)));
                 }
                 if let Some(state) = layout.state.as_deref() {
-                    let (icon, icon_style) =
-                        state_icon(entry.state, entry.seen, app.status_indicators, p);
+                    let (icon, icon_style) = state_icon_with_stale(
+                        entry.state,
+                        entry.seen,
+                        entry.stale,
+                        app.status_indicators,
+                        p,
+                    );
                     spans.push(Span::styled(icon, icon_style.bg(bg)));
                     if layout.show_state_label {
                         spans.extend([
                             Span::styled(
                                 format!(" {state}"),
                                 Style::default()
-                                    .fg(state_label_color(entry.state, entry.seen, p))
+                                    .fg(state_label_color_with_stale(
+                                        entry.state,
+                                        entry.seen,
+                                        entry.stale,
+                                        p,
+                                    ))
                                     .bg(bg),
                             ),
                             Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
@@ -1420,6 +1444,8 @@ mod tests {
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,
+            stale: false,
+            reported_at: None,
             last_agent_state_change_seq: None,
             activity_at: None,
             state_labels: std::collections::HashMap::new(),

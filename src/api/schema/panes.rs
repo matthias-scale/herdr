@@ -337,6 +337,12 @@ pub struct PaneReportAgentParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
@@ -365,6 +371,12 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             message: Option<String>,
             #[serde(default)]
             seq: Option<u64>,
+            #[serde(default)]
+            wait: Option<String>,
+            #[serde(default)]
+            eta_s: Option<u64>,
+            #[serde(default)]
+            reported_at: Option<String>,
             #[serde(default)]
             agent_session_id: Option<String>,
             #[serde(default)]
@@ -402,6 +414,9 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             v: raw.v,
             message: raw.message,
             seq: raw.seq,
+            wait: raw.wait,
+            eta_s: raw.eta_s,
+            reported_at: raw.reported_at,
             agent_session_id: raw.agent_session_id,
             agent_session_path: raw.agent_session_path,
             gates: typed(raw.gates, strict)?,
@@ -567,6 +582,12 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

@@ -203,7 +203,7 @@ fn validate_field_value(field: &AgentViewField, value: &AgentViewValue) -> Resul
                 AgentViewField::Builtin(AgentViewBuiltinField::Status)
             ) && !matches!(
                 value.as_str(),
-                "idle" | "working" | "blocked" | "done" | "unknown"
+                "idle" | "working" | "blocked" | "done" | "stale" | "unknown"
             ) {
                 return Err(format!("unknown agent status `{value}`"));
             }
@@ -308,9 +308,11 @@ fn builtin_field_value(
     field: AgentViewBuiltinField,
 ) -> Option<EvalValue> {
     match field {
-        AgentViewBuiltinField::Status => {
-            Some(EvalValue::String(status_name(entry.state, entry.seen)))
-        }
+        AgentViewBuiltinField::Status => Some(EvalValue::String(status_name(
+            entry.state,
+            entry.seen,
+            entry.stale,
+        ))),
         AgentViewBuiltinField::WorkspaceId => app
             .workspaces
             .get(entry.ws_idx)
@@ -374,9 +376,11 @@ fn sort_value(
             AgentViewBuiltinSortField::Attention => Some(EvalValue::Number(u64::from(
                 super::api_helpers::tab_attention_priority(entry.state, entry.seen),
             ))),
-            AgentViewBuiltinSortField::Status => {
-                Some(EvalValue::String(status_name(entry.state, entry.seen)))
-            }
+            AgentViewBuiltinSortField::Status => Some(EvalValue::String(status_name(
+                entry.state,
+                entry.seen,
+                entry.stale,
+            ))),
             AgentViewBuiltinSortField::Agent => {
                 entry.agent_kind_label.clone().map(EvalValue::String)
             }
@@ -388,7 +392,10 @@ fn sort_value(
     }
 }
 
-fn status_name(state: crate::detect::AgentState, seen: bool) -> String {
+fn status_name(state: crate::detect::AgentState, seen: bool, stale: bool) -> String {
+    if stale {
+        return "stale".to_string();
+    }
     let status = match (state, seen) {
         (crate::detect::AgentState::Idle, false) => AgentStatus::Done,
         (crate::detect::AgentState::Idle, true) => AgentStatus::Idle,
@@ -401,6 +408,7 @@ fn status_name(state: crate::detect::AgentState, seen: bool) -> String {
         AgentStatus::Working => "working",
         AgentStatus::Blocked => "blocked",
         AgentStatus::Done => "done",
+        AgentStatus::Stale => "stale",
         AgentStatus::Unknown => "unknown",
     }
     .to_string()

@@ -4503,6 +4503,18 @@ impl HeadlessServer {
 
         if self
             .app
+            .state
+            .next_agent_watchdog_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            for update in self.app.state.mark_due_agent_status_stale_at(now) {
+                self.app.emit_pane_state_update(&update);
+                changed = true;
+            }
+        }
+
+        if self
+            .app
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -7059,6 +7071,9 @@ next_tab = ""
                 state: crate::detect::AgentState::Working,
                 message: None,
                 seq: None,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 session_ref: None,
             })
         );
@@ -11155,6 +11170,9 @@ next_tab = ""
                     v: None,
                     message: None,
                     seq: Some(19),
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
                     agent_session_id: None,
                     agent_session_path: None,
                     gates: None,
