@@ -73,6 +73,21 @@ Work summary goes here.
 Done here.
 """
 
+DECISIONS_BEFORE_EMPTY_CAP = """\
+Work summary goes here.
+
+**Auto-proceeded decisions**
+
+1. Proceed with the compact list; recommendation: compact list at 14:25.
+2. Kept the existing socket transport.
+
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+Done here.
+"""
+
 STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 **Critical action points (0 blocking)**
 
@@ -144,6 +159,16 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertNotIn("Critical action points", decisions[1]["text"])
         self.assertEqual(block.blocking, 1)
         self.assertEqual(len(block.wire_gates()), 1)
+
+    def test_decisions_before_empty_cap_block_are_parsed(self):
+        block = closing_block.parse(DECISIONS_BEFORE_EMPTY_CAP)
+
+        decisions = block.wire_decisions()
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0]["recommendation"], "compact list")
+        self.assertIn("socket transport", decisions[1]["text"])
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
 
     def test_decisions_from_earlier_cap_block_are_not_attached(self):
         block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)

@@ -280,8 +280,7 @@ def parse(text: str) -> ClosingBlock:
             )
         block.items.extend(_parse_what_to_test(text, start, block.items))
 
-    closing_markers = sorted([*headers, *nothings], key=lambda match: match.start())
-    decisions_start = closing_markers[-1].end() if len(closing_markers) > 1 else 0
+    decisions_start = headers[-1].end() if len(headers) > 1 else 0
     decisions_heading = None
     for candidate in _DECISIONS_RE.finditer(text, decisions_start):
         decisions_heading = candidate
