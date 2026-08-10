@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import threading
 import unittest
@@ -277,18 +278,21 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
 
     def test_emit_forces_legacy_default_fields_to_null(self):
-        outcome = herdr_status.report(
-            agent="claude",
-            blocking=1,
-            agents=0,
-            gates=[
-                {
-                    "text": "Gate text",
-                    "default": "approve",
-                    "default_at": "2026-08-09T12:00:00Z",
-                }
-            ],
-        )
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                gates=[
+                    {
+                        "text": "Gate text",
+                        "default": "approve",
+                        "default_at": "2026-08-09T12:00:00Z",
+                    }
+                ],
+                pane_id="w9:p12",
+                sock_path="/tmp/herdr-test.sock",
+            )
 
         gate = outcome["payload"]["gates"][0]
         self.assertIsNone(gate["default"])
@@ -304,10 +308,42 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
     def test_blocked_state_label_is_independent_of_gate_bodies(self):
         long_gate = [{"text": "x" * 300, "label": "Gate", "n": 1}]
-        outcome = herdr_status.report(
-            agent="claude", blocking=1, agents=0, gates=long_gate
-        )
+        with self._isolated():
+            outcome = herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=0,
+                gates=long_gate,
+                pane_id="w9:p13",
+                sock_path="/tmp/herdr-test.sock",
+            )
         self.assertNotIn("x" * 20, outcome["payload"].get("message", ""))
+
+    def test_report_never_falls_back_to_the_ambient_pane(self):
+        # `report()` defaults pane and socket from HERDR_PANE_ID /
+        # HERDR_SOCKET_PATH, so a test that omits them talks to whatever server
+        # owns the shell running the suite. That is how this suite once posted
+        # the fixture gate "Gate text" onto a live daily-driver pane. Every
+        # `report()` call in this file must name both, and this test fails if
+        # the ambient values would have been reachable.
+        import inspect
+
+        source = inspect.getsource(type(self))
+        calls = source.count("herdr_status.report(")
+        self.assertEqual(calls, source.count('sock_path="/tmp/herdr-test.sock"'))
+        self.assertEqual(calls, source.count('pane_id="w'))
+
+    @contextlib.contextmanager
+    def _isolated(self):
+        """No ambient pane, no ambient socket, no live state directory."""
+        with mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            herdr_status.os.environ.pop("HERDR_PANE_ID", None)
+            herdr_status.os.environ.pop("HERDR_SOCKET_PATH", None)
+            yield
 
     @staticmethod
     def _state_dir():
