@@ -100,6 +100,30 @@ STALE_DECISIONS_BEFORE_FINAL_CAP = """\
 Done here.
 """
 
+STALE_DECISIONS_AFTER_TERMINATION = """\
+**Auto-proceeded decisions**
+
+1. Stale decision.
+
+**Nothing to act on.**
+
+Intervening prose.
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
+DECISIONS_AFTER_FINAL_NOTHING = """\
+**Critical action points (0 blocking)**
+
+**Nothing to act on.**
+
+**Auto-proceeded decisions**
+
+1. Stale decision after termination.
+"""
+
 
 class ClosingBlockV2Tests(unittest.TestCase):
     def test_cap_gate_becomes_nonempty_object_gate(self):
@@ -172,6 +196,16 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
     def test_decisions_from_earlier_cap_block_are_not_attached(self):
         block = closing_block.parse(STALE_DECISIONS_BEFORE_FINAL_CAP)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_decisions_after_nothing_are_not_attached_to_final_cap(self):
+        block = closing_block.parse(STALE_DECISIONS_AFTER_TERMINATION)
+
+        self.assertEqual(block.wire_decisions(), [])
+
+    def test_decisions_after_final_nothing_are_not_parsed_as_payload(self):
+        block = closing_block.parse(DECISIONS_AFTER_FINAL_NOTHING)
 
         self.assertEqual(block.wire_decisions(), [])
 
