@@ -829,7 +829,7 @@ impl TerminalState {
             });
             if let Some(source) = cleared_hook_source {
                 self.hook_report_sequences.remove(&source);
-                self.hook_authority = None;
+                self.replace_hook_authority(None);
             }
             if !newer_custom_authority
                 && self
@@ -902,7 +902,7 @@ impl TerminalState {
             self.suppress_current_full_lifecycle_hook_authority(
                 FullLifecycleHookSuppressionReason::HookClear,
             );
-            self.hook_authority = None;
+            self.replace_hook_authority(None);
             self.persisted_agent_session = durable_session;
         }
         if agent_released {
@@ -929,6 +929,11 @@ impl TerminalState {
             hook_work_context_changed,
             agent_released,
         }
+    }
+
+    fn replace_hook_authority(&mut self, authority: Option<HookAuthority>) {
+        self.hook_authority = authority;
+        self.supervisor_stale = false;
     }
 
     #[cfg(test)]
@@ -1102,7 +1107,7 @@ impl TerminalState {
         }
         self.persisted_agent_session = None;
         let (wait, eta_s) = normalize_declared_wait(state, wait, eta_s);
-        self.hook_authority = Some(HookAuthority {
+        self.replace_hook_authority(Some(HookAuthority {
             source,
             agent_label,
             state,
@@ -1113,8 +1118,7 @@ impl TerminalState {
             reported_at_wire: reported_at_wire.filter(|value| !value.trim().is_empty()),
             session_ref,
             retired_at: None,
-        });
-        self.supervisor_stale = false;
+        }));
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
         let hook_work_context_changed = if previous_session != current_session {
@@ -1612,7 +1616,7 @@ impl TerminalState {
             });
             if let Some(pending) = pending {
                 self.hook_report_sequences.insert(source, pending.seq);
-                self.hook_authority = Some(pending.authority);
+                self.replace_hook_authority(Some(pending.authority));
             }
         }
     }
@@ -2014,12 +2018,12 @@ impl TerminalState {
                 agent_label.clone(),
                 replaced_hook_session,
             );
-            self.hook_authority = None;
+            self.replace_hook_authority(None);
         } else if foreground_takeover_allowed {
             self.suppress_current_full_lifecycle_hook_authority(
                 FullLifecycleHookSuppressionReason::HookClear,
             );
-            self.hook_authority = None;
+            self.replace_hook_authority(None);
         }
         self.reconcile_agent_name_owner(&agent_label, Some(&session_ref));
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -2151,8 +2155,7 @@ impl TerminalState {
         self.suppress_current_full_lifecycle_hook_authority(
             FullLifecycleHookSuppressionReason::HookClear,
         );
-        self.hook_authority = None;
-        self.supervisor_stale = false;
+        self.replace_hook_authority(None);
         self.persisted_agent_session = None;
         let hook_work_context_changed = self.clear_hook_work_context();
         Some(TerminalStateMutation {
@@ -2261,7 +2264,7 @@ impl TerminalState {
             self.fallback_observed_at = None;
             self.clear_agent_name();
         }
-        self.hook_authority = None;
+        self.replace_hook_authority(None);
         if !preserve_foreign_persisted_session {
             self.persisted_agent_session = None;
         }
@@ -2629,8 +2632,7 @@ impl TerminalState {
         self.fallback_visible_working_observed_at = None;
         self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
-        self.hook_authority = None;
-        self.supervisor_stale = false;
+        self.replace_hook_authority(None);
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
@@ -2857,6 +2859,44 @@ mod tests {
         assert!(!terminal.status_report_snapshot().3);
         assert_eq!(terminal.status_report_snapshot().0, None);
         assert_eq!(terminal.status_report_snapshot().1, None);
+    }
+
+    #[test]
+    fn process_exit_clears_supervisor_stale_with_hook_authority() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(1),
+                started,
+            )
+            .expect("working report accepted");
+        terminal
+            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the report stale");
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            started + AGENT_STALE_SILENCE + Duration::from_secs(1),
+        );
+
+        assert!(terminal.hook_authority.is_none());
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.state, AgentState::Idle);
     }
 
     #[test]
