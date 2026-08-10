@@ -1170,13 +1170,13 @@ mod tests {
         app.mode = Mode::Prefix;
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 54, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 54, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 53, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 53, 18));
 
         app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 54, 18));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 19, 54, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 53, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 19, 53, 1));
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.y == 19));
         assert_eq!(app.view.new_tab_hit_area.y, 19);
 

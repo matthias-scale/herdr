@@ -614,6 +614,30 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.toggle_dock",
+          "type": "keybinding",
+          "default": "\"prefix+shift+e\"",
+          "description": "Toggle dock collapse."
+        },
+        {
+          "key": "keys.previous_dock_tab",
+          "type": "keybinding",
+          "default": "\"prefix+shift+[\"",
+          "description": "Select the previous dock tab."
+        },
+        {
+          "key": "keys.next_dock_tab",
+          "type": "keybinding",
+          "default": "\"prefix+shift+]\"",
+          "description": "Select the next dock tab."
+        },
+        {
+          "key": "keys.toggle_pin_tab",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Pin or unpin the active tab into the sidebar's Pinned group. Unset by default."
+        },
+        {
           "key": "keys.toggle_info_panel",
           "type": "keybinding",
           "default": "\"prefix+i\"",
