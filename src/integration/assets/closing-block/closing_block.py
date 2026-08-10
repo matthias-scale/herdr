@@ -207,6 +207,45 @@ def _decisions_end(text: str, start: int) -> int:
     return min(candidates, default=len(text))
 
 
+def _decision_heading_for_block(
+    text: str,
+    headers: list[re.Match[str]],
+    nothings: list[re.Match[str]],
+) -> re.Match[str] | None:
+    """Find the decisions section associated with the final CAP block."""
+    header = headers[-1] if headers else None
+    nothing = nothings[-1] if nothings else None
+    if header is None and nothing is None:
+        return None
+
+    # Nothing terminates the CAP only when it follows its header. A heading
+    # after that marker belongs outside the block and must not be parsed.
+    cap_end = (
+        nothing.start()
+        if header is not None and nothing is not None and nothing.start() > header.start()
+        else len(text)
+    )
+    markers_before_header = [*headers[:-1], *nothings]
+    candidates: list[re.Match[str]] = []
+    for candidate in _DECISIONS_RE.finditer(text):
+        if candidate.start() >= cap_end:
+            continue
+        if header is None:
+            if candidate.end() <= nothing.start() and not any(
+                marker.start() < nothing.start()
+                for marker in markers_before_header
+            ):
+                candidates.append(candidate)
+        elif candidate.start() >= header.end():
+            candidates.append(candidate)
+        elif candidate.end() <= header.start() and not any(
+            marker.start() < header.start()
+            for marker in markers_before_header
+        ):
+            candidates.append(candidate)
+    return max(candidates, key=lambda match: match.start(), default=None)
+
+
 def _parse_what_to_test(text: str, start: int, items: list[Item]) -> list[Item]:
     headings = list(_WHAT_RE.finditer(text, start))
     parsed: list[Item] = []
@@ -280,10 +319,7 @@ def parse(text: str) -> ClosingBlock:
             )
         block.items.extend(_parse_what_to_test(text, start, block.items))
 
-    decisions_start = headers[-1].end() if len(headers) > 1 else 0
-    decisions_heading = None
-    for candidate in _DECISIONS_RE.finditer(text, decisions_start):
-        decisions_heading = candidate
+    decisions_heading = _decision_heading_for_block(text, headers, nothings)
     if decisions_heading:
         block.present = True
         decisions_end = _decisions_end(text, decisions_heading.end())
