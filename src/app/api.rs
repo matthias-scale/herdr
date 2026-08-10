@@ -244,7 +244,7 @@ impl App {
 
         if let AppEvent::PaneDied { pane_id } = &ev {
             if self.handle_dock_editor_exit(*pane_id) {
-                return;
+                return None;
             }
             if self
                 .state

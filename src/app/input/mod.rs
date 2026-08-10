@@ -38,8 +38,8 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 
 mod clipboard;
 mod copy_mode;
-mod lease;
 mod dock;
+mod lease;
 mod modal;
 mod mouse;
 mod navigate;
@@ -458,11 +458,9 @@ impl App {
             && self.state.on_dock_divider(mouse.column, mouse.row)
         {
             let now = std::time::Instant::now();
-            let double_click = self
-                .last_dock_divider_click
-                .is_some_and(|previous| {
-                    now.duration_since(previous) <= super::SIDEBAR_DOUBLE_CLICK_WINDOW
-                });
+            let double_click = self.last_dock_divider_click.is_some_and(|previous| {
+                now.duration_since(previous) <= super::SIDEBAR_DOUBLE_CLICK_WINDOW
+            });
             self.last_dock_divider_click = Some(now);
             if double_click {
                 self.state.dock_width = crate::ui::DOCK_DEFAULT_WIDTH;

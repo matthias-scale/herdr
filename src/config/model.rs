@@ -476,7 +476,7 @@ pub struct KeysConfig {
     #[serde(alias = "fullscreen")]
     pub zoom: BindingConfig,
     /// Pin or unpin the active tab into the sidebar's Pinned group.
-    /// Default: "prefix+shift+f"
+    /// Unset by default; pinning is available from the sidebar and API.
     pub toggle_pin_tab: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
@@ -1156,7 +1156,7 @@ impl Default for KeysConfig {
             split_up: BindingConfig::one("prefix+shift+minus"),
             close_pane: BindingConfig::one("prefix+x"),
             zoom: BindingConfig::one("prefix+z"),
-            toggle_pin_tab: BindingConfig::one("prefix+shift+f"),
+            toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
             toggle_dock: BindingConfig::one("prefix+shift+e"),

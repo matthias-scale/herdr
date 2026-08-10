@@ -272,7 +272,7 @@ pub(crate) fn mobile_switcher_target_at(
                             tab_idx: entry.tab_idx,
                         }
                     }
-                },
+                }
                 SidebarRow::SectionHeader { .. } => unreachable!("returned above"),
             });
         }

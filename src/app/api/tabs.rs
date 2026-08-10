@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
-    TabMoveParams, TabPrioMode, TabPrioParams, TabPrioResult, TabRenameParams, TabTarget,
-    TabMoveParams, TabPinMode, TabPinParams, TabRenameParams, TabTarget,
+    TabMoveParams, TabPinMode, TabPinParams, TabPrioMode, TabPrioParams, TabPrioResult,
+    TabRenameParams, TabTarget,
 };
 use crate::app::{App, Mode};
 use crate::workspace::TabPrioAction as StateTabPrioAction;

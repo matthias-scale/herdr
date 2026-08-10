@@ -144,10 +144,6 @@ impl App {
             let rt = self.terminal_runtimes.get(&terminal_id)?;
             rt.scroll_reset();
             let bytes = rt.encode_terminal_key(key);
-            self.pressed_terminal_keys
-                .retain(|(id, _), _| *id != source_id);
-            self.suppressed_repeat_keys
-                .retain(|(id, _)| *id != source_id);
             return Some(PreparedPaneInput {
                 target: TerminalInputTarget { terminal_id },
                 bytes: Bytes::from(bytes),

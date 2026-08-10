@@ -54,7 +54,9 @@ fn focused_terminal(app: &AppState) -> Option<&TerminalState> {
     app.terminals.get(terminal_id)
 }
 
-pub(super) fn visible_candidates(terminal: &TerminalState) -> Vec<crate::work_context::WorkLinkCandidate> {
+pub(super) fn visible_candidates(
+    terminal: &TerminalState,
+) -> Vec<crate::work_context::WorkLinkCandidate> {
     let mut preview_seen = false;
     work_link_candidates(terminal.effective_work_context())
         .into_iter()

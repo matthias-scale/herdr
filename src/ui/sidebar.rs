@@ -858,24 +858,25 @@ fn sidebar_rows_inner(
         })
         .cloned()
         .collect();
-    let push_group = |rows: &mut Vec<SidebarRow>, title: &'static str, group: Vec<AgentPanelEntry>| {
-        if group.is_empty() {
-            return;
-        }
-        let collapsed = section_is_collapsed(app, title);
-        rows.push(SidebarRow::SectionHeader {
-            title,
-            count: group.len(),
-            collapsed,
-        });
-        if collapsed {
-            return;
-        }
-        rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
-            entry: Box::new(entry),
-            depth: 0,
-        }));
-    };
+    let push_group =
+        |rows: &mut Vec<SidebarRow>, title: &'static str, group: Vec<AgentPanelEntry>| {
+            if group.is_empty() {
+                return;
+            }
+            let collapsed = section_is_collapsed(app, title);
+            rows.push(SidebarRow::SectionHeader {
+                title,
+                count: group.len(),
+                collapsed,
+            });
+            if collapsed {
+                return;
+            }
+            rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
+                entry: Box::new(entry),
+                depth: 0,
+            }));
+        };
     push_group(&mut rows, BLOCKED_SECTION_TITLE, blocked);
     push_group(&mut rows, PINNED_SECTION_TITLE, pinned);
 
@@ -2349,7 +2350,10 @@ fn render_section_header(
                 Style::default().fg(color),
             ),
             Span::raw(" "),
-            Span::styled(title, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                title,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 count_label,
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
@@ -2733,7 +2737,10 @@ fn agent_activity_age_fits(
     // Measured against the row this depth actually paints: a worklist row is the
     // one-line shape, and measuring the tree template instead would size the age
     // field against text that never appears.
-    let Some(resolved) = resolved_agent_rows_at(app, detail, depth).into_iter().next() else {
+    let Some(resolved) = resolved_agent_rows_at(app, detail, depth)
+        .into_iter()
+        .next()
+    else {
         return false;
     };
     let prefix_width = usize::from(depth.max(1)) * 3 + usize::from(depth > 0);
@@ -5635,11 +5642,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn pinned_tabs_group_below_blocked_and_above_the_tree() {
-        let mut app = priority_app_with_states(&[
-            AgentState::Working,
-            AgentState::Blocked,
-            AgentState::Idle,
-        ]);
+        let mut app =
+            priority_app_with_states(&[AgentState::Working, AgentState::Blocked, AgentState::Idle]);
         // ws0 is merely pinned; ws1 is pinned *and* blocked.
         app.workspaces[0].tabs[0].pinned = true;
         app.workspaces[1].tabs[0].pinned = true;

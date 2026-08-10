@@ -4472,29 +4472,6 @@
           ],
           "type": "object"
         },
-        "TabPrioMode": {
-          "enum": [
-            "toggle",
-            "on",
-            "off"
-          ],
-          "type": "string"
-        },
-        "TabPrioParams": {
-          "properties": {
-            "mode": {
-              "$ref": "#/schemas/request/$defs/TabPrioMode",
-              "default": "toggle"
-            },
-            "tab_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "type": "object"
-        },
         "TabPinMode": {
           "enum": [
             "toggle",
@@ -4516,6 +4493,29 @@
           "required": [
             "tab_id"
           ],
+          "type": "object"
+        },
+        "TabPrioMode": {
+          "enum": [
+            "toggle",
+            "on",
+            "off"
+          ],
+          "type": "string"
+        },
+        "TabPrioParams": {
+          "properties": {
+            "mode": {
+              "$ref": "#/schemas/request/$defs/TabPrioMode",
+              "default": "toggle"
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "TabRenameParams": {

@@ -533,10 +533,9 @@ impl AppState {
                     self.scroll_tabs_right();
                     return None;
                 }
-                if let (Some(ws_idx), Some(tab_idx)) = (
-                    self.active,
-                    self.tab_pin_glyph_at(mouse.column, mouse.row),
-                ) {
+                if let (Some(ws_idx), Some(tab_idx)) =
+                    (self.active, self.tab_pin_glyph_at(mouse.column, mouse.row))
+                {
                     self.request_pin_toggle = Some((ws_idx, tab_idx));
                     return None;
                 }

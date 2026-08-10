@@ -1263,11 +1263,13 @@ mod tests {
         terminal.state = crate::detect::AgentState::Blocked;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
 
-        let header =
-            crate::ui::compute_sidebar_section_header_areas(&app.state, app.state.view.sidebar_rect)
-                .into_iter()
-                .find(|header| header.title == crate::ui::BLOCKED_SECTION_TITLE)
-                .expect("a blocked agent opens the group");
+        let header = crate::ui::compute_sidebar_section_header_areas(
+            &app.state,
+            app.state.view.sidebar_rect,
+        )
+        .into_iter()
+        .find(|header| header.title == crate::ui::BLOCKED_SECTION_TITLE)
+        .expect("a blocked agent opens the group");
         let rows_open = crate::ui::sidebar_rows(&app.state).len();
 
         app.handle_mouse(mouse(
@@ -1302,7 +1304,10 @@ mod tests {
             (0, working_pane, AgentState::Working),
             (1, blocked_pane, AgentState::Blocked),
         ] {
-            let terminal_id = app.state.workspaces[ws_idx].terminal_id(pane_id).unwrap().clone();
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .unwrap()
+                .clone();
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.detected_agent = Some(Agent::Claude);
             terminal.state = state;

@@ -68,9 +68,9 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
+pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::BLOCKED_SECTION_TITLE;
-pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
@@ -412,8 +412,13 @@ fn compute_view_internal(
     };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
-    let (dock_handle_rect, dock_divider_rect, dock_tab_bar_rect, dock_tab_hit_areas, dock_body_rect) =
-        dock_geometry(dock_area, app.dock_collapsed);
+    let (
+        dock_handle_rect,
+        dock_divider_rect,
+        dock_tab_bar_rect,
+        dock_tab_hit_areas,
+        dock_body_rect,
+    ) = dock_geometry(dock_area, app.dock_collapsed);
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
@@ -947,11 +952,17 @@ mod tests {
         assert_eq!(app.view.tab_bar_rect.x, old_tab_bar.x);
         assert_eq!(app.view.tab_bar_rect.y, old_tab_bar.y);
         assert_eq!(app.view.tab_bar_rect.height, old_tab_bar.height);
-        assert_eq!(app.view.tab_bar_rect.width + DOCK_COLLAPSED_WIDTH, old_tab_bar.width);
+        assert_eq!(
+            app.view.tab_bar_rect.width + DOCK_COLLAPSED_WIDTH,
+            old_tab_bar.width
+        );
         assert_eq!(app.view.terminal_area.x, old_terminal.x);
         assert_eq!(app.view.terminal_area.y, old_terminal.y);
         assert_eq!(app.view.terminal_area.height, old_terminal.height);
-        assert_eq!(app.view.terminal_area.width + DOCK_COLLAPSED_WIDTH, old_terminal.width);
+        assert_eq!(
+            app.view.terminal_area.width + DOCK_COLLAPSED_WIDTH,
+            old_terminal.width
+        );
         assert_eq!(app.view.dock_rect, Rect::new(79, 1, 1, 19));
         assert_eq!(app.view.dock_handle_rect, app.view.dock_rect);
     }
@@ -996,7 +1007,11 @@ mod tests {
         assert_eq!(app.view.dock_tab_hit_areas.len(), 3);
         assert!(app.view.dock_body_rect.height > 0);
         for tab in crate::app::DockTab::ALL {
-            assert!(screen.contains(tab.label()), "missing {} in {screen:?}", tab.label());
+            assert!(
+                screen.contains(tab.label()),
+                "missing {} in {screen:?}",
+                tab.label()
+            );
         }
         assert!(screen.contains("focus an agent first"));
     }

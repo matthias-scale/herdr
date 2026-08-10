@@ -24,9 +24,7 @@ fn field_line(app: &AppState, label: &str, value: impl Into<String>) -> Line<'st
     ])
 }
 
-fn focused_terminal<'a>(
-    app: &'a AppState,
-) -> Option<(&'a crate::workspace::Workspace, &'a TerminalState)> {
+fn focused_terminal(app: &AppState) -> Option<(&crate::workspace::Workspace, &TerminalState)> {
     let workspace = app.active.and_then(|index| app.workspaces.get(index))?;
     let pane_id = workspace.focused_pane_id()?;
     let terminal_id = workspace.terminal_id(pane_id)?;
@@ -126,7 +124,7 @@ fn context_lines(app: &AppState) -> Option<Vec<Line<'static>>> {
     let (workspace, terminal) = focused_terminal(app)?;
     let pane_id = workspace.focused_pane_id()?;
     let tab = workspace
-        .active_tab_display_name()
+        .active_tab_display_name_from(&app.terminals)
         .unwrap_or_else(|| "—".to_string());
     let provider = terminal
         .effective_agent_label()
