@@ -372,11 +372,11 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             #[serde(default)]
             seq: Option<u64>,
             #[serde(default)]
-            wait: Option<String>,
+            wait: Option<serde_json::Value>,
             #[serde(default)]
-            eta_s: Option<u64>,
+            eta_s: Option<serde_json::Value>,
             #[serde(default)]
-            reported_at: Option<String>,
+            reported_at: Option<serde_json::Value>,
             #[serde(default)]
             agent_session_id: Option<String>,
             #[serde(default)]
@@ -405,6 +405,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
         }
 
         let raw = Raw::deserialize(deserializer)?;
+        let version_compatible = raw.v.is_none_or(|version| version == CLOSING_BLOCK_VERSION);
         let strict = raw.v == Some(CLOSING_BLOCK_VERSION);
         Ok(Self {
             pane_id: raw.pane_id,
@@ -414,9 +415,9 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             v: raw.v,
             message: raw.message,
             seq: raw.seq,
-            wait: raw.wait,
-            eta_s: raw.eta_s,
-            reported_at: raw.reported_at,
+            wait: typed(raw.wait, version_compatible)?,
+            eta_s: typed(raw.eta_s, version_compatible)?,
+            reported_at: typed(raw.reported_at, version_compatible)?,
             agent_session_id: raw.agent_session_id,
             agent_session_path: raw.agent_session_path,
             gates: typed(raw.gates, strict)?,
