@@ -15,15 +15,15 @@ from typing import Any
 
 # HERDR_INTEGRATION_VERSION=1
 _HEADER_RE = re.compile(
-    r"^\s*\*\*Critical action points(?:\s*\((?P<n>\d+)\s+blocking\))?\*\*\s*$",
+    r"^\*\*Critical action points(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?\*\*[ \t]*\r?$",
     re.MULTILINE,
 )
-_NOTHING_RE = re.compile(r"^\s*\*\*Nothing to act on\.?\*\*\s*$", re.MULTILINE)
+_NOTHING_RE = re.compile(r"^\*\*Nothing to act on\.?\*\*[ \t]*\r?$", re.MULTILINE)
 _AGENTS_RE = re.compile(
-    r"^\s*(?P<n>\d+)\s+agents?\s+running:\s*(?P<rest>.+?)\s*$",
+    r"^(?P<n>\d+)[ \t]+agents?[ \t]+running:[ \t]*(?P<rest>.+?)[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
-_DONE_RE = re.compile(r"^\s*Done here\.\s*$", re.MULTILINE)
+_DONE_RE = re.compile(r"^Done here\.[ \t]*\r?$", re.MULTILINE)
 
 _ITEM_START = r"^\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
 _ITEM_RE = re.compile(
@@ -34,7 +34,7 @@ _ITEM_RE = re.compile(
     re.MULTILINE | re.IGNORECASE | re.DOTALL,
 )
 _DECISIONS_RE = re.compile(
-    r"^\s*\*\*Auto-proceeded decisions\*\*\s*$",
+    r"^\*\*Auto-proceeded decisions\*\*[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 _DECISION_ITEM_RE = re.compile(
@@ -44,7 +44,7 @@ _DECISION_ITEM_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 _WHAT_RE = re.compile(
-    r"^\s*\*\*What to test(?P<meta>.*?)\*\*\s*$",
+    r"^\*\*What to test(?P<meta>.*?)\*\*[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 _PR_RE = re.compile(r"(?<![A-Za-z0-9])#(?P<pr>\d+)\b")
@@ -126,6 +126,14 @@ class Decision:
         }
 
 
+@dataclass(frozen=True)
+class _ClosingBlock:
+    start: int
+    end: int
+    header: re.Match[str] | None
+    decisions_end: int
+
+
 @dataclass
 class ClosingBlock:
     present: bool = False
@@ -183,79 +191,87 @@ class ClosingBlock:
         return [decision.wire() for decision in self.decisions]
 
 
-def _section_end(text: str, start: int) -> int:
+def _section_end(text: str, start: int, end: int) -> int:
     candidates = [
         match.start()
-        for pattern in (_DECISIONS_RE, _WHAT_RE)
-        for match in pattern.finditer(text, start)
+        for pattern in (_DECISIONS_RE, _NOTHING_RE, _WHAT_RE)
+        for match in pattern.finditer(text, start, end)
     ]
-    return min(candidates, default=len(text))
+    return min(candidates, default=end)
 
 
-def _decisions_end(text: str, start: int) -> int:
+def _decisions_end(text: str, start: int, end: int) -> int:
     # The decisions list may sit before the critical-action-points block (the
     # authoring rules put the closing block last), so the item scan must stop
     # at whichever section opens next or the CAP items parse as decisions.
     candidates = [
         match.start()
-        for pattern in (_HEADER_RE, _NOTHING_RE, _WHAT_RE, _AGENTS_RE, _DONE_RE)
-        for match in pattern.finditer(text, start)
+        for pattern in (
+            _DECISIONS_RE,
+            _HEADER_RE,
+            _NOTHING_RE,
+            _WHAT_RE,
+            _AGENTS_RE,
+            _DONE_RE,
+        )
+        for match in pattern.finditer(text, start, end)
     ]
-    return min(candidates, default=len(text))
+    return min(candidates, default=end)
 
 
-def _decision_heading_for_block(
-    text: str,
-    headers: list[re.Match[str]],
-    nothings: list[re.Match[str]],
-) -> re.Match[str] | None:
-    """Find the decisions section associated with the final CAP block."""
-    header = headers[-1] if headers else None
-    nothing = nothings[-1] if nothings else None
-    if header is None and nothing is None:
-        return None
+def _closing_blocks(text: str) -> list[_ClosingBlock]:
+    """Split top-level CAP sections into blocks and bound their decisions.
 
-    # Nothing terminates the CAP only when it follows its header. A heading
-    # after that marker belongs outside the block and must not be parsed.
-    cap_end = (
-        nothing.start()
-        if header is not None and nothing is not None and nothing.start() > header.start()
-        else len(text)
-    )
-    markers_before_header = [*headers[:-1], *nothings]
-    candidates: list[re.Match[str]] = []
-    for candidate in _DECISIONS_RE.finditer(text):
-        if candidate.start() >= cap_end:
-            continue
-        if header is None:
-            if candidate.end() <= nothing.start() and not any(
-                marker.start() < nothing.start()
-                for marker in markers_before_header
-            ):
-                candidates.append(candidate)
-        elif candidate.start() >= header.end():
-            candidates.append(candidate)
-        elif candidate.end() <= header.start() and not any(
-            marker.start() < header.start()
-            for marker in markers_before_header
-        ):
-            candidates.append(candidate)
-    return max(candidates, key=lambda match: match.start(), default=None)
+    The first CAP belongs to the initial block so valid pre-CAP decisions are
+    retained. A top-level Nothing marker bounds decisions in that block; the
+    last such marker is the closing boundary, which keeps repeated markers in
+    one structural block. A Nothing before the first CAP closes the preamble,
+    so that stale decisions cannot flow into the later CAP block.
+    """
+    headers = list(_HEADER_RE.finditer(text))
+    nothings = list(_NOTHING_RE.finditer(text))
+    if not headers:
+        if not nothings:
+            return []
+        return [_ClosingBlock(0, len(text), None, nothings[-1].start())]
+
+    first_start = 0
+    if nothings and nothings[0].start() < headers[0].start():
+        first_start = headers[0].start()
+
+    blocks: list[_ClosingBlock] = []
+    for position, header in enumerate(headers):
+        start = first_start if position == 0 else header.start()
+        end = (
+            headers[position + 1].start()
+            if position + 1 < len(headers)
+            else len(text)
+        )
+        block_nothings = [
+            marker
+            for marker in nothings
+            if start <= marker.start() < end
+        ]
+        decisions_end = block_nothings[-1].start() if block_nothings else end
+        blocks.append(_ClosingBlock(start, end, header, decisions_end))
+    return blocks
 
 
-def _parse_what_to_test(text: str, start: int, items: list[Item]) -> list[Item]:
-    headings = list(_WHAT_RE.finditer(text, start))
+def _parse_what_to_test(
+    text: str, start: int, end: int, items: list[Item]
+) -> list[Item]:
+    headings = list(_WHAT_RE.finditer(text, start, end))
     parsed: list[Item] = []
     for position, heading in enumerate(headings):
         end_candidates = [
             match.start()
-            for pattern in (_DECISIONS_RE, _AGENTS_RE, _DONE_RE)
-            for match in pattern.finditer(text, heading.end())
+            for pattern in (_DECISIONS_RE, _NOTHING_RE, _AGENTS_RE, _DONE_RE)
+            for match in pattern.finditer(text, heading.end(), end)
         ]
         if position + 1 < len(headings):
             end_candidates.append(headings[position + 1].start())
-        end = min(end_candidates, default=len(text))
-        body = text[heading.end() : end].strip()
+        section_end = min(end_candidates, default=end)
+        body = text[heading.end() : section_end].strip()
         if not body:
             continue
         gate_number = re.search(r"\bGate\s+(?P<n>\d+)\b", heading.group("meta"), re.I)
@@ -288,48 +304,48 @@ def parse(text: str) -> ClosingBlock:
     """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
-    headers = list(_HEADER_RE.finditer(text))
-    nothings = list(_NOTHING_RE.finditer(text))
-    header = headers[-1] if headers else None
-    nothing = nothings[-1] if nothings else None
-
+    blocks = _closing_blocks(text)
+    selected = blocks[-1] if blocks else None
     start = None
-    if header and (nothing is None or header.start() > nothing.start()):
+    if selected:
         block.present = True
-        declared = header.group("n")
-        block.declared_blocking = int(declared) if declared is not None else None
-        start = header.end()
-    elif nothing:
-        block.present = True
-        block.declared_blocking = 0
-        start = nothing.end()
+        if selected.header:
+            declared = selected.header.group("n")
+            block.declared_blocking = int(declared) if declared is not None else None
+            start = selected.header.end()
+        else:
+            block.declared_blocking = 0
 
-    if start is not None:
-        cap_end = _section_end(text, start)
-        for match in _ITEM_RE.finditer(text, start, cap_end):
-            block.items.append(
-                Item(
-                    int(match.group("idx")),
-                    match.group("label").capitalize(),
-                    _clean_body(match.group("body")),
+        if start is not None:
+            cap_end = _section_end(text, start, selected.end)
+            for match in _ITEM_RE.finditer(text, start, cap_end):
+                block.items.append(
+                    Item(
+                        int(match.group("idx")),
+                        match.group("label").capitalize(),
+                        _clean_body(match.group("body")),
+                    )
                 )
+            block.items.extend(
+                _parse_what_to_test(text, start, selected.end, block.items)
             )
-        block.items.extend(_parse_what_to_test(text, start, block.items))
 
-    decisions_heading = _decision_heading_for_block(text, headers, nothings)
-    if decisions_heading:
-        block.present = True
-        decisions_end = _decisions_end(text, decisions_heading.end())
-        for match in _DECISION_ITEM_RE.finditer(
-            text, decisions_heading.end(), decisions_end
+        for decisions_heading in _DECISIONS_RE.finditer(
+            text, selected.start, selected.decisions_end
         ):
-            body = _clean_body(match.group("body"))
-            if not body:
-                continue
-            recommendation, decided_at = _decision_fields(body)
-            block.decisions.append(
-                Decision(int(match.group("idx")), body, recommendation, decided_at)
+            decisions_end = _decisions_end(
+                text, decisions_heading.end(), selected.decisions_end
             )
+            for match in _DECISION_ITEM_RE.finditer(
+                text, decisions_heading.end(), decisions_end
+            ):
+                body = _clean_body(match.group("body"))
+                if not body:
+                    continue
+                recommendation, decided_at = _decision_fields(body)
+                block.decisions.append(
+                    Decision(int(match.group("idx")), body, recommendation, decided_at)
+                )
 
     agents = None
     for candidate in _AGENTS_RE.finditer(text):
