@@ -24,11 +24,22 @@ pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
 pub(super) const FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE: std::time::Duration =
     std::time::Duration::from_secs(5);
 
+/// Retires a blocked turn-end hook report once the pane is *working again*.
+///
+/// Retirement may only read continuing output as a new turn. Ending a turn is
+/// itself a write: every agent repaints its prompt box right after the hook
+/// returns, and a single repaint used to start a grace period that expired on
+/// its own and threw the gate away while the human was still reading it. So the
+/// window is measured between the first and the latest content change, not
+/// against wall clock: one burst of turn-end repaint never retires a gate, and
+/// a genuinely resumed turn -- which keeps writing tokens, spinners and
+/// counters -- always does.
 #[derive(Debug, Default)]
 pub(super) struct FullLifecycleHookOutputRetirement {
     authority_baseline_content_seq: Option<u64>,
     last_content_seq: Option<u64>,
     output_started_at: Option<std::time::Instant>,
+    output_latest_at: Option<std::time::Instant>,
 }
 
 impl FullLifecycleHookOutputRetirement {
@@ -36,6 +47,7 @@ impl FullLifecycleHookOutputRetirement {
         self.authority_baseline_content_seq = None;
         self.last_content_seq = None;
         self.output_started_at = None;
+        self.output_latest_at = None;
     }
 
     pub(super) fn observe(
@@ -48,16 +60,21 @@ impl FullLifecycleHookOutputRetirement {
             self.authority_baseline_content_seq = Some(authority_baseline_content_seq);
             self.last_content_seq = Some(authority_baseline_content_seq);
             self.output_started_at = None;
+            self.output_latest_at = None;
         }
 
         if self.last_content_seq != Some(content_seq) {
             self.last_content_seq = Some(content_seq);
             self.output_started_at.get_or_insert(now);
+            self.output_latest_at = Some(now);
         }
 
-        self.output_started_at.filter(|started_at| {
-            now.duration_since(*started_at) >= FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE
-        })
+        let started_at = self.output_started_at?;
+        self.output_latest_at
+            .is_some_and(|latest_at| {
+                latest_at.duration_since(started_at) >= FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE
+            })
+            .then_some(started_at)
     }
 }
 
@@ -769,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn output_retires_a_hook_gate_after_the_grace_period() {
+    fn continuing_output_retires_a_hook_gate_after_the_grace_period() {
         let started = std::time::Instant::now();
         let mut retirement = FullLifecycleHookOutputRetirement::default();
 
@@ -780,13 +797,35 @@ mod tests {
         );
         assert_eq!(
             retirement.observe(
-                5,
+                6,
                 4,
                 started
                     + std::time::Duration::from_secs(1)
                     + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE
             ),
             Some(started + std::time::Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn a_turn_end_repaint_alone_does_not_retire_a_hook_gate() {
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+
+        // The agent repaints its prompt box once as the turn ends, then waits
+        // on the human. That burst must never expire the gate on its own.
+        assert_eq!(retirement.observe(5, 4, started), None);
+        assert_eq!(
+            retirement.observe(6, 4, started + std::time::Duration::from_millis(200)),
+            None
+        );
+        assert_eq!(
+            retirement.observe(
+                6,
+                4,
+                started + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE * 3,
+            ),
+            None
         );
     }
 
@@ -813,7 +852,7 @@ mod tests {
 
         assert_eq!(retirement.observe(5, 4, started), None);
         assert_eq!(
-            retirement.observe(5, 4, started + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE),
+            retirement.observe(7, 4, started + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE),
             Some(started)
         );
     }

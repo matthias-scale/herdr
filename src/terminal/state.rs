@@ -1346,7 +1346,23 @@ impl TerminalState {
         // this source claims (see `detect::is_closing_block_source`), and
         // `accept_hook_report` still enforces per-source sequence monotonicity
         // downstream, so accepting on presence alone loses no protection.
-        if process_present && crate::detect::is_closing_block_source(source, agent_label) {
+        // Screen detection falling silent is not evidence that the agent left:
+        // at turn end the prompt box frequently matches no rule at all, and the
+        // scan is skipped outright while this very authority is live. Only a
+        // *different* detected agent, or an observed process exit, contradicts
+        // the hook. Suppressed sources keep the stricter presence guard.
+        let process_not_contradicted = known_agent.is_some()
+            && self.recent_agent_process_exit.is_none()
+            && self
+                .detected_agent
+                .is_none_or(|detected_agent| Some(detected_agent) == known_agent);
+        if crate::detect::is_closing_block_source(source, agent_label)
+            && (process_present
+                || (process_not_contradicted
+                    && !self
+                        .suppressed_full_lifecycle_hook_reports
+                        .contains_key(source)))
+        {
             return FullLifecycleHookReportRoute::Accept {
                 reanchor_sequence: false,
             };
@@ -2285,10 +2301,22 @@ impl TerminalState {
         })
     }
 
+    /// A full-lifecycle hook owns the pane unless the pane contradicts it.
+    ///
+    /// Only two things contradict it: the agent process is gone, or screen
+    /// detection is looking at a *different* agent. Detection returning nothing
+    /// is not a contradiction -- it is the normal state at the end of a turn,
+    /// when the prompt box matches no rule or the scan is skipped -- and it must
+    /// not demote the hook back to the screen-scraped fallback, because that is
+    /// exactly when the hook knows something the screen cannot: a gate is
+    /// waiting on a human.
     fn hook_authority_is_effective(&self, authority: &HookAuthority) -> bool {
         !crate::detect::full_lifecycle_hook_authority(&authority.source, &authority.agent_label)
             || crate::detect::parse_agent_label(&authority.agent_label).is_none_or(|agent| {
-                self.detected_agent == Some(agent) && self.recent_agent_process_exit.is_none()
+                self.recent_agent_process_exit.is_none()
+                    && self
+                        .detected_agent
+                        .is_none_or(|detected_agent| detected_agent == agent)
             })
     }
 
@@ -4849,6 +4877,124 @@ mod tests {
             false,
             observed + std::time::Duration::from_secs(2),
         );
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn a_blocked_closing_block_report_survives_unavailable_screen_detection() {
+        // Turn end on a claude pane: the prompt box matches no detection rule,
+        // so the screen scan yields no agent while a stale spinner title still
+        // reads Working. The gate must outrank that.
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed,
+        );
+        assert_eq!(terminal.detected_agent, None);
+
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed + std::time::Duration::from_millis(10),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(terminal.effective_agent_label(), Some("claude"));
+    }
+
+    #[test]
+    fn a_blocked_closing_block_report_yields_to_a_different_detected_agent() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed + std::time::Duration::from_secs(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+    }
+
+    #[test]
+    fn a_blocked_closing_block_report_yields_to_the_agent_process_exiting() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            observed + std::time::Duration::from_secs(1),
+        );
+
+        assert_ne!(terminal.state, AgentState::Blocked);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+    }
+
+    #[test]
+    fn a_blocked_closing_block_report_ends_when_a_new_turn_retires_it() {
+        // The confirmed production drop: the pane keeps a stale spinner title,
+        // so retirement must be the only thing that hands the pane back to it.
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(
+                observed + std::time::Duration::from_secs(6),
+            )
+            .expect("sustained new-turn output retires the gate");
+
         assert_eq!(terminal.state, AgentState::Working);
     }
 
