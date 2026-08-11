@@ -235,7 +235,9 @@ impl App {
             crate::raw_input::RawInputEvent::OuterFocusGained => {
                 #[cfg(not(windows))]
                 self.query_host_terminal_appearance();
-                self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
+                if self.state.symphony_detail.is_none() {
+                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
+                }
                 if self.state.redraw_on_focus_gained {
                     self.request_repaint();
                 }
@@ -245,7 +247,9 @@ impl App {
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
                 self.release_input_source(super::LOCAL_INPUT_SOURCE).await;
-                self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
+                if self.state.symphony_detail.is_none() {
+                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
+                }
                 self.state.outer_terminal_focus = Some(false);
                 false
             }

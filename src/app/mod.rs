@@ -1989,11 +1989,15 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::OuterFocusGained => {
-                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
+                    if self.state.symphony_detail.is_none() {
+                        self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
+                    }
                 }
                 crate::raw_input::RawInputEvent::OuterFocusLost => {
                     self.release_input_source_headless(source_id);
-                    self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
+                    if self.state.symphony_detail.is_none() {
+                        self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
+                    }
                 }
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
@@ -2250,6 +2254,26 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn focus_reporting_app() -> (App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("focus-reporting");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80,
+                24,
+                0,
+                b"\x1b[?1004h",
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        (app, input_rx)
     }
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
@@ -4128,22 +4152,7 @@ mod tests {
 
     #[tokio::test]
     async fn monolithic_outer_focus_events_reach_reporting_pane() {
-        let mut app = test_app();
-        let mut workspace = Workspace::test_new("focus-reporting");
-        let pane_id = workspace.tabs[0].root_pane;
-        let (runtime, mut input_rx) =
-            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
-                80,
-                24,
-                0,
-                b"\x1b[?1004h",
-                4,
-            );
-        workspace.insert_test_runtime(pane_id, runtime);
-        app.state.workspaces = vec![workspace];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        let (mut app, mut input_rx) = focus_reporting_app();
 
         assert!(
             app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
@@ -4163,6 +4172,80 @@ mod tests {
         );
         assert_eq!(
             input_rx.recv().await.expect("forwarded focus lost report"),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    #[tokio::test]
+    async fn symphony_overlay_blocks_monolithic_outer_focus_events() {
+        let (mut app, mut input_rx) = focus_reporting_app();
+        app.state.toggle_symphony();
+
+        assert!(
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+                .await
+        );
+        assert_eq!(app.state.outer_terminal_focus, Some(true));
+        assert!(
+            !app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+                .await
+        );
+        assert_eq!(app.state.outer_terminal_focus, Some(false));
+        assert!(input_rx.try_recv().is_err());
+
+        app.state.toggle_symphony();
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+            .await;
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusLost)
+            .await;
+
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("focus gained after overlay closes"),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("focus lost after overlay closes"),
+            bytes::Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    #[tokio::test]
+    async fn symphony_overlay_blocks_headless_outer_focus_events() {
+        let (mut app, mut input_rx) = focus_reporting_app();
+        app.state.toggle_symphony();
+
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::OuterFocusGained,
+                crate::raw_input::RawInputEvent::OuterFocusLost,
+            ],
+            false,
+        );
+        assert!(input_rx.try_recv().is_err());
+
+        app.state.toggle_symphony();
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::OuterFocusGained,
+                crate::raw_input::RawInputEvent::OuterFocusLost,
+            ],
+            false,
+        );
+
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("focus gained after overlay closes"),
+            bytes::Bytes::from_static(b"\x1b[I")
+        );
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("focus lost after overlay closes"),
             bytes::Bytes::from_static(b"\x1b[O")
         );
     }
