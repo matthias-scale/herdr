@@ -13,6 +13,7 @@
 //! - Displays sound/toast notifications forwarded from server
 
 mod input;
+pub(crate) mod presentation;
 
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write as _};
@@ -852,6 +853,7 @@ fn do_handshake(
     cell_height_px: u32,
     requested_encoding: RenderEncoding,
     direct_attach_requested: bool,
+    dock_width: u16,
 ) -> Result<RenderEncoding, ClientError> {
     stream
         .set_nonblocking(false)
@@ -897,6 +899,8 @@ fn do_handshake(
             if let Some(error) = error {
                 return Err(ClientError::HandshakeRejected { version, error });
             }
+            write_to_server(stream, &ClientMessage::SetDockWidth { width: dock_width })
+                .map_err(ClientError::ConnectionFailed)?;
             info!(version, ?encoding, "handshake succeeded");
             Ok(encoding)
         }
@@ -1045,6 +1049,7 @@ fn connect_terminal_session_stream(
         0,
         RenderEncoding::TerminalAnsi,
         true,
+        crate::ui::DOCK_DEFAULT_WIDTH,
     ) {
         Ok(RenderEncoding::TerminalAnsi) => {}
         Ok(encoding) => {
@@ -1233,6 +1238,7 @@ fn run_client_with_mode(
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let host_cursor = loaded_config.config.ui.host_cursor;
+    let dock_width = presentation::load_dock_width();
     let direct_attach_requested = attach_request.is_some();
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
@@ -1276,6 +1282,7 @@ fn run_client_with_mode(
         cell_height_px,
         requested_encoding,
         direct_attach_requested,
+        dock_width,
     ) {
         Ok(encoding) => encoding,
         Err(err) => {
@@ -1755,6 +1762,9 @@ async fn run_client_loop(
                         &mut state.draw_host_cursor,
                         &mut state.remote_image_paste_key,
                     );
+                }
+                ServerMessage::DockWidth { width } => {
+                    presentation::save_dock_width(width);
                 }
                 ServerMessage::MouseCapture { enabled } => {
                     let desired = enabled;

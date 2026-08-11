@@ -61,7 +61,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::events::AppEvent;
 
-pub use state::{AppState, Mode, ToastKind, ViewState};
+pub use state::{AppState, DockTab, Mode, ToastKind, ViewState};
 
 pub(crate) fn load_plugin_manifest(
     path: &str,
@@ -162,6 +162,7 @@ pub struct App {
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
+    pub(crate) last_dock_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
     pub(crate) next_resize_poll: Instant,
@@ -589,6 +590,7 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            collapsed_sidebar_groups: std::collections::HashSet::new(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
@@ -613,6 +615,7 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -622,6 +625,7 @@ impl App {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            dock_width_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -679,6 +683,12 @@ impl App {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                dock_rect: Rect::default(),
+                dock_handle_rect: Rect::default(),
+                dock_divider_rect: Rect::default(),
+                dock_tab_bar_rect: Rect::default(),
+                dock_tab_hit_areas: Vec::new(),
+                dock_body_rect: Rect::default(),
             },
             drag: None,
             workspace_press: None,
@@ -701,6 +711,13 @@ impl App {
             sidebar_width,
             sidebar_min_width,
             sidebar_max_width,
+            dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
+            dock_collapsed: true,
+            dock_tab: state::DockTab::Editor,
+            dock_scroll: 0,
+            dock_editor_focused: false,
+            dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_errors: std::collections::HashMap::new(),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
@@ -864,6 +881,7 @@ impl App {
             pending_api_worktree_remove_paths: HashMap::new(),
             next_api_worktree_operation_id: 1,
             last_sidebar_divider_click: None,
+            last_dock_divider_click: None,
             last_pane_click: None,
             pending_url_click_sources: HashSet::new(),
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
@@ -1129,6 +1147,11 @@ impl App {
                 needs_render = true;
             }
 
+            if let Some((ws_idx, tab_idx)) = self.state.request_pin_toggle.take() {
+                self.toggle_pin_tab_via_api(ws_idx, tab_idx);
+                needs_render = true;
+            }
+
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
@@ -1204,6 +1227,9 @@ impl App {
             let now = Instant::now();
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
+            if let Some(width) = self.state.take_dock_width_persistence_request() {
+                crate::client::presentation::save_dock_width(width);
+            }
 
             if needs_render && self.can_render_now(now) {
                 self.sync_status_context_before_render();
@@ -1242,6 +1268,8 @@ impl App {
                             area,
                         );
                     }
+                    self.ensure_dock_editor();
+                    self.resize_dock_editor();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,

@@ -38,6 +38,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 
 mod clipboard;
 mod copy_mode;
+mod dock;
 mod lease;
 mod modal;
 mod mouse;
@@ -229,6 +230,11 @@ impl App {
         }
         if self.state.mode != Mode::Terminal {
             self.paste_into_active_text_input(&text);
+            return;
+        }
+
+        if let Some(runtime) = self.dock_editor_runtime() {
+            let _ = runtime.send_paste(text).await;
             return;
         }
 
@@ -462,6 +468,25 @@ impl App {
             return;
         }
 
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.state.on_dock_divider(mouse.column, mouse.row)
+        {
+            let now = std::time::Instant::now();
+            let double_click = self.last_dock_divider_click.is_some_and(|previous| {
+                now.duration_since(previous) <= super::SIDEBAR_DOUBLE_CLICK_WINDOW
+            });
+            self.last_dock_divider_click = Some(now);
+            if double_click {
+                self.state.set_dock_width(crate::ui::DOCK_DEFAULT_WIDTH);
+                self.state.drag = None;
+            } else {
+                self.state.drag = Some(crate::app::state::DragState {
+                    target: crate::app::state::DragTarget::DockDivider,
+                });
+            }
+            return;
+        }
+
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
         if !handled_pane_double_click {
             self.focus_pane_before_mouse_press(mouse);
@@ -654,6 +679,7 @@ impl App {
             return;
         };
 
+        self.state.dock_editor_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }

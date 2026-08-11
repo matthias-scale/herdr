@@ -769,6 +769,50 @@ pub(crate) enum SidebarRow {
         entry: Box<AgentPanelEntry>,
         depth: u16,
     },
+    /// A group label. Carries no pane, so it is deliberately absent from every
+    /// card-area list: it cannot be focused or navigated onto. Clicking it
+    /// collapses the group, which is why it carries the count -- a collapsed
+    /// group has no rows left to count from the outside.
+    SectionHeader {
+        title: &'static str,
+        count: usize,
+        collapsed: bool,
+    },
+}
+
+/// Agents waiting on a human are the only ones whose wait you can end, so they
+/// are grouped above everything else rather than sorted among it. The group is
+/// omitted entirely when empty, which is the common case.
+pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
+pub(crate) const AGENTS_SECTION_TITLE: &str = "Agents";
+pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
+pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
+
+/// Only the group that demands action is coloured. Pinned and Spaces are
+/// organisation, not urgency, so they stay in the muted chrome tone.
+fn section_header_color(title: &str, p: &Palette) -> ratatui::style::Color {
+    if title == BLOCKED_SECTION_TITLE {
+        p.red
+    } else {
+        p.overlay0
+    }
+}
+
+/// A pin is per tab, while a sidebar row is per agent pane, so every pane of a
+/// pinned tab is pinned. Out-of-range indices simply are not pinned -- a stale
+/// entry must never panic the whole sidebar.
+/// Groups collapse by title rather than by index: the set of groups changes
+/// every time an agent blocks or unblocks, and a collapse the user asked for
+/// must survive that churn.
+pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
+    app.collapsed_sidebar_groups.contains(title)
+}
+
+fn tab_is_pinned(app: &AppState, ws_idx: usize, tab_idx: usize) -> bool {
+    app.workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.tabs.get(tab_idx))
+        .is_some_and(|tab| tab.pinned)
 }
 
 pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
@@ -803,19 +847,88 @@ fn sidebar_rows_inner(
             Some(runtimes) => agent_panel_entries_from(app, runtimes),
             None => agent_panel_entries(app),
         };
-        return entries
+        // Partition rather than sort: an entry belongs to exactly one group, so
+        // the row count still equals the agent count. Headers appear only when
+        // something is blocked -- with nothing blocked the list is byte-for-byte
+        // what it was before.
+        let (blocked, rest): (Vec<_>, Vec<_>) = entries
             .into_iter()
-            .map(|entry| SidebarRow::Agent {
-                entry: Box::new(entry),
-                depth: 0,
-            })
-            .collect();
+            .partition(|entry| entry.state == AgentState::Blocked);
+        let agent_row = |entry: AgentPanelEntry| SidebarRow::Agent {
+            entry: Box::new(entry),
+            depth: 0,
+        };
+        if blocked.is_empty() {
+            return rest.into_iter().map(agent_row).collect();
+        }
+        let mut rows = Vec::with_capacity(blocked.len() + rest.len() + 2);
+        rows.push(SidebarRow::SectionHeader {
+            title: BLOCKED_SECTION_TITLE,
+            count: blocked.len(),
+            collapsed: section_is_collapsed(app, BLOCKED_SECTION_TITLE),
+        });
+        if !section_is_collapsed(app, BLOCKED_SECTION_TITLE) {
+            rows.extend(blocked.into_iter().map(agent_row));
+        }
+        if !rest.is_empty() {
+            rows.push(SidebarRow::SectionHeader {
+                title: AGENTS_SECTION_TITLE,
+                count: rest.len(),
+                collapsed: section_is_collapsed(app, AGENTS_SECTION_TITLE),
+            });
+            if !section_is_collapsed(app, AGENTS_SECTION_TITLE) {
+                rows.extend(rest.into_iter().map(agent_row));
+            }
+        }
+        return rows;
     }
 
     let agents = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
     };
+    // The blocked group is a worklist, not an ownership claim, so unlike the
+    // priority projection it does *not* remove the agent from its workspace
+    // subtree below -- the tree stays a complete picture of what runs where,
+    // and the group above is the shortcut to what is waiting on you.
+    let mut rows = Vec::new();
+    let blocked: Vec<AgentPanelEntry> = agents
+        .iter()
+        .filter(|entry| entry.state == AgentState::Blocked)
+        .cloned()
+        .collect();
+    // A pinned tab that is also blocked appears once, under Blocked: the gate
+    // is the more urgent fact, and listing a row twice above the tree would
+    // make the groups read as a queue you have to de-duplicate by eye.
+    let pinned: Vec<AgentPanelEntry> = agents
+        .iter()
+        .filter(|entry| {
+            entry.state != AgentState::Blocked && tab_is_pinned(app, entry.ws_idx, entry.tab_idx)
+        })
+        .cloned()
+        .collect();
+    let push_group =
+        |rows: &mut Vec<SidebarRow>, title: &'static str, group: Vec<AgentPanelEntry>| {
+            if group.is_empty() {
+                return;
+            }
+            let collapsed = section_is_collapsed(app, title);
+            rows.push(SidebarRow::SectionHeader {
+                title,
+                count: group.len(),
+                collapsed,
+            });
+            if collapsed {
+                return;
+            }
+            rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
+                entry: Box::new(entry),
+                depth: 0,
+            }));
+        };
+    push_group(&mut rows, BLOCKED_SECTION_TITLE, blocked);
+    push_group(&mut rows, PINNED_SECTION_TITLE, pinned);
+
     let mut agents_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
     for entry in agents {
         agents_by_workspace
@@ -824,12 +937,28 @@ fn sidebar_rows_inner(
             .push(entry);
     }
 
-    let mut rows = Vec::new();
     let workspaces = if expand_worktrees {
         workspace_list_entries_expanded(app)
     } else {
         workspace_list_entries(app)
     };
+    // The tree gets a header -- and with it the handle that folds it away --
+    // only once some group sits above it. Alone in the sidebar it needs no
+    // label, and folding it would leave nothing behind to fold back.
+    let spaces_collapsed = !rows.is_empty() && section_is_collapsed(app, SPACES_SECTION_TITLE);
+    if !rows.is_empty() {
+        rows.push(SidebarRow::SectionHeader {
+            title: SPACES_SECTION_TITLE,
+            count: workspaces
+                .iter()
+                .filter(|WorkspaceListEntry::Workspace { indented, .. }| !indented)
+                .count(),
+            collapsed: spaces_collapsed,
+        });
+    }
+    if spaces_collapsed {
+        return rows;
+    }
     for workspace in workspaces {
         let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace;
         if indented {
@@ -1031,9 +1160,26 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
             .get(*ws_idx)
             .map(|workspace| workspace_row_height_in_body(app, workspace, *indented, body_height))
             .unwrap_or(0),
-        SidebarRow::Agent { entry, .. } => agent_entry_height_in_body(app, entry, body_height),
-        SidebarRow::Tab { .. } => 1,
+        SidebarRow::Agent { entry, depth } => {
+            agent_entry_height_in_body_at(app, entry, body_height, *depth)
+        }
+        SidebarRow::Tab { .. } | SidebarRow::SectionHeader { .. } => 1,
     }
+}
+
+/// For each row index, the 1-based number to show if it is a top-level agent.
+/// Non-agent rows get 0; they are never rendered with a number.
+fn agent_row_ordinals(rows: &[SidebarRow]) -> Vec<usize> {
+    let mut next = 0usize;
+    rows.iter()
+        .map(|row| match row {
+            SidebarRow::Agent { .. } => {
+                next += 1;
+                next
+            }
+            _ => 0,
+        })
+        .collect()
 }
 
 fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
@@ -1054,6 +1200,10 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::Tab { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Tab { .. }) => 0,
+        // A header hugs the group it names, and earns the agent gap above it so
+        // the two groups read as separate lists rather than one long one.
+        (SidebarRow::SectionHeader { .. }, _) => 0,
+        (_, SidebarRow::SectionHeader { .. }) => app.sidebar_agents.row_gap,
     }
 }
 
@@ -1110,6 +1260,9 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         SidebarRow::Workspace { ws_idx: row_ws, .. } => *row_ws == ws_idx,
         SidebarRow::Agent { entry, .. } => entry.ws_idx == ws_idx,
         SidebarRow::Tab { entry, .. } => entry.ws_idx == ws_idx,
+        // Headers belong to a state, not a workspace, so scrolling to a
+        // workspace must never land on one.
+        SidebarRow::SectionHeader { .. } => false,
     }
 }
 
@@ -1165,6 +1318,20 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
     ))
 }
 
+/// Depth 0 means the row sits in a worklist group rather than in the tree, and
+/// those two want different shapes: the tree keeps the configured template, the
+/// worklist collapses to one line.
+fn resolved_agent_rows_at(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    depth: u16,
+) -> Vec<Vec<ResolvedToken>> {
+    if depth == 0 {
+        return tokens::worklist_row(entry);
+    }
+    resolved_agent_rows(app, entry)
+}
+
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
@@ -1182,15 +1349,27 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
     tokens::agent_rows(&app.sidebar_agents, entry, label)
 }
 
+#[cfg(test)]
 pub(crate) fn agent_entry_height_in_body(
     app: &AppState,
     entry: &AgentPanelEntry,
     body_height: u16,
 ) -> u16 {
-    (resolved_agent_rows(app, entry)
+    agent_entry_height_in_body_at(app, entry, body_height, 1)
+}
+
+/// A worklist row is one line and owns no tab header -- it is a pointer into
+/// the tree, not a copy of the tree's structure.
+fn agent_entry_height_in_body_at(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    body_height: u16,
+    depth: u16,
+) -> u16 {
+    (resolved_agent_rows_at(app, entry, depth)
         .len()
         .max(1)
-        .saturating_add(usize::from(entry.tab_first_pane))
+        .saturating_add(usize::from(entry.tab_first_pane && depth > 0))
         .min(u16::MAX as usize) as u16)
         .min(body_height)
 }
@@ -1243,8 +1422,8 @@ pub(crate) fn compute_sidebar_row_areas(
                     indented: *indented,
                 });
             }
-            SidebarRow::Agent { entry, .. } => {
-                let row_height = agent_entry_height_in_body(app, entry, body.height);
+            SidebarRow::Agent { entry, depth } => {
+                let row_height = agent_entry_height_in_body_at(app, entry, body.height, *depth);
                 if row_y.saturating_add(row_height) > body_bottom {
                     break;
                 }
@@ -1253,9 +1432,10 @@ pub(crate) fn compute_sidebar_row_areas(
                     tab_idx: entry.tab_idx,
                     pane_id: entry.pane_id,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
+                    row_idx: entry_idx,
                 });
             }
-            SidebarRow::Tab { .. } => {}
+            SidebarRow::Tab { .. } | SidebarRow::SectionHeader { .. } => {}
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
@@ -1305,6 +1485,47 @@ pub(crate) fn compute_tab_card_areas(
                 tab_idx: entry.tab_idx,
                 pane_id: entry.pane_id,
                 depth: *depth,
+                rect: Rect::new(body.x, y, body.width, height),
+            });
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, &rows, idx));
+    }
+    out
+}
+
+/// Where a group header landed this frame. Headers are not cards -- they own no
+/// pane -- so they get their own list rather than a seat in the card areas that
+/// focus and navigation walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SectionHeaderArea {
+    pub title: &'static str,
+    pub rect: Rect,
+}
+
+pub(crate) fn compute_sidebar_section_header_areas(
+    app: &AppState,
+    area: Rect,
+) -> Vec<SectionHeaderArea> {
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let mut y = body.y;
+    let mut out = Vec::new();
+    let rows = sidebar_rows(app);
+    for (idx, row) in rows
+        .iter()
+        .enumerate()
+        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+    {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.y.saturating_add(body.height) {
+            break;
+        }
+        if let SidebarRow::SectionHeader { title, .. } = row {
+            out.push(SectionHeaderArea {
+                title,
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
@@ -1513,7 +1734,11 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     }
 
     let scroll = collapsed_sidebar_row_scroll(app, ws_area);
-    for (row_idx, row) in sidebar_rows(app).iter().enumerate().skip(scroll) {
+    let rows = sidebar_rows(app);
+    // Agents are numbered by their position among agents, not among rows: a
+    // section header must not consume a number the user could type.
+    let agent_ordinals = agent_row_ordinals(&rows);
+    for (row_idx, row) in rows.iter().enumerate().skip(scroll) {
         let y = ws_area.y + (row_idx - scroll) as u16;
         if y >= ws_area.y + ws_area.height {
             break;
@@ -1573,7 +1798,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Paragraph::new(Line::from(vec![
                         Span::styled(
                             if *depth == 0 {
-                                format!("{}", row_idx + 1)
+                                format!("{}", agent_ordinals[row_idx])
                             } else if *depth > 1 {
                                 "  ".to_string()
                             } else {
@@ -1601,6 +1826,17 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         Span::raw("  "),
                         Span::styled(icon, icon_style),
                     ])),
+                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                );
+            }
+            SidebarRow::SectionHeader { title, .. } => {
+                // Collapsed leaves no room for a word, so the header degrades to
+                // a rule: the grouping is still legible, the labels are not.
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "─".repeat(usize::from(ws_area.width)),
+                        Style::default().fg(section_header_color(title, p)),
+                    ))),
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
@@ -2163,6 +2399,48 @@ fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) 
     style
 }
 
+/// Painted like a space row on purpose -- same chevron in the same column --
+/// because it collapses the same way, and the eye should not have to learn two
+/// disclosure affordances in one list.
+fn render_section_header(
+    app: &AppState,
+    frame: &mut Frame,
+    header: &SectionHeaderArea,
+    count: usize,
+    collapsed: bool,
+) {
+    if header.rect.width == 0 || header.rect.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let color = section_header_color(header.title, p);
+    let count_label = format!(" ({count})");
+    let title = truncate_end(
+        header.title,
+        usize::from(header.rect.width)
+            .saturating_sub(display_width(" ▾ ") + display_width(&count_label)),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                if collapsed { "▸" } else { "▾" },
+                Style::default().fg(color),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                title,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                count_label,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ),
+        ])),
+        Rect::new(header.rect.x, header.rect.y, header.rect.width, 1),
+    );
+}
+
 fn render_workspace_list(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -2281,18 +2559,25 @@ fn render_workspace_list(
     } else {
         app.view.agent_card_areas.clone()
     };
+    for header in compute_sidebar_section_header_areas(app, sidebar_area) {
+        let Some((count, collapsed)) = row_entries.iter().find_map(|row| match row {
+            SidebarRow::SectionHeader {
+                title,
+                count,
+                collapsed,
+            } if *title == header.title => Some((*count, *collapsed)),
+            _ => None,
+        }) else {
+            continue;
+        };
+        render_section_header(app, frame, &header, count, collapsed);
+    }
     for card in compute_tab_card_areas(app, sidebar_area) {
         render_tab_card(app, frame, &card);
     }
     for card in agent_cards {
-        let Some((entry, depth)) = row_entries.iter().find_map(|row| match row {
-            SidebarRow::Agent { entry, depth }
-                if entry.ws_idx == card.ws_idx
-                    && entry.tab_idx == card.tab_idx
-                    && entry.pane_id == card.pane_id =>
-            {
-                Some((entry, *depth))
-            }
+        let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
+            SidebarRow::Agent { entry, depth } => Some((entry, *depth)),
             _ => None,
         }) else {
             continue;
@@ -2437,7 +2722,7 @@ fn render_agent_card(
 ) {
     let p = &app.palette;
     let label_color = state_label_color_with_stale(detail.state, detail.seen, detail.stale, p);
-    let rows = resolved_agent_rows(app, detail);
+    let rows = resolved_agent_rows_at(app, detail, depth);
     let header_height = 0;
     let height = (rows.len().max(1) as u16)
         .saturating_add(header_height)
@@ -2462,7 +2747,10 @@ fn render_agent_card(
         app.status_indicators,
         p,
     );
-    let indent = usize::from(depth) * 3;
+    // Grouped rows are pointers under a section header, so they share the
+    // child indentation of the tree even though their semantic depth is zero.
+    let indent_depth = depth.max(1);
+    let indent = usize::from(indent_depth) * 3;
 
     for (row_index, resolved) in rows
         .iter()
@@ -2543,10 +2831,16 @@ fn agent_activity_age_fits(
     rect: Rect,
     depth: u16,
 ) -> bool {
-    let Some(resolved) = resolved_agent_rows(app, detail).into_iter().next() else {
+    // Measured against the row this depth actually paints: a worklist row is the
+    // one-line shape, and measuring the tree template instead would size the age
+    // field against text that never appears.
+    let Some(resolved) = resolved_agent_rows_at(app, detail, depth)
+        .into_iter()
+        .next()
+    else {
         return false;
     };
-    let prefix_width = usize::from(depth) * 3 + usize::from(depth > 0);
+    let prefix_width = usize::from(depth.max(1)) * 3 + usize::from(depth > 0);
     let content_width = usize::from(rect.width).saturating_sub(prefix_width);
     if content_width < AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH {
         return false;
@@ -2831,6 +3125,7 @@ mod tests {
                 SidebarRow::Workspace { ws_idx, .. } => ('w', ws_idx),
                 SidebarRow::Tab { entry, .. } => ('t', entry.ws_idx),
                 SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
+                SidebarRow::SectionHeader { .. } => ('h', 0),
             })
             .collect()
     }
@@ -3744,6 +4039,7 @@ mod tests {
                     SidebarRow::Workspace { ws_idx, .. } => ('w', *ws_idx),
                     SidebarRow::Tab { entry, .. } => ('t', entry.ws_idx),
                     SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
+                    SidebarRow::SectionHeader { .. } => ('h', 0),
                 })
                 .collect::<Vec<_>>(),
             vec![('w', 0), ('t', 0), ('w', 1), ('t', 1)]
@@ -3775,7 +4071,9 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
-                SidebarRow::Workspace { .. } | SidebarRow::Agent { .. } => None,
+                SidebarRow::Workspace { .. }
+                | SidebarRow::Agent { .. }
+                | SidebarRow::SectionHeader { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(tabs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
@@ -3814,6 +4112,7 @@ mod tests {
                         Some(entry.tab_idx),
                         Some(entry.pane_id),
                     ),
+                    SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                 })
                 .collect::<Vec<_>>()
         };
@@ -5244,6 +5543,66 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn a_depth_zero_worklist_entry_occupies_one_line() {
+        let mut app = priority_app_with_states(&[AgentState::Blocked]);
+        app.sidebar_agents.rows = vec![
+            vec![crate::config::AgentSidebarToken::Agent],
+            vec![crate::config::AgentSidebarToken::Workspace],
+        ];
+        let area = Rect::new(0, 0, 40, 12);
+        let rows = sidebar_rows(&app);
+        let blocked = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Agent { entry, depth } if *depth == 0 => Some(entry),
+                _ => None,
+            })
+            .expect("blocked worklist should contain an agent row");
+
+        assert_eq!(
+            resolved_agent_rows_at(&app, blocked, 0).len(),
+            1,
+            "worklist rows ignore the configured multi-row tree template"
+        );
+        assert_eq!(
+            agent_entry_height_in_body_at(&app, blocked, 8, 0),
+            1,
+            "layout height must match the single painted worklist row"
+        );
+        let cards = compute_agent_card_areas(&app, area);
+        let card = cards
+            .iter()
+            .find(|card| card.ws_idx == blocked.ws_idx && card.pane_id == blocked.pane_id)
+            .expect("blocked worklist card should have geometry");
+        assert_eq!(card.rect.height, 1);
+    }
+
+    #[test]
+    fn a_blocked_worklist_row_renders_its_title_without_its_space_name() {
+        let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
+        let blocked_pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(blocked_pane).unwrap().clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("Review blocked thread".into()));
+        let area = Rect::new(0, 0, 50, 12);
+        let card = compute_agent_card_areas(&app, area)
+            .into_iter()
+            .find(|card| card.pane_id == blocked_pane)
+            .expect("blocked worklist card should render");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("sidebar should render");
+
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+        assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
+        assert!(!rendered.contains("ws0"), "{rendered:?}");
+    }
+
+    #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {
         let app = crate::app::state::AppState::test_new();
         let area = Rect::new(0, 0, 26, 20);
@@ -5380,6 +5739,210 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect();
 
         assert_eq!(labels, ["four", "two", "one", "three"]);
+    }
+
+    /// Describe the priority projection as `("section", title)` / `("agent",
+    /// workspace)` pairs, so a test can assert grouping and order together.
+    fn priority_row_shape(app: &AppState) -> Vec<(&'static str, String)> {
+        sidebar_rows(app)
+            .into_iter()
+            .map(|row| match row {
+                SidebarRow::SectionHeader { title, .. } => ("section", title.to_string()),
+                SidebarRow::Agent { entry, .. } => ("agent", entry.primary_label.clone()),
+                SidebarRow::Workspace { .. } => ("workspace", String::new()),
+                SidebarRow::Tab { .. } => ("tab", String::new()),
+            })
+            .collect()
+    }
+
+    fn priority_app_with_states(states: &[AgentState]) -> AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = states
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| Workspace::test_new(&format!("ws{idx}")))
+            .collect();
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+        for (ws_idx, state) in states.iter().enumerate() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = *state;
+        }
+        app
+    }
+
+    #[test]
+    fn blocked_agents_group_above_the_rest_under_their_own_header() {
+        let app = priority_app_with_states(&[
+            AgentState::Working,
+            AgentState::Blocked,
+            AgentState::Idle,
+            AgentState::Blocked,
+        ]);
+
+        let shape = priority_row_shape(&app);
+        assert_eq!(
+            shape[..4],
+            [
+                ("section", BLOCKED_SECTION_TITLE.to_string()),
+                ("agent", "ws1".to_string()),
+                ("agent", "ws3".to_string()),
+                ("section", SPACES_SECTION_TITLE.to_string()),
+            ]
+        );
+
+        // Below the second header the ownership tree resumes untouched: the
+        // blocked group is a worklist layered on top, not a reordering of it.
+        assert!(
+            shape[4..].iter().all(|(kind, _)| *kind != "section"),
+            "the tree below must not grow further headers: {shape:?}"
+        );
+        assert!(shape[4..].iter().any(|(kind, _)| *kind == "workspace"));
+    }
+
+    #[test]
+    fn pinned_tabs_group_below_blocked_and_above_the_tree() {
+        let mut app =
+            priority_app_with_states(&[AgentState::Working, AgentState::Blocked, AgentState::Idle]);
+        // ws0 is merely pinned; ws1 is pinned *and* blocked.
+        app.workspaces[0].tabs[0].pinned = true;
+        app.workspaces[1].tabs[0].pinned = true;
+
+        let shape = priority_row_shape(&app);
+        assert_eq!(
+            shape[..5],
+            [
+                ("section", BLOCKED_SECTION_TITLE.to_string()),
+                ("agent", "ws1".to_string()),
+                ("section", PINNED_SECTION_TITLE.to_string()),
+                ("agent", "ws0".to_string()),
+                ("section", SPACES_SECTION_TITLE.to_string()),
+            ],
+            "a pinned-and-blocked tab is listed once, under Blocked: {shape:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_pinned_or_blocked_costs_no_header_rows() {
+        let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
+        app.workspaces[0].tabs[0].pinned = true;
+        assert!(
+            sidebar_rows(&app)
+                .iter()
+                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
+            "a pin alone must be enough to open the group"
+        );
+        app.workspaces[0].tabs[0].pinned = false;
+        assert!(
+            !sidebar_rows(&app)
+                .iter()
+                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
+            "with nothing pinned or blocked the sidebar is byte-for-byte what it was"
+        );
+    }
+
+    #[test]
+    fn collapsing_a_group_keeps_its_header_and_drops_only_its_rows() {
+        let mut app = priority_app_with_states(&[
+            AgentState::Blocked,
+            AgentState::Working,
+            AgentState::Blocked,
+        ]);
+        let open = priority_row_shape(&app);
+        assert_eq!(open[0], ("section", BLOCKED_SECTION_TITLE.to_string()));
+        assert_eq!(open[1].0, "agent");
+
+        app.collapsed_sidebar_groups
+            .insert(BLOCKED_SECTION_TITLE.to_string());
+        let folded = priority_row_shape(&app);
+        assert_eq!(folded[0], ("section", BLOCKED_SECTION_TITLE.to_string()));
+        assert_eq!(
+            folded[1],
+            ("section", SPACES_SECTION_TITLE.to_string()),
+            "a folded group leaves its header and nothing else"
+        );
+        // The count survives the fold: it is the only thing left saying how much
+        // is hidden behind the header.
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, count: 2, collapsed: true } if *title == BLOCKED_SECTION_TITLE
+        )));
+        assert!(
+            folded.iter().any(|(kind, _)| *kind == "workspace"),
+            "folding one group must not fold the tree"
+        );
+    }
+
+    #[test]
+    fn folding_spaces_hides_the_whole_tree_but_keeps_the_worklist() {
+        let mut app = priority_app_with_states(&[AgentState::Blocked, AgentState::Working]);
+        app.collapsed_sidebar_groups
+            .insert(SPACES_SECTION_TITLE.to_string());
+        let shape = priority_row_shape(&app);
+        assert_eq!(
+            shape,
+            vec![
+                ("section", BLOCKED_SECTION_TITLE.to_string()),
+                ("agent", shape[1].1.clone()),
+                ("section", SPACES_SECTION_TITLE.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_spaces_fold_is_ignored_while_the_tree_stands_alone() {
+        // Without a group above it the tree has no header to unfold from, so a
+        // stale fold from a moment when something was blocked must not strand
+        // the sidebar empty.
+        let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
+        app.collapsed_sidebar_groups
+            .insert(SPACES_SECTION_TITLE.to_string());
+        assert!(priority_row_shape(&app)
+            .iter()
+            .any(|(kind, _)| *kind == "workspace"));
+    }
+
+    #[test]
+    fn nothing_blocked_leaves_the_list_exactly_as_it_was() {
+        let app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
+        assert!(
+            !sidebar_rows(&app)
+                .iter()
+                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
+            "an empty blocked group must not cost a header row"
+        );
+    }
+
+    #[test]
+    fn section_headers_are_not_selectable_and_do_not_consume_agent_numbers() {
+        let app = priority_app_with_states(&[AgentState::Blocked, AgentState::Blocked]);
+        let rows = sidebar_rows(&app);
+
+        // Numbers the user can type must run 1..=n over agents only, skipping
+        // the header rows that sit between them.
+        let ordinals: Vec<usize> = agent_row_ordinals(&rows)
+            .into_iter()
+            .zip(rows.iter())
+            .filter(|(_, row)| matches!(row, SidebarRow::Agent { .. }))
+            .map(|(ordinal, _)| ordinal)
+            .collect();
+        assert_eq!(ordinals, [1, 2]);
+
+        // And a header belongs to no workspace, so workspace scrolling can
+        // never target one.
+        for row in &rows {
+            if matches!(row, SidebarRow::SectionHeader { .. }) {
+                assert!(!sidebar_row_belongs_to_workspace(row, 0));
+                assert!(!sidebar_row_belongs_to_workspace(row, 1));
+            }
+        }
     }
 
     #[test]
@@ -5732,6 +6295,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         format!("window:{}:{}", entry.ws_idx, entry.tab_idx)
                     }
                     SidebarRow::Agent { .. } => "agent".to_string(),
+                    SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
                 })
                 .collect::<Vec<_>>(),
             vec!["space:0", "window:0:0", "window:0:1", "window:1:0"]

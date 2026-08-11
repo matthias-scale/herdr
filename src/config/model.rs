@@ -475,10 +475,19 @@ pub struct KeysConfig {
     /// Toggle zoom for the focused pane. Default: "prefix+z"
     #[serde(alias = "fullscreen")]
     pub zoom: BindingConfig,
+    /// Pin or unpin the active tab into the sidebar's Pinned group.
+    /// Unset by default; pinning is available from the sidebar and API.
+    pub toggle_pin_tab: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    /// Toggle dock collapse. Default: "prefix+shift+e"
+    pub toggle_dock: BindingConfig,
+    /// Select the previous dock tab. Default: "prefix+shift+["
+    pub previous_dock_tab: BindingConfig,
+    /// Select the next dock tab. Default: "prefix+shift+]"
+    pub next_dock_tab: BindingConfig,
     /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
     pub toggle_info_panel: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
@@ -621,10 +630,17 @@ pub(crate) struct KeysConfigOverlay {
     close_pane: Option<BindingConfig>,
     #[serde(alias = "fullscreen", skip_serializing_if = "Option::is_none")]
     zoom: Option<BindingConfig>,
+    toggle_pin_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resize_mode: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_dock: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_dock_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_dock_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -714,8 +730,12 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(split_up);
         apply_field!(close_pane);
         apply_field!(zoom);
+        apply_field!(toggle_pin_tab);
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
+        apply_field!(toggle_dock);
+        apply_field!(previous_dock_tab);
+        apply_field!(next_dock_tab);
         apply_field!(toggle_info_panel);
         apply_field!(indexed);
         apply_field!(command);
@@ -826,8 +846,12 @@ impl KeysConfig {
         copy_effective_action_field!(split_up, keybinds.split_up);
         copy_effective_action_field!(close_pane, keybinds.close_pane);
         copy_effective_action_field!(zoom, keybinds.zoom);
+        copy_effective_action_field!(toggle_pin_tab, keybinds.toggle_pin_tab);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
+        copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
+        copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_user_field!(indexed);
 
@@ -1132,8 +1156,12 @@ impl Default for KeysConfig {
             split_up: BindingConfig::one("prefix+shift+minus"),
             close_pane: BindingConfig::one("prefix+x"),
             zoom: BindingConfig::one("prefix+z"),
+            toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_dock: BindingConfig::one("prefix+shift+e"),
+            previous_dock_tab: BindingConfig::one("prefix+shift+["),
+            next_dock_tab: BindingConfig::one("prefix+shift+]"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),

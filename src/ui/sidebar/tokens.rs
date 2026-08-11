@@ -1,4 +1,4 @@
-use super::AgentPanelEntry;
+use super::{AgentPanelEntry, DEFAULT_THREAD_TITLE};
 use crate::config::{
     AgentSidebarToken, AgentsSidebarConfig, SidebarTokenStyle, SpaceSidebarToken,
     SpacesSidebarConfig,
@@ -87,6 +87,32 @@ pub(super) fn agent_rows(
             (!resolved.is_empty()).then_some(resolved)
         })
         .collect()
+}
+
+/// Worklist rows point at a thread in the tree, so they ignore the configured
+/// multi-row template and carry only its state and title. The provider and
+/// space are deliberately absent: neither tells you which gate to open next.
+pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
+    let title = entry
+        .terminal_title_stripped
+        .clone()
+        .or_else(|| entry.terminal_title.clone())
+        .or_else(|| entry.pane_label.clone())
+        .or_else(|| entry.primary_tab_label.clone())
+        // Keep the row identifiable when every live title source is absent;
+        // the stable thread fallback is more useful here than a bare state dot.
+        .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
+    let mut row = vec![ResolvedToken::new(
+        ResolvedTokenKind::StateIcon,
+        SidebarTokenStyle::default(),
+    )];
+    if let Some(title) = title {
+        row.push(ResolvedToken::new(
+            ResolvedTokenKind::Tab(title),
+            SidebarTokenStyle::default(),
+        ));
+    }
+    vec![row]
 }
 
 #[allow(dead_code)]
@@ -219,6 +245,37 @@ mod tests {
             vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
                 "pi".into()
             ))]
+        );
+    }
+
+    #[test]
+    fn worklist_rows_are_one_line_of_title_without_space_or_provider() {
+        let mut entry = entry();
+        entry.terminal_title_stripped = Some("Review herdr context enrichment".into());
+        entry.agent_label = Some("codex".into());
+
+        let rows = worklist_row(&entry);
+
+        assert_eq!(
+            rows,
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab(
+                    "Review herdr context enrichment".into()
+                )),
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_titleless_worklist_row_uses_the_default_thread_title() {
+        let rows = worklist_row(&entry());
+        assert_eq!(
+            rows,
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("New Thread".into())),
+            ]]
         );
     }
 

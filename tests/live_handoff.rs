@@ -953,7 +953,9 @@ fn live_handoff_preserves_pane_process_io() {
         "second:after-handoff-second",
         Duration::from_secs(5),
     );
-    wait_for_output(&api_socket, &second_pane_id, "second:after-handoff-sec");
+    // The visible pane may wrap the final suffix; the file assertion above
+    // already verifies the complete process output.
+    wait_for_output(&api_socket, &second_pane_id, "second:after-handoff");
 
     let _ = request(
         &api_socket,

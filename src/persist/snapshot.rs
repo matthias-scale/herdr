@@ -98,6 +98,10 @@ pub struct TabSnapshot {
     pub layout: LayoutSnapshot,
     pub panes: HashMap<u32, PaneSnapshot>,
     pub zoomed: bool,
+    /// User-set: this tab is pinned into the sidebar's own group. Defaulted so
+    /// session files written before pins existed restore unchanged.
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default)]
     pub prio: bool,
     #[serde(default)]
@@ -175,6 +179,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             panes: snap.panes,
             zoomed: snap.zoomed,
             prio: false,
+            pinned: false,
             focused: snap.focused,
             root_pane: snap.root_pane,
         };
@@ -419,6 +424,7 @@ fn capture_tab(
         panes,
         zoomed: tab.zoomed,
         prio: tab.prio,
+        pinned: tab.pinned,
         focused: Some(tab.layout.focused().raw()),
         root_pane: Some(tab.root_pane.raw()),
     }
@@ -1132,6 +1138,7 @@ mod tests {
                     panes,
                     zoomed: false,
                     prio: false,
+                    pinned: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
@@ -1734,6 +1741,7 @@ mod tests {
                     panes,
                     zoomed: false,
                     prio: false,
+                    pinned: false,
                     focused: Some(0),
                     root_pane: Some(0),
                 }],

@@ -423,9 +423,31 @@ impl App {
                 self.zoom_focused_pane_via_api();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::TogglePinTab => {
+                self.toggle_pin_active_tab_via_api();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::EnterResizeMode => self.state.mode = Mode::Resize,
             NavigateAction::ToggleSidebar => {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::ToggleDock => {
+                self.state.dock_collapsed = !self.state.dock_collapsed;
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::PreviousDockTab => {
+                self.state.dock_tab = self.state.dock_tab.previous();
+                if self.state.dock_tab == crate::app::DockTab::Editor {
+                    self.state.dock_editor_focused = true;
+                }
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::NextDockTab => {
+                self.state.dock_tab = self.state.dock_tab.next();
+                if self.state.dock_tab == crate::app::DockTab::Editor {
+                    self.state.dock_editor_focused = true;
+                }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::CyclePaneNext => {
@@ -849,6 +871,30 @@ impl App {
                 mode: crate::api::schema::PaneZoomMode::Toggle,
             },
         );
+    }
+
+    /// Pin or unpin whichever tab is in front. Takes an explicit index so the
+    /// same path serves both the keybinding (active tab) and a click on some
+    /// other tab's pin glyph.
+    pub(crate) fn toggle_pin_tab_via_api(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return;
+        };
+        self.runtime_tab_pin(
+            "tui.tab.pin",
+            crate::api::schema::TabPinParams {
+                tab_id,
+                mode: crate::api::schema::TabPinMode::Toggle,
+            },
+        );
+    }
+
+    pub(crate) fn toggle_pin_active_tab_via_api(&mut self) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let tab_idx = self.state.workspaces[ws_idx].active_tab;
+        self.toggle_pin_tab_via_api(ws_idx, tab_idx);
     }
 
     pub(crate) fn set_split_ratio_via_api(&mut self, path: Vec<bool>, ratio: f32) {
@@ -1608,8 +1654,12 @@ pub(crate) enum NavigateAction {
     EditScrollback,
     CopyMode,
     Zoom,
+    TogglePinTab,
     EnterResizeMode,
     ToggleSidebar,
+    ToggleDock,
+    PreviousDockTab,
+    NextDockTab,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -1769,8 +1819,12 @@ fn non_indexed_action_for_key(
         (&kb.split_up, NavigateAction::SplitUp),
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.zoom, NavigateAction::Zoom),
+        (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.toggle_dock, NavigateAction::ToggleDock),
+        (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
+        (&kb.next_dock_tab, NavigateAction::NextDockTab),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
@@ -2056,9 +2110,33 @@ pub(super) fn execute_navigate_action_in_context(
             state.toggle_zoom();
             leave_navigate_mode(state);
         }
+        // Headless/test dispatch has no API client, so it flips the flag it
+        // would otherwise have asked the server to flip.
+        NavigateAction::TogglePinTab => {
+            state.toggle_pin_active_tab();
+            leave_navigate_mode(state);
+        }
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleDock => {
+            state.dock_collapsed = !state.dock_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::PreviousDockTab => {
+            state.dock_tab = state.dock_tab.previous();
+            if state.dock_tab == crate::app::DockTab::Editor {
+                state.dock_editor_focused = true;
+            }
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NextDockTab => {
+            state.dock_tab = state.dock_tab.next();
+            if state.dock_tab == crate::app::DockTab::Editor {
+                state.dock_editor_focused = true;
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {
@@ -2379,8 +2457,69 @@ mod tests {
     }
 
     #[test]
+    fn dock_key_actions_cycle_tabs_and_toggle_the_dock() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Shortcuts);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
+
+        state.dock_collapsed = true;
+        state.session_dirty = false;
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::ToggleDock,
+            ActionContext::Prefix,
+        );
+        assert!(!state.dock_collapsed);
+        assert!(
+            !state.session_dirty,
+            "client-local dock presentation must not dirty shared session state"
+        );
+    }
+
+    #[test]
     fn ac4_default_work_link_keybindings_map_to_distinct_prefix_actions() {
         let state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('e'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::ToggleDock)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('['), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::PreviousDockTab)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char(']'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::NextDockTab)
+        );
         assert_eq!(
             action_for_key(
                 &state,

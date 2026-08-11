@@ -2128,6 +2128,23 @@ impl AppState {
         })
     }
 
+    /// Flip the active tab's pin without an API round trip. `tab.pin` is the
+    /// production path, exactly as `pane.zoom` is for `toggle_zoom` below; this
+    /// exists for the test-only navigate dispatch, which has no client.
+    #[cfg(test)]
+    pub(crate) fn toggle_pin_active_tab(&mut self) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        let tab_idx = ws.active_tab;
+        if let Some(tab) = ws.tabs.get_mut(tab_idx) {
+            tab.pinned = !tab.pinned;
+        }
+    }
+
     #[cfg(test)]
     pub fn toggle_zoom(&mut self) {
         let Some(ws_idx) = self.active else {

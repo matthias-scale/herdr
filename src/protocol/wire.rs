@@ -428,6 +428,12 @@ pub enum ClientMessage {
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
+
+    /// Update the client-local dock width used by the full app presentation.
+    SetDockWidth {
+        /// Dock width in terminal columns.
+        width: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,6 +716,12 @@ pub enum ServerMessage {
     PrefixInputSource {
         /// Whether the ASCII input source should be active.
         active: bool,
+    },
+
+    /// Persist the full app client's dock width in its local presentation state.
+    DockWidth {
+        /// Dock width in terminal columns.
+        width: u16,
     },
 }
 
@@ -1317,6 +1329,15 @@ mod tests {
     }
 
     #[test]
+    fn client_dock_width_roundtrip() {
+        let msg = ClientMessage::SetDockWidth { width: 25 };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
     fn client_attach_scroll_roundtrip() {
         let msg = ClientMessage::AttachScroll {
             source: AttachScrollSource::Wheel,
@@ -1553,6 +1574,15 @@ mod tests {
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn server_dock_width_roundtrip() {
+        let msg = ServerMessage::DockWidth { width: 25 };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     // ---- Framing ----

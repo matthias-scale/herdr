@@ -228,6 +228,27 @@ impl AppState {
         })
     }
 
+    pub(super) fn sidebar_section_header_at(&self, row: u16) -> Option<&'static str> {
+        crate::ui::compute_sidebar_section_header_areas(self, self.view.sidebar_rect)
+            .into_iter()
+            .find(|header| row >= header.rect.y && row < header.rect.y + header.rect.height)
+            .map(|header| header.title)
+    }
+
+    /// Folding a group is view state, not session state, so it needs no API
+    /// round trip -- but it does change the row count, so the sidebar's own
+    /// scroll clamp has to run afterwards.
+    pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
+        if !self.collapsed_sidebar_groups.remove(title) {
+            self.collapsed_sidebar_groups.insert(title.to_string());
+        }
+        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+            self,
+            self.view.sidebar_rect,
+            self.workspace_scroll,
+        );
+    }
+
     pub(super) fn collapsed_workspace_at_row(&self, row: u16) -> Option<usize> {
         if !self.sidebar_collapsed {
             return None;
@@ -244,7 +265,9 @@ impl AppState {
             .get(idx)
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
-                crate::ui::SidebarRow::Agent { .. } | crate::ui::SidebarRow::Tab { .. } => None,
+                crate::ui::SidebarRow::Agent { .. }
+                | crate::ui::SidebarRow::Tab { .. }
+                | crate::ui::SidebarRow::SectionHeader { .. } => None,
             })
     }
 
@@ -263,7 +286,8 @@ impl AppState {
             .get(row_idx)
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
-                crate::ui::SidebarRow::Workspace { .. } => None,
+                crate::ui::SidebarRow::Workspace { .. }
+                | crate::ui::SidebarRow::SectionHeader { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -797,6 +821,7 @@ mod tests {
             tab_idx: 0,
             pane_id: second_pane,
             rect: first_row,
+            row_idx: 0,
         }];
 
         assert_eq!(app.state.tab_target_at(first_row.y), Some((0, 0)));
@@ -1223,6 +1248,96 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_group_header_folds_and_unfolds_that_group() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = crate::detect::AgentState::Blocked;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+
+        let header = crate::ui::compute_sidebar_section_header_areas(
+            &app.state,
+            app.state.view.sidebar_rect,
+        )
+        .into_iter()
+        .find(|header| header.title == crate::ui::BLOCKED_SECTION_TITLE)
+        .expect("a blocked agent opens the group");
+        let rows_open = crate::ui::sidebar_rows(&app.state).len();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.rect.x + 1,
+            header.rect.y,
+        ));
+        assert!(app
+            .state
+            .collapsed_sidebar_groups
+            .contains(crate::ui::BLOCKED_SECTION_TITLE));
+        assert!(crate::ui::sidebar_rows(&app.state).len() < rows_open);
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.rect.x + 1,
+            header.rect.y,
+        ));
+        assert!(app.state.collapsed_sidebar_groups.is_empty());
+        assert_eq!(crate::ui::sidebar_rows(&app.state).len(), rows_open);
+    }
+
+    #[test]
+    fn clicking_a_blocked_worklist_row_focuses_its_own_pane() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("blocked")];
+        app.state.ensure_test_terminals();
+        let working_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let blocked_pane = app.state.workspaces[1].tabs[0].root_pane;
+        for (ws_idx, pane_id, state) in [
+            (0, working_pane, AgentState::Working),
+            (1, blocked_pane, AgentState::Blocked),
+        ] {
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .unwrap()
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let screen = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app.state, screen);
+        let area = app.state.view.sidebar_rect;
+        let card = crate::ui::compute_agent_card_areas(&app.state, area)
+            .into_iter()
+            .find(|card| card.pane_id == blocked_pane)
+            .expect("blocked worklist row should be clickable");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(
+            app.state.workspaces[1].tabs[0].layout.focused(),
+            blocked_pane
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
     fn clicking_worktree_parent_row_focuses_workspace_without_toggling() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
@@ -1420,7 +1535,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 66, 20));
 
         let right = app.state.view.tab_scroll_right_hit_area;
         assert!(right.width > 0);
@@ -1462,15 +1577,16 @@ mod tests {
         let target = app.state.view.tab_hit_areas[last_idx];
         let clamped_scroll = app.state.tab_scroll;
         assert!(target.width > 0, "last tab should already be visible");
+        let target_col = target.x + target.width - 1;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            target.x + 1,
+            target_col,
             target.y,
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            target.x + 1,
+            target_col,
             target.y,
         ));
 

@@ -64,6 +64,12 @@ pub(crate) struct PopupPaneState {
     pub height: Option<crate::popup_size::PopupSize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockEditorSession {
+    pub pane_id: PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -653,6 +659,10 @@ pub struct AgentCardArea {
     pub tab_idx: usize,
     pub pane_id: PaneId,
     pub rect: Rect,
+    /// Index into the sidebar rows this frame. A blocked pane owns two rows --
+    /// one in its group, one in the tree -- so the ids alone cannot say which
+    /// of the two a card came from.
+    pub row_idx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,6 +697,30 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) mobile_switcher_scroll: usize,
     /// Global projection revision last reconciled into this attach.
     pub(crate) projection_revision: u64,
+}
+
+/// Attach-local dock presentation. The headless server swaps one instance into
+/// `AppState` while routing input or rendering that client; editor PTYs remain
+/// server-owned runtime resources in `AppState`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockPresentationState {
+    pub(crate) width: u16,
+    pub(crate) collapsed: bool,
+    pub(crate) tab: DockTab,
+    pub(crate) scroll: u16,
+    pub(crate) editor_focused: bool,
+}
+
+impl Default for DockPresentationState {
+    fn default() -> Self {
+        Self {
+            width: crate::ui::DOCK_DEFAULT_WIDTH,
+            collapsed: true,
+            tab: DockTab::Editor,
+            scroll: 0,
+            editor_focused: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -840,6 +874,35 @@ pub enum ViewLayout {
     Mobile,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockTab {
+    Editor,
+    Shortcuts,
+    Context,
+}
+
+impl DockTab {
+    pub const ALL: [Self; 3] = [Self::Editor, Self::Shortcuts, Self::Context];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "Editor",
+            Self::Shortcuts => "Shortcuts",
+            Self::Context => "Context",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    pub fn previous(self) -> Self {
+        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
@@ -862,6 +925,12 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+    pub dock_rect: Rect,
+    pub dock_handle_rect: Rect,
+    pub dock_divider_rect: Rect,
+    pub dock_tab_bar_rect: Rect,
+    pub dock_tab_hit_areas: Vec<Rect>,
+    pub dock_body_rect: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1249,6 +1318,7 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
+    DockDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1518,6 +1588,9 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    /// A click landed on a tab's pin glyph. Drained by the app loop, which is
+    /// the layer that owns the API client the mutation has to travel through.
+    pub request_pin_toggle: Option<(usize, usize)>,
     pub request_new_linked_worktree: Option<usize>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
@@ -1529,6 +1602,8 @@ pub struct AppState {
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
+    /// Width to persist in the attached client's local presentation state.
+    pub(crate) dock_width_persistence_request: Option<u16>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -1542,6 +1617,10 @@ pub struct AppState {
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
     pub prio_panel_collapsed: bool,
+    /// Sidebar group headers the user folded away, keyed by title. Separate from
+    /// `collapsed_space_keys`, which folds one space inside the tree; this folds
+    /// a whole group, the tree included.
+    pub collapsed_sidebar_groups: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1590,6 +1669,13 @@ pub struct AppState {
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
     pub sidebar_max_width: u16,
+    pub dock_width: u16,
+    pub dock_collapsed: bool,
+    pub dock_tab: DockTab,
+    pub dock_scroll: u16,
+    pub(crate) dock_editor_focused: bool,
+    pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
+    pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -1752,6 +1838,17 @@ impl AppState {
 }
 
 impl AppState {
+    pub(crate) fn set_dock_width(&mut self, width: u16) {
+        if self.dock_width != width {
+            self.dock_width = width;
+            self.dock_width_persistence_request = Some(width);
+        }
+    }
+
+    pub(crate) fn take_dock_width_persistence_request(&mut self) -> Option<u16> {
+        self.dock_width_persistence_request.take()
+    }
+
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
@@ -1774,6 +1871,14 @@ impl AppState {
             &mut self.sidebar_presentation.projection_revision,
             &mut other.projection_revision,
         );
+    }
+
+    pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
+        std::mem::swap(&mut self.dock_width, &mut other.width);
+        std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
+        std::mem::swap(&mut self.dock_tab, &mut other.tab);
+        std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
+        std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
@@ -2110,6 +2215,7 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -2119,6 +2225,7 @@ impl AppState {
             request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_config_reload: false,
+            dock_width_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -2129,6 +2236,7 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
+            collapsed_sidebar_groups: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -2167,6 +2275,12 @@ impl AppState {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                dock_rect: Rect::default(),
+                dock_handle_rect: Rect::default(),
+                dock_divider_rect: Rect::default(),
+                dock_tab_bar_rect: Rect::default(),
+                dock_tab_hit_areas: Vec::new(),
+                dock_body_rect: Rect::default(),
             },
             drag: None,
             workspace_press: None,
@@ -2189,6 +2303,13 @@ impl AppState {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
+            dock_collapsed: true,
+            dock_tab: DockTab::Editor,
+            dock_scroll: 0,
+            dock_editor_focused: false,
+            dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_errors: std::collections::HashMap::new(),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,

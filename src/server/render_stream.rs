@@ -170,6 +170,52 @@ fn insert_graphics_before_sync_end(encoded: &mut Vec<u8>, graphics: &[u8]) {
     }
 }
 
+fn focused_agent_pane_id(app_state: &AppState) -> Option<crate::layout::PaneId> {
+    let ws_idx = app_state.active?;
+    let workspace = app_state.workspaces.get(ws_idx)?;
+    let pane_id = workspace.focused_pane_id()?;
+    let terminal_id = workspace.terminal_id(pane_id)?;
+    let terminal = app_state.terminals.get(terminal_id)?;
+    terminal.is_agent_terminal().then_some(pane_id)
+}
+
+fn focused_editor_terminal_id(app_state: &AppState) -> Option<crate::terminal::TerminalId> {
+    if app_state.mode != Mode::Terminal
+        || !app_state.dock_editor_focused
+        || app_state.dock_collapsed
+        || app_state.dock_tab != crate::app::DockTab::Editor
+    {
+        return None;
+    }
+    let agent_pane_id = focused_agent_pane_id(app_state)?;
+    app_state
+        .dock_editor_sessions
+        .get(&agent_pane_id)
+        .map(|session| session.terminal_id.clone())
+}
+
+pub(crate) fn dock_editor_is_focused(app_state: &AppState) -> bool {
+    focused_editor_terminal_id(app_state).is_some()
+}
+
+pub(crate) fn dock_editor_cursor_state(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Option<CursorState> {
+    let terminal_id = focused_editor_terminal_id(app_state)?;
+    let runtime = terminal_runtimes.get(&terminal_id)?;
+    if runtime.synchronized_output_active() {
+        return None;
+    }
+    let cursor = runtime.cursor_state(app_state.view.dock_body_rect, true)?;
+    Some(CursorState {
+        x: cursor.x,
+        y: cursor.y,
+        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
+        shape: cursor.shape,
+    })
+}
+
 /// A prepared client render message plus any baseline state needed after send.
 pub(crate) enum PreparedRender {
     Semantic {
@@ -349,8 +395,9 @@ fn render_virtual_with_runtime_registry_inner(
     render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     let popup_visible = app_state.popup_pane.is_some();
-    let pre_compute_suppresses_focused_terminal_cursor =
-        !popup_visible && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+    let dock_editor_focused = !popup_visible && dock_editor_is_focused(app_state);
+    let pre_compute_suppresses_focused_terminal_cursor = !dock_editor_focused
+        && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
     if resize_panes {
         crate::ui::compute_view_with_cell_size(app_state, terminal_runtimes, area, cell_size);
     } else {
@@ -358,6 +405,7 @@ fn render_virtual_with_runtime_registry_inner(
     }
     let suppress_focused_terminal_cursor = pre_compute_suppresses_focused_terminal_cursor
         || (!popup_visible
+            && !dock_editor_focused
             && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes));
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
@@ -382,6 +430,8 @@ fn render_virtual_with_runtime_registry_inner(
     let buffer = terminal.backend().buffer().clone();
     let cursor = if popup_visible {
         popup_terminal_cursor(app_state, terminal_runtimes)
+    } else if dock_editor_focused {
+        dock_editor_cursor_state(app_state, terminal_runtimes)
     } else if suppress_focused_terminal_cursor {
         None
     } else {
@@ -459,6 +509,9 @@ pub(crate) fn focused_terminal_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<CursorState> {
+    if dock_editor_is_focused(app_state) {
+        return dock_editor_cursor_state(app_state, terminal_runtimes);
+    }
     crate::ui::tab_surface_cursor(app_state, terminal_runtimes, app_state.view.tab_surface())
 }
 
@@ -466,7 +519,7 @@ fn focused_terminal_owns_host_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal {
+    if app_state.mode != Mode::Terminal || dock_editor_is_focused(app_state) {
         return false;
     }
 
@@ -494,7 +547,7 @@ fn focused_terminal_suppresses_host_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal {
+    if app_state.mode != Mode::Terminal || dock_editor_is_focused(app_state) {
         return false;
     }
 
