@@ -32,6 +32,8 @@ pub enum Subscription {
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
     WorkspaceFocused {},
+    #[serde(rename = "loop.run_history_updated")]
+    LoopRunHistoryUpdated {},
     #[serde(rename = "worktree.created")]
     WorktreeCreated {},
     #[serde(rename = "worktree.opened")]
@@ -200,6 +202,7 @@ pub enum EventKind {
     WorkspaceMoved,
     WorkspaceReordered,
     WorkspaceFocused,
+    LoopRunHistoryUpdated,
     WorktreeCreated,
     WorktreeOpened,
     WorktreeRemoved,
@@ -231,6 +234,7 @@ impl EventKind {
             EventKind::WorkspaceMoved => "workspace.moved",
             EventKind::WorkspaceReordered => "workspace.reordered",
             EventKind::WorkspaceFocused => "workspace.focused",
+            EventKind::LoopRunHistoryUpdated => "loop.run_history_updated",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
             EventKind::WorktreeRemoved => "worktree.removed",
@@ -263,6 +267,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceMoved,
     EventKind::WorkspaceReordered,
     EventKind::WorkspaceFocused,
+    EventKind::LoopRunHistoryUpdated,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
     EventKind::WorktreeRemoved,
@@ -401,6 +406,12 @@ pub struct PaneAgentStatusChangedEvent {
     pub workspace_id: String,
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -451,6 +462,12 @@ pub enum EventData {
     },
     WorkspaceFocused {
         workspace_id: String,
+    },
+    LoopRunHistoryUpdated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_id: Option<String>,
+        runs: Vec<super::loops::LoopRunInfo>,
+        skipped_lines: u64,
     },
     WorktreeCreated {
         workspace: WorkspaceInfo,
@@ -541,6 +558,12 @@ pub enum EventData {
         pane_id: String,
         workspace_id: String,
         agent_status: AgentStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        eta_s: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_at: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

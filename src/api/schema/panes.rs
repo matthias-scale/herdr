@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use serde::{de::Deserializer, Deserialize, Serialize};
+use serde::{
+    de::{Deserializer, Error},
+    Deserialize, Serialize,
+};
 
 pub(crate) const PANE_GRAPHICS_SET_MAX_BYTES: usize = 512 * 1024;
 pub(crate) const PANE_GRAPHICS_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -337,6 +340,12 @@ pub struct PaneReportAgentParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
@@ -366,6 +375,12 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             #[serde(default)]
             seq: Option<u64>,
             #[serde(default)]
+            wait: Option<serde_json::Value>,
+            #[serde(default)]
+            eta_s: Option<serde_json::Value>,
+            #[serde(default)]
+            reported_at: Option<serde_json::Value>,
+            #[serde(default)]
             agent_session_id: Option<String>,
             #[serde(default)]
             agent_session_path: Option<String>,
@@ -392,8 +407,36 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             }
         }
 
-        let raw = Raw::deserialize(deserializer)?;
-        let strict = raw.v == Some(CLOSING_BLOCK_VERSION);
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let version = value
+            .get("v")
+            .cloned()
+            .map(|value| serde_json::from_value::<Option<u8>>(value).map_err(D::Error::custom))
+            .transpose()?
+            .flatten();
+        if version.is_some_and(|version| version != CLOSING_BLOCK_VERSION) {
+            return Ok(Self {
+                pane_id: String::new(),
+                source: String::new(),
+                agent: String::new(),
+                state: PaneAgentState::Unknown,
+                v: version,
+                message: None,
+                seq: None,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: None,
+                items: None,
+                decisions: None,
+            });
+        }
+
+        let raw = Raw::deserialize(value).map_err(D::Error::custom)?;
+        let version_compatible = raw.v.is_none_or(|version| version == CLOSING_BLOCK_VERSION);
+        let strict = version_compatible;
         Ok(Self {
             pane_id: raw.pane_id,
             source: raw.source,
@@ -402,6 +445,9 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             v: raw.v,
             message: raw.message,
             seq: raw.seq,
+            wait: typed(raw.wait, version_compatible)?,
+            eta_s: typed(raw.eta_s, version_compatible)?,
+            reported_at: typed(raw.reported_at, version_compatible)?,
             agent_session_id: raw.agent_session_id,
             agent_session_path: raw.agent_session_path,
             gates: typed(raw.gates, strict)?,
@@ -567,6 +613,12 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

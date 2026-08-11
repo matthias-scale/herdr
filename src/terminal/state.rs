@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalId;
 
+pub(crate) const AGENT_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
+pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
+
 #[path = "metadata.rs"]
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
@@ -23,6 +26,9 @@ pub struct HookAuthority {
     pub state: AgentState,
     pub message: Option<String>,
     pub reported_at: Instant,
+    pub wait: Option<String>,
+    pub eta_s: Option<u64>,
+    pub reported_at_wire: Option<String>,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
     pub retired_at: Option<Instant>,
 }
@@ -266,6 +272,7 @@ pub struct TerminalState {
     fallback_working_observed_at: Option<Instant>,
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
+    pub supervisor_stale: bool,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub work_context: crate::work_context::PaneWorkContextState,
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
@@ -303,6 +310,24 @@ pub struct TerminalState {
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
 }
 
+fn normalize_declared_wait(
+    state: AgentState,
+    wait: Option<String>,
+    eta_s: Option<u64>,
+) -> (Option<String>, Option<u64>) {
+    const MAX_DECLARED_WAIT_S: u64 = 7 * 24 * 60 * 60;
+    let wait = wait
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string());
+    if state != AgentState::Working || wait.is_none() {
+        return (None, None);
+    }
+    let Some(eta_s) = eta_s.filter(|eta_s| *eta_s <= MAX_DECLARED_WAIT_S) else {
+        return (None, None);
+    };
+    (wait, Some(eta_s))
+}
+
 impl TerminalState {
     pub fn new(id: TerminalId, cwd: PathBuf) -> Self {
         Self {
@@ -316,6 +341,7 @@ impl TerminalState {
             fallback_working_observed_at: None,
             fallback_observed_at: None,
             hook_authority: None,
+            supervisor_stale: false,
             agent_metadata: HashMap::new(),
             work_context: crate::work_context::PaneWorkContextState::default(),
             work_title_initial_subject: None,
@@ -803,7 +829,7 @@ impl TerminalState {
             });
             if let Some(source) = cleared_hook_source {
                 self.hook_report_sequences.remove(&source);
-                self.hook_authority = None;
+                self.replace_hook_authority(None);
             }
             if !newer_custom_authority
                 && self
@@ -876,7 +902,7 @@ impl TerminalState {
             self.suppress_current_full_lifecycle_hook_authority(
                 FullLifecycleHookSuppressionReason::HookClear,
             );
-            self.hook_authority = None;
+            self.replace_hook_authority(None);
             self.persisted_agent_session = durable_session;
         }
         if agent_released {
@@ -905,6 +931,11 @@ impl TerminalState {
         }
     }
 
+    fn replace_hook_authority(&mut self, authority: Option<HookAuthority>) {
+        self.hook_authority = authority;
+        self.supervisor_stale = false;
+    }
+
     #[cfg(test)]
     pub fn set_hook_authority(
         &mut self,
@@ -926,6 +957,7 @@ impl TerminalState {
         .and_then(|mutation| mutation.effective_state_change)
     }
 
+    #[cfg(test)]
     pub fn set_hook_authority_with_session_ref(
         &mut self,
         source: String,
@@ -946,12 +978,40 @@ impl TerminalState {
         )
     }
 
+    #[cfg(test)]
     pub fn set_hook_authority_at(
         &mut self,
         source: String,
         agent_label: String,
         state: AgentState,
         message: Option<String>,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        self.set_hook_authority_report_at(
+            source,
+            agent_label,
+            state,
+            message,
+            None,
+            None,
+            None,
+            session_ref,
+            seq,
+            now,
+        )
+    }
+
+    pub fn set_hook_authority_report_at(
+        &mut self,
+        source: String,
+        agent_label: String,
+        state: AgentState,
+        message: Option<String>,
+        wait: Option<String>,
+        eta_s: Option<u64>,
+        reported_at_wire: Option<String>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         seq: Option<u64>,
         now: Instant,
@@ -1046,15 +1106,19 @@ impl TerminalState {
             }
         }
         self.persisted_agent_session = None;
-        self.hook_authority = Some(HookAuthority {
+        let (wait, eta_s) = normalize_declared_wait(state, wait, eta_s);
+        self.replace_hook_authority(Some(HookAuthority {
             source,
             agent_label,
             state,
             message,
             reported_at: now,
+            wait,
+            eta_s,
+            reported_at_wire: reported_at_wire.filter(|value| !value.trim().is_empty()),
             session_ref,
             retired_at: None,
-        });
+        }));
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
         let hook_work_context_changed = if previous_session != current_session {
@@ -1075,6 +1139,50 @@ impl TerminalState {
             hook_work_context_changed,
             agent_released: false,
         })
+    }
+
+    pub fn status_report_snapshot(&self) -> (Option<String>, Option<u64>, Option<String>, bool) {
+        let Some(authority) = self.hook_authority.as_ref() else {
+            return (None, None, None, self.supervisor_stale);
+        };
+        (
+            authority.wait.clone(),
+            authority.eta_s,
+            authority.reported_at_wire.clone(),
+            self.supervisor_stale,
+        )
+    }
+
+    pub fn status_reported_at(&self) -> Option<Instant> {
+        self.hook_authority
+            .as_ref()
+            .map(|authority| authority.reported_at)
+    }
+
+    pub fn agent_status_watchdog_deadline(&self) -> Option<Instant> {
+        let authority = self.hook_authority.as_ref()?;
+        if self.supervisor_stale || authority.state != AgentState::Working {
+            return None;
+        }
+        let age = authority
+            .wait
+            .as_ref()
+            .and(authority.eta_s)
+            .map(|eta_s| Duration::from_secs(eta_s).saturating_add(DECLARED_WAIT_GRACE))
+            .unwrap_or(AGENT_STALE_SILENCE);
+        authority.reported_at.checked_add(age)
+    }
+
+    pub fn mark_agent_status_stale_at(&mut self, now: Instant) -> Option<TerminalStateMutation> {
+        if self.supervisor_stale
+            || self
+                .agent_status_watchdog_deadline()
+                .is_none_or(|deadline| now < deadline)
+        {
+            return None;
+        }
+        self.supervisor_stale = true;
+        Some(TerminalStateMutation::default())
     }
 
     fn hook_authority_not_newer_than(&self, observed_at: Instant) -> bool {
@@ -1320,6 +1428,9 @@ impl TerminalState {
                     state,
                     message: message.map(str::to_string),
                     reported_at,
+                    wait: None,
+                    eta_s: None,
+                    reported_at_wire: None,
                     session_ref: Some(session_ref),
                     retired_at: None,
                 },
@@ -1505,7 +1616,7 @@ impl TerminalState {
             });
             if let Some(pending) = pending {
                 self.hook_report_sequences.insert(source, pending.seq);
-                self.hook_authority = Some(pending.authority);
+                self.replace_hook_authority(Some(pending.authority));
             }
         }
     }
@@ -1907,12 +2018,12 @@ impl TerminalState {
                 agent_label.clone(),
                 replaced_hook_session,
             );
-            self.hook_authority = None;
+            self.replace_hook_authority(None);
         } else if foreground_takeover_allowed {
             self.suppress_current_full_lifecycle_hook_authority(
                 FullLifecycleHookSuppressionReason::HookClear,
             );
-            self.hook_authority = None;
+            self.replace_hook_authority(None);
         }
         self.reconcile_agent_name_owner(&agent_label, Some(&session_ref));
         self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
@@ -2044,7 +2155,7 @@ impl TerminalState {
         self.suppress_current_full_lifecycle_hook_authority(
             FullLifecycleHookSuppressionReason::HookClear,
         );
-        self.hook_authority = None;
+        self.replace_hook_authority(None);
         self.persisted_agent_session = None;
         let hook_work_context_changed = self.clear_hook_work_context();
         Some(TerminalStateMutation {
@@ -2153,7 +2264,7 @@ impl TerminalState {
             self.fallback_observed_at = None;
             self.clear_agent_name();
         }
-        self.hook_authority = None;
+        self.replace_hook_authority(None);
         if !preserve_foreign_persisted_session {
             self.persisted_agent_session = None;
         }
@@ -2521,7 +2632,7 @@ impl TerminalState {
         self.fallback_visible_working_observed_at = None;
         self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
-        self.hook_authority = None;
+        self.replace_hook_authority(None);
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
@@ -2692,6 +2803,171 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn declared_wait_watchdog_uses_deadline_and_fresh_report_clears_stale() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                Some("waiting for CI".into()),
+                Some("CI run 4123".into()),
+                Some(120),
+                Some("2026-08-10T10:00:00Z".into()),
+                None,
+                Some(1),
+                started,
+            )
+            .expect("declared wait accepted");
+
+        assert_eq!(
+            terminal.status_report_snapshot(),
+            (
+                Some("CI run 4123".into()),
+                Some(120),
+                Some("2026-08-10T10:00:00Z".into()),
+                false,
+            )
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at(started + Duration::from_secs(149))
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(started + Duration::from_secs(150))
+            .is_some());
+        assert!(terminal.status_report_snapshot().3);
+
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some("2026-08-10T10:03:00Z".into()),
+                None,
+                Some(2),
+                started + Duration::from_secs(151),
+            )
+            .expect("fresh report accepted");
+        assert!(!terminal.status_report_snapshot().3);
+        assert_eq!(terminal.status_report_snapshot().0, None);
+        assert_eq!(terminal.status_report_snapshot().1, None);
+    }
+
+    #[test]
+    fn process_exit_clears_supervisor_stale_with_hook_authority() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(1),
+                started,
+            )
+            .expect("working report accepted");
+        terminal
+            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the report stale");
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            started + AGENT_STALE_SILENCE + Duration::from_secs(1),
+        );
+
+        assert!(terminal.hook_authority.is_none());
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn no_declared_wait_watchdog_stales_after_silence_only_while_working() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some("2026-08-10T10:00:00Z".into()),
+                None,
+                Some(1),
+                started,
+            )
+            .expect("working report accepted");
+        assert!(terminal
+            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .is_some());
+
+        let mut waiting = test_terminal();
+        waiting.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        waiting
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                Some("CI".into()),
+                Some(3600),
+                None,
+                None,
+                Some(1),
+                started,
+            )
+            .expect("waiting report accepted");
+        assert!(waiting
+            .mark_agent_status_stale_at(started + AGENT_STALE_SILENCE)
+            .is_none());
+    }
+
+    #[test]
+    fn declared_wait_is_ignored_for_non_working_reports() {
+        let started = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Blocked,
+                None,
+                Some("not a live wait".into()),
+                Some(10),
+                None,
+                None,
+                Some(1),
+                started,
+            )
+            .expect("blocked report accepted");
+        assert_eq!(terminal.status_report_snapshot().0, None);
+        assert_eq!(terminal.status_report_snapshot().1, None);
+        assert!(terminal.agent_status_watchdog_deadline().is_none());
     }
 
     #[test]

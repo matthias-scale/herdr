@@ -16,6 +16,7 @@ mod dock_context;
 mod dock_shortcuts;
 mod info_panel;
 mod keybind_help;
+mod loop_runs;
 mod menus;
 mod mobile;
 mod navigator;
@@ -42,6 +43,7 @@ use self::dialogs::{
 use self::dock::render_dock;
 use self::info_panel::{compute_link_rows, panel_width_for_main, render_info_panel};
 use self::keybind_help::render_keybind_help_overlay;
+use self::loop_runs::render_loop_run_history;
 use self::menus::{
     render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
     render_navigate_overlay, render_prefix_overlay, render_resize_overlay,
@@ -641,7 +643,16 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
-    if app
+    if let Some(detail) = app.loop_run_history_detail.as_ref() {
+        render_loop_run_history(
+            &app.palette,
+            &detail.history,
+            &detail.loop_id,
+            terminal_area,
+            detail.observed_at,
+            frame,
+        );
+    } else if app
         .active
         .and_then(|ws_idx| app.workspaces.get(ws_idx))
         .is_some()

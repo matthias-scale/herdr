@@ -1282,6 +1282,9 @@ impl App {
                 state: detect_state_from_api(params.state),
                 message: params.message,
                 seq: params.seq,
+                wait: params.wait,
+                eta_s: params.eta_s,
+                reported_at: params.reported_at,
             })
             .unwrap_or(false);
         if hook_state_report_accepted {
@@ -1848,7 +1851,7 @@ fn normalize_state_labels(
             let status = status.trim().to_ascii_lowercase();
             if !matches!(
                 status.as_str(),
-                "idle" | "working" | "blocked" | "done" | "unknown"
+                "idle" | "working" | "blocked" | "done" | "stale" | "unknown"
             ) {
                 return Err(status);
             }
@@ -4355,6 +4358,9 @@ mod tests {
                 v: Some(2),
                 message: Some("Approve the open Herdr PR".into()),
                 seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: Some(gates),
@@ -4383,6 +4389,158 @@ mod tests {
     }
 
     #[test]
+    fn pane_report_agent_declared_wait_and_reported_at_are_exposed_in_api_and_event() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let reported_at = "2026-08-10T10:00:00Z".to_string();
+
+        let response = app.handle_pane_report_agent(
+            "declared-wait".into(),
+            PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude-closing-block".into(),
+                agent: "claude".into(),
+                state: crate::api::schema::PaneAgentState::Working,
+                v: Some(2),
+                message: Some("waiting for CI".into()),
+                seq: Some(1),
+                wait: Some("CI run 4123".into()),
+                eta_s: Some(720),
+                reported_at: Some(reported_at.clone()),
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: Some(Vec::new()),
+                items: Some(Vec::new()),
+                decisions: Some(Vec::new()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget { pane_id }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+        assert_eq!(pane.wait.as_deref(), Some("CI run 4123"));
+        assert_eq!(pane.eta_s, Some(720));
+        assert_eq!(pane.reported_at.as_deref(), Some(reported_at.as_str()));
+        assert!(app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| matches!(
+                &event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    agent_status: crate::api::schema::AgentStatus::Working,
+                    wait: Some(wait),
+                    eta_s: Some(720),
+                    reported_at: Some(value),
+                    ..
+                } if wait == "CI run 4123" && value == &reported_at
+            )));
+    }
+
+    #[test]
+    fn stale_watchdog_is_visible_in_api_event_and_cleared_by_fresh_report() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let started = std::time::Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal
+            .set_hook_authority_report_at(
+                "herdr:claude-closing-block".into(),
+                "claude".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some("2026-08-10T10:00:00Z".into()),
+                None,
+                Some(1),
+                started,
+            )
+            .expect("working report accepted");
+
+        let updates = app
+            .state
+            .mark_due_agent_status_stale_at(started + crate::terminal::state::AGENT_STALE_SILENCE);
+        assert_eq!(updates.len(), 1);
+        for update in &updates {
+            app.emit_pane_state_update(update);
+        }
+        let pane = app.pane_info(0, internal_pane_id).expect("pane info");
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Stale);
+        assert!(app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| matches!(
+                event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    agent_status: crate::api::schema::AgentStatus::Stale,
+                    ..
+                }
+            )));
+
+        let response = app.handle_pane_report_agent(
+            "fresh".into(),
+            PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude-closing-block".into(),
+                agent: "claude".into(),
+                state: crate::api::schema::PaneAgentState::Working,
+                v: Some(2),
+                message: None,
+                seq: Some(2),
+                wait: None,
+                eta_s: None,
+                reported_at: Some("2026-08-10T10:21:00Z".into()),
+                agent_session_id: None,
+                agent_session_path: None,
+                gates: Some(Vec::new()),
+                items: Some(Vec::new()),
+                decisions: Some(Vec::new()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let pane = app.pane_info(0, internal_pane_id).expect("pane info");
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+        assert!(!app.state.terminals[&terminal_id].supervisor_stale);
+    }
+
+    #[test]
+    fn stale_is_not_a_self_reportable_pane_agent_state() {
+        let raw = serde_json::json!({
+            "pane_id": "w1:p1",
+            "source": "herdr:claude-closing-block",
+            "agent": "claude",
+            "state": "stale",
+            "v": 2,
+        });
+        assert!(serde_json::from_value::<PaneReportAgentParams>(raw).is_err());
+    }
+
+    #[test]
     fn stale_v2_closing_block_report_does_not_replace_newer_gate_without_pty() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
@@ -4405,6 +4563,9 @@ mod tests {
             v: Some(2),
             message: Some(text.into()),
             seq: Some(seq),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
             agent_session_id: None,
             agent_session_path: None,
             gates: Some(vec![crate::api::schema::ClosingBlockItem {
@@ -4466,6 +4627,9 @@ mod tests {
                 v: Some(1),
                 message: Some("legacy gate".into()),
                 seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: Some(vec![crate::api::schema::ClosingBlockItem {
@@ -4520,6 +4684,9 @@ mod tests {
                 v: Some(1),
                 message: Some("a v1 gate".into()),
                 seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: None,
@@ -4541,6 +4708,9 @@ mod tests {
                 v: Some(3),
                 message: None,
                 seq: Some(2),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: None,
@@ -4560,6 +4730,29 @@ mod tests {
         };
         assert!(pane.gates.is_empty());
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
+    }
+
+    #[test]
+    fn foreign_version_with_reshaped_state_is_a_silent_no_op() {
+        let (mut app, _) = app_with_test_workspace();
+        let request = serde_json::from_value::<crate::api::schema::Request>(serde_json::json!({
+            "id": "foreign-reshaped-state",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": "w9:p9",
+                "source": "herdr:claude-closing-block",
+                "agent": "claude",
+                "state": {"phase": "paused"},
+                "v": 3,
+                "wait": {"until": "ci"}
+            }
+        }))
+        .expect("foreign versions must parse before the handler skips them");
+
+        let response = app.handle_api_request(request);
+        let success: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).expect("foreign versions must return success");
+        assert_eq!(success.result, ResponseResult::Ok {});
     }
 
     #[test]
@@ -5406,6 +5599,9 @@ mod tests {
                 v: None,
                 message: None,
                 seq: Some(5),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 agent_session_id: Some("session-pi".into()),
                 agent_session_path: None,
                 gates: None,

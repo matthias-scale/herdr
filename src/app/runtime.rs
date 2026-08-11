@@ -281,6 +281,7 @@ impl App {
 
     pub(crate) fn handle_scheduled_tasks(&mut self, now: Instant, geometry_dirty: bool) -> bool {
         let mut changed = self.take_due_agent_activity_refresh(now);
+        changed |= self.handle_loop_receipt_fallback(now);
         let mut resized = false;
 
         if now >= self.next_resize_poll {
@@ -336,6 +337,17 @@ impl App {
         }
 
         if self
+            .state
+            .next_agent_watchdog_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            for update in self.state.mark_due_agent_status_stale_at(now) {
+                self.emit_pane_state_update(&update);
+                changed = true;
+            }
+        }
+
+        if self
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -386,6 +398,49 @@ impl App {
         } else {
             self.sync_pending_agent_resume_deadline(now);
             changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
+        }
+        changed
+    }
+
+    pub(crate) fn handle_loop_receipt_fallback(&mut self, now: Instant) -> bool {
+        let watcher_unavailable = self.loop_history_reader.is_some()
+            && self._loop_receipt_watcher.is_none()
+            && self.loop_receipt_fallback_deadline.is_some();
+        let failure_detected = self.loop_receipt_watch_health.take_fallback_request();
+        if !watcher_unavailable && !failure_detected {
+            return false;
+        }
+
+        let mut changed = false;
+        if !self.loop_receipt_watch_degraded {
+            self.loop_receipt_watch_degraded = true;
+            changed = true;
+        }
+        if self.loop_receipt_fallback_deadline.is_none() {
+            self.loop_receipt_fallback_deadline = Some(now);
+        }
+        const WARNING: &str =
+            "loop run history watcher unavailable; using low-frequency fallback refresh";
+        if !self
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("loop run history watcher unavailable"))
+        {
+            self.state.config_diagnostic = Some(match self.state.config_diagnostic.take() {
+                Some(message) => format!("{message}; {WARNING}"),
+                None => WARNING.to_string(),
+            });
+            self.config_diagnostic_deadline = None;
+            changed = true;
+        }
+
+        if self
+            .loop_receipt_fallback_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.loop_receipt_fallback_deadline = Some(now + super::LOOP_RECEIPT_FALLBACK_INTERVAL);
+            changed |= self.refresh_loop_run_history();
         }
         changed
     }
@@ -672,6 +727,7 @@ impl App {
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
+            self.state.next_agent_watchdog_deadline(),
             self.copy_feedback_deadline,
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh
@@ -704,6 +760,7 @@ impl App {
                 .flatten(),
             self.pending_agent_resume_deadline,
             self.session_save_deadline,
+            self.loop_receipt_fallback_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
             render_deadline,

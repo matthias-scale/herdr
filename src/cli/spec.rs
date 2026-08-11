@@ -358,7 +358,7 @@ fn agent_command() -> Command {
                     option("until", "STATUS")
                         .action(ArgAction::Append)
                         .requires("wait")
-                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
+                        .value_parser(["idle", "working", "blocked", "done", "stale", "unknown"])
                         .help("State to match after --wait; repeat for more than one state"),
                 )
                 .arg(
@@ -402,7 +402,7 @@ fn agent_command() -> Command {
                 .arg(
                     option("until", "STATUS")
                         .action(ArgAction::Append)
-                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
+                        .value_parser(["idle", "working", "blocked", "done", "stale", "unknown"])
                         .help("State to match; repeat for more than one state"),
                 )
                 .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
@@ -1255,7 +1255,7 @@ mod tests {
         assert!(!has_option(wait, "status"));
         assert_eq!(
             option_values(wait, "until"),
-            ["idle", "working", "blocked", "done", "unknown"]
+            ["idle", "working", "blocked", "done", "stale", "unknown"]
         );
         assert!(has_option(wait, "timeout"));
     }

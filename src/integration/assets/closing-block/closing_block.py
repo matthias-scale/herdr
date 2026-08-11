@@ -15,15 +15,19 @@ from typing import Any
 
 # HERDR_INTEGRATION_VERSION=1
 _HEADER_RE = re.compile(
-    r"^\s*\*\*Critical action points(?:\s*\((?P<n>\d+)\s+blocking\))?\*\*\s*$",
+    r"^\*\*Critical action points(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?\*\*[ \t]*\r?$",
     re.MULTILINE,
 )
-_NOTHING_RE = re.compile(r"^\s*\*\*Nothing to act on\.?\*\*\s*$", re.MULTILINE)
+_NOTHING_RE = re.compile(r"^\*\*Nothing to act on\.?\*\*[ \t]*\r?$", re.MULTILINE)
 _AGENTS_RE = re.compile(
-    r"^\s*(?P<n>\d+)\s+agents?\s+running:\s*(?P<rest>.+?)\s*$",
+    r"^(?P<n>\d+)[ \t]+agents?[ \t]+running:[ \t]*(?P<rest>.+?)[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
-_DONE_RE = re.compile(r"^\s*Done here\.\s*$", re.MULTILINE)
+_DONE_RE = re.compile(r"^Done here\.[ \t]*\r?$", re.MULTILINE)
+_FENCE_OPEN_RE = re.compile(
+    r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$"
+)
+_FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 
 _ITEM_START = r"^\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
 _ITEM_RE = re.compile(
@@ -34,7 +38,7 @@ _ITEM_RE = re.compile(
     re.MULTILINE | re.IGNORECASE | re.DOTALL,
 )
 _DECISIONS_RE = re.compile(
-    r"^\s*\*\*Auto-proceeded decisions\*\*\s*$",
+    r"^\*\*Auto-proceeded decisions\*\*[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 _DECISION_ITEM_RE = re.compile(
@@ -44,7 +48,7 @@ _DECISION_ITEM_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 _WHAT_RE = re.compile(
-    r"^\s*\*\*What to test(?P<meta>.*?)\*\*\s*$",
+    r"^\*\*What to test(?P<meta>.*?)\*\*[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 _PR_RE = re.compile(r"(?<![A-Za-z0-9])#(?P<pr>\d+)\b")
@@ -126,6 +130,14 @@ class Decision:
         }
 
 
+@dataclass(frozen=True)
+class _ClosingBlock:
+    start: int
+    end: int
+    header: re.Match[str] | None
+    decisions_end: int
+
+
 @dataclass
 class ClosingBlock:
     present: bool = False
@@ -146,11 +158,8 @@ class ClosingBlock:
 
     @property
     def blocking(self) -> int:
-        # Item labels are authoritative. Keep the header only as a fallback for
-        # an incomplete block, never as a source of phantom gates.
-        if self.items:
-            return len(self.gates)
-        return self.declared_blocking or 0
+        # Item labels are authoritative; a declared count cannot create gates.
+        return len(self.gates)
 
     @property
     def agents_running(self) -> int:
@@ -186,40 +195,149 @@ class ClosingBlock:
         return [decision.wire() for decision in self.decisions]
 
 
-def _section_end(text: str, start: int) -> int:
+def _fence_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    fence_start: int | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    offset = 0
+
+    for line in text.splitlines(keepends=True):
+        line_end = offset + len(line)
+        content = line.rstrip("\r\n")
+        if fence_start is None:
+            opener = _FENCE_OPEN_RE.fullmatch(content)
+            if opener:
+                marker = opener.group("marker")
+                fence_start = offset
+                fence_char = marker[0]
+                fence_length = len(marker)
+        else:
+            closer = _FENCE_CLOSE_RE.fullmatch(content)
+            if closer:
+                marker = closer.group("marker")
+                if marker[0] == fence_char and len(marker) >= fence_length:
+                    ranges.append((fence_start, line_end))
+                    fence_start = None
+                    fence_char = None
+                    fence_length = 0
+        offset = line_end
+
+    if fence_start is not None:
+        # An unfinished example is treated as fenced through end-of-message;
+        # an ambiguous tail must not fabricate live status markers.
+        ranges.append((fence_start, len(text)))
+    return ranges
+
+
+def _visible_matches(
+    pattern: re.Pattern[str],
+    text: str,
+    start: int,
+    end: int,
+    fences: list[tuple[int, int]],
+):
+    for match in pattern.finditer(text, start, end):
+        if not any(
+            fence_start <= match.start() < fence_end
+            for fence_start, fence_end in fences
+        ):
+            yield match
+
+
+def _section_end(
+    text: str, start: int, end: int, fences: list[tuple[int, int]]
+) -> int:
     candidates = [
         match.start()
-        for pattern in (_DECISIONS_RE, _WHAT_RE)
-        for match in pattern.finditer(text, start)
+        for pattern in (_DECISIONS_RE, _NOTHING_RE, _WHAT_RE)
+        for match in _visible_matches(pattern, text, start, end, fences)
     ]
-    return min(candidates, default=len(text))
+    return min(candidates, default=end)
 
 
-def _decisions_end(text: str, start: int) -> int:
+def _decisions_end(
+    text: str, start: int, end: int, fences: list[tuple[int, int]]
+) -> int:
     # The decisions list may sit before the critical-action-points block (the
     # authoring rules put the closing block last), so the item scan must stop
     # at whichever section opens next or the CAP items parse as decisions.
     candidates = [
         match.start()
-        for pattern in (_HEADER_RE, _NOTHING_RE, _WHAT_RE, _AGENTS_RE, _DONE_RE)
-        for match in pattern.finditer(text, start)
+        for pattern in (
+            _DECISIONS_RE,
+            _HEADER_RE,
+            _NOTHING_RE,
+            _WHAT_RE,
+            _AGENTS_RE,
+            _DONE_RE,
+        )
+        for match in _visible_matches(pattern, text, start, end, fences)
     ]
-    return min(candidates, default=len(text))
+    return min(candidates, default=end)
 
 
-def _parse_what_to_test(text: str, start: int, items: list[Item]) -> list[Item]:
-    headings = list(_WHAT_RE.finditer(text, start))
+def _closing_blocks(
+    text: str, fences: list[tuple[int, int]]
+) -> list[_ClosingBlock]:
+    """Split top-level CAP sections into blocks and bound their decisions.
+
+    The first CAP belongs to the initial block so valid pre-CAP decisions are
+    retained. A top-level Nothing marker bounds decisions in that block; the
+    last such marker is the closing boundary, which keeps repeated markers in
+    one structural block. A Nothing before the first CAP closes the preamble,
+    so that stale decisions cannot flow into the later CAP block.
+    """
+    headers = list(_visible_matches(_HEADER_RE, text, 0, len(text), fences))
+    nothings = list(_visible_matches(_NOTHING_RE, text, 0, len(text), fences))
+    if not headers:
+        if not nothings:
+            return []
+        return [_ClosingBlock(0, len(text), None, nothings[-1].start())]
+
+    first_start = 0
+    if nothings and nothings[0].start() < headers[0].start():
+        first_start = headers[0].start()
+
+    blocks: list[_ClosingBlock] = []
+    for position, header in enumerate(headers):
+        start = first_start if position == 0 else header.start()
+        end = (
+            headers[position + 1].start()
+            if position + 1 < len(headers)
+            else len(text)
+        )
+        block_nothings = [
+            marker
+            for marker in nothings
+            if start <= marker.start() < end
+        ]
+        decisions_end = block_nothings[-1].start() if block_nothings else end
+        blocks.append(_ClosingBlock(start, end, header, decisions_end))
+    return blocks
+
+
+def _parse_what_to_test(
+    text: str,
+    start: int,
+    end: int,
+    items: list[Item],
+    fences: list[tuple[int, int]],
+) -> list[Item]:
+    headings = list(_visible_matches(_WHAT_RE, text, start, end, fences))
     parsed: list[Item] = []
     for position, heading in enumerate(headings):
         end_candidates = [
             match.start()
-            for pattern in (_DECISIONS_RE, _AGENTS_RE, _DONE_RE)
-            for match in pattern.finditer(text, heading.end())
+            for pattern in (_DECISIONS_RE, _NOTHING_RE, _AGENTS_RE, _DONE_RE)
+            for match in _visible_matches(
+                pattern, text, heading.end(), end, fences
+            )
         ]
         if position + 1 < len(headings):
             end_candidates.append(headings[position + 1].start())
-        end = min(end_candidates, default=len(text))
-        body = text[heading.end() : end].strip()
+        section_end = min(end_candidates, default=end)
+        body = text[heading.end() : section_end].strip()
         if not body:
             continue
         gate_number = re.search(r"\bGate\s+(?P<n>\d+)\b", heading.group("meta"), re.I)
@@ -229,6 +347,78 @@ def _parse_what_to_test(text: str, start: int, items: list[Item]) -> list[Item]:
         parsed.append(
             Item(index, "What to test", body, _metadata(heading.group(0) + " " + body))
         )
+    return parsed
+
+
+def _parse_items(
+    text: str, start: int, end: int, fences: list[tuple[int, int]]
+) -> list[Item]:
+    section_end = _section_end(text, start, end, fences)
+    matches = list(_visible_matches(_ITEM_RE, text, start, section_end, fences))
+    parsed: list[Item] = []
+    for position, match in enumerate(matches):
+        end_candidates = [section_end]
+        if position + 1 < len(matches):
+            end_candidates.append(matches[position + 1].start())
+        for pattern in (_AGENTS_RE, _DONE_RE):
+            end_candidates.extend(
+                candidate.start()
+                for candidate in _visible_matches(
+                    pattern, text, match.end(), section_end, fences
+                )
+            )
+        item_end = min(end_candidates)
+        body = text[match.start("body") : item_end]
+        parsed.append(
+            Item(
+                int(match.group("idx")),
+                match.group("label").capitalize(),
+                _clean_body(body),
+            )
+        )
+    return parsed
+
+
+def _parse_decisions(
+    text: str,
+    headings: list[re.Match[str]],
+    end: int,
+    fences: list[tuple[int, int]],
+) -> list[Decision]:
+    parsed: list[Decision] = []
+    for decisions_heading in headings:
+        decisions_end = _decisions_end(
+            text, decisions_heading.end(), end, fences
+        )
+        matches = list(
+            _visible_matches(
+                _DECISION_ITEM_RE,
+                text,
+                decisions_heading.end(),
+                decisions_end,
+                fences,
+            )
+        )
+        for position, match in enumerate(matches):
+            end_candidates = [decisions_end]
+            if position + 1 < len(matches):
+                end_candidates.append(matches[position + 1].start())
+            for pattern in (_AGENTS_RE, _DONE_RE):
+                end_candidates.extend(
+                    candidate.start()
+                    for candidate in _visible_matches(
+                        pattern, text, match.end(), decisions_end, fences
+                    )
+                )
+            body = _clean_body(
+                text[match.start("body") : min(end_candidates)]
+            )
+            if not body:
+                continue
+            recommendation, decided_at = _decision_fields(body)
+            parsed.append(
+                Decision(int(match.group("idx")), body, recommendation, decided_at)
+            )
     return parsed
 
 
@@ -252,55 +442,60 @@ def parse(text: str) -> ClosingBlock:
     """Parse the last closing block out of a full assistant message."""
     block = ClosingBlock()
 
-    headers = list(_HEADER_RE.finditer(text))
-    nothings = list(_NOTHING_RE.finditer(text))
-    header = headers[-1] if headers else None
-    nothing = nothings[-1] if nothings else None
-
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    fences = _fence_ranges(text)
+    blocks = _closing_blocks(text, fences)
+    selected = blocks[-1] if blocks else None
     start = None
-    if header and (nothing is None or header.start() > nothing.start()):
+    if selected:
         block.present = True
-        declared = header.group("n")
-        block.declared_blocking = int(declared) if declared is not None else None
-        start = header.end()
-    elif nothing:
-        block.present = True
-        block.declared_blocking = 0
-        start = nothing.end()
+        if selected.header:
+            declared = selected.header.group("n")
+            block.declared_blocking = int(declared) if declared is not None else None
+            start = selected.header.end()
+        else:
+            block.declared_blocking = 0
 
-    if start is not None:
-        cap_end = _section_end(text, start)
-        for match in _ITEM_RE.finditer(text, start, cap_end):
-            block.items.append(
-                Item(
-                    int(match.group("idx")),
-                    match.group("label").capitalize(),
-                    _clean_body(match.group("body")),
+        if start is not None:
+            block.items.extend(_parse_items(text, start, selected.end, fences))
+            block.items.extend(
+                _parse_what_to_test(
+                    text, start, selected.end, block.items, fences
                 )
             )
-        block.items.extend(_parse_what_to_test(text, start, block.items))
 
-    closing_markers = sorted([*headers, *nothings], key=lambda match: match.start())
-    decisions_start = closing_markers[-1].end() if len(closing_markers) > 1 else 0
-    decisions_heading = None
-    for candidate in _DECISIONS_RE.finditer(text, decisions_start):
-        decisions_heading = candidate
-    if decisions_heading:
-        block.present = True
-        decisions_end = _decisions_end(text, decisions_heading.end())
-        for match in _DECISION_ITEM_RE.finditer(
-            text, decisions_heading.end(), decisions_end
-        ):
-            body = _clean_body(match.group("body"))
-            if not body:
-                continue
-            recommendation, decided_at = _decision_fields(body)
-            block.decisions.append(
-                Decision(int(match.group("idx")), body, recommendation, decided_at)
+        decision_headings = list(
+            _visible_matches(
+                _DECISIONS_RE,
+                text,
+                selected.start,
+                selected.decisions_end,
+                fences,
             )
+        )
+        if selected.header:
+            post_cap_headings = [
+                heading
+                for heading in decision_headings
+                if heading.start() >= selected.header.end()
+            ]
+            if post_cap_headings:
+                # Pre-CAP decisions are a supported authoring order when no
+                # later section exists. Once a selected CAP has a post-CAP
+                # section, that section is operative and supersedes all
+                # earlier pre-CAP sections. Keep every heading on the
+                # operative side so repeated sections in one block survive.
+                decision_headings = post_cap_headings
+
+        block.decisions.extend(
+            _parse_decisions(
+                text, decision_headings, selected.decisions_end, fences
+            )
+        )
 
     agents = None
-    for candidate in _AGENTS_RE.finditer(text):
+    for candidate in _visible_matches(_AGENTS_RE, text, 0, len(text), fences):
         agents = candidate
     if agents:
         block.declared_agents = int(agents.group("n"))
@@ -308,7 +503,7 @@ def parse(text: str) -> ClosingBlock:
             part.strip() for part in agents.group("rest").split(";") if part.strip()
         ]
         block.present = True
-    elif _DONE_RE.search(text):
+    elif next(_visible_matches(_DONE_RE, text, 0, len(text), fences), None):
         block.done_here = True
         block.declared_agents = 0
         block.present = True

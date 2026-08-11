@@ -504,6 +504,7 @@ fn all_agent_statuses() -> Vec<crate::api::schema::AgentStatus> {
         crate::api::schema::AgentStatus::Working,
         crate::api::schema::AgentStatus::Blocked,
         crate::api::schema::AgentStatus::Done,
+        crate::api::schema::AgentStatus::Stale,
         crate::api::schema::AgentStatus::Unknown,
     ]
 }
@@ -516,6 +517,7 @@ fn agent_wait_statuses(
             crate::api::schema::AgentStatus::Idle,
             crate::api::schema::AgentStatus::Done,
             crate::api::schema::AgentStatus::Blocked,
+            crate::api::schema::AgentStatus::Stale,
         ]
     } else {
         until
@@ -768,6 +770,9 @@ fn wait_matched_response(request_id: &str, event: serde_json::Value) -> String {
                     pane_id: data.pane_id,
                     workspace_id: data.workspace_id,
                     agent_status: data.agent_status,
+                    wait: data.wait,
+                    eta_s: data.eta_s,
+                    reported_at: data.reported_at,
                     agent: data.agent,
                     title: data.title,
                     display_agent: data.display_agent,

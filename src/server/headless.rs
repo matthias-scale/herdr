@@ -2419,7 +2419,30 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::LoopRunHistoryChanged => {
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                if changed {
+                    self.refresh_client_loop_history_details();
+                }
+                changed
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
+        }
+    }
+
+    fn refresh_client_loop_history_details(&mut self) {
+        let history = self.app.state.loop_run_history.clone();
+        for client in self.clients.values_mut() {
+            let Some(detail) = client.loop_run_history_detail.as_mut() else {
+                continue;
+            };
+            let loop_id = (detail.loop_id != crate::loop_runs::ALL_LOOPS_ID)
+                .then_some(detail.loop_id.as_str());
+            detail.history = crate::loop_runs::RunHistory {
+                runs: crate::loop_runs::runs_for_loop(&history, loop_id),
+                skipped_lines: history.skipped_lines,
+            };
+            detail.observed_at = std::time::SystemTime::now();
         }
     }
 
@@ -2793,6 +2816,11 @@ impl HeadlessServer {
                 .map(|client| std::mem::take(&mut client.dock_presentation))
                 .unwrap_or_default()
         });
+        let mut loop_run_history_detail = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .and_then(|client| client.loop_run_history_detail.take())
+        });
         if let Some(presentation) = &mut sidebar_presentation {
             self.app.state.swap_sidebar_presentation(presentation);
             self.app.state.reconcile_sidebar_presentation();
@@ -2800,7 +2828,13 @@ impl HeadlessServer {
         if let Some(presentation) = &mut dock_presentation {
             self.app.state.swap_dock_presentation(presentation);
         }
+        if let Some(detail) = &mut loop_run_history_detail {
+            self.app.state.swap_loop_run_history_detail(detail);
+        }
         self.app.route_client_events_from(client_id, events, false);
+        if let Some(detail) = &mut loop_run_history_detail {
+            self.app.state.swap_loop_run_history_detail(detail);
+        }
         if let Some(mut presentation) = sidebar_presentation {
             self.app.state.swap_sidebar_presentation(&mut presentation);
             if let Some(client) = self.clients.get_mut(&client_id) {
@@ -2811,6 +2845,11 @@ impl HeadlessServer {
             self.app.state.swap_dock_presentation(&mut presentation);
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.dock_presentation = presentation;
+            }
+        }
+        if let Some(detail) = loop_run_history_detail {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.loop_run_history_detail = detail;
             }
         }
         if self.app.take_config_reloaded_from_disk() {
@@ -4179,6 +4218,10 @@ impl HeadlessServer {
                         .get_mut(&client_id)
                         .map(|client| std::mem::take(&mut client.sidebar_presentation))
                         .unwrap_or_default();
+                    let mut loop_run_history_detail = self
+                        .clients
+                        .get_mut(&client_id)
+                        .and_then(|client| client.loop_run_history_detail.take());
                     self.app
                         .state
                         .swap_sidebar_presentation(&mut sidebar_presentation);
@@ -4191,6 +4234,9 @@ impl HeadlessServer {
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
                     self.app.state.reconcile_sidebar_presentation();
+                    self.app
+                        .state
+                        .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -4263,9 +4309,13 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    self.app
+                        .state
+                        .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
+                        client.loop_run_history_detail = loop_run_history_detail;
                     }
                     frame
                 }
@@ -4501,6 +4551,7 @@ impl HeadlessServer {
             self.app.agent_activity_refresh_deadline = None;
             false
         };
+        changed |= self.app.handle_loop_receipt_fallback(now);
         changed |= if self.app.status_metrics_visible {
             self.app.schedule_status_metrics(now)
         } else {
@@ -4545,6 +4596,18 @@ impl HeadlessServer {
                 for delivery in &deliveries {
                     self.forward_agent_notification_delivery(delivery);
                 }
+                changed = true;
+            }
+        }
+
+        if self
+            .app
+            .state
+            .next_agent_watchdog_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            for update in self.app.state.mark_due_agent_status_stale_at(now) {
+                self.app.emit_pane_state_update(&update);
                 changed = true;
             }
         }
@@ -7283,6 +7346,9 @@ next_tab = ""
                 state: crate::detect::AgentState::Working,
                 message: None,
                 seq: None,
+                wait: None,
+                eta_s: None,
+                reported_at: None,
                 session_ref: None,
             })
         );
@@ -11379,6 +11445,9 @@ next_tab = ""
                     v: None,
                     message: None,
                     seq: Some(19),
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
                     agent_session_id: None,
                     agent_session_path: None,
                     gates: None,

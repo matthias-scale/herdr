@@ -155,6 +155,7 @@ pub enum AgentStatus {
     Working,
     Blocked,
     Done,
+    Stale,
     Unknown,
 }
 

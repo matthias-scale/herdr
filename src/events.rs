@@ -54,6 +54,8 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// The append-only loop receipt source changed; refresh its cursor.
+    LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.
     StatusMetricsRefreshed {
         snapshot: Option<Box<crate::platform::status_metrics::StatusMetricsSnapshot>>,
@@ -80,6 +82,9 @@ pub enum AppEvent {
         state: AgentState,
         message: Option<String>,
         seq: Option<u64>,
+        wait: Option<String>,
+        eta_s: Option<u64>,
+        reported_at: Option<String>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
     },
     /// Agent session identity was reported without state authority.

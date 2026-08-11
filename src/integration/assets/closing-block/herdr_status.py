@@ -86,6 +86,19 @@ def _normalize_decision(
     return decision
 
 
+def blocked_state_label(blocking: int) -> str:
+    """The sidebar state label names the STATE, never the gate's text.
+
+    Row width is scarce and the pane's own title already sits beside it, so a
+    truncated copy of the gate body crowds out the identity that says which
+    agent is asking. The full text stays available in the `closing_gates`
+    token and in `gates[]`.
+    """
+    if blocking <= 0:
+        return "blocked"
+    return "gate" if blocking == 1 else f"{blocking} gates"
+
+
 def message_for(
     blocking: int,
     agents: int,
@@ -170,6 +183,8 @@ def report(
     agent: str,
     blocking: int,
     agents: int,
+    wait: str | None = None,
+    eta_s: int | None = None,
     gates: list[dict[str, Any] | str] | None = None,
     items: list[dict[str, Any] | str] | None = None,
     decisions: list[dict[str, Any]] | None = None,
@@ -198,11 +213,13 @@ def report(
     sock_path = sock_path or os.environ.get("HERDR_SOCKET_PATH") or ""
 
     seq = time.time_ns()
+    reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     state = state_for(blocking, agents)
     payload = {
         "v": VERSION,
         "agent": agent,
         "seq": seq,
+        "reported_at": reported_at,
         "state": state,
         "blocking": blocking,
         "agents": agents,
@@ -213,6 +230,9 @@ def report(
     }
     if title:
         payload["title"] = title
+    if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
+        payload["wait"] = wait
+        payload["eta_s"] = eta_s
 
     outcome = {"payload": payload, "mirror": None, "socket": False}
     if pane_id:
@@ -234,8 +254,12 @@ def report(
 
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
                     "state": state, "seq": seq, "v": VERSION,
+                    "reported_at": reported_at,
                     "gates": gate_objects, "items": item_objects,
                     "decisions": decision_objects}
+    if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
+        agent_params["wait"] = wait
+        agent_params["eta_s"] = eta_s
     message = message_for(blocking, agents, gate_objects)
     if message:
         agent_params["message"] = message
@@ -255,7 +279,7 @@ def report(
         "applies_to_source": source,
         "tokens": tokens,
         "state_labels": {
-            "blocked": message if blocking else "blocked",
+            "blocked": blocked_state_label(blocking),
             "working": "working",
         },
         "seq": seq,

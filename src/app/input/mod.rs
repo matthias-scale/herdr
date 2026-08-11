@@ -84,6 +84,9 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        if self.handle_loop_run_history_key(key_event) {
+            return None;
+        }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
@@ -123,6 +126,17 @@ impl App {
             },
         }
         None
+    }
+
+    pub(crate) fn handle_loop_run_history_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.loop_run_history_detail.is_none() {
+            return false;
+        }
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            self.state.clear_loop_run_history();
+            self.state.mode = Mode::Terminal;
+        }
+        true
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {

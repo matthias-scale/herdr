@@ -75,6 +75,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -336,6 +337,37 @@
               "required": [
                 "type",
                 "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "loop_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runs": {
+                  "items": {
+                    "$ref": "#/schemas/event/$defs/LoopRunInfo"
+                  },
+                  "type": "array"
+                },
+                "skipped_lines": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "loop_run_history_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "runs",
+                "skipped_lines"
               ],
               "type": "object"
             },
@@ -764,8 +796,22 @@
                     "null"
                   ]
                 },
+                "eta_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "reported_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "state_labels": {
                   "additionalProperties": {
@@ -782,6 +828,12 @@
                 "type": {
                   "const": "pane_agent_status_changed",
                   "type": "string"
+                },
+                "wait": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "workspace_id": {
                   "type": "string"
@@ -823,6 +875,7 @@
             "workspace_moved",
             "workspace_reordered",
             "workspace_focused",
+            "loop_run_history_updated",
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
@@ -843,6 +896,141 @@
             "layout_updated"
           ],
           "type": "string"
+        },
+        "LoopGateInfo": {
+          "properties": {
+            "defaulted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "recommendation_matched": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "defaulted"
+          ],
+          "type": "object"
+        },
+        "LoopRunInfo": {
+          "properties": {
+            "blocked_min": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "end": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gates": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/LoopGateInfo"
+              },
+              "type": "array"
+            },
+            "human_touches": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "interrupted_focus": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "loop_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "out_tokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "pr": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "review_rounds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "skill": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string"
+            },
+            "ticket": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "touches_by_type": {
+              "additionalProperties": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "wall_min": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "skill",
+            "start",
+            "gates",
+            "outcome"
+          ],
+          "type": "object"
         },
         "PaneInfo": {
           "properties": {
@@ -883,6 +1071,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -912,6 +1108,12 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -967,6 +1169,12 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "work_context": {
               "$ref": "#/schemas/event/$defs/PaneWorkContext",
@@ -1537,6 +1745,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -2546,6 +2755,18 @@
           ],
           "type": "object"
         },
+        "LoopRunHistoryParams": {
+          "properties": {
+            "loop_id": {
+              "description": "Optional during the receipt-schema migration. When omitted, the API\nreturns every observed run; when present, records with loop identity\nare filtered to this id.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "NotificationShowParams": {
           "properties": {
             "body": {
@@ -3043,6 +3264,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "gates": {
               "items": {
                 "$ref": "#/schemas/request/$defs/ClosingBlockItem"
@@ -3070,6 +3299,12 @@
             "pane_id": {
               "type": "string"
             },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "seq": {
               "format": "uint64",
               "minimum": 0,
@@ -3090,6 +3325,12 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "wait": {
+              "type": [
+                "string",
                 "null"
               ]
             }
@@ -4142,6 +4383,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "loop.run_history_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "worktree.created",
                   "type": "string"
                 }
@@ -5131,6 +5384,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "loop.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "loop.run_history",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LoopRunHistoryParams"
             }
           },
           "required": [
@@ -6343,6 +6628,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -6364,8 +6650,22 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "state_labels": {
               "additionalProperties": {
@@ -6374,6 +6674,12 @@
               "type": "object"
             },
             "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wait": {
               "type": [
                 "string",
                 "null"
@@ -6589,6 +6895,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -6624,6 +6938,12 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -6678,6 +6998,12 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
@@ -6800,6 +7126,7 @@
             "working",
             "blocked",
             "done",
+            "stale",
             "unknown"
           ],
           "type": "string"
@@ -7077,6 +7404,37 @@
               "required": [
                 "type",
                 "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "loop_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runs": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LoopRunInfo"
+                  },
+                  "type": "array"
+                },
+                "skipped_lines": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "loop_run_history_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "runs",
+                "skipped_lines"
               ],
               "type": "object"
             },
@@ -7505,8 +7863,22 @@
                     "null"
                   ]
                 },
+                "eta_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "reported_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "state_labels": {
                   "additionalProperties": {
@@ -7523,6 +7895,12 @@
                 "type": {
                   "const": "pane_agent_status_changed",
                   "type": "string"
+                },
+                "wait": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "workspace_id": {
                   "type": "string"
@@ -7579,6 +7957,7 @@
             "workspace_moved",
             "workspace_reordered",
             "workspace_focused",
+            "loop_run_history_updated",
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
@@ -7853,6 +8232,207 @@
             }
           ]
         },
+        "LoopGateInfo": {
+          "properties": {
+            "defaulted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "recommendation_matched": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "defaulted"
+          ],
+          "type": "object"
+        },
+        "LoopInfo": {
+          "properties": {
+            "fields": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "loop_id": {
+              "type": "string"
+            },
+            "recent_runs": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/LoopRecentRun"
+              },
+              "type": "array"
+            },
+            "state": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "loop_id",
+            "title",
+            "state"
+          ],
+          "type": "object"
+        },
+        "LoopRecentRun": {
+          "properties": {
+            "at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "stable_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        "LoopRunInfo": {
+          "properties": {
+            "blocked_min": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "end": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gates": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/LoopGateInfo"
+              },
+              "type": "array"
+            },
+            "human_touches": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "interrupted_focus": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "loop_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "out_tokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "pr": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "review_rounds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "skill": {
+              "type": "string"
+            },
+            "start": {
+              "type": "string"
+            },
+            "ticket": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "touches_by_type": {
+              "additionalProperties": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "wall_min": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "skill",
+            "start",
+            "gates",
+            "outcome"
+          ],
+          "type": "object"
+        },
         "NotificationShowReason": {
           "enum": [
             "shown",
@@ -7983,6 +8563,14 @@
                 "null"
               ]
             },
+            "eta_s": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -8012,6 +8600,12 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "reported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -8067,6 +8661,12 @@
                 "pattern": "^[A-Za-z0-9_-]{1,32}$"
               },
               "type": "object"
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "work_context": {
               "$ref": "#/schemas/success_response/$defs/PaneWorkContext",
@@ -9353,6 +9953,56 @@
               "required": [
                 "type",
                 "workspaces"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "loops": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LoopInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "loop_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "loops"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "loop_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runs": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LoopRunInfo"
+                  },
+                  "type": "array"
+                },
+                "skipped_lines": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "loop_run_history",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "runs",
+                "skipped_lines"
               ],
               "type": "object"
             },
