@@ -672,6 +672,51 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     )
 }
 
+/// Everything the blocked turn-end gate retirement poll reads or writes outside
+/// the detect loop's own locals.
+struct FullLifecycleHookRetirementPorts<'a> {
+    pane_id: PaneId,
+    detection_content_seq: &'a AtomicU64,
+    baseline_content_seq: &'a AtomicU64,
+    authority_active: &'a AtomicBool,
+    blocked: &'a AtomicBool,
+    state_events: &'a mpsc::Sender<AppEvent>,
+}
+
+/// Retire a blocked turn-end hook gate once the pane is working again.
+///
+/// Two detect loops run this: the one `spawn_basic_detection_task` starts for a
+/// freshly spawned pane, and the one the restored/attached path starts. They
+/// have to make the same call, so the wiring lives here rather than in two
+/// copies that can drift apart.
+async fn poll_full_lifecycle_hook_retirement(
+    ports: FullLifecycleHookRetirementPorts<'_>,
+    retirement: &mut FullLifecycleHookOutputRetirement,
+    lifecycle_authority_active: &mut bool,
+    process_exited: bool,
+    now: std::time::Instant,
+) {
+    if *lifecycle_authority_active && ports.blocked.load(Ordering::Acquire) && !process_exited {
+        if let Some(observed_at) = retirement.observe(
+            ports.detection_content_seq.load(Ordering::Relaxed),
+            ports.baseline_content_seq.load(Ordering::Acquire),
+            now,
+        ) {
+            ports.authority_active.store(false, Ordering::Release);
+            *lifecycle_authority_active = false;
+            let _ = ports
+                .state_events
+                .send(AppEvent::HookAuthorityRetired {
+                    pane_id: ports.pane_id,
+                    observed_at,
+                })
+                .await;
+        }
+    } else if !*lifecycle_authority_active || !ports.blocked.load(Ordering::Acquire) {
+        retirement.clear();
+    }
+}
+
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
@@ -873,29 +918,21 @@ fn spawn_basic_detection_task(
                 && agent.is_some()
                 && !foreground_shell_exit_reported;
 
-            if lifecycle_authority_active
-                && full_lifecycle_hook_blocked.load(Ordering::Acquire)
-                && !process_exited
-            {
-                if let Some(observed_at) = hook_output_retirement.observe(
-                    detection_content_seq.load(Ordering::Relaxed),
-                    full_lifecycle_hook_baseline_content_seq.load(Ordering::Acquire),
-                    now,
-                ) {
-                    full_lifecycle_authority_active.store(false, Ordering::Release);
-                    lifecycle_authority_active = false;
-                    let _ = state_events
-                        .send(AppEvent::HookAuthorityRetired {
-                            pane_id,
-                            observed_at,
-                        })
-                        .await;
-                }
-            } else if !lifecycle_authority_active
-                || !full_lifecycle_hook_blocked.load(Ordering::Acquire)
-            {
-                hook_output_retirement.clear();
-            }
+            poll_full_lifecycle_hook_retirement(
+                FullLifecycleHookRetirementPorts {
+                    pane_id,
+                    detection_content_seq: &detection_content_seq,
+                    baseline_content_seq: &full_lifecycle_hook_baseline_content_seq,
+                    authority_active: &full_lifecycle_authority_active,
+                    blocked: &full_lifecycle_hook_blocked,
+                    state_events: &state_events,
+                },
+                &mut hook_output_retirement,
+                &mut lifecycle_authority_active,
+                process_exited,
+                now,
+            )
+            .await;
 
             if agent_changed || suppressed_agent.is_some() {
                 last_output_at = None;
@@ -2485,31 +2522,22 @@ impl PaneRuntime {
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
 
-                    if lifecycle_authority_active
-                        && full_lifecycle_hook_blocked_for_task.load(Ordering::Acquire)
-                        && !process_exited
-                    {
-                        if let Some(observed_at) = hook_output_retirement.observe(
-                            detection_content_seq.load(Ordering::Relaxed),
-                            full_lifecycle_hook_baseline_content_seq_for_task
-                                .load(Ordering::Acquire),
-                            now,
-                        ) {
-                            full_lifecycle_authority_active_for_task
-                                .store(false, Ordering::Release);
-                            lifecycle_authority_active = false;
-                            let _ = state_events
-                                .send(AppEvent::HookAuthorityRetired {
-                                    pane_id,
-                                    observed_at,
-                                })
-                                .await;
-                        }
-                    } else if !lifecycle_authority_active
-                        || !full_lifecycle_hook_blocked_for_task.load(Ordering::Acquire)
-                    {
-                        hook_output_retirement.clear();
-                    }
+                    poll_full_lifecycle_hook_retirement(
+                        FullLifecycleHookRetirementPorts {
+                            pane_id,
+                            detection_content_seq: &detection_content_seq,
+                            baseline_content_seq:
+                                &full_lifecycle_hook_baseline_content_seq_for_task,
+                            authority_active: &full_lifecycle_authority_active_for_task,
+                            blocked: &full_lifecycle_hook_blocked_for_task,
+                            state_events: &state_events,
+                        },
+                        &mut hook_output_retirement,
+                        &mut lifecycle_authority_active,
+                        process_exited,
+                        now,
+                    )
+                    .await;
 
                     if agent_changed || suppressed_agent.is_some() {
                         last_output_at = None;
@@ -3283,6 +3311,126 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// One detect loop's worth of retirement state, so the shared poll both
+    /// loops make can be exercised without spawning a pane.
+    struct RetirementHarness {
+        detection_content_seq: AtomicU64,
+        baseline_content_seq: AtomicU64,
+        authority_active: AtomicBool,
+        blocked: AtomicBool,
+        state_events: mpsc::Sender<AppEvent>,
+        retirement: FullLifecycleHookOutputRetirement,
+        lifecycle_authority_active: bool,
+    }
+
+    impl RetirementHarness {
+        fn blocked_at(baseline: u64, state_events: mpsc::Sender<AppEvent>) -> Self {
+            Self {
+                detection_content_seq: AtomicU64::new(baseline),
+                baseline_content_seq: AtomicU64::new(baseline),
+                authority_active: AtomicBool::new(true),
+                blocked: AtomicBool::new(true),
+                state_events,
+                retirement: FullLifecycleHookOutputRetirement::default(),
+                lifecycle_authority_active: true,
+            }
+        }
+
+        async fn poll(&mut self, content_seq: u64, at: std::time::Instant) {
+            self.detection_content_seq
+                .store(content_seq, Ordering::Release);
+            poll_full_lifecycle_hook_retirement(
+                FullLifecycleHookRetirementPorts {
+                    pane_id: PaneId::from_raw(0),
+                    detection_content_seq: &self.detection_content_seq,
+                    baseline_content_seq: &self.baseline_content_seq,
+                    authority_active: &self.authority_active,
+                    blocked: &self.blocked,
+                    state_events: &self.state_events,
+                },
+                &mut self.retirement,
+                &mut self.lifecycle_authority_active,
+                false,
+                at,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_retirement_poll_retires_only_on_sustained_output() {
+        let (state_events, mut events) = mpsc::channel(4);
+        let mut harness = RetirementHarness::blocked_at(10, state_events);
+        let started = std::time::Instant::now();
+
+        // Turn-end repaint, then a long quiet pane, then one isolated write.
+        harness.poll(11, started).await;
+        harness
+            .poll(12, started + std::time::Duration::from_secs(30))
+            .await;
+        assert!(harness.lifecycle_authority_active);
+        assert!(harness.authority_active.load(Ordering::Acquire));
+        assert!(events.try_recv().is_err());
+
+        // A resumed turn writes on every 300ms detect tick.
+        let resumed_at = started + std::time::Duration::from_secs(60);
+        let mut seq = 12;
+        for tick in 0..32 {
+            seq += 1;
+            harness
+                .poll(
+                    seq,
+                    resumed_at + std::time::Duration::from_millis(300) * tick,
+                )
+                .await;
+            if !harness.lifecycle_authority_active {
+                break;
+            }
+        }
+
+        assert!(!harness.lifecycle_authority_active);
+        assert!(!harness.authority_active.load(Ordering::Acquire));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AppEvent::HookAuthorityRetired { observed_at, .. }) if observed_at == resumed_at
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_retirement_poll_clears_when_the_gate_goes_away() {
+        let (state_events, _events) = mpsc::channel(4);
+        let mut harness = RetirementHarness::blocked_at(10, state_events);
+        let started = std::time::Instant::now();
+
+        harness.poll(11, started).await;
+        harness
+            .poll(12, started + std::time::Duration::from_millis(300))
+            .await;
+
+        // The gate is answered: retirement state must not survive into the next
+        // one, or a stale run would retire it early.
+        harness.blocked.store(false, Ordering::Release);
+        harness
+            .poll(13, started + std::time::Duration::from_millis(600))
+            .await;
+        harness.blocked.store(true, Ordering::Release);
+        harness.baseline_content_seq.store(13, Ordering::Release);
+
+        harness
+            .poll(14, started + std::time::Duration::from_millis(900))
+            .await;
+        harness
+            .poll(
+                15,
+                started
+                    + std::time::Duration::from_millis(900)
+                    + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE,
+            )
+            .await;
+
+        assert!(harness.lifecycle_authority_active);
     }
 
     #[test]
