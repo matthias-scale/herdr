@@ -3034,6 +3034,7 @@ impl AppState {
 
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
+            AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::LoopRunHistoryChanged => Vec::new(),
             AppEvent::StatusMetricsRefreshed { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {

@@ -60,6 +60,8 @@ pub(crate) struct ClientConnection {
     pub(crate) dock_presentation: crate::app::state::DockPresentationState,
     /// Client-local run-history detail surface, separate from server-owned receipt facts.
     pub(crate) loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
+    /// Client-local Symphony dashboard selection over the server-owned snapshot.
+    pub(crate) symphony_detail: Option<crate::app::state::SymphonyDetail>,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
@@ -133,6 +135,7 @@ impl ClientConnection {
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
             dock_presentation: crate::app::state::DockPresentationState::default(),
             loop_run_history_detail: None,
+            symphony_detail: None,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             graphics_surface_reset_pending: false,
             render_pending: false,

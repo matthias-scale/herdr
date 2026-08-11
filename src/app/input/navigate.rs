@@ -487,6 +487,10 @@ impl App {
                 self.state.info_panel_expanded = !self.state.info_panel_expanded;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenSymphony => {
+                self.state.toggle_symphony();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::Detach => {
                 super::modal::request_detach(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -1675,6 +1679,7 @@ pub(crate) enum NavigateAction {
     CopyWorkPr,
     CopyWorkPreview,
     ToggleInfoPanel,
+    OpenSymphony,
     Detach,
     OpenNavigator,
 }
@@ -1826,6 +1831,7 @@ fn non_indexed_action_for_key(
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
+        (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -2176,6 +2182,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.info_panel_expanded = !state.info_panel_expanded;
             leave_navigate_mode(state);
         }
+        NavigateAction::OpenSymphony => {
+            state.toggle_symphony();
+            leave_navigate_mode(state);
+        }
         NavigateAction::Detach => {
             super::modal::request_detach(state);
             leave_navigate_mode(state);
@@ -2368,6 +2378,68 @@ mod tests {
         app
     }
 
+    fn temporary_checkout(name: &str, origin: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "herdr-symphony-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        let checkout = root.join(name);
+        std::fs::create_dir_all(&checkout).expect("create test checkout");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&checkout)
+            .status()
+            .expect("run git init");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["remote", "add", "origin", origin])
+            .current_dir(&checkout)
+            .status()
+            .expect("add git origin");
+        assert!(status.success());
+        checkout
+    }
+
+    fn point_workspace_at(app: &mut App, workspace: usize, cwd: &std::path::Path) {
+        let root_pane = app.state.workspaces[workspace].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[workspace].tabs[0]
+            .terminal_id(root_pane)
+            .expect("root terminal")
+            .clone();
+        app.state.workspaces[workspace].identity_cwd = cwd.to_path_buf();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .cwd = cwd.to_path_buf();
+    }
+
+    fn set_symphony_workflow(app: &mut App, repo: &str) {
+        app.state.symphony_detail = Some(crate::app::state::SymphonyDetail {
+            snapshot: crate::symphony::Snapshot {
+                workflows: vec![crate::symphony::Workflow {
+                    workflow_id: "symphony-MAT-138".to_string(),
+                    run_id: "run".to_string(),
+                    name: "Temporal blocker dashboard".to_string(),
+                    phase: "runFlowStep".to_string(),
+                    wait: Some("plan-sign-off".to_string()),
+                    started_at: None,
+                    ticket: Some("MAT-138".to_string()),
+                    repo: Some(repo.to_string()),
+                    pr: Some("https://github.com/matthias-scale/herdr/pull/1".to_string()),
+                    receipts: Some("/receipts".to_string()),
+                }],
+                unavailable: None,
+            },
+            selected: 0,
+            observed_at: std::time::SystemTime::now(),
+        });
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn prefix_pass_through_retires_blocked_hook_authority_after_forwarding() {
         let mut app = app_with_test_workspaces(&["test"]);
@@ -2419,6 +2491,86 @@ mod tests {
         );
 
         assert!(app.state.loop_run_history_detail.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn symphony_enter_opens_interactive_tab_in_matching_checkout() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.default_shell = crate::app::api::test_support::exiting_test_command().into();
+        let cwd = temporary_checkout(
+            "mat-138-symphony-service",
+            "git@github.com:owner-a/mat-138-symphony-service.git",
+        );
+        point_workspace_at(&mut app, 0, &cwd);
+        set_symphony_workflow(&mut app, "owner-a/mat-138-symphony-service");
+
+        assert!(app.handle_symphony_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert!(app.state.symphony_detail.is_none());
+        let created = &app.state.workspaces[0].tabs[1];
+        let terminal_id = created.terminal_id(created.root_pane).unwrap();
+        assert_eq!(app.state.terminals[terminal_id].cwd, cwd);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        std::fs::remove_dir_all(cwd.parent().expect("checkout parent"))
+            .expect("remove test checkout");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn symphony_enter_accepts_matching_origin_with_custom_checkout_basename() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.default_shell = crate::app::api::test_support::exiting_test_command().into();
+        let cwd = temporary_checkout("custom-worktree-path", "git@github.com:owner-a/service.git");
+        point_workspace_at(&mut app, 0, &cwd);
+        set_symphony_workflow(&mut app, "owner-a/service");
+
+        assert!(app.handle_symphony_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert!(app.state.symphony_detail.is_none());
+        let created = &app.state.workspaces[0].tabs[1];
+        let terminal_id = created.terminal_id(created.root_pane).unwrap();
+        assert_eq!(app.state.terminals[terminal_id].cwd, cwd);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        std::fs::remove_dir_all(cwd.parent().expect("checkout parent"))
+            .expect("remove test checkout");
+    }
+
+    #[test]
+    fn symphony_enter_rejects_same_basename_with_different_owner() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let cwd = temporary_checkout(
+            "mat-138-symphony-collision",
+            "git@github.com:owner-b/mat-138-symphony-collision.git",
+        );
+        point_workspace_at(&mut app, 0, &cwd);
+        set_symphony_workflow(&mut app, "owner-a/mat-138-symphony-collision");
+
+        assert!(app.handle_symphony_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert!(app.state.symphony_detail.is_some());
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("Symphony checkout origin mismatch for owner-a/mat-138-symphony-collision")
+        );
+        std::fs::remove_dir_all(cwd.parent().expect("checkout parent"))
+            .expect("remove test checkout");
+    }
+
+    #[test]
+    fn symphony_enter_rejects_hostile_repository_name() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        set_symphony_workflow(&mut app, "..");
+
+        assert!(app.handle_symphony_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert!(app.state.symphony_detail.is_some());
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("Invalid Symphony repository name: ..")
+        );
     }
 
     #[test]

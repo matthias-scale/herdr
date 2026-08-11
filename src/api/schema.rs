@@ -10,6 +10,7 @@ pub mod plugins;
 pub mod response;
 pub mod server;
 pub mod session;
+pub mod symphony;
 pub mod tabs;
 pub mod workspaces;
 pub mod worktrees;
@@ -24,6 +25,7 @@ pub use plugins::*;
 pub use response::*;
 pub use server::*;
 pub use session::*;
+pub use symphony::*;
 pub use tabs::*;
 pub use workspaces::*;
 pub use worktrees::*;
@@ -87,6 +89,8 @@ pub enum Method {
     LoopList(EmptyParams),
     #[serde(rename = "loop.run_history")]
     LoopRunHistory(LoopRunHistoryParams),
+    #[serde(rename = "symphony.list")]
+    SymphonyList(EmptyParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

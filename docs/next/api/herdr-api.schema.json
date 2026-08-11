@@ -5427,6 +5427,22 @@
         {
           "properties": {
             "method": {
+              "const": "symphony.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "worktree.list",
               "type": "string"
             },
@@ -10008,6 +10024,31 @@
             },
             {
               "properties": {
+                "type": {
+                  "const": "symphony_list",
+                  "type": "string"
+                },
+                "unavailable": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "workflows": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/SymphonyWorkflowInfo"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "workflows"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "source": {
                   "$ref": "#/schemas/success_response/$defs/WorktreeSourceInfo"
                 },
@@ -11102,6 +11143,65 @@
             "down"
           ],
           "type": "string"
+        },
+        "SymphonyWorkflowInfo": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "pr": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "receipts": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "repo": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ticket": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wait": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workflow_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workflow_id",
+            "run_id",
+            "name",
+            "phase"
+          ],
+          "type": "object"
         },
         "TabInfo": {
           "properties": {

@@ -94,7 +94,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) {
-        if self.mode != Mode::Terminal {
+        if self.mode != Mode::Terminal || self.symphony_detail.is_some() {
             return;
         }
         let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
@@ -2514,6 +2514,41 @@ mod tests {
                 Bytes::from(format!("\x1b[<{button};3;4M"))
             );
         }
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn symphony_overlay_blocks_monolithic_and_headless_mouse_passthrough() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.state.toggle_symphony();
+        let event = mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + 2,
+            info.inner_rect.y + 3,
+        );
+
+        app.handle_mouse(event);
+        app.state.mouse_capture = false;
+        app.route_client_events(vec![crate::raw_input::RawInputEvent::Mouse(event)], false);
+
         assert!(input_rx.try_recv().is_err());
     }
 

@@ -490,6 +490,8 @@ pub struct KeysConfig {
     pub next_dock_tab: BindingConfig,
     /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
     pub toggle_info_panel: BindingConfig,
+    /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
+    pub symphony: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -644,6 +646,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    symphony: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -737,6 +741,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
         apply_field!(toggle_info_panel);
+        apply_field!(symphony);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -853,6 +858,7 @@ impl KeysConfig {
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
+        copy_effective_action_field!(symphony, keybinds.symphony);
         copy_user_field!(indexed);
 
         profile
@@ -1163,6 +1169,7 @@ impl Default for KeysConfig {
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
+            symphony: BindingConfig::one("prefix+shift+s"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

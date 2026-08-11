@@ -2426,6 +2426,15 @@ impl HeadlessServer {
                 }
                 changed
             }
+            AppEvent::SymphonyWorkflowsRefreshed { .. } => {
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                let dashboard_open = self
+                    .clients
+                    .values()
+                    .any(|client| client.symphony_detail.is_some());
+                self.refresh_client_symphony_details();
+                changed || dashboard_open
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }
@@ -2443,6 +2452,16 @@ impl HeadlessServer {
                 skipped_lines: history.skipped_lines,
             };
             detail.observed_at = std::time::SystemTime::now();
+        }
+    }
+
+    fn refresh_client_symphony_details(&mut self) {
+        let snapshot = self.app.state.symphony_snapshot.clone();
+        for client in self.clients.values_mut() {
+            let Some(detail) = client.symphony_detail.as_mut() else {
+                continue;
+            };
+            detail.replace_snapshot(snapshot.clone());
         }
     }
 
@@ -2821,6 +2840,11 @@ impl HeadlessServer {
                 .get_mut(&client_id)
                 .and_then(|client| client.loop_run_history_detail.take())
         });
+        let mut symphony_detail = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .and_then(|client| client.symphony_detail.take())
+        });
         if let Some(presentation) = &mut sidebar_presentation {
             self.app.state.swap_sidebar_presentation(presentation);
             self.app.state.reconcile_sidebar_presentation();
@@ -2831,7 +2855,13 @@ impl HeadlessServer {
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
         }
+        if let Some(detail) = &mut symphony_detail {
+            self.app.state.swap_symphony_detail(detail);
+        }
         self.app.route_client_events_from(client_id, events, false);
+        if let Some(detail) = &mut symphony_detail {
+            self.app.state.swap_symphony_detail(detail);
+        }
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
         }
@@ -2850,6 +2880,11 @@ impl HeadlessServer {
         if let Some(detail) = loop_run_history_detail {
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.loop_run_history_detail = detail;
+            }
+        }
+        if let Some(detail) = symphony_detail {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.symphony_detail = detail;
             }
         }
         if self.app.take_config_reloaded_from_disk() {
@@ -4222,6 +4257,10 @@ impl HeadlessServer {
                         .clients
                         .get_mut(&client_id)
                         .and_then(|client| client.loop_run_history_detail.take());
+                    let mut symphony_detail = self
+                        .clients
+                        .get_mut(&client_id)
+                        .and_then(|client| client.symphony_detail.take());
                     self.app
                         .state
                         .swap_sidebar_presentation(&mut sidebar_presentation);
@@ -4237,6 +4276,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
+                    self.app.state.swap_symphony_detail(&mut symphony_detail);
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -4312,10 +4352,12 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
+                    self.app.state.swap_symphony_detail(&mut symphony_detail);
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
+                        client.symphony_detail = symphony_detail;
                     }
                     frame
                 }

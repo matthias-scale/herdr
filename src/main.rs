@@ -94,6 +94,7 @@ mod selection;
 mod server;
 mod session;
 mod sound;
+mod symphony;
 mod terminal;
 mod terminal_modes;
 mod terminal_notify;
@@ -223,6 +224,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+b"
 # toggle_info_panel = "prefix+i"
+# symphony = "prefix+shift+s"
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

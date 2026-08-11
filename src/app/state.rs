@@ -1559,6 +1559,8 @@ pub struct AppState {
     pub(crate) loop_run_history: crate::loop_runs::RunHistory,
     pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
+    pub(crate) symphony_snapshot: crate::symphony::Snapshot,
+    pub(crate) symphony_detail: Option<SymphonyDetail>,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
@@ -1796,7 +1798,57 @@ pub(crate) struct LoopRunHistoryDetail {
     pub(crate) observed_at: std::time::SystemTime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SymphonyDetail {
+    pub(crate) snapshot: crate::symphony::Snapshot,
+    pub(crate) selected: usize,
+    pub(crate) observed_at: std::time::SystemTime,
+}
+
+impl SymphonyDetail {
+    pub(crate) fn replace_snapshot(&mut self, snapshot: crate::symphony::Snapshot) {
+        let selected_identity = self
+            .snapshot
+            .workflows
+            .get(self.selected)
+            .map(|workflow| (workflow.workflow_id.as_str(), workflow.run_id.as_str()));
+        let selected = selected_identity
+            .and_then(|(workflow_id, run_id)| {
+                snapshot.workflows.iter().position(|workflow| {
+                    workflow.workflow_id == workflow_id && workflow.run_id == run_id
+                })
+            })
+            .unwrap_or_else(|| {
+                self.selected
+                    .min(snapshot.workflows.len().saturating_sub(1))
+            });
+        self.snapshot = snapshot;
+        self.selected = selected;
+        self.observed_at = std::time::SystemTime::now();
+    }
+}
+
 impl AppState {
+    pub(crate) fn swap_symphony_detail(&mut self, other: &mut Option<SymphonyDetail>) {
+        std::mem::swap(&mut self.symphony_detail, other);
+    }
+
+    pub(crate) fn toggle_symphony(&mut self) {
+        if self.symphony_detail.is_some() {
+            self.symphony_detail = None;
+        } else {
+            self.symphony_detail = Some(SymphonyDetail {
+                snapshot: self.symphony_snapshot.clone(),
+                selected: 0,
+                observed_at: std::time::SystemTime::now(),
+            });
+        }
+    }
+
+    pub(crate) fn clear_symphony(&mut self) {
+        self.symphony_detail = None;
+    }
+
     pub(crate) fn swap_loop_run_history_detail(
         &mut self,
         other: &mut Option<LoopRunHistoryDetail>,
@@ -2192,6 +2244,8 @@ impl AppState {
             loop_run_history: crate::loop_runs::RunHistory::default(),
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            symphony_snapshot: crate::symphony::Snapshot::default(),
+            symphony_detail: None,
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),
@@ -2745,6 +2799,49 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn symphony_refresh_preserves_selection_by_workflow_identity() {
+        let workflow = |workflow_id: &str, run_id: &str| crate::symphony::Workflow {
+            workflow_id: workflow_id.to_string(),
+            run_id: run_id.to_string(),
+            name: workflow_id.to_string(),
+            phase: "running".to_string(),
+            wait: None,
+            started_at: None,
+            ticket: None,
+            repo: None,
+            pr: None,
+            receipts: None,
+        };
+        let mut detail = SymphonyDetail {
+            snapshot: crate::symphony::Snapshot {
+                workflows: vec![workflow("first", "run-1"), workflow("selected", "run-2")],
+                unavailable: None,
+            },
+            selected: 1,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        detail.replace_snapshot(crate::symphony::Snapshot {
+            workflows: vec![workflow("selected", "run-2"), workflow("first", "run-1")],
+            unavailable: None,
+        });
+
+        assert_eq!(detail.selected, 0);
+        assert_eq!(
+            detail.snapshot.workflows[detail.selected].workflow_id,
+            "selected"
+        );
+        assert_eq!(detail.snapshot.workflows[detail.selected].run_id, "run-2");
+
+        detail.selected = 1;
+        detail.replace_snapshot(crate::symphony::Snapshot {
+            workflows: vec![workflow("replacement", "run-3")],
+            unavailable: None,
+        });
+        assert_eq!(detail.selected, 0);
+    }
 
     #[test]
     fn agent_terminal_keeps_final_child_cursor_exposed() {
