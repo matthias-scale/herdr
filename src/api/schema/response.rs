@@ -18,6 +18,7 @@ use super::plugins::{
 };
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
+use super::symphony::SymphonyWorkflowInfo;
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
@@ -71,6 +72,11 @@ pub enum ResponseResult {
         loop_id: Option<String>,
         runs: Vec<LoopRunInfo>,
         skipped_lines: u64,
+    },
+    SymphonyList {
+        workflows: Vec<SymphonyWorkflowInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unavailable: Option<String>,
     },
     WorktreeList {
         source: WorktreeSourceInfo,

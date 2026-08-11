@@ -644,6 +644,12 @@
           "description": "Toggle the focused pane's right-side work-context panel."
         },
         {
+          "key": "keys.symphony",
+          "type": "keybinding",
+          "default": "\"prefix+shift+s\"",
+          "description": "Open the read-only Symphony workflow dashboard."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",

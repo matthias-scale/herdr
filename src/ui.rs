@@ -30,6 +30,7 @@ mod sidebar;
 #[cfg(test)]
 pub(crate) use sidebar::{TAB_INFO_FIELD_WIDTH, TAB_PRIO_FIELD_WIDTH};
 mod status;
+mod symphony;
 mod tab_surface;
 mod tabs;
 mod text;
@@ -82,6 +83,7 @@ use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_status_bar,
     render_toast_notification, toast_notification_rect,
 };
+use self::symphony::render as render_symphony;
 pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
@@ -643,7 +645,16 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
-    if let Some(detail) = app.loop_run_history_detail.as_ref() {
+    if let Some(detail) = app.symphony_detail.as_ref() {
+        render_symphony(
+            &app.palette,
+            &detail.snapshot,
+            detail.selected,
+            terminal_area,
+            detail.observed_at,
+            frame,
+        );
+    } else if let Some(detail) = app.loop_run_history_detail.as_ref() {
         render_loop_run_history(
             &app.palette,
             &detail.history,

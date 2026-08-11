@@ -1559,6 +1559,8 @@ pub struct AppState {
     pub(crate) loop_run_history: crate::loop_runs::RunHistory,
     pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
+    pub(crate) symphony_snapshot: crate::symphony::Snapshot,
+    pub(crate) symphony_detail: Option<SymphonyDetail>,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
@@ -1796,7 +1798,34 @@ pub(crate) struct LoopRunHistoryDetail {
     pub(crate) observed_at: std::time::SystemTime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SymphonyDetail {
+    pub(crate) snapshot: crate::symphony::Snapshot,
+    pub(crate) selected: usize,
+    pub(crate) observed_at: std::time::SystemTime,
+}
+
 impl AppState {
+    pub(crate) fn swap_symphony_detail(&mut self, other: &mut Option<SymphonyDetail>) {
+        std::mem::swap(&mut self.symphony_detail, other);
+    }
+
+    pub(crate) fn toggle_symphony(&mut self) {
+        if self.symphony_detail.is_some() {
+            self.symphony_detail = None;
+        } else {
+            self.symphony_detail = Some(SymphonyDetail {
+                snapshot: self.symphony_snapshot.clone(),
+                selected: 0,
+                observed_at: std::time::SystemTime::now(),
+            });
+        }
+    }
+
+    pub(crate) fn clear_symphony(&mut self) {
+        self.symphony_detail = None;
+    }
+
     pub(crate) fn swap_loop_run_history_detail(
         &mut self,
         other: &mut Option<LoopRunHistoryDetail>,
@@ -2192,6 +2221,8 @@ impl AppState {
             loop_run_history: crate::loop_runs::RunHistory::default(),
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            symphony_snapshot: crate::symphony::Snapshot::default(),
+            symphony_detail: None,
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),

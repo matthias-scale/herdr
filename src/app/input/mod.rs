@@ -84,6 +84,9 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        if self.handle_symphony_key(key_event) {
+            return None;
+        }
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
@@ -137,6 +140,93 @@ impl App {
             self.state.mode = Mode::Terminal;
         }
         true
+    }
+
+    pub(crate) fn handle_symphony_key(&mut self, key: KeyEvent) -> bool {
+        let Some(detail) = self.state.symphony_detail.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.state.clear_symphony();
+                self.state.mode = Mode::Terminal;
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                detail.selected = detail.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                detail.selected =
+                    (detail.selected + 1).min(detail.snapshot.workflows.len().saturating_sub(1));
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => self.open_selected_symphony_workflow(),
+            _ => {}
+        }
+        true
+    }
+
+    fn open_selected_symphony_workflow(&mut self) {
+        let Some(workflow) = self
+            .state
+            .symphony_detail
+            .as_ref()
+            .and_then(|detail| detail.snapshot.workflows.get(detail.selected))
+            .cloned()
+        else {
+            return;
+        };
+        let repo_name = workflow
+            .repo
+            .as_deref()
+            .and_then(crate::symphony::repo_name);
+        let workspace_match = repo_name.and_then(|repo_name| {
+            self.state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(index, workspace)| {
+                    let cwd = workspace.resolved_identity_cwd_from(
+                        &self.state.terminals,
+                        &self.terminal_runtimes,
+                    )?;
+                    cwd.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name == repo_name)
+                        .then_some((index, cwd))
+                })
+        });
+        let (workspace_id, cwd) = if let Some((index, cwd)) = workspace_match {
+            (Some(self.public_workspace_id(index)), Some(cwd))
+        } else {
+            (
+                None,
+                workflow
+                    .repo
+                    .as_deref()
+                    .and_then(crate::symphony::common_checkout),
+            )
+        };
+        let Some(cwd) = cwd else {
+            self.state.config_diagnostic = Some(format!(
+                "Symphony checkout unavailable for {}",
+                workflow.repo.as_deref().unwrap_or("unknown repository")
+            ));
+            return;
+        };
+        self.runtime_tab_create(
+            "tui.symphony.workflow.open",
+            crate::api::schema::TabCreateParams {
+                workspace_id,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                focus: true,
+                label: workflow
+                    .ticket
+                    .clone()
+                    .or_else(|| Some(workflow.name.clone())),
+                env: crate::symphony::launch_env(&workflow),
+            },
+        );
+        self.state.clear_symphony();
+        self.state.mode = Mode::Terminal;
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {

@@ -487,6 +487,10 @@ impl App {
                 self.state.info_panel_expanded = !self.state.info_panel_expanded;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenSymphony => {
+                self.state.toggle_symphony();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::Detach => {
                 super::modal::request_detach(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -1675,6 +1679,7 @@ pub(crate) enum NavigateAction {
     CopyWorkPr,
     CopyWorkPreview,
     ToggleInfoPanel,
+    OpenSymphony,
     Detach,
     OpenNavigator,
 }
@@ -1826,6 +1831,7 @@ fn non_indexed_action_for_key(
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
+        (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -2176,6 +2182,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.info_panel_expanded = !state.info_panel_expanded;
             leave_navigate_mode(state);
         }
+        NavigateAction::OpenSymphony => {
+            state.toggle_symphony();
+            leave_navigate_mode(state);
+        }
         NavigateAction::Detach => {
             super::modal::request_detach(state);
             leave_navigate_mode(state);
@@ -2419,6 +2429,45 @@ mod tests {
         );
 
         assert!(app.state.loop_run_history_detail.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn symphony_enter_opens_interactive_tab_in_matching_checkout() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.default_shell = crate::app::api::test_support::exiting_test_command().into();
+        let cwd = std::env::current_dir().expect("test cwd");
+        let repo_name = cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("repo directory name");
+        app.state.symphony_detail = Some(crate::app::state::SymphonyDetail {
+            snapshot: crate::symphony::Snapshot {
+                workflows: vec![crate::symphony::Workflow {
+                    workflow_id: "symphony-MAT-138".to_string(),
+                    run_id: "run".to_string(),
+                    name: "Temporal blocker dashboard".to_string(),
+                    phase: "runFlowStep".to_string(),
+                    wait: Some("plan-sign-off".to_string()),
+                    started_at: None,
+                    ticket: Some("MAT-138".to_string()),
+                    repo: Some(format!("matthias-scale/{repo_name}")),
+                    pr: Some("https://github.com/matthias-scale/herdr/pull/1".to_string()),
+                    receipts: Some("/receipts".to_string()),
+                }],
+                unavailable: None,
+            },
+            selected: 0,
+            observed_at: std::time::SystemTime::now(),
+        });
+
+        assert!(app.handle_symphony_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert!(app.state.symphony_detail.is_none());
+        let created = &app.state.workspaces[0].tabs[1];
+        let terminal_id = created.terminal_id(created.root_pane).unwrap();
+        assert_eq!(app.state.terminals[terminal_id].cwd, cwd);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }
 
     #[test]

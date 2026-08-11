@@ -112,6 +112,19 @@ fn ac1_loop_run_history_is_typed_on_the_json_api() {
 }
 
 #[test]
+fn symphony_list_is_a_typed_read_only_api_method() {
+    let request = Request {
+        id: "symphony".to_string(),
+        method: Method::SymphonyList(EmptyParams::default()),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["method"], "symphony.list");
+    assert!(value.to_string().contains("symphony.list"));
+    assert!(!value.to_string().contains("signal"));
+    assert!(!value.to_string().contains("cancel"));
+}
+
+#[test]
 fn agent_start_and_prompt_requests_round_trip() {
     let start = Request {
         id: "start".into(),

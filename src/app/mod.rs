@@ -595,6 +595,8 @@ impl App {
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            symphony_snapshot: crate::symphony::Snapshot::default(),
+            symphony_detail: None,
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,
@@ -825,6 +827,7 @@ impl App {
                 crate::detect::manifest_update::auto_update(manifest_update_tx)
             });
         }
+        crate::symphony::start_poller(event_tx.clone());
 
         let last_focus = state.active.and_then(|idx| {
             state

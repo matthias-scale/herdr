@@ -54,6 +54,8 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// A read-only Symphony Temporal workflow poll completed.
+    SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
     /// The append-only loop receipt source changed; refresh its cursor.
     LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.

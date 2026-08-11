@@ -11,6 +11,7 @@ mod panes;
 pub(crate) mod plugins;
 mod responses;
 mod session;
+mod symphony;
 mod tabs;
 mod workspaces;
 mod worktrees;
@@ -61,6 +62,9 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
+                self.refresh_symphony_snapshot(snapshot)
+            }
             AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
@@ -140,6 +144,10 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
+            return Some(self.refresh_symphony_snapshot(snapshot));
+        }
+
         if let AppEvent::LoopRunHistoryChanged = ev {
             return Some(self.refresh_loop_run_history());
         }
@@ -434,6 +442,20 @@ impl App {
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
         hook_state_report_accepted
+    }
+
+    fn refresh_symphony_snapshot(&mut self, snapshot: crate::symphony::Snapshot) -> bool {
+        let changed = self.state.symphony_snapshot.workflows != snapshot.workflows
+            || self.state.symphony_snapshot.unavailable != snapshot.unavailable;
+        self.state.symphony_snapshot = snapshot.clone();
+        if let Some(detail) = self.state.symphony_detail.as_mut() {
+            detail.snapshot = snapshot;
+            detail.selected = detail
+                .selected
+                .min(detail.snapshot.workflows.len().saturating_sub(1));
+            detail.observed_at = std::time::SystemTime::now();
+        }
+        changed || self.state.symphony_detail.is_some()
     }
 
     fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {
@@ -1126,6 +1148,7 @@ impl App {
             Method::LoopRunHistory(params) => {
                 return self.handle_loop_run_history(request.id, params)
             }
+            Method::SymphonyList(_) => return self.handle_symphony_list(request.id),
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }
