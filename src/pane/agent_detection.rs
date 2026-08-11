@@ -23,17 +23,35 @@ pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(3);
 pub(super) const FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE: std::time::Duration =
     std::time::Duration::from_secs(5);
+/// Longest silence a single run of output may contain and still count as the
+/// same burst.
+///
+/// The detect loop that feeds `observe` ticks every 300ms while an agent is
+/// identified, and an agent that is really running a turn repaints tokens,
+/// spinners or counters on essentially every one of those ticks. Two seconds is
+/// six ticks of headroom for a slow repaint, and still far below the multi-second
+/// silences that separate the isolated writes this window has to reject: a lone
+/// background job line, a stray control sequence, a herdr resize.
+pub(super) const FULL_LIFECYCLE_HOOK_OUTPUT_QUIET_RESET: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Retires a blocked turn-end hook report once the pane is *working again*.
 ///
 /// Retirement may only read continuing output as a new turn. Ending a turn is
 /// itself a write: every agent repaints its prompt box right after the hook
 /// returns, and a single repaint used to start a grace period that expired on
-/// its own and threw the gate away while the human was still reading it. So the
-/// window is measured between the first and the latest content change, not
-/// against wall clock: one burst of turn-end repaint never retires a gate, and
-/// a genuinely resumed turn -- which keeps writing tokens, spinners and
-/// counters -- always does.
+/// its own and threw the gate away while the human was still reading it.
+///
+/// So the window is measured across a *run* of content changes rather than
+/// against wall clock, and a silence longer than
+/// `FULL_LIFECYCLE_HOOK_OUTPUT_QUIET_RESET` starts a new run. Measuring only
+/// first-change-to-latest-change was not enough: it retired on any second change
+/// at least a grace period after the first, so one isolated late write -- a
+/// background job printing a line, an OSC/synchronised-update sequence, a herdr
+/// window resize -- cleared a gate the human was still reading. Requiring the
+/// changes to keep arriving means a turn-end repaint never retires a gate, an
+/// isolated write after a quiet pane never retires a gate, and a genuinely
+/// resumed turn always does, one grace period after its first token.
 #[derive(Debug, Default)]
 pub(super) struct FullLifecycleHookOutputRetirement {
     authority_baseline_content_seq: Option<u64>,
@@ -65,7 +83,12 @@ impl FullLifecycleHookOutputRetirement {
 
         if self.last_content_seq != Some(content_seq) {
             self.last_content_seq = Some(content_seq);
-            self.output_started_at.get_or_insert(now);
+            let run_broken = self.output_latest_at.is_none_or(|latest_at| {
+                now.duration_since(latest_at) > FULL_LIFECYCLE_HOOK_OUTPUT_QUIET_RESET
+            });
+            if run_broken {
+                self.output_started_at = Some(now);
+            }
             self.output_latest_at = Some(now);
         }
 
@@ -785,26 +808,100 @@ mod tests {
         assert_eq!(seq.load(Ordering::Relaxed), 1);
     }
 
+    /// One pass of the detect loop, which ticks every 300ms while an agent is
+    /// identified. `changed` models whether the pane wrote anything since the
+    /// previous tick.
+    fn detect_tick(
+        retirement: &mut FullLifecycleHookOutputRetirement,
+        content_seq: &mut u64,
+        baseline: u64,
+        at: std::time::Instant,
+        changed: bool,
+    ) -> Option<std::time::Instant> {
+        if changed {
+            *content_seq += 1;
+        }
+        retirement.observe(*content_seq, baseline, at)
+    }
+
+    const DETECT_TICK: std::time::Duration = std::time::Duration::from_millis(300);
+
     #[test]
     fn continuing_output_retires_a_hook_gate_after_the_grace_period() {
         let started = std::time::Instant::now();
         let mut retirement = FullLifecycleHookOutputRetirement::default();
+        let mut content_seq = 4;
 
-        assert_eq!(retirement.observe(4, 4, started), None);
+        // The pane is quiet for a tick, then a new turn starts writing and keeps
+        // writing on every tick, the way a resumed agent does.
         assert_eq!(
-            retirement.observe(5, 4, started + std::time::Duration::from_secs(1)),
+            detect_tick(&mut retirement, &mut content_seq, 4, started, false),
+            None
+        );
+
+        let first_output_at = started + DETECT_TICK;
+        let mut retired_at = None;
+        for tick in 1..=32 {
+            let at = started + DETECT_TICK * tick;
+            retired_at = detect_tick(&mut retirement, &mut content_seq, 4, at, true);
+            if retired_at.is_some() {
+                assert!(
+                    at.duration_since(first_output_at)
+                        >= FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE,
+                    "retired before the grace period elapsed"
+                );
+                assert!(
+                    at.duration_since(first_output_at)
+                        < FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE + DETECT_TICK,
+                    "retired more than one tick late"
+                );
+                break;
+            }
+        }
+
+        assert_eq!(retired_at, Some(first_output_at));
+    }
+
+    #[test]
+    fn an_isolated_late_write_does_not_retire_a_hook_gate() {
+        // The confirmed P2: the turn-end repaint arms the window, the pane then
+        // sits quiet under the human's eyes, and a single content bump -- a
+        // background job line, a control sequence, a herdr window resize --
+        // arrives much later. One mark is not a resumed turn.
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+
+        assert_eq!(retirement.observe(5, 4, started), None);
+        assert_eq!(
+            retirement.observe(5, 4, started + std::time::Duration::from_secs(30)),
             None
         );
         assert_eq!(
-            retirement.observe(
-                6,
-                4,
-                started
-                    + std::time::Duration::from_secs(1)
-                    + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE
-            ),
-            Some(started + std::time::Duration::from_secs(1))
+            retirement.observe(6, 4, started + std::time::Duration::from_secs(30)),
+            None
         );
+        assert_eq!(
+            retirement.observe(6, 4, started + std::time::Duration::from_secs(60)),
+            None
+        );
+    }
+
+    #[test]
+    fn isolated_writes_never_accumulate_into_a_retirement() {
+        // A background job printing one line every ten seconds must never add up
+        // to a resumed turn, however long the pane stays open.
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+        let mut content_seq = 4;
+
+        for bump in 0..30 {
+            let at = started + std::time::Duration::from_secs(10) * bump;
+            assert_eq!(
+                detect_tick(&mut retirement, &mut content_seq, 4, at, true),
+                None,
+                "isolated write {bump} retired the gate"
+            );
+        }
     }
 
     #[test]
@@ -847,13 +944,48 @@ mod tests {
 
     #[test]
     fn output_before_the_first_detection_tick_starts_the_grace_period() {
+        // Several writes can land between two detect ticks; the first tick that
+        // sees any of them anchors the run, and the grace period runs from there.
         let started = std::time::Instant::now();
         let mut retirement = FullLifecycleHookOutputRetirement::default();
+        let mut content_seq = 6;
 
-        assert_eq!(retirement.observe(5, 4, started), None);
+        assert_eq!(retirement.observe(content_seq, 4, started), None);
+        for tick in 1..=17 {
+            let at = started + DETECT_TICK * tick;
+            if let Some(retired_at) = detect_tick(&mut retirement, &mut content_seq, 4, at, true) {
+                assert_eq!(retired_at, started);
+                return;
+            }
+        }
+        panic!("sustained output never retired the gate");
+    }
+
+    #[test]
+    fn output_resuming_after_a_pause_restarts_the_grace_period() {
+        // A stalled turn that goes quiet and then really resumes still retires,
+        // one grace period after the output it actually resumed with.
+        let started = std::time::Instant::now();
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+        let mut content_seq = 4;
+
         assert_eq!(
-            retirement.observe(7, 4, started + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE),
-            Some(started)
+            detect_tick(&mut retirement, &mut content_seq, 4, started, true),
+            None
         );
+
+        let resumed_at = started + std::time::Duration::from_secs(45);
+        assert_eq!(
+            detect_tick(&mut retirement, &mut content_seq, 4, resumed_at, true),
+            None
+        );
+        for tick in 1..=17 {
+            let at = resumed_at + DETECT_TICK * tick;
+            if let Some(retired_at) = detect_tick(&mut retirement, &mut content_seq, 4, at, true) {
+                assert_eq!(retired_at, resumed_at);
+                return;
+            }
+        }
+        panic!("resumed output never retired the gate");
     }
 }

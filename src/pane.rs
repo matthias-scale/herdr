@@ -2730,14 +2730,23 @@ impl PaneRuntime {
             .full_lifecycle_hook_blocked
             .swap(active && blocked, Ordering::AcqRel);
         if active && blocked && (!previous || !was_blocked) {
-            self.full_lifecycle_hook_baseline_content_seq.store(
-                self.detection_content_seq.load(Ordering::Acquire),
-                Ordering::Release,
-            );
+            self.rebaseline_full_lifecycle_hook_content();
         }
         if active && !previous {
             self.detect_reset_notify.notify_one();
         }
+    }
+
+    /// Declare every content change so far to be *not* a new turn's output.
+    ///
+    /// Retirement of a blocked turn-end gate only counts detection content
+    /// changes after this baseline, so anything herdr itself writes to the pane
+    /// has to move the baseline with it.
+    fn rebaseline_full_lifecycle_hook_content(&self) {
+        self.full_lifecycle_hook_baseline_content_seq.store(
+            self.detection_content_seq.load(Ordering::Acquire),
+            Ordering::Release,
+        );
     }
 
     pub(crate) fn current_size(&self) -> (u16, u16) {
@@ -2765,7 +2774,13 @@ impl PaneRuntime {
         let terminal_responses = self
             .terminal
             .resize(rows, cols, cell_width_px, cell_height_px);
+        // A resize repaints the whole screen, so the idle scan skip has to be
+        // invalidated -- but it is herdr's own write, not the agent resuming a
+        // turn, so it must not count toward retiring a blocked turn-end gate.
+        // Excluding it here, at the one callsite that is not agent output, keeps
+        // that distinction out of the time-based retirement window entirely.
         mark_detection_content_changed(&self.detection_content_seq);
+        self.rebaseline_full_lifecycle_hook_content();
         self.io.resize(
             rows,
             cols,
@@ -3228,7 +3243,47 @@ impl PaneRuntime {
 
 #[cfg(test)]
 mod tests {
+    use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    #[tokio::test]
+    async fn a_resize_does_not_arm_retirement_of_a_blocked_gate() {
+        // Resizing the herdr window repaints the pane, which has to invalidate
+        // the idle scan skip -- but it is herdr's own write, and it used to be
+        // enough on its own to clear a blocked badge the human was reading.
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        runtime.set_full_lifecycle_authority_state(true, true);
+        let armed_baseline = runtime
+            .full_lifecycle_hook_baseline_content_seq
+            .load(Ordering::Acquire);
+
+        runtime.resize(40, 100, 0, 0);
+
+        let content_seq = runtime.detection_content_seq.load(Ordering::Acquire);
+        assert!(
+            content_seq > armed_baseline,
+            "a resize must still invalidate the idle scan skip"
+        );
+        assert_eq!(
+            runtime
+                .full_lifecycle_hook_baseline_content_seq
+                .load(Ordering::Acquire),
+            content_seq,
+            "a resize must not read as the agent resuming a turn"
+        );
+
+        let mut retirement = FullLifecycleHookOutputRetirement::default();
+        let now = std::time::Instant::now();
+        assert_eq!(retirement.observe(content_seq, content_seq, now), None);
+        assert_eq!(
+            retirement.observe(
+                content_seq,
+                content_seq,
+                now + FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE * 3,
+            ),
+            None
+        );
+    }
 
     #[test]
     fn pane_launch_env_removes_outer_codex_thread_id() {
