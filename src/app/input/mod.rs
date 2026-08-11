@@ -174,11 +174,18 @@ impl App {
         else {
             return;
         };
-        let repo_name = workflow
-            .repo
-            .as_deref()
-            .and_then(crate::symphony::repo_name);
-        let workspace_match = repo_name.and_then(|repo_name| {
+        let Some(repo) = workflow.repo.as_deref() else {
+            self.state.config_diagnostic =
+                Some("Symphony workflow has no repository checkout".to_string());
+            return;
+        };
+        let Some(repo_name) = crate::symphony::repo_name(repo) else {
+            self.state.config_diagnostic =
+                Some(format!("Invalid Symphony repository name: {repo}"));
+            return;
+        };
+        let mut verification_error = None;
+        let workspace_match =
             self.state
                 .workspaces
                 .iter()
@@ -188,28 +195,33 @@ impl App {
                         &self.state.terminals,
                         &self.terminal_runtimes,
                     )?;
-                    cwd.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name == repo_name)
-                        .then_some((index, cwd))
-                })
-        });
+                    if cwd.file_name().and_then(|name| name.to_str()) != Some(repo_name) {
+                        return None;
+                    }
+                    match crate::symphony::checkout_matches_repo(&cwd, repo) {
+                        Ok(()) => Some((index, cwd)),
+                        Err(error) => {
+                            verification_error.get_or_insert(error);
+                            None
+                        }
+                    }
+                });
         let (workspace_id, cwd) = if let Some((index, cwd)) = workspace_match {
             (Some(self.public_workspace_id(index)), Some(cwd))
         } else {
-            (
-                None,
-                workflow
-                    .repo
-                    .as_deref()
-                    .and_then(crate::symphony::common_checkout),
-            )
+            match crate::symphony::common_checkout(repo) {
+                Ok(cwd) => (None, cwd),
+                Err(error) => {
+                    verification_error.get_or_insert(error);
+                    (None, None)
+                }
+            }
         };
         let Some(cwd) = cwd else {
-            self.state.config_diagnostic = Some(format!(
-                "Symphony checkout unavailable for {}",
-                workflow.repo.as_deref().unwrap_or("unknown repository")
-            ));
+            self.state.config_diagnostic = Some(
+                verification_error
+                    .unwrap_or_else(|| format!("Symphony checkout unavailable for {repo}")),
+            );
             return;
         };
         self.runtime_tab_create(

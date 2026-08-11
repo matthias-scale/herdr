@@ -8,6 +8,9 @@ use crate::events::AppEvent;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL_BUDGET: Duration = Duration::from_secs(60);
+const POLL_BUDGET_EXHAUSTED: &str = "Symphony poll time budget exhausted";
+const MAX_EXECUTIONS: usize = 200;
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const LIST_QUERY: &str = "ExecutionStatus = \"Running\"";
 const FLOW_TYPE: &str = "symphonyFlow";
@@ -52,7 +55,7 @@ impl Snapshot {
 }
 
 trait TemporalCommand {
-    fn run_json(&self, args: &[String]) -> Result<serde_json::Value, String>;
+    fn run_json(&self, args: &[String], timeout: Duration) -> Result<serde_json::Value, String>;
 }
 
 struct TemporalCli {
@@ -86,7 +89,7 @@ impl TemporalCli {
 }
 
 impl TemporalCommand for TemporalCli {
-    fn run_json(&self, args: &[String]) -> Result<serde_json::Value, String> {
+    fn run_json(&self, args: &[String], timeout: Duration) -> Result<serde_json::Value, String> {
         let mut child = Command::new("temporal")
             .args(args)
             .stdout(Stdio::piped())
@@ -106,7 +109,7 @@ impl TemporalCommand for TemporalCli {
             let mut reader = stderr;
             let _ = std::io::copy(&mut reader, &mut std::io::sink());
         });
-        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -184,6 +187,15 @@ pub(crate) fn poll() -> Snapshot {
 }
 
 fn poll_with(cli: &impl TemporalCommand) -> Snapshot {
+    poll_with_limits(cli, POLL_BUDGET, MAX_EXECUTIONS)
+}
+
+fn poll_with_limits(
+    cli: &impl TemporalCommand,
+    poll_budget: Duration,
+    max_executions: usize,
+) -> Snapshot {
+    let budget = PollBudget::new(poll_budget);
     let production = TemporalCli::default();
     let list_args = production.scoped(vec![
         "workflow".to_string(),
@@ -191,13 +203,16 @@ fn poll_with(cli: &impl TemporalCommand) -> Snapshot {
         "--query".to_string(),
         LIST_QUERY.to_string(),
         "--limit".to_string(),
-        "1000".to_string(),
+        (max_executions + 1).to_string(),
     ]);
-    let list = match cli.run_json(&list_args) {
+    let list = match budget.run_json(cli, &list_args) {
         Ok(value) => value,
-        Err(error) => return Snapshot::unavailable(error),
+        Err(PollCommandError::BudgetExhausted) => {
+            return Snapshot::unavailable(POLL_BUDGET_EXHAUSTED);
+        }
+        Err(PollCommandError::Command(error)) => return Snapshot::unavailable(error),
     };
-    let executions = match parse_executions(&list) {
+    let executions = match parse_executions(&list, max_executions) {
         Ok(value) => value,
         Err(error) => return Snapshot::unavailable(error),
     };
@@ -207,10 +222,16 @@ fn poll_with(cli: &impl TemporalCommand) -> Snapshot {
         .iter()
         .filter(|execution| execution.workflow_type == QUESTION_TYPE)
     {
-        if let Ok(value) = cli.run_json(&query_args(&production, execution, QUESTION_QUERY)) {
-            if let Some(context) = parse_question_context(&value) {
-                questions.push(context);
+        match budget.run_json(cli, &query_args(&production, execution, QUESTION_QUERY)) {
+            Ok(value) => {
+                if let Some(context) = parse_question_context(&value) {
+                    questions.push(context);
+                }
             }
+            Err(PollCommandError::BudgetExhausted) => {
+                return Snapshot::unavailable(POLL_BUDGET_EXHAUSTED);
+            }
+            Err(PollCommandError::Command(_)) => {}
         }
     }
 
@@ -219,16 +240,20 @@ fn poll_with(cli: &impl TemporalCommand) -> Snapshot {
         .iter()
         .filter(|execution| execution.workflow_type == FLOW_TYPE)
     {
-        let context = cli
-            .run_json(&query_args(&production, execution, FLOW_QUERY))
-            .ok()
-            .and_then(|value| parse_flow_context(&value))
-            .unwrap_or_default();
-        let phase = cli
-            .run_json(&describe_args(&production, execution))
-            .ok()
-            .and_then(|value| pending_activity_name(&value))
-            .unwrap_or_else(|| "running".to_string());
+        let context = match budget.run_json(cli, &query_args(&production, execution, FLOW_QUERY)) {
+            Ok(value) => parse_flow_context(&value).unwrap_or_default(),
+            Err(PollCommandError::BudgetExhausted) => {
+                return Snapshot::unavailable(POLL_BUDGET_EXHAUSTED);
+            }
+            Err(PollCommandError::Command(_)) => FlowContext::default(),
+        };
+        let phase = match budget.run_json(cli, &describe_args(&production, execution)) {
+            Ok(value) => pending_activity_name(&value).unwrap_or_else(|| "running".to_string()),
+            Err(PollCommandError::BudgetExhausted) => {
+                return Snapshot::unavailable(POLL_BUDGET_EXHAUSTED);
+            }
+            Err(PollCommandError::Command(_)) => "running".to_string(),
+        };
         let wait = questions
             .iter()
             .find(|question| question_matches_flow(question, &context))
@@ -256,6 +281,40 @@ fn poll_with(cli: &impl TemporalCommand) -> Snapshot {
     Snapshot::available(workflows)
 }
 
+enum PollCommandError {
+    BudgetExhausted,
+    Command(String),
+}
+
+struct PollBudget {
+    deadline: Instant,
+}
+
+impl PollBudget {
+    fn new(duration: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + duration,
+        }
+    }
+
+    fn run_json(
+        &self,
+        cli: &impl TemporalCommand,
+        args: &[String],
+    ) -> Result<serde_json::Value, PollCommandError> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(PollCommandError::BudgetExhausted)?;
+        let result = cli.run_json(args, remaining.min(COMMAND_TIMEOUT));
+        if Instant::now() >= self.deadline {
+            return Err(PollCommandError::BudgetExhausted);
+        }
+        result.map_err(PollCommandError::Command)
+    }
+}
+
 fn query_args(cli: &TemporalCli, execution: &Execution, query: &str) -> Vec<String> {
     cli.scoped(vec![
         "workflow".to_string(),
@@ -280,7 +339,10 @@ fn describe_args(cli: &TemporalCli, execution: &Execution) -> Vec<String> {
     ])
 }
 
-fn parse_executions(value: &serde_json::Value) -> Result<Vec<Execution>, String> {
+fn parse_executions(
+    value: &serde_json::Value,
+    max_executions: usize,
+) -> Result<Vec<Execution>, String> {
     let rows = value
         .as_array()
         .or_else(|| {
@@ -294,7 +356,23 @@ fn parse_executions(value: &serde_json::Value) -> Result<Vec<Execution>, String>
                 .and_then(serde_json::Value::as_array)
         })
         .ok_or_else(|| "Temporal list JSON has no workflow executions".to_string())?;
-    Ok(rows.iter().filter_map(parse_execution).collect())
+    if rows.len() > max_executions {
+        return Err(format!(
+            "Temporal list row limit exceeded: {} rows (maximum {max_executions})",
+            rows.len()
+        ));
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            parse_execution(row).ok_or_else(|| {
+                format!(
+                    "Temporal list output not understood: invalid execution row {}",
+                    index + 1
+                )
+            })
+        })
+        .collect()
 }
 
 fn parse_execution(value: &serde_json::Value) -> Option<Execution> {
@@ -430,18 +508,98 @@ pub(crate) fn start_poller(event_tx: tokio::sync::mpsc::Sender<AppEvent>) {
 }
 
 pub(crate) fn repo_name(repo: &str) -> Option<&str> {
-    repo.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
+    repo_identity(repo).map(|(_, name)| name)
 }
 
-pub(crate) fn common_checkout(repo: &str) -> Option<PathBuf> {
-    let name = repo_name(repo)?;
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    [home.join("Repos").join(name), home.join("repos").join(name)]
-        .into_iter()
-        .find(|path| path.is_dir())
+pub(crate) fn checkout_matches_repo(checkout: &Path, repo: &str) -> Result<(), String> {
+    let expected =
+        repo_identity(repo).ok_or_else(|| format!("Invalid Symphony repository name: {repo}"))?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .map_err(|error| format!("Could not verify Symphony checkout origin: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("Symphony checkout origin unavailable for {repo}"));
+    }
+    let remote = std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(remote_repo_identity)
+        .ok_or_else(|| format!("Symphony checkout origin not understood for {repo}"))?;
+    if remote.0.eq_ignore_ascii_case(expected.0) && remote.1.eq_ignore_ascii_case(expected.1) {
+        Ok(())
+    } else {
+        Err(format!("Symphony checkout origin mismatch for {repo}"))
+    }
+}
+
+pub(crate) fn common_checkout(repo: &str) -> Result<Option<PathBuf>, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "Symphony checkout lookup needs HOME".to_string())?;
+    common_checkout_from(&home, repo)
+}
+
+fn common_checkout_from(home: &Path, repo: &str) -> Result<Option<PathBuf>, String> {
+    let name =
+        repo_name(repo).ok_or_else(|| format!("Invalid Symphony repository name: {repo}"))?;
+    let mut verification_error = None;
+    for path in [home.join("Repos").join(name), home.join("repos").join(name)] {
+        if !path.is_dir() {
+            continue;
+        }
+        match checkout_matches_repo(&path, repo) {
+            Ok(()) => return Ok(Some(path)),
+            Err(error) => verification_error.get_or_insert(error),
+        };
+    }
+    match verification_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+fn repo_identity(repo: &str) -> Option<(&str, &str)> {
+    let repo = repo.trim();
+    if repo.contains('\\') {
+        return None;
+    }
+    let repo = repo.strip_suffix('/').unwrap_or(repo);
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let mut components = repo.split('/');
+    let owner = components.next()?;
+    let name = components.next()?;
+    if components.next().is_some() || !valid_repo_component(owner) || !valid_repo_component(name) {
+        return None;
+    }
+    Some((owner, name))
+}
+
+fn remote_repo_identity(remote: &str) -> Option<(&str, &str)> {
+    let remote = remote.trim();
+    let path = if let Some((_, authority_and_path)) = remote.split_once("://") {
+        let (authority, path) = authority_and_path.split_once('/')?;
+        if authority.is_empty() {
+            return None;
+        }
+        path
+    } else {
+        let (authority, path) = remote.split_once(':')?;
+        if authority.is_empty() || authority.contains('/') || authority.contains('\\') {
+            return None;
+        }
+        path
+    };
+    repo_identity(path)
+}
+
+fn valid_repo_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains(['/', '\\', ':', '?', '#'])
+        && !value.chars().any(char::is_control)
 }
 
 pub(crate) fn launch_env(workflow: &Workflow) -> HashMap<String, String> {
@@ -489,7 +647,11 @@ mod tests {
     }
 
     impl TemporalCommand for FixtureCli {
-        fn run_json(&self, args: &[String]) -> Result<serde_json::Value, String> {
+        fn run_json(
+            &self,
+            args: &[String],
+            _timeout: Duration,
+        ) -> Result<serde_json::Value, String> {
             self.calls
                 .lock()
                 .expect("fixture calls")
@@ -499,6 +661,22 @@ mod tests {
                 .expect("fixture responses")
                 .pop()
                 .expect("fixture response")
+        }
+    }
+
+    struct DelayedFixtureCli {
+        inner: FixtureCli,
+        delay: Duration,
+    }
+
+    impl TemporalCommand for DelayedFixtureCli {
+        fn run_json(
+            &self,
+            args: &[String],
+            timeout: Duration,
+        ) -> Result<serde_json::Value, String> {
+            std::thread::sleep(self.delay);
+            self.inner.run_json(args, timeout)
         }
     }
 
@@ -543,6 +721,189 @@ mod tests {
         let unavailable = poll_with(&FixtureCli::new(vec![Err("offline".to_string())]));
         assert!(unavailable.workflows.is_empty());
         assert_eq!(unavailable.unavailable.as_deref(), Some("offline"));
+    }
+
+    #[test]
+    fn malformed_non_empty_list_is_unavailable() {
+        let snapshot = poll_with(&FixtureCli::new(vec![Ok(serde_json::json!([
+            {"unexpected":"shape"}
+        ]))]));
+
+        assert!(snapshot.workflows.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("Temporal list output not understood: invalid execution row 1")
+        );
+    }
+
+    #[test]
+    fn mixed_valid_and_invalid_list_is_unavailable() {
+        let cli = FixtureCli::new(vec![Ok(serde_json::json!([
+            {"execution":{"workflowId":"symphony-MAT-138","runId":"run"},"type":{"name":"symphonyFlow"}},
+            {"unexpected":"shape"}
+        ]))]);
+
+        let snapshot = poll_with(&cli);
+
+        assert!(snapshot.workflows.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("Temporal list output not understood: invalid execution row 2")
+        );
+        assert_eq!(cli.calls().len(), 1);
+    }
+
+    #[test]
+    fn non_array_list_container_is_unavailable() {
+        let snapshot = poll_with(&FixtureCli::new(vec![Ok(serde_json::json!({
+            "executions": {"unexpected":"shape"}
+        }))]));
+
+        assert!(snapshot.workflows.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("Temporal list JSON has no workflow executions")
+        );
+    }
+
+    #[test]
+    fn local_execution_cap_stops_row_expansion() {
+        let rows = (0..=MAX_EXECUTIONS)
+            .map(|index| {
+                serde_json::json!({
+                    "execution":{"workflowId":format!("question-{index}"),"runId":format!("run-{index}")},
+                    "type":{"name":"questionLoopWorkflow"}
+                })
+            })
+            .collect::<Vec<_>>();
+        let cli = FixtureCli::new(vec![Ok(serde_json::Value::Array(rows))]);
+
+        let snapshot = poll_with(&cli);
+
+        assert!(snapshot.workflows.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("Temporal list row limit exceeded: 201 rows (maximum 200)")
+        );
+        assert_eq!(cli.calls().len(), 1);
+    }
+
+    #[test]
+    fn whole_poll_budget_exhaustion_is_unavailable() {
+        let cli = DelayedFixtureCli {
+            inner: FixtureCli::new(vec![Ok(serde_json::json!([]))]),
+            delay: Duration::from_millis(5),
+        };
+
+        let snapshot = poll_with_limits(&cli, Duration::from_millis(1), MAX_EXECUTIONS);
+
+        assert!(snapshot.workflows.is_empty());
+        assert_eq!(snapshot.unavailable.as_deref(), Some(POLL_BUDGET_EXHAUSTED));
+        assert_eq!(cli.inner.calls().len(), 1);
+    }
+
+    #[test]
+    fn repository_names_reject_path_traversal_and_separators() {
+        assert_eq!(repo_name("owner/service"), Some("service"));
+        assert_eq!(repo_name("owner/service.git"), Some("service"));
+        for hostile in [
+            ".",
+            "..",
+            "../service",
+            "owner/../service",
+            "owner/service/child",
+            "owner\\service",
+        ] {
+            assert_eq!(repo_name(hostile), None, "accepted hostile repo {hostile}");
+        }
+    }
+
+    #[test]
+    fn remote_identity_requires_matching_owner_and_repo() {
+        assert_eq!(
+            remote_repo_identity("git@github.com:owner-a/service.git"),
+            Some(("owner-a", "service"))
+        );
+        assert_eq!(
+            remote_repo_identity("https://github.com/owner-a/service.git"),
+            Some(("owner-a", "service"))
+        );
+        assert_eq!(remote_repo_identity("../service"), None);
+    }
+
+    #[test]
+    fn common_checkout_requires_verified_matching_origin() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "herdr-symphony-common-checkout-{}-{unique}",
+            std::process::id()
+        ));
+        let checkout = home.join("Repos/service");
+        std::fs::create_dir_all(&checkout).expect("create test checkout");
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&checkout)
+            .status()
+            .expect("run git init");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:owner-b/service.git",
+            ])
+            .current_dir(&checkout)
+            .status()
+            .expect("add git origin");
+        assert!(status.success());
+
+        assert_eq!(
+            common_checkout_from(&home, "owner-a/service"),
+            Err("Symphony checkout origin mismatch for owner-a/service".to_string())
+        );
+
+        let status = Command::new("git")
+            .args([
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/owner-a/service.git",
+            ])
+            .current_dir(&checkout)
+            .status()
+            .expect("replace git origin");
+        assert!(status.success());
+        assert_eq!(
+            common_checkout_from(&home, "owner-a/service"),
+            Ok(Some(checkout.clone()))
+        );
+
+        std::fs::remove_dir_all(home).expect("remove test checkout");
+    }
+
+    #[test]
+    fn common_checkout_rejects_unverifiable_origin() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "herdr-symphony-no-origin-{}-{unique}",
+            std::process::id()
+        ));
+        let checkout = home.join("Repos/service");
+        std::fs::create_dir_all(&checkout).expect("create test checkout");
+
+        assert_eq!(
+            common_checkout_from(&home, "owner-a/service"),
+            Err("Symphony checkout origin unavailable for owner-a/service".to_string())
+        );
+
+        std::fs::remove_dir_all(home).expect("remove test checkout");
     }
 
     #[test]
