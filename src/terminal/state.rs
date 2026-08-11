@@ -4914,6 +4914,87 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_closing_block_report_ends_a_blocked_gate_without_screen_detection() {
+        // AC4 on the path that raised the gate in the first place: the claude
+        // prompt box matches no detection rule, so the pane has no detected
+        // agent at all. The next turn's report must still be able to end the
+        // blocked state -- a gate that only screen detection can clear would be
+        // unexitable on exactly the panes that need it.
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed + std::time::Duration::from_millis(10),
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert_eq!(terminal.detected_agent, None);
+
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(8),
+            observed + std::time::Duration::from_secs(30),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.detected_agent, None);
+    }
+
+    #[test]
+    fn a_working_closing_block_report_ends_a_blocked_gate_without_screen_detection() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            observed,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(3),
+            observed + std::time::Duration::from_millis(10),
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(4),
+            observed + std::time::Duration::from_secs(30),
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
     fn a_blocked_closing_block_report_yields_to_a_different_detected_agent() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
