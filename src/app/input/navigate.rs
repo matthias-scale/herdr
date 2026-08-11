@@ -2516,6 +2516,26 @@ mod tests {
             .expect("remove test checkout");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn symphony_enter_accepts_matching_origin_with_custom_checkout_basename() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.default_shell = crate::app::api::test_support::exiting_test_command().into();
+        let cwd = temporary_checkout("custom-worktree-path", "git@github.com:owner-a/service.git");
+        point_workspace_at(&mut app, 0, &cwd);
+        set_symphony_workflow(&mut app, "owner-a/service");
+
+        assert!(app.handle_symphony_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert!(app.state.symphony_detail.is_none());
+        let created = &app.state.workspaces[0].tabs[1];
+        let terminal_id = created.terminal_id(created.root_pane).unwrap();
+        assert_eq!(app.state.terminals[terminal_id].cwd, cwd);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        std::fs::remove_dir_all(cwd.parent().expect("checkout parent"))
+            .expect("remove test checkout");
+    }
+
     #[test]
     fn symphony_enter_rejects_same_basename_with_different_owner() {
         let mut app = app_with_test_workspaces(&["test"]);

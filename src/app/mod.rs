@@ -1812,7 +1812,9 @@ impl App {
 
 impl App {
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
-        if let Some(popup) = &self.state.popup_pane {
+        if self.state.symphony_detail.is_some() {
+            None
+        } else if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
         } else if self.state.mode == Mode::Terminal {
             Some(TerminalInputContext::Pane)
@@ -1959,7 +1961,8 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
-                    if self.try_route_paste_to_popup(&text) {
+                    if self.state.symphony_detail.is_some() || self.try_route_paste_to_popup(&text)
+                    {
                     } else if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
                     } else {
@@ -2029,6 +2032,9 @@ impl App {
     /// since the server doesn't have the async context of the monolithic App.
     fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
+        if self.handle_symphony_key(key_event) {
+            return;
+        }
         if self.handle_loop_run_history_key(key_event) {
             return;
         }

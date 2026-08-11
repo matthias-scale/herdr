@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -17,6 +18,7 @@ const FLOW_TYPE: &str = "symphonyFlow";
 const QUESTION_TYPE: &str = "questionLoopWorkflow";
 const FLOW_QUERY: &str = "symphony-start-attestation-v1";
 const QUESTION_QUERY: &str = "symphony-question-state-v1";
+const EXPECTED_REPO_HOST: &str = "github.com";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Workflow {
@@ -451,13 +453,14 @@ fn string_at(value: &serde_json::Value, path: &[&str]) -> Option<String> {
 }
 
 fn receipts_dir(run_digest: &str) -> Option<String> {
+    if !valid_run_digest(run_digest) {
+        return None;
+    }
     let root = std::env::var_os("SYMPHONY_FLOW_RUN_ROOT")
         .or_else(|| std::env::var_os("SYMPHONY_RUN_ROOT"))
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".local/state/symphony-temporal/runs"))
+            symphony_home_dir().map(|home| home.join(".local/state/symphony-temporal/runs"))
         })?;
     Some(
         root.join(format!("flow-{run_digest}"))
@@ -527,7 +530,10 @@ pub(crate) fn checkout_matches_repo(checkout: &Path, repo: &str) -> Result<(), S
         .ok()
         .and_then(remote_repo_identity)
         .ok_or_else(|| format!("Symphony checkout origin not understood for {repo}"))?;
-    if remote.0.eq_ignore_ascii_case(expected.0) && remote.1.eq_ignore_ascii_case(expected.1) {
+    if remote.0.eq_ignore_ascii_case(EXPECTED_REPO_HOST)
+        && remote.1.eq_ignore_ascii_case(expected.0)
+        && remote.2.eq_ignore_ascii_case(expected.1)
+    {
         Ok(())
     } else {
         Err(format!("Symphony checkout origin mismatch for {repo}"))
@@ -535,9 +541,8 @@ pub(crate) fn checkout_matches_repo(checkout: &Path, repo: &str) -> Result<(), S
 }
 
 pub(crate) fn common_checkout(repo: &str) -> Result<Option<PathBuf>, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "Symphony checkout lookup needs HOME".to_string())?;
+    let home = symphony_home_dir()
+        .ok_or_else(|| "Symphony checkout lookup needs a home directory".to_string())?;
     common_checkout_from(&home, repo)
 }
 
@@ -576,22 +581,65 @@ fn repo_identity(repo: &str) -> Option<(&str, &str)> {
     Some((owner, name))
 }
 
-fn remote_repo_identity(remote: &str) -> Option<(&str, &str)> {
+fn remote_repo_identity(remote: &str) -> Option<(&str, &str, &str)> {
     let remote = remote.trim();
-    let path = if let Some((_, authority_and_path)) = remote.split_once("://") {
+    let (authority, path) = if let Some((_, authority_and_path)) = remote.split_once("://") {
         let (authority, path) = authority_and_path.split_once('/')?;
-        if authority.is_empty() {
-            return None;
-        }
-        path
+        (authority, path)
     } else {
         let (authority, path) = remote.split_once(':')?;
-        if authority.is_empty() || authority.contains('/') || authority.contains('\\') {
-            return None;
-        }
-        path
+        (authority, path)
     };
-    repo_identity(path)
+    if authority.is_empty() || authority.contains('/') || authority.contains('\\') {
+        return None;
+    }
+    let host = match authority.rsplit_once('@') {
+        Some((user, host)) if !user.is_empty() => host,
+        Some(_) => return None,
+        None => authority,
+    };
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+    let (owner, name) = repo_identity(path)?;
+    Some((host, owner, name))
+}
+
+fn valid_run_digest(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn symphony_home_dir() -> Option<PathBuf> {
+    symphony_home_dir_from(cfg!(windows), |key| std::env::var_os(key))
+}
+
+fn symphony_home_dir_from(
+    is_windows: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let usable = |value: Option<OsString>| value.filter(|value| !value.is_empty());
+    if let Some(home) = usable(env("HOME")) {
+        return Some(PathBuf::from(home));
+    }
+    if !is_windows {
+        return None;
+    }
+    if let Some(profile) = usable(env("USERPROFILE")) {
+        return Some(PathBuf::from(profile));
+    }
+    let drive = usable(env("HOMEDRIVE"))?;
+    let path = usable(env("HOMEPATH"))?;
+    let drive = drive.to_string_lossy();
+    let path = path.to_string_lossy();
+    let separator = if path.starts_with(['\\', '/']) {
+        ""
+    } else {
+        "\\"
+    };
+    Some(PathBuf::from(format!("{drive}{separator}{path}")))
 }
 
 fn valid_repo_component(value: &str) -> bool {
@@ -822,13 +870,77 @@ mod tests {
     fn remote_identity_requires_matching_owner_and_repo() {
         assert_eq!(
             remote_repo_identity("git@github.com:owner-a/service.git"),
-            Some(("owner-a", "service"))
+            Some(("github.com", "owner-a", "service"))
         );
         assert_eq!(
             remote_repo_identity("https://github.com/owner-a/service.git"),
-            Some(("owner-a", "service"))
+            Some(("github.com", "owner-a", "service"))
         );
         assert_eq!(remote_repo_identity("../service"), None);
+    }
+
+    #[test]
+    fn checkout_rejects_matching_repo_identity_on_wrong_host() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let checkout = std::env::temp_dir().join(format!(
+            "herdr-symphony-wrong-host-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&checkout).expect("create test checkout");
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&checkout)
+            .status()
+            .expect("run git init")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://evil.invalid/owner-a/service.git",
+            ])
+            .current_dir(&checkout)
+            .status()
+            .expect("add git origin")
+            .success());
+
+        assert_eq!(
+            checkout_matches_repo(&checkout, "owner-a/service"),
+            Err("Symphony checkout origin mismatch for owner-a/service".to_string())
+        );
+
+        std::fs::remove_dir_all(checkout).expect("remove test checkout");
+    }
+
+    #[test]
+    fn symphony_windows_home_fallbacks_cover_profile_and_drive_path() {
+        let profile = symphony_home_dir_from(true, |key| {
+            (key == "USERPROFILE").then(|| OsString::from(r"C:\Users\herdr"))
+        });
+        assert_eq!(profile, Some(PathBuf::from(r"C:\Users\herdr")));
+
+        let drive_path = symphony_home_dir_from(true, |key| match key {
+            "HOMEDRIVE" => Some(OsString::from("D:")),
+            "HOMEPATH" => Some(OsString::from(r"\Agents\herdr")),
+            _ => None,
+        });
+        assert_eq!(drive_path, Some(PathBuf::from(r"D:\Agents\herdr")));
+    }
+
+    #[test]
+    fn symphony_receipts_reject_hostile_run_digest() {
+        assert!(valid_run_digest("aB3_-9"));
+        for hostile in ["", "../escape", "a/b", "a\\b", "digest.json"] {
+            assert!(
+                !valid_run_digest(hostile),
+                "accepted hostile digest {hostile}"
+            );
+            assert_eq!(receipts_dir(hostile), None);
+        }
     }
 
     #[test]

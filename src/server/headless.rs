@@ -2461,11 +2461,7 @@ impl HeadlessServer {
             let Some(detail) = client.symphony_detail.as_mut() else {
                 continue;
             };
-            detail.snapshot = snapshot.clone();
-            detail.selected = detail
-                .selected
-                .min(detail.snapshot.workflows.len().saturating_sub(1));
-            detail.observed_at = std::time::SystemTime::now();
+            detail.replace_snapshot(snapshot.clone());
         }
     }
 

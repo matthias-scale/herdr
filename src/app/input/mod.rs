@@ -179,11 +179,6 @@ impl App {
                 Some("Symphony workflow has no repository checkout".to_string());
             return;
         };
-        let Some(repo_name) = crate::symphony::repo_name(repo) else {
-            self.state.config_diagnostic =
-                Some(format!("Invalid Symphony repository name: {repo}"));
-            return;
-        };
         let mut verification_error = None;
         let workspace_match =
             self.state
@@ -195,9 +190,6 @@ impl App {
                         &self.state.terminals,
                         &self.terminal_runtimes,
                     )?;
-                    if cwd.file_name().and_then(|name| name.to_str()) != Some(repo_name) {
-                        return None;
-                    }
                     match crate::symphony::checkout_matches_repo(&cwd, repo) {
                         Ok(()) => Some((index, cwd)),
                         Err(error) => {
@@ -242,7 +234,7 @@ impl App {
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || self.state.symphony_detail.is_some() {
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -282,7 +274,7 @@ impl App {
     }
 
     pub(super) async fn handle_text_commit(&mut self, text: String) {
-        if text.is_empty() {
+        if text.is_empty() || self.state.symphony_detail.is_some() {
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -322,6 +314,9 @@ impl App {
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
+        if self.state.symphony_detail.is_some() {
+            return;
+        }
         if self.state.popup_pane.is_some() {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.send_paste(text).await;
@@ -490,6 +485,9 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        if self.state.symphony_detail.is_some() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.pending_url_click_sources.remove(&source_id);
@@ -1240,6 +1238,32 @@ mod tests {
         app.handle_text_commit_headless("continue");
         assert!(rx.try_recv().is_ok());
         assert_blocked_hook_retired(&app, &terminal_id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn symphony_overlay_blocks_text_paste_and_headless_keys() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.state.toggle_symphony();
+
+        app.handle_text_commit("hidden command\n".into()).await;
+        app.handle_text_commit_headless("hidden command\n");
+        app.handle_paste("hidden command\n".into()).await;
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste(
+                "hidden command\n".into(),
+            )],
+            false,
+        );
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('x'),
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert!(app.state.symphony_detail.is_some());
     }
 
     #[tokio::test]

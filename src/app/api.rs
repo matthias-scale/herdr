@@ -449,11 +449,7 @@ impl App {
             || self.state.symphony_snapshot.unavailable != snapshot.unavailable;
         self.state.symphony_snapshot = snapshot.clone();
         if let Some(detail) = self.state.symphony_detail.as_mut() {
-            detail.snapshot = snapshot;
-            detail.selected = detail
-                .selected
-                .min(detail.snapshot.workflows.len().saturating_sub(1));
-            detail.observed_at = std::time::SystemTime::now();
+            detail.replace_snapshot(snapshot);
         }
         changed || self.state.symphony_detail.is_some()
     }
