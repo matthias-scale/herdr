@@ -1005,5 +1005,198 @@ class StopHookTranscriptTests(unittest.TestCase):
         self.assertIsNone(hook.last_assistant_text("/nonexistent/transcript.jsonl"))
 
 
+class QuestionGateHookTests(unittest.TestCase):
+    """`AskUserQuestion` opens a gate mid-turn, where no `Stop` ever fires."""
+
+    @staticmethod
+    def _hook_module():
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "herdr-question-gate.py")
+        spec = importlib.util.spec_from_file_location("herdr_question_gate_hook", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def setUp(self):
+        import tempfile
+
+        self.hook = self._hook_module()
+        self.pane_id = "w1:p1"
+        state_dir = tempfile.mkdtemp(prefix="herdr-question-gate-test-")
+        patch = mock.patch.dict(
+            herdr_status.os.environ,
+            {
+                "XDG_STATE_HOME": state_dir,
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": self.pane_id,
+                "HERDR_SOCKET_PATH": "/tmp/herdr-question-gate-test.sock",
+            },
+            clear=False,
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        rpc = mock.patch.object(herdr_status, "_rpc")
+        self.rpc = rpc.start()
+        self.addCleanup(rpc.stop)
+
+    # Captured verbatim from a live `AskUserQuestion` PreToolUse payload.
+    _PRE = {
+        "session_id": "sess-1",
+        "transcript_path": "/tmp/sess-1.jsonl",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": "toolu_1",
+        "tool_input": {
+            "questions": [
+                {
+                    "question": "Which color do you prefer?",
+                    "header": "Color",
+                    "options": [
+                        {"label": "Red", "description": "Warm."},
+                        {"label": "Green", "description": "Calm."},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        },
+    }
+    _POST = {
+        "session_id": "sess-1",
+        "transcript_path": "/tmp/sess-1.jsonl",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": "toolu_1",
+        "tool_input": _PRE["tool_input"],
+        "tool_response": {"answers": {"Which color do you prefer?": "Red"}},
+    }
+
+    def _run(self, payload):
+        import io
+        import json
+
+        stdin = io.StringIO(json.dumps(payload))
+        with mock.patch.object(self.hook.sys, "stdin", stdin):
+            self.assertEqual(self.hook.main(), 0)
+
+    def _reports(self):
+        return [
+            call.args[3]
+            for call in self.rpc.call_args_list
+            if call.args[2] == "pane.report_agent"
+        ]
+
+    def test_opening_the_dialog_reports_blocked_with_the_question(self):
+        self._run(self._PRE)
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["state"], "blocked")
+        self.assertEqual(reports[0]["source"], "herdr:claude-closing-block")
+        self.assertIn("Which color do you prefer?", reports[0]["gates"][0]["text"])
+        self.assertIn("Red / Green", reports[0]["gates"][0]["text"])
+        self.assertIn("Which color do you prefer?", reports[0]["message"])
+
+    def test_the_gate_binds_to_the_reporting_session(self):
+        self._run(self._PRE)
+
+        session = [
+            call.args[3]
+            for call in self.rpc.call_args_list
+            if call.args[2] == "pane.report_agent_session"
+        ]
+        self.assertEqual(session[0]["agent_session_id"], "sess-1")
+        self.assertEqual(session[0]["agent_session_path"], "/tmp/sess-1.jsonl")
+
+    def test_answering_returns_the_pane_to_working_not_idle(self):
+        self._run(self._PRE)
+        self._run(self._POST)
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 2)
+        # Zero counts alone would read as `idle` and publish a finished turn.
+        self.assertEqual(reports[1]["state"], "working")
+        self.assertEqual(reports[1]["gates"], [])
+        self.assertGreater(reports[1]["seq"], reports[0]["seq"])
+
+    def test_a_prompt_submit_clears_a_dialog_cancelled_with_escape(self):
+        self._run(self._PRE)
+        self._run(
+            {
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/sess-1.jsonl",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "never mind",
+            }
+        )
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[1]["state"], "working")
+
+    def test_a_prompt_submit_without_an_open_gate_reports_nothing(self):
+        self._run(
+            {
+                "session_id": "sess-1",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "ordinary work",
+            }
+        )
+
+        self.assertEqual(self._reports(), [])
+
+    def test_a_gate_is_only_cleared_by_the_session_that_opened_it(self):
+        self._run(self._PRE)
+        stale = dict(self._POST, session_id="sess-2", hook_event_name="UserPromptSubmit")
+        self._run(stale)
+
+        self.assertEqual(len(self._reports()), 1)
+        # The original session can still clear its own gate.
+        self._run(self._POST)
+        self.assertEqual(len(self._reports()), 2)
+
+    def test_other_tools_and_subagents_are_ignored(self):
+        self._run(dict(self._PRE, tool_name="Bash"))
+        self._run(dict(self._PRE, agent_id="sub-1"))
+
+        self.assertEqual(self._reports(), [])
+
+    def test_outside_herdr_nothing_is_reported(self):
+        with mock.patch.dict(herdr_status.os.environ, {"HERDR_ENV": "0"}, clear=False):
+            self._run(self._PRE)
+        self.assertEqual(self._reports(), [])
+
+    def test_multiple_questions_report_one_gate_each(self):
+        payload = dict(self._PRE)
+        payload["tool_input"] = {
+            "questions": [
+                {"question": "First?", "options": [{"label": "A"}]},
+                {"question": "Second?", "options": [{"label": "B"}]},
+            ]
+        }
+        self._run(payload)
+
+        reports = self._reports()
+        self.assertEqual(len(reports[0]["gates"]), 2)
+        self.assertEqual(reports[0]["state"], "blocked")
+
+    def test_a_malformed_tool_input_still_opens_a_gate(self):
+        self._run(dict(self._PRE, tool_input={"questions": "not a list"}))
+
+        reports = self._reports()
+        self.assertEqual(reports[0]["state"], "blocked")
+        self.assertEqual(reports[0]["gates"][0]["text"], "Question waiting")
+
+
+class ExplicitStateTests(unittest.TestCase):
+    def test_an_override_names_a_state_the_counts_cannot(self):
+        self.assertEqual(herdr_status.resolve_state(0, 0, "working"), "working")
+        self.assertEqual(herdr_status.resolve_state(0, 0, None), "idle")
+        # Junk must degrade to the counts, never reach the server verbatim.
+        self.assertEqual(herdr_status.resolve_state(1, 0, "nonsense"), "blocked")
+        self.assertEqual(herdr_status.resolve_state(0, 1, 7), "working")
+
+
 if __name__ == "__main__":
     unittest.main()
