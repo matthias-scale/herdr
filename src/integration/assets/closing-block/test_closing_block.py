@@ -830,5 +830,51 @@ class ClosingBlockV2Tests(unittest.TestCase):
         return tempfile.mkdtemp(prefix="herdr-closing-block-test-")
 
 
+class StopHookTranscriptTests(unittest.TestCase):
+    @staticmethod
+    def _hook_module():
+        import importlib.util
+        import os
+
+        path = os.path.join(os.path.dirname(__file__), "herdr-closing-block.py")
+        spec = importlib.util.spec_from_file_location("herdr_closing_block_hook", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _write_transcript(self, lines):
+        import os
+        import tempfile
+
+        fd, path = tempfile.mkstemp(prefix="herdr-transcript-", suffix=".jsonl")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    _ASSISTANT_ROW = (
+        '{"type": "assistant", "message": {"content": '
+        '[{"type": "text", "text": "Done here."}]}}'
+    )
+
+    def test_torn_trailing_line_does_not_discard_transcript(self):
+        hook = self._hook_module()
+        path = self._write_transcript(
+            [self._ASSISTANT_ROW, '{"type": "system", "subtype": "stop_hook_su']
+        )
+        self.assertEqual(hook.last_assistant_text(path), "Done here.")
+
+    def test_torn_line_mid_file_is_skipped(self):
+        hook = self._hook_module()
+        path = self._write_transcript(
+            ['{"broken', self._ASSISTANT_ROW, '{"type": "user"}']
+        )
+        self.assertEqual(hook.last_assistant_text(path), "Done here.")
+
+    def test_missing_file_returns_none(self):
+        hook = self._hook_module()
+        self.assertIsNone(hook.last_assistant_text("/nonexistent/transcript.jsonl"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,10 +27,19 @@ from herdr_status import report  # noqa: E402
 
 
 def last_assistant_text(transcript_path: str) -> str | None:
+    rows = []
     try:
         with open(transcript_path, encoding="utf-8") as fh:
-            rows = [json.loads(line) for line in fh if line.strip()]
-    except (OSError, ValueError):
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    # Claude Code appends concurrently with the Stop hook; a
+                    # torn trailing line must not discard the whole transcript.
+                    continue
+    except OSError:
         return None
     for row in reversed(rows):
         if row.get("type") != "assistant" or row.get("isSidechain"):
