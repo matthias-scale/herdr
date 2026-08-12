@@ -1480,6 +1480,7 @@ mod tests {
             foreground_process_name: None,
             prio: false,
             state: AgentState::Idle,
+            open_blockers: false,
             background_job_count: None,
             seen: true,
             stale: false,
@@ -1755,27 +1756,28 @@ mod tests {
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
 
         assert_eq!(agent_panel_entries(&app).len(), 2);
-        // Spaces title + new-workspace action precede the workspace, followed
+        // Spaces title + new-workspace action, then the always-present
+        // Blocked and Spaces section headers, precede the workspace, followed
         // immediately by its two disclosed single-line tab rows.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 0)
                 .expect("workspace row")
                 .start,
-            2
+            4
         );
 
         let viewport = mobile_switcher_areas(&app).viewport;
-        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 2);
+        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
         assert_eq!(
-            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 3),
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 0
             })
         );
         assert_eq!(
-            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4),
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 6),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 1
@@ -1969,22 +1971,23 @@ mod tests {
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
 
         // Linked worktrees no longer create an intermediate Space row. Their
-        // windows remain direct children of the root Space.
+        // windows remain direct children of the root Space, below the
+        // always-present Blocked and Spaces section headers.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 2)
                 .expect("linked worktree window row")
                 .start,
-            4
+            6
         );
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 1)
                 .expect("workspace row")
                 .start,
-            5
+            7
         );
 
         let viewport = mobile_switcher_areas(&app).viewport;
-        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 6);
         assert_eq!(
             hit,
             Some(MobileSwitcherTarget::SidebarTab {
@@ -1999,9 +2002,9 @@ mod tests {
             mobile_switcher_workspace_doc_range(&app, 2)
                 .expect("linked worktree window row")
                 .start,
-            4
+            6
         );
-        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 6);
         assert!(matches!(
             hit,
             Some(MobileSwitcherTarget::SidebarTab {
@@ -2018,13 +2021,14 @@ mod tests {
         app.active = Some(0);
         app.selected = 0;
 
-        // No attached terminals -> no agents -> no agents header, spaces lead.
+        // No attached terminals -> no agents -> no Agents header, but the
+        // Blocked and Spaces headers are always present ahead of the tree.
         assert_eq!(agent_panel_entries(&app).len(), 0);
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 0)
                 .expect("workspace row")
                 .start,
-            2
+            4
         );
     }
 

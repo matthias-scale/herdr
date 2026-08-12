@@ -20,6 +20,10 @@ pub struct PaneDetail {
     pub agent_context: Option<Agent>,
     pub has_agent: bool,
     pub state: AgentState,
+    /// The last closing-block report still names at least one gate. Outlives
+    /// the blocked lifecycle state: output retirement may flip the pane back
+    /// to working while the human decision is still open.
+    pub open_blockers: bool,
     pub background_job_count: Option<u16>,
     pub foreground_process_name: Option<String>,
     pub seen: bool,
@@ -79,6 +83,7 @@ impl Tab {
                     agent_context: terminal.agent_lifecycle_context(),
                     has_agent: terminal.agent_lifecycle_context().is_some(),
                     state: terminal.state,
+                    open_blockers: !terminal.closing_gates.is_empty(),
                     background_job_count: terminal.background_job_count,
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen: pane.seen,

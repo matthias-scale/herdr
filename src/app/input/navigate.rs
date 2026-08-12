@@ -3797,7 +3797,10 @@ navigate_pane_right = "ctrl+l"
         );
 
         assert_eq!(state.selected, 1);
-        assert_eq!(state.mobile_switcher_scroll, 0);
+        // The always-present Blocked and Spaces headers now eat two rows of
+        // the short 8-row viewport, so keeping row 1 visible requires a
+        // one-row scroll where it previously needed none.
+        assert_eq!(state.mobile_switcher_scroll, 1);
     }
 
     #[test]

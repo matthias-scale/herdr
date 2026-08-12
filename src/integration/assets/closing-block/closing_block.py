@@ -14,11 +14,19 @@ from datetime import datetime, timezone
 from typing import Any
 
 # HERDR_INTEGRATION_VERSION=1
+# The header line alone is the trigger: agents drop the bold markers, add a
+# heading marker or a colon, or vary the case often enough that any strictness
+# here silently un-latches gates. The `(N blocking)` count on this line is what
+# blocks; item parsing below it is best-effort detail. Only the full-line
+# anchor is kept so prose mentions never match.
 _HEADER_RE = re.compile(
-    r"^\*\*Critical action points(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?\*\*[ \t]*\r?$",
-    re.MULTILINE,
+    r"^(?:#{1,6}[ \t]*)?(?:\*\*)?Critical action points"
+    r"(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?(?:\*\*)?[ \t]*:?[ \t]*\r?$",
+    re.MULTILINE | re.IGNORECASE,
 )
-_NOTHING_RE = re.compile(r"^\*\*Nothing to act on\.?\*\*[ \t]*\r?$", re.MULTILINE)
+_NOTHING_RE = re.compile(
+    r"^(?:\*\*)?Nothing to act on\.?(?:\*\*)?[ \t]*\r?$", re.MULTILINE
+)
 _AGENTS_RE = re.compile(
     r"^(?P<n>\d+)[ \t]+agents?[ \t]+running:[ \t]*(?P<rest>.+?)[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
@@ -29,9 +37,14 @@ _FENCE_OPEN_RE = re.compile(
 )
 _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 
-_ITEM_START = r"^\d+[.)]\s*\*\*(?:Gate|Answer|Verify)\*\*"
+# A label is bold in the authored form; a plain `Gate — ...` prefix counts too,
+# but only with a following separator so an item that merely *starts* with the
+# word (`Verify the deploy...`) stays unlabeled instead of being half-eaten.
+_ITEM_START = r"^\d+[.)][ \t]"
 _ITEM_RE = re.compile(
-    rf"^(?P<idx>\d+)[.)]\s*\*\*(?P<label>Gate|Answer|Verify)\*\*"
+    rf"^(?P<idx>\d+)[.)]\s*"
+    rf"(?:\*\*(?P<label>Gate|Answer|Verify)\*\*"
+    rf"|(?P<plain_label>Gate|Answer|Verify)(?=[ \t]*(?:[—–:]|-[ \t])))?"
     rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\*\*What to test\b|"
     r"^\*\*Auto-proceeded decisions\*\*|^\d+\s+agents?\s+running:|"
     r"^Done here\.|\Z)",
@@ -158,8 +171,10 @@ class ClosingBlock:
 
     @property
     def blocking(self) -> int:
-        # Item labels are authoritative; a declared count cannot create gates.
-        return len(self.gates)
+        # Labeled gates are authoritative for detail, but a header that
+        # declares more blocking items than could be parsed still blocks:
+        # under-reporting a gate is the failure mode this exists to prevent.
+        return max(len(self.gates), self.declared_blocking or 0)
 
     @property
     def agents_running(self) -> int:
@@ -178,8 +193,10 @@ class ClosingBlock:
     def message(self) -> str | None:
         if self.blocking > 0:
             head = self.gates[0].text if self.gates else ""
+            if not head:
+                return f"{self.blocking} blocking"
             extra = f" (+{self.blocking - 1})" if self.blocking > 1 else ""
-            return ((head or f"{self.blocking} blocking")[:80]) + extra
+            return head[:80] + extra
         if self.agents_running > 0:
             n = self.agents_running
             return f"{n} agent{'s' if n != 1 else ''} running"
@@ -369,10 +386,11 @@ def _parse_items(
             )
         item_end = min(end_candidates)
         body = text[match.start("body") : item_end]
+        label = match.group("label") or match.group("plain_label") or ""
         parsed.append(
             Item(
                 int(match.group("idx")),
-                match.group("label").capitalize(),
+                label.capitalize(),
                 _clean_body(body),
             )
         )
@@ -459,6 +477,17 @@ def parse(text: str) -> ClosingBlock:
 
         if start is not None:
             block.items.extend(_parse_items(text, start, selected.end, fences))
+            # Unlabeled numbered items exist only in the lenient plain form.
+            # Promote them to gates, oldest first, until the declared blocking
+            # count is met; the rest are dropped exactly as the strict parser
+            # always dropped them, so labeled authoring is unchanged.
+            labeled_gates = len(block.gates)
+            declared = block.declared_blocking or 0
+            for item in block.items:
+                if item.label == "" and labeled_gates < declared:
+                    item.label = "Gate"
+                    labeled_gates += 1
+            block.items = [item for item in block.items if item.label]
             block.items.extend(
                 _parse_what_to_test(
                     text, start, selected.end, block.items, fences

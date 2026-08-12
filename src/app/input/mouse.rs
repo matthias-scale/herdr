@@ -4148,7 +4148,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 4,
-            viewport.y + 3,
+            viewport.y + 5,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -4240,7 +4240,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 4,
+            viewport.y + 6,
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, target_tab);
@@ -4282,7 +4282,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 4,
-            viewport.y + 1,
+            viewport.y + 3,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -4325,7 +4325,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 3,
+            viewport.y + 5,
         ));
         assert_eq!(app.state.workspaces[0].active_tab, 2);
     }
@@ -4426,7 +4426,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 4,
+            viewport.y + 6,
         ));
 
         assert_eq!(app.state.mode, Mode::RenameTab);
@@ -4456,7 +4456,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 4,
+            viewport.y + 6,
         ));
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(!app.state.creating_new_tab);

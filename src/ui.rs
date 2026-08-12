@@ -1660,7 +1660,9 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         let (ws_area, _, _) = collapsed_sidebar_sections(app.view.sidebar_rect);
-        let active_row = ws_area.y + 1;
+        // Skip past the always-present Blocked and Spaces header rows to land
+        // on workspace "two" (the active one).
+        let active_row = ws_area.y + 3;
         let active_style = buffer[(ws_area.x, active_row)].style();
 
         assert_eq!(active_style.fg, Some(app.palette.text));
