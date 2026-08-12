@@ -205,6 +205,7 @@ mod tests {
             foreground_process_name: None,
             prio: false,
             state: AgentState::Working,
+            open_blockers: false,
             background_job_count: None,
             seen: true,
             stale: false,

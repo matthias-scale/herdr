@@ -296,6 +296,9 @@ pub(crate) struct AgentPanelEntry {
     pub has_agent: bool,
     pub prio: bool,
     pub state: AgentState,
+    /// The last closing-block report still names at least one gate, even if
+    /// the lifecycle state has moved on. Drives the persistent red blocker dot.
+    pub open_blockers: bool,
     pub background_job_count: Option<u16>,
     pub seen: bool,
     pub stale: bool,
@@ -516,6 +519,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         has_agent: detail.has_agent,
                         prio,
                         state: detail.state,
+                        open_blockers: detail.open_blockers,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         stale: detail.stale,
@@ -665,6 +669,7 @@ fn aggregate_tab_entries(
                     }
                     *has_agent |= entry.has_agent;
                     *has_current_agent |= entry.agent.is_some();
+                    tab_entry.open_blockers |= entry.open_blockers;
                 },
             )
             .or_insert_with(|| {
@@ -2602,6 +2607,12 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
     };
     spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
+    if entry.open_blockers && entry.state != AgentState::Blocked {
+        spans.extend([
+            Span::styled("●", Style::default().fg(p.red)),
+            Span::raw(" "),
+        ]);
+    }
     if let Some(state) = layout.state.as_deref() {
         let state_icon = state_icon_with_stale(
             entry.state,
@@ -2714,7 +2725,18 @@ fn render_agent_card(
         };
         let prefix_width = display_width_u16(&prefix);
         let mut spans = vec![Span::raw(prefix)];
-        let content_width = rect.width.saturating_sub(prefix_width) as usize;
+        let mut blocker_dot_width = 0u16;
+        if row_index == 0 && detail.open_blockers && detail.state != AgentState::Blocked {
+            spans.extend([
+                Span::styled("●", Style::default().fg(p.red)),
+                Span::raw(" "),
+            ]);
+            blocker_dot_width = 2;
+        }
+        let content_width = rect
+            .width
+            .saturating_sub(prefix_width)
+            .saturating_sub(blocker_dot_width) as usize;
         let resolve_tokens = |max_width| {
             resolved_token_spans(
                 resolved,
@@ -3055,6 +3077,7 @@ mod tests {
             has_agent: true,
             prio: true,
             state,
+            open_blockers: false,
             background_job_count: None,
             seen,
             stale: false,
@@ -3590,6 +3613,46 @@ mod tests {
 
         assert!(text.iter().any(|line| line.contains('×')), "{text:?}");
         assert!(text.iter().any(|line| line.contains('✓')), "{text:?}");
+    }
+
+    #[test]
+    fn a_working_pane_with_persisted_gates_keeps_a_red_blocker_dot() {
+        let mut app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.state = AgentState::Working;
+        terminal.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the open PR".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        assert!(entry.open_blockers);
+        assert_eq!(entry.state, AgentState::Working);
+
+        // The dot clears once a later report carries no gates.
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        assert!(!entry.open_blockers);
     }
 
     #[test]
