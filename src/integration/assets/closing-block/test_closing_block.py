@@ -860,19 +860,50 @@ class StopHookTranscriptTests(unittest.TestCase):
     def test_torn_trailing_line_does_not_discard_transcript(self):
         hook = self._hook_module()
         path = self._write_transcript(
-            [self._ASSISTANT_ROW, '{"type": "system", "subtype": "stop_hook_su']
+            [
+                '{"type": "user"}',
+                self._ASSISTANT_ROW,
+                '{"type": "system", "subtype": "stop_hook_su',
+            ]
         )
         self.assertEqual(hook.last_assistant_text(path), "Done here.")
 
     def test_torn_line_mid_file_is_skipped(self):
         hook = self._hook_module()
-        path = self._write_transcript(
-            ['{"broken', self._ASSISTANT_ROW, '{"type": "user"}']
-        )
+        path = self._write_transcript(['{"broken', '{"type": "user"}', self._ASSISTANT_ROW])
         self.assertEqual(hook.last_assistant_text(path), "Done here.")
+
+    def test_waits_for_the_assistant_row_to_flush(self):
+        hook = self._hook_module()
+        path = self._write_transcript(['{"type": "user"}'])
+
+        def append_reply():
+            import time
+
+            time.sleep(0.3)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(self._ASSISTANT_ROW + "\n")
+
+        writer = threading.Thread(target=append_reply)
+        writer.start()
+        try:
+            self.assertEqual(hook.last_assistant_text(path), "Done here.")
+        finally:
+            writer.join()
+
+    def test_stale_text_is_a_timeout_fallback_not_a_fresh_read(self):
+        hook = self._hook_module()
+        hook.FLUSH_WAIT_SECONDS = 0.3
+        path = self._write_transcript([self._ASSISTANT_ROW, '{"type": "user"}'])
+        import time
+
+        started = time.monotonic()
+        self.assertEqual(hook.last_assistant_text(path), "Done here.")
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
 
     def test_missing_file_returns_none(self):
         hook = self._hook_module()
+        hook.FLUSH_WAIT_SECONDS = 0.2
         self.assertIsNone(hook.last_assistant_text("/nonexistent/transcript.jsonl"))
 
 
