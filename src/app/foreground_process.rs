@@ -154,14 +154,24 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
         // stops there too: past it a bare `-NoExit` is a word in the command
         // being run, not a request to stay.
         "pwsh" | "powershell" => {
-            let mut stays_interactive = false;
-            for argument in arguments() {
-                if powershell_command_flag(argument) {
-                    return !stays_interactive;
+            let mut arguments = arguments();
+            let mut runs_one_thing = false;
+            while let Some(argument) = arguments.next() {
+                if powershell_flag(argument, "noexit", 3) {
+                    return false;
                 }
-                stays_interactive |= powershell_flag(argument, "noexit", 3);
+                // `-EncodedCommand` takes exactly one value and PowerShell goes
+                // on reading switches after it, so the search continues past it.
+                // The other forms end switch parsing, and what follows is the
+                // command text or the script's own arguments.
+                if powershell_flag(argument, "encodedcommand", 1) {
+                    arguments.next();
+                    runs_one_thing = true;
+                } else if powershell_command_flag(argument) {
+                    return true;
+                }
             }
-            false
+            runs_one_thing
         }
         // `cmd /c`, and only `/c` — `/k` runs the command and then stays.
         "cmd" => arguments().any(|argument| {
@@ -182,12 +192,15 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
     }
 }
 
-/// The switches that hand PowerShell the one thing it should run and then be
-/// done with: `-Command`, `-EncodedCommand` and `-File`, plus `-CommandWithArgs`
-/// from PowerShell 7.4 with its own `-cwa` alias. All four end switch parsing,
-/// so everything after them belongs to the work rather than to the shell.
+/// The switches that hand PowerShell the one thing it should run and end switch
+/// parsing with it: `-Command`, `-File`, and `-CommandWithArgs` from PowerShell
+/// 7.4 with its own `-cwa` alias. Everything after one of these belongs to the
+/// work — the command text, or the script's own arguments — not to the shell.
+///
+/// `-File -` counts: the script arrives on the pipe the agent opened and the
+/// shell is done at end of input.
 fn powershell_command_flag(argument: &str) -> bool {
-    ["command", "commandwithargs", "encodedcommand", "file"]
+    ["command", "commandwithargs", "file"]
         .iter()
         .any(|name| powershell_flag(argument, name, 1))
         || argument
@@ -710,6 +723,14 @@ mod tests {
             vec!["pwsh", "-NoExit", "-Command", "Start-Sleep 1"],
             vec!["pwsh", "-noex", "-c", "Start-Sleep 1"],
             vec!["pwsh", "-NoExit", "-File", "C:\\work\\build.ps1"],
+            // `-EncodedCommand` takes one value and switch parsing goes on, so
+            // this `-NoExit` is a switch and the shell stays.
+            vec![
+                "pwsh",
+                "-EncodedCommand",
+                "UwB0AGEAcgB0AC0AUwBsAGUAZQBwAA==",
+                "-NoExit",
+            ],
             vec!["cmd.exe", "/k", "prompt"],
             vec!["bash", "-C"],
         ] {
