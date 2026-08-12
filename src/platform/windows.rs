@@ -825,7 +825,7 @@ fn available_pane_shell_from_snapshot(
 /// already reports the selected agent entry together with its descendants; the
 /// pane sub-process probe filters those out by pid and only adds whatever the
 /// foreground job left behind.
-pub fn descendant_processes(root_pid: u32) -> Vec<ForegroundProcess> {
+pub fn descendant_processes(root_pid: u32) -> Vec<super::ForegroundProcess> {
     let entries = cached_foreground_processes();
     descendant_entries(root_pid, &entries)
         .into_iter()
