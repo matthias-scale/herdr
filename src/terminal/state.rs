@@ -4235,6 +4235,48 @@ mod tests {
         assert_ne!(terminal.state, AgentState::Blocked);
     }
 
+    /// A turn-end report describes the agent, not the work it left running. A
+    /// `run_in_background` command outlives the turn, and the pane stays Working
+    /// until that process tree is quiet -- then the reported idle stands.
+    #[test]
+    fn a_live_agent_subprocess_holds_a_turn_end_report_working() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::path(test_session_path("subprocess.jsonl")),
+            Some(999),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        assert_eq!(terminal.state, AgentState::Idle);
+
+        terminal.set_foreground_process(Some("codex".into()), true, now);
+        assert_eq!(
+            terminal.state,
+            AgentState::Working,
+            "a live sub-process must outrank the turn-end report"
+        );
+
+        terminal.set_foreground_process(None, false, now);
+        assert_eq!(
+            terminal.state,
+            AgentState::Idle,
+            "the reported idle stands once the sub-process tree is quiet"
+        );
+    }
+
     #[test]
     fn rapid_restart_replays_reports_that_arrive_before_process_evidence() {
         let mut terminal = test_terminal();

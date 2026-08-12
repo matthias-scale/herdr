@@ -225,6 +225,58 @@ pub(crate) fn foreground_process_job(child_pid: u32) -> Option<ForegroundJob> {
     foreground_job(child_pid)
 }
 
+/// Depth cap for the pane sub-process walk.
+///
+/// An agent's background command sits two or three levels under the agent
+/// process (wrapper shell, command, its own children). The cap only exists so a
+/// pathological or cyclic parent table cannot turn a 1.5s refresh into an
+/// unbounded walk.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) const DESCENDANT_SCAN_MAX_DEPTH: usize = 8;
+/// Process cap for the pane sub-process walk, for the same reason.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) const DESCENDANT_SCAN_MAX_PROCESSES: usize = 64;
+
+/// Collect the live descendants of `root_pid`, breadth-first and capped.
+///
+/// Only real descendants are returned: a process that daemonizes away from the
+/// agent is reparented to init and drops out of this walk, so it cannot hold a
+/// pane in any state forever.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn collect_descendant_processes(
+    root_pid: u32,
+    child_pids: impl Fn(u32) -> Vec<u32>,
+    details: impl Fn(u32) -> Option<ForegroundProcess>,
+) -> Vec<ForegroundProcess> {
+    let mut seen = std::collections::HashSet::from([root_pid]);
+    let mut processes = Vec::new();
+    let mut frontier = vec![root_pid];
+
+    for _ in 0..DESCENDANT_SCAN_MAX_DEPTH {
+        let mut next = Vec::new();
+        for pid in frontier {
+            for child in child_pids(pid) {
+                if !seen.insert(child) {
+                    continue;
+                }
+                if let Some(process) = details(child) {
+                    processes.push(process);
+                }
+                if processes.len() >= DESCENDANT_SCAN_MAX_PROCESSES {
+                    return processes;
+                }
+                next.push(child);
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    processes
+}
+
 /// Cached native metrics for the full-width top status bar (tmux-parity).
 pub(crate) mod status_metrics;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -379,6 +431,49 @@ impl PrefixInputSource for RealPrefixInputSource {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn test_process(pid: u32) -> ForegroundProcess {
+        ForegroundProcess {
+            pid,
+            name: format!("process-{pid}"),
+            argv0: None,
+            argv: None,
+            cmdline: None,
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn descendants_are_collected_through_the_whole_tree() {
+        let processes = collect_descendant_processes(
+            1,
+            |pid| match pid {
+                1 => vec![2, 3],
+                2 => vec![4],
+                _ => Vec::new(),
+            },
+            |pid| Some(test_process(pid)),
+        );
+
+        let pids: Vec<u32> = processes.iter().map(|process| process.pid).collect();
+        assert_eq!(pids, vec![2, 3, 4]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_cyclic_or_endless_parent_table_cannot_stall_the_walk() {
+        let cycle =
+            collect_descendant_processes(1, |pid| vec![pid % 3 + 1], |pid| Some(test_process(pid)));
+        assert!(cycle.len() < DESCENDANT_SCAN_MAX_PROCESSES);
+
+        let unbounded = collect_descendant_processes(
+            1,
+            |pid| vec![pid * 2, pid * 2 + 1],
+            |pid| Some(test_process(pid)),
+        );
+        assert_eq!(unbounded.len(), DESCENDANT_SCAN_MAX_PROCESSES);
+    }
 
     #[test]
     fn terminal_wake_signals_are_recorded_once_per_delivery() {

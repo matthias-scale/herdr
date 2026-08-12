@@ -294,6 +294,7 @@ pub(crate) use super::unix_common::{
     remote_reattach_program, remote_ssh_config_paths,
 };
 const PROC_PGRP_ONLY: u32 = 2;
+const PROC_PPID_ONLY: u32 = 6;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
@@ -598,6 +599,35 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
 }
 
 fn process_group_pids(process_group_id: u32) -> Vec<u32> {
+    listed_pids(PROC_PGRP_ONLY, process_group_id)
+}
+
+/// Live descendants of `root_pid`, used to see agent sub-processes that left
+/// the pane's foreground process group.
+pub fn descendant_processes(root_pid: u32) -> Vec<ForegroundProcess> {
+    if root_pid == 0 {
+        return Vec::new();
+    }
+
+    super::collect_descendant_processes(
+        root_pid,
+        |pid| listed_pids(PROC_PPID_ONLY, pid),
+        |pid| {
+            let info = process_bsdinfo(pid)?;
+            let name = comm_from_bsdinfo(&info)?;
+            let argv = process_argv(pid);
+            Some(ForegroundProcess {
+                pid,
+                name,
+                argv0: process_argv0_name(pid),
+                cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+                argv,
+            })
+        },
+    )
+}
+
+fn listed_pids(kind: u32, value: u32) -> Vec<u32> {
     let mut capacity = 16usize;
 
     for _ in 0..8 {
@@ -605,8 +635,8 @@ fn process_group_pids(process_group_id: u32) -> Vec<u32> {
         let buffer_bytes = pids.len() * std::mem::size_of::<libc::pid_t>();
         let returned_bytes = unsafe {
             libc::proc_listpids(
-                PROC_PGRP_ONLY,
-                process_group_id,
+                kind,
+                value,
                 pids.as_mut_ptr() as *mut libc::c_void,
                 buffer_bytes as libc::c_int,
             )

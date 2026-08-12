@@ -477,6 +477,92 @@ fn process_pgrp_and_comm_from_stat(stat: &str) -> Option<(i32, String)> {
     Some((pgrp, comm))
 }
 
+/// Live descendants of `root_pid`, used to see agent sub-processes that left
+/// the pane's foreground process group.
+pub fn descendant_processes(root_pid: u32) -> Vec<ForegroundProcess> {
+    if root_pid == 0 {
+        return Vec::new();
+    }
+
+    super::collect_descendant_processes(root_pid, child_pids, |pid| {
+        let (_, name) = process_pgrp_and_comm(pid)?;
+        let argv = process_argv(pid);
+        Some(ForegroundProcess {
+            pid,
+            name,
+            argv0: None,
+            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+            argv,
+        })
+    })
+}
+
+/// Direct children of `pid`.
+///
+/// `/proc/<pid>/task/<tid>/children` is one read per thread and needs no
+/// system-wide scan, so it is the primary source. Kernels built without
+/// `CONFIG_PROC_CHILDREN` do not expose it; those fall back to a single scan of
+/// `/proc` for processes whose parent is `pid`.
+fn child_pids(pid: u32) -> Vec<u32> {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+
+    let mut children = Vec::new();
+    let mut children_file_seen = false;
+    for task in tasks.flatten() {
+        let path = task.path().join("children");
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        children_file_seen = true;
+        children.extend(parse_child_pids(&contents));
+    }
+
+    if children_file_seen {
+        return children;
+    }
+
+    child_pids_by_scan(pid)
+}
+
+fn parse_child_pids(contents: &str) -> Vec<u32> {
+    contents
+        .split_ascii_whitespace()
+        .filter_map(|value| value.parse::<u32>().ok())
+        .filter(|child| *child > 0)
+        .collect()
+}
+
+fn child_pids_by_scan(pid: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok())
+        })
+        .filter(|candidate: &u32| {
+            std::fs::read_to_string(format!("/proc/{candidate}/stat"))
+                .ok()
+                .and_then(|stat| parent_pid_from_stat(&stat))
+                == Some(pid)
+        })
+        .collect()
+}
+
+fn parent_pid_from_stat(stat: &str) -> Option<u32> {
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    // After (comm): state(0) ppid(1)
+    let ppid: i32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+    (ppid > 0).then_some(ppid as u32)
+}
+
 fn process_argv(pid: u32) -> Option<Vec<String>> {
     let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     if bytes.is_empty() {
