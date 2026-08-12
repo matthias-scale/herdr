@@ -119,6 +119,10 @@ impl PaneLaunchEnv {
 
 fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     cmd.env_remove("CODEX_THREAD_ID");
+    // A herdr pane is always a top-level agent session; an inherited child-session
+    // marker makes Claude Code >=2.1.226 suppress transcript persistence, which
+    // starves the closing-block Stop hook and hides turn-end gates.
+    cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
     }
@@ -3441,6 +3445,16 @@ mod tests {
         apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
 
         assert!(cmd.get_env("CODEX_THREAD_ID").is_none());
+    }
+
+    #[test]
+    fn pane_launch_env_removes_outer_claude_child_session_marker() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("CLAUDE_CODE_CHILD_SESSION", "1");
+
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        assert!(cmd.get_env("CLAUDE_CODE_CHILD_SESSION").is_none());
     }
 
     #[test]
