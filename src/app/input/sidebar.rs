@@ -439,33 +439,6 @@ impl AppState {
             .map(|card| (card.ws_idx, card.tab_idx))
     }
 
-    pub(super) fn tab_info_target_at(&self, column: u16, row: u16) -> Option<(usize, usize)> {
-        if self.sidebar_collapsed || !crate::ui::info_panel_affordance_available(self) {
-            return None;
-        }
-        let rows = crate::ui::sidebar_rows(self);
-        crate::ui::compute_tab_card_areas(self, self.view.sidebar_rect)
-            .into_iter()
-            .find(|card| {
-                let has_work_context_links = rows.iter().any(|row| match row {
-                    crate::ui::SidebarRow::Tab { entry, .. } => {
-                        entry.ws_idx == card.ws_idx
-                            && entry.tab_idx == card.tab_idx
-                            && entry.pane_id == card.pane_id
-                            && entry.has_work_context_links
-                    }
-                    _ => false,
-                });
-                let target = crate::ui::tab_info_rect(card);
-                has_work_context_links
-                    && column >= target.x
-                    && column < target.x.saturating_add(target.width)
-                    && row >= target.y
-                    && row < target.y.saturating_add(target.height)
-            })
-            .map(|card| (card.ws_idx, card.tab_idx))
-    }
-
     pub(super) fn prio_panel_target_at(&self, column: u16, row: u16) -> Option<(usize, usize)> {
         if self.sidebar_collapsed {
             return None;
