@@ -138,33 +138,30 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
         return false;
     };
 
-    process.argv.as_deref().is_some_and(|argv| {
-        argv.iter()
-            .skip(1)
-            .any(|argument| is_run_command_flag(&shell, argument))
-    })
-}
+    let Some(argv) = process.argv.as_deref() else {
+        return false;
+    };
+    let arguments = || argv.iter().skip(1);
 
-/// "Run this one command and exit", in each spelling the shells herdr
-/// recognizes actually use. The families do not share a syntax, so the flag is
-/// read against the shell that was invoked rather than pattern-matched loosely:
-/// a bare `-C` is `noclobber` to bash and an abbreviated `-Command` to
-/// PowerShell.
-fn is_run_command_flag(shell: &str, argument: &str) -> bool {
-    match shell {
+    // The families do not share a syntax, so the flags are read against the
+    // shell that was actually invoked rather than pattern-matched loosely: a
+    // bare `-C` is `noclobber` to bash and an abbreviated `-Command` to
+    // PowerShell.
+    match shell.as_str() {
+        // `-NoExit` runs the command and then stays interactive, so such a
+        // shell outlives its work and is not evidence that any is running.
+        "pwsh" | "powershell" => {
+            !arguments().any(|argument| powershell_flag(argument, "noexit", 3))
+                && arguments().any(|argument| powershell_flag(argument, "command", 1))
+        }
         // `cmd /c`, and only `/c` — `/k` runs the command and then stays.
-        "cmd" => argument
-            .strip_prefix('/')
-            .is_some_and(|flag| flag.eq_ignore_ascii_case("c")),
-        // PowerShell flags are case-insensitive and accept any unambiguous
-        // prefix, so `-Command`, `-command`, `-comm` and `-c` are one flag.
-        "pwsh" | "powershell" => argument.strip_prefix('-').is_some_and(|flag| {
-            !flag.is_empty()
-                && !flag.starts_with('-')
-                && "command".starts_with(&flag.to_ascii_lowercase())
+        "cmd" => arguments().any(|argument| {
+            argument
+                .strip_prefix('/')
+                .is_some_and(|flag| flag.eq_ignore_ascii_case("c"))
         }),
         // Every Unix shell takes `-c`, bundled with other short flags or not.
-        _ => {
+        _ => arguments().any(|argument| {
             argument.starts_with('-')
                 && !argument.starts_with("--")
                 && argument.contains('c')
@@ -172,8 +169,18 @@ fn is_run_command_flag(shell: &str, argument: &str) -> bool {
                     .chars()
                     .skip(1)
                     .all(|flag| flag.is_ascii_alphabetic())
-        }
+        }),
     }
+}
+
+/// PowerShell flags are case-insensitive and accept any unambiguous prefix, so
+/// `-Command`, `-command`, `-comm` and `-c` are one flag. `shortest` is where a
+/// prefix stops being ambiguous with the other switches: `-c` can only be
+/// `-Command`, but `-no` could still become `-NoLogo` or `-NoProfile`.
+fn powershell_flag(argument: &str, name: &str, shortest: usize) -> bool {
+    argument
+        .strip_prefix('-')
+        .is_some_and(|flag| flag.len() >= shortest && name.starts_with(&flag.to_ascii_lowercase()))
 }
 
 fn is_idle_agent_runtime(name: &str) -> bool {
@@ -663,6 +670,10 @@ mod tests {
     fn interactive_windows_shells_do_not_hold_the_pane() {
         for argv in [
             vec!["pwsh", "-NoProfile", "-NoExit"],
+            // -NoExit with a command: it runs the command and then stays, so
+            // the shell outlives the work and proves nothing about it.
+            vec!["pwsh", "-NoExit", "-Command", "Start-Sleep 1"],
+            vec!["pwsh", "-noex", "-c", "Start-Sleep 1"],
             vec!["cmd.exe", "/k", "prompt"],
             vec!["bash", "-C"],
         ] {
