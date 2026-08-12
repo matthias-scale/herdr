@@ -819,6 +819,20 @@ fn available_pane_shell_from_snapshot(
         .then(|| shell.name.clone())
 }
 
+/// Live descendants of `root_pid`.
+///
+/// Windows has no terminal foreground process group, so `foreground_process_job`
+/// already reports the selected agent entry together with its descendants; the
+/// pane sub-process probe filters those out by pid and only adds whatever the
+/// foreground job left behind.
+pub fn descendant_processes(root_pid: u32) -> Vec<super::ForegroundProcess> {
+    let entries = cached_foreground_processes();
+    descendant_entries(root_pid, &entries)
+        .into_iter()
+        .map(foreground_process_from_entry)
+        .collect()
+}
+
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
     let entries = cached_foreground_processes();
     let entry = entries.iter().find(|entry| entry.pid == process_group_id)?;

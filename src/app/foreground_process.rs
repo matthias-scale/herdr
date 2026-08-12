@@ -64,31 +64,94 @@ fn process_is_active(shell_pid: u32, job: &ForegroundJob, idle_agent_context: bo
         return false;
     }
 
-    let Some((agent, _)) = crate::detect::identify_agent_in_job(job) else {
+    let Some(selected_agent_pid) = agent_process_pid(job) else {
         return true;
     };
-    let selected_agent_pid = job.processes.iter().find_map(|process| {
-        let single_process_job = ForegroundJob {
-            process_group_id: process.pid,
-            processes: vec![process.clone()],
-        };
-        crate::detect::identify_agent_in_job(&single_process_job)
-            .is_some_and(|(process_agent, _)| process_agent == agent)
-            .then_some(process.pid)
-    });
 
     job.processes.iter().any(|process| {
-        let single_process_job = ForegroundJob {
-            process_group_id: process.pid,
-            processes: vec![process.clone()],
-        };
-        match crate::detect::identify_agent_in_job(&single_process_job) {
-            Some(_) => Some(process.pid) != selected_agent_pid,
+        match crate::detect::identify_agent_in_job(&single_process_job(process)) {
+            Some(_) => process.pid != selected_agent_pid,
             None => {
                 !crate::platform::is_pane_shell_process_name(&process.name)
                     && !is_idle_agent_runtime(&process.name)
             }
         }
+    })
+}
+
+fn single_process_job(process: &ForegroundProcess) -> ForegroundJob {
+    ForegroundJob {
+        process_group_id: process.pid,
+        processes: vec![process.clone()],
+    }
+}
+
+/// The pid of the agent process the pane's foreground job is named after.
+fn agent_process_pid(job: &ForegroundJob) -> Option<u32> {
+    let (agent, _) = crate::detect::identify_agent_in_job(job)?;
+    job.processes.iter().find_map(|process| {
+        crate::detect::identify_agent_in_job(&single_process_job(process))
+            .is_some_and(|(process_agent, _)| process_agent == agent)
+            .then_some(process.pid)
+    })
+}
+
+/// True while the pane's agent still owns live sub-process work that has left
+/// the pane's foreground process group.
+///
+/// A turn-end report describes the *agent*: the Stop hook fires and the prompt
+/// box repaints the moment the agent stops talking. It says nothing about a
+/// command the agent started in the background, which keeps running for
+/// minutes afterwards. Those children are spawned into their own process group
+/// with no controlling terminal, so `foreground_job` — which is exactly the
+/// pane's foreground process group — cannot see them at all.
+///
+/// Evidence is the agent process's own live descendant tree, never screen
+/// output, so this cannot resurface the retired-gate-by-output failure. Two
+/// shapes count, both of which only exist while work is actually running:
+///
+/// - another agent process (`codex exec` under Claude, and the reverse),
+/// - a command shell the agent spawned, which lives exactly as long as the
+///   command it was given.
+///
+/// Everything else is ignored, which is what keeps a long-lived helper from
+/// pinning the pane Working forever: MCP servers and other resting runtimes
+/// (`node`, `bun`, `python`) never match, and a process that truly daemonizes
+/// is reparented away from the agent and leaves this tree entirely.
+fn agent_subprocess_active(job: &ForegroundJob, descendants: &[ForegroundProcess]) -> bool {
+    let Some(agent_pid) = agent_process_pid(job) else {
+        return false;
+    };
+    let foreground_pids: std::collections::HashSet<u32> =
+        job.processes.iter().map(|process| process.pid).collect();
+
+    descendants.iter().any(|process| {
+        if process.pid == agent_pid || foreground_pids.contains(&process.pid) {
+            return false;
+        }
+        crate::detect::identify_agent_in_job(&single_process_job(process)).is_some()
+            || is_agent_command_shell(process)
+    })
+}
+
+/// A shell the agent started to run one command, as opposed to an interactive
+/// shell. `-c` is the shape every agent uses for a tool call, and such a shell
+/// exits with its command.
+fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
+    if !crate::platform::is_pane_shell_process_name(&process.name) {
+        return false;
+    }
+
+    process.argv.as_deref().is_some_and(|argv| {
+        argv.iter().skip(1).any(|argument| {
+            argument.starts_with('-')
+                && !argument.starts_with("--")
+                && argument.contains('c')
+                && argument
+                    .chars()
+                    .skip(1)
+                    .all(|flag| flag.is_ascii_alphabetic())
+        })
     })
 }
 
@@ -126,13 +189,15 @@ fn process_name(process: &ForegroundProcess) -> Option<String> {
     })
 }
 
-pub(crate) fn refresh_foreground_processes<F>(
+pub(crate) fn refresh_foreground_processes<F, D>(
     targets: &[ForegroundProcessTarget],
     deadline: Instant,
     lookup: F,
+    descendants: D,
 ) -> Vec<ForegroundProcessObservation>
 where
     F: Fn(u32) -> Option<ForegroundJob>,
+    D: Fn(u32) -> Vec<ForegroundProcess>,
 {
     let mut observations = Vec::with_capacity(targets.len());
     for target in targets {
@@ -141,10 +206,11 @@ where
             Some(_) if Instant::now() >= deadline => continue,
             Some(shell_pid) => lookup(shell_pid)
                 .map(|job| {
-                    (
-                        process_name_for_job(shell_pid, &job),
-                        process_is_active(shell_pid, &job, target.idle_agent_context),
-                    )
+                    let active = process_is_active(shell_pid, &job, target.idle_agent_context)
+                        || agent_process_pid(&job).is_some_and(|agent_pid| {
+                            agent_subprocess_active(&job, &descendants(agent_pid))
+                        });
+                    (process_name_for_job(shell_pid, &job), active)
                 })
                 .unwrap_or((None, false)),
         };
@@ -231,6 +297,7 @@ impl crate::app::App {
                     &targets,
                     deadline,
                     crate::detect::foreground_process_job,
+                    crate::platform::descendant_processes,
                 );
                 let _ =
                     event_tx.blocking_send(crate::events::AppEvent::ForegroundProcessesRefreshed {
@@ -492,6 +559,113 @@ mod tests {
         ));
     }
 
+    /// The reproduced bug: Claude ends its turn while a `codex exec` it started
+    /// with `run_in_background` keeps running. The background command is spawned
+    /// into its own process group, so the pane's foreground job holds nothing
+    /// but the resting agent.
+    #[test]
+    fn backgrounded_agent_subprocess_outside_the_foreground_group_is_active() {
+        let claude = process(20, "claude");
+        let wrapper = process_with_argv(30, "zsh", &["/bin/zsh", "-c", "codex exec ..."]);
+        let codex = process(31, "codex");
+
+        assert!(!process_is_active(10, &job(20, vec![claude.clone()]), true));
+        assert!(agent_subprocess_active(
+            &job(20, vec![claude]),
+            &[wrapper, codex],
+        ));
+    }
+
+    #[test]
+    fn a_command_shell_alone_holds_the_pane_until_its_command_exits() {
+        let wrapper = process_with_argv(30, "zsh", &["/bin/zsh", "-c", "sleep 240 && echo ok"]);
+
+        assert!(agent_subprocess_active(
+            &job(20, vec![process(20, "claude")]),
+            &[wrapper.clone(), process(31, "sleep")],
+        ));
+        assert!(!agent_subprocess_active(
+            &job(20, vec![process(20, "claude")]),
+            &[],
+        ));
+    }
+
+    /// The pinned-forever failure this must not cause: an idle agent keeps its
+    /// MCP servers and other resting runtimes alive for its whole lifetime.
+    #[test]
+    fn resting_agent_helpers_do_not_hold_the_pane_working() {
+        assert!(!agent_subprocess_active(
+            &job(20, vec![process(20, "claude")]),
+            &[
+                process(30, "node"),
+                process(31, "python3"),
+                process(32, "bun"),
+                process(33, "sleep"),
+                process_with_argv(34, "zsh", &["-zsh"]),
+            ],
+        ));
+    }
+
+    #[test]
+    fn subprocesses_are_only_read_for_a_pane_running_an_agent() {
+        assert!(!agent_subprocess_active(
+            &job(20, vec![process(20, "cargo")]),
+            &[process(30, "codex")],
+        ));
+    }
+
+    #[test]
+    fn the_agents_own_foreground_processes_are_not_counted_twice() {
+        let claude = process(20, "claude");
+
+        assert!(!agent_subprocess_active(
+            &job(20, vec![claude.clone()]),
+            &[claude],
+        ));
+    }
+
+    #[test]
+    fn a_refresh_promotes_a_resting_agent_with_a_live_background_command() {
+        let targets = [ForegroundProcessTarget {
+            pane_id: PaneId::from_raw(1),
+            shell_pid: Some(10),
+            idle_agent_context: true,
+        }];
+
+        let observations = refresh_foreground_processes(
+            &targets,
+            Instant::now() + Duration::from_secs(1),
+            |_pid| Some(job(20, vec![process(20, "claude")])),
+            |agent_pid| {
+                assert_eq!(agent_pid, 20);
+                vec![
+                    process_with_argv(30, "zsh", &["/bin/zsh", "-c", "codex exec ..."]),
+                    process(31, "codex"),
+                ]
+            },
+        );
+
+        assert!(observations[0].process_active);
+    }
+
+    #[test]
+    fn a_refresh_leaves_a_quiet_agent_idle() {
+        let targets = [ForegroundProcessTarget {
+            pane_id: PaneId::from_raw(1),
+            shell_pid: Some(10),
+            idle_agent_context: true,
+        }];
+
+        let observations = refresh_foreground_processes(
+            &targets,
+            Instant::now() + Duration::from_secs(1),
+            |_pid| Some(job(20, vec![process(20, "claude")])),
+            |_pid| vec![process(30, "node")],
+        );
+
+        assert!(!observations[0].process_active);
+    }
+
     #[test]
     fn missing_shell_or_lookup_result_is_silent() {
         let targets = [
@@ -510,6 +684,7 @@ mod tests {
             &targets,
             Instant::now() + Duration::from_secs(1),
             |_pid| None,
+            |_pid| Vec::new(),
         );
 
         assert_eq!(observations.len(), 2);
@@ -537,6 +712,7 @@ mod tests {
             let observations = refresh_foreground_processes(
                 &targets,
                 Instant::now() - Duration::from_millis(1),
+                |_pid| panic!("timed-out targets must not be inspected"),
                 |_pid| panic!("timed-out targets must not be inspected"),
             );
             assert!(observations.is_empty());
