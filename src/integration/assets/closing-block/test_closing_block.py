@@ -378,11 +378,14 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(block.blocking, 1)
         self.assertEqual(block.wire_gates()[0]["text"], "Approve the zero-count correction.")
 
-    def test_declared_blocking_without_items_does_not_create_phantom_gates(self):
+    def test_declared_blocking_without_items_still_blocks(self):
         block = closing_block.parse(DECLARED_BLOCKING_WITHOUT_ITEMS)
 
-        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.blocking, 2)
+        self.assertEqual(block.herdr_state, "blocked")
+        # No parseable items means no gate detail, only the declared count.
         self.assertEqual(block.wire_gates(), [])
+        self.assertEqual(block.message(), "2 blocking")
 
     def test_answer_and_what_to_test_are_nonblocking_items(self):
         block = closing_block.parse(REALISTIC_CAP)
@@ -575,12 +578,14 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
         self.assertEqual(block.wire_decisions(), [])
 
-    def test_adversarial_declared_counts_do_not_create_gates(self):
+    def test_declared_counts_floor_blocking_but_never_relabel_items(self):
         for count, text in DECLARED_COUNT_WITH_ONLY_NONBLOCKING_ITEMS.items():
             with self.subTest(count=count):
                 block = closing_block.parse(text)
 
-                self.assertEqual(block.blocking, 0)
+                # The declared count blocks even when every parsed item is
+                # nonblocking; labeled items keep their labels regardless.
+                self.assertEqual(block.blocking, count)
                 self.assertEqual(block.wire_gates(), [])
                 self.assertEqual(
                     [item["label"] for item in block.wire_items()],
@@ -828,6 +833,99 @@ class ClosingBlockV2Tests(unittest.TestCase):
         import tempfile
 
         return tempfile.mkdtemp(prefix="herdr-closing-block-test-")
+
+
+PLAIN_FORM_CAP = """\
+Critical action points (1 blocking)
+
+1. n8n production apply — still held per your instruction
+  - (a-rec) Green-light after both PRs merge, so the apply runs through the new --base guard rather than around it
+  - (b) Apply now under the current unguarded script
+  - (c) You apply by hand in the n8n UI
+"""
+
+BOLD_FORM_CAP = """\
+**Critical action points (1 blocking)**
+
+1. **Gate** — n8n production apply — still held per your instruction
+  - (a-rec) Green-light after both PRs merge, so the apply runs through the new --base guard rather than around it
+  - (b) Apply now under the current unguarded script
+  - (c) You apply by hand in the n8n UI
+"""
+
+
+class PlainFormTests(unittest.TestCase):
+    """The observed unformatted authoring must latch exactly like the strict
+    form -- these fixtures pin the two shapes against drifting apart."""
+
+    def test_plain_form_latches_a_gate(self):
+        block = closing_block.parse(PLAIN_FORM_CAP)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.herdr_state, "blocked")
+        gates = block.wire_gates()
+        self.assertEqual(len(gates), 1)
+        self.assertIn("n8n production apply", gates[0]["text"])
+        self.assertIn("(a-rec)", gates[0]["text"])
+
+    def test_plain_and_bold_forms_do_not_drift(self):
+        plain = closing_block.parse(PLAIN_FORM_CAP)
+        bold = closing_block.parse(BOLD_FORM_CAP)
+
+        self.assertEqual(plain.blocking, bold.blocking)
+        self.assertEqual(plain.herdr_state, bold.herdr_state)
+        self.assertEqual(
+            [gate["text"] for gate in plain.wire_gates()],
+            [gate["text"] for gate in bold.wire_gates()],
+        )
+
+    def test_header_line_alone_is_enough_to_block(self):
+        for header in (
+            "Critical action points (3 blocking)",
+            "## Critical action points (3 blocking)",
+            "critical action points (3 blocking):",
+            "**Critical action points (3 blocking)**",
+        ):
+            with self.subTest(header=header):
+                block = closing_block.parse(header + "\n")
+                self.assertEqual(block.blocking, 3)
+                self.assertEqual(block.herdr_state, "blocked")
+
+    def test_bare_header_without_count_stays_zero(self):
+        block = closing_block.parse("Critical action points\n\nDone here.\n")
+
+        self.assertTrue(block.present)
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.herdr_state, "idle")
+
+    def test_plain_labels_parse_and_word_prefixes_do_not(self):
+        block = closing_block.parse(
+            "Critical action points (1 blocking)\n\n"
+            "1. Gate — approve the rollout\n"
+            "2. Verify — check the deploy log\n"
+            "3. Gate-keeping doc update shipped\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.wire_gates()[0]["text"], "approve the rollout")
+        labels = [item["label"] for item in block.wire_items()]
+        self.assertEqual(labels, ["Verify"])
+
+    def test_promotion_stops_at_the_declared_count(self):
+        block = closing_block.parse(
+            "Critical action points (1 blocking)\n\n"
+            "1. first unlabeled item\n"
+            "2. second unlabeled item\n"
+            "3. third unlabeled item\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 1)
+        gates = block.wire_gates()
+        self.assertEqual(len(gates), 1)
+        self.assertEqual(gates[0]["text"], "first unlabeled item")
+        self.assertEqual(block.wire_items(), [])
 
 
 class StopHookTranscriptTests(unittest.TestCase):
