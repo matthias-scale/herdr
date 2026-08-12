@@ -966,19 +966,23 @@ fn render_mobile_switcher_content(
 
 fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
-    let status = entry
-        .state_labels
-        .get(super::sidebar::agent_panel_status_key_with_stale(
-            entry.state,
-            entry.seen,
-            entry.stale,
-        ))
-        .cloned()
-        .unwrap_or_else(|| match entry.state {
-            _ if entry.stale => "stale".to_string(),
-            AgentState::Idle => "done".to_string(),
-            _ => super::status::state_label(entry.state, entry.seen).to_string(),
-        });
+    let status = if super::sidebar::gate_overrides_label(entry) {
+        super::sidebar::gate_override_label(entry)
+    } else {
+        entry
+            .state_labels
+            .get(super::sidebar::agent_panel_status_key_with_stale(
+                entry.state,
+                entry.seen,
+                entry.stale,
+            ))
+            .cloned()
+            .unwrap_or_else(|| match entry.state {
+                _ if entry.stale => "stale".to_string(),
+                AgentState::Idle => "done".to_string(),
+                _ => super::status::state_label(entry.state, entry.seen).to_string(),
+            })
+    };
     parts.push(status);
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
