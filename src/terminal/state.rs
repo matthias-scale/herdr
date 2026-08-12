@@ -1159,17 +1159,38 @@ impl TerminalState {
             .map(|authority| authority.reported_at)
     }
 
+    /// True while the pane only reads as working because sub-process evidence
+    /// outranks the agent's own report.
+    ///
+    /// The agent said it was finished, so nothing further is coming from it, but
+    /// work it started is still running under the pane. Nobody is reporting on
+    /// that work, which is exactly the silence the watchdog exists to notice.
+    fn subprocess_held_working(&self) -> bool {
+        self.state == AgentState::Working
+            && self.foreground_process_active
+            && self
+                .hook_authority
+                .as_ref()
+                .is_some_and(|authority| authority.state != AgentState::Working)
+    }
+
     pub fn agent_status_watchdog_deadline(&self) -> Option<Instant> {
         let authority = self.hook_authority.as_ref()?;
-        if self.supervisor_stale || authority.state != AgentState::Working {
+        if self.supervisor_stale {
             return None;
         }
-        let age = authority
-            .wait
-            .as_ref()
-            .and(authority.eta_s)
-            .map(|eta_s| Duration::from_secs(eta_s).saturating_add(DECLARED_WAIT_GRACE))
-            .unwrap_or(AGENT_STALE_SILENCE);
+        let age = match authority.state {
+            AgentState::Working => authority
+                .wait
+                .as_ref()
+                .and(authority.eta_s)
+                .map(|eta_s| Duration::from_secs(eta_s).saturating_add(DECLARED_WAIT_GRACE))
+                .unwrap_or(AGENT_STALE_SILENCE),
+            // A declared wait belongs to a working report; a finished report that
+            // is still holding sub-processes gets the plain silence budget.
+            _ if self.subprocess_held_working() => AGENT_STALE_SILENCE,
+            _ => return None,
+        };
         authority.reported_at.checked_add(age)
     }
 
@@ -4275,6 +4296,102 @@ mod tests {
             AgentState::Idle,
             "the reported idle stands once the sub-process tree is quiet"
         );
+    }
+
+    /// Builds a pane whose agent has reported idle but is still holding a live
+    /// sub-process tree, which is the shape the watchdog has to cover.
+    fn subprocess_held_terminal(now: Instant) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::path(test_session_path("watchdog.jsonl")),
+            Some(999),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal.set_foreground_process(Some("codex".into()), true, now);
+        assert_eq!(terminal.state, AgentState::Working);
+        terminal
+    }
+
+    #[test]
+    fn a_subprocess_held_pane_arms_the_status_watchdog() {
+        let now = Instant::now();
+        let terminal = subprocess_held_terminal(now);
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(),
+            now.checked_add(AGENT_STALE_SILENCE),
+            "work nobody is reporting on must still be watched"
+        );
+
+        let mut quiet = test_terminal();
+        quiet.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        quiet.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        assert!(
+            quiet.agent_status_watchdog_deadline().is_none(),
+            "a pane that is genuinely finished has nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn a_subprocess_held_pane_goes_stale_when_the_silence_runs_out() {
+        let now = Instant::now();
+        let mut terminal = subprocess_held_terminal(now);
+
+        assert!(terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE - Duration::from_secs(1))
+            .is_none());
+        assert!(terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .is_some());
+        assert!(terminal.supervisor_stale);
+
+        // The mark outlives the sub-process tree, so the pane does not quietly
+        // settle into done as if the agent had signed off on it.
+        terminal.set_foreground_process(None, false, now + AGENT_STALE_SILENCE);
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.status_report_snapshot().3);
+    }
+
+    #[test]
+    fn a_fresh_report_clears_a_subprocess_held_stale_mark() {
+        let now = Instant::now();
+        let mut terminal = subprocess_held_terminal(now);
+        terminal
+            .mark_agent_status_stale_at(now + AGENT_STALE_SILENCE)
+            .expect("watchdog should mark the silence stale");
+        assert!(terminal.supervisor_stale);
+
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1001),
+            now + AGENT_STALE_SILENCE + Duration::from_secs(1),
+        );
+        assert!(!terminal.supervisor_stale);
+        assert!(terminal.agent_status_watchdog_deadline().is_some());
     }
 
     #[test]
