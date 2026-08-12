@@ -61,7 +61,33 @@ fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
 }
 
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
-    entry.has_agent && (entry.stale || entry.state != AgentState::Idle || !entry.seen)
+    entry.has_agent
+        && (entry.open_blockers || entry.stale || entry.state != AgentState::Idle || !entry.seen)
+}
+
+/// A latched gate must never hide behind a lifecycle label: any row that
+/// carries the red blocker dot reads as its blocked label ("gate") too, even
+/// while the agent is still mid-turn working.
+pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
+    entry.open_blockers && !entry.stale && entry.state != AgentState::Blocked
+}
+
+pub(super) fn gate_override_label(entry: &AgentPanelEntry) -> String {
+    entry
+        .state_labels
+        .get("blocked")
+        .cloned()
+        .unwrap_or_else(|| "blocked".to_string())
+}
+
+pub(super) fn agent_panel_label_color(
+    entry: &AgentPanelEntry,
+    p: &Palette,
+) -> ratatui::style::Color {
+    if gate_overrides_label(entry) {
+        return p.red;
+    }
+    state_label_color_with_stale(entry.state, entry.seen, entry.stale, p)
 }
 
 pub(super) struct TabRowLayout {
@@ -84,6 +110,9 @@ pub(super) fn tab_row_layout(
     indicator_style: StatusIndicatorStyle,
 ) -> TabRowLayout {
     let state = tab_lifecycle_visible(entry).then(|| {
+        if gate_overrides_label(entry) {
+            return gate_override_label(entry);
+        }
         entry
             .state_labels
             .get(agent_panel_status_key_with_stale(
@@ -1307,20 +1336,24 @@ fn resolved_agent_rows_at(
 }
 
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
-    let label = entry
-        .state_labels
-        .get(agent_panel_status_key_with_stale(
-            entry.state,
-            entry.seen,
-            entry.stale,
-        ))
-        .map(String::as_str)
-        .unwrap_or_else(|| match entry.state {
-            _ if entry.stale => "stale",
-            AgentState::Idle => "done",
-            _ => state_label(entry.state, entry.seen),
-        });
-    tokens::agent_rows(&app.sidebar_agents, entry, label)
+    let label = if gate_overrides_label(entry) {
+        gate_override_label(entry)
+    } else {
+        entry
+            .state_labels
+            .get(agent_panel_status_key_with_stale(
+                entry.state,
+                entry.seen,
+                entry.stale,
+            ))
+            .cloned()
+            .unwrap_or_else(|| match entry.state {
+                _ if entry.stale => "stale".to_string(),
+                AgentState::Idle => "done".to_string(),
+                _ => state_label(entry.state, entry.seen).to_string(),
+            })
+    };
+    tokens::agent_rows(&app.sidebar_agents, entry, &label)
 }
 
 #[cfg(test)]
@@ -2626,12 +2659,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             spans.extend([
                 Span::styled(
                     format!(" {state}"),
-                    Style::default().fg(state_label_color_with_stale(
-                        entry.state,
-                        entry.seen,
-                        entry.stale,
-                        p,
-                    )),
+                    Style::default().fg(agent_panel_label_color(&entry, p)),
                 ),
                 Span::styled(" · ", Style::default().fg(p.overlay0)),
             ]);
@@ -2682,7 +2710,7 @@ fn render_agent_card(
     depth: u16,
 ) {
     let p = &app.palette;
-    let label_color = state_label_color_with_stale(detail.state, detail.seen, detail.stale, p);
+    let label_color = agent_panel_label_color(detail, p);
     let rows = resolved_agent_rows_at(app, detail, depth);
     let header_height = 0;
     let height = (rows.len().max(1) as u16)
@@ -2818,7 +2846,7 @@ fn agent_activity_age_fits(
         return false;
     }
     let p = &app.palette;
-    let label_color = state_label_color_with_stale(detail.state, detail.seen, detail.stale, p);
+    let label_color = agent_panel_label_color(detail, p);
     let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
     let name_style = if is_active {
         Style::default().fg(p.text).add_modifier(Modifier::BOLD)
@@ -3653,6 +3681,74 @@ mod tests {
             .find(|entry| entry.pane_id == pane)
             .expect("pane entry");
         assert!(!entry.open_blockers);
+    }
+
+    #[test]
+    fn a_working_pane_with_persisted_gates_labels_as_blocked() {
+        let mut app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.state = AgentState::Working;
+        terminal.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the open PR".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let mut entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        assert!(entry.open_blockers);
+        assert_eq!(entry.state, AgentState::Working);
+
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("blocked"));
+
+        // A configured blocked label ("gate") wins over the fallback.
+        entry.state_labels.insert("blocked".into(), "gate".into());
+        entry
+            .state_labels
+            .insert("working".into(), "working".into());
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("gate"));
+
+        // Without a latched gate the same working pane reads as working.
+        entry.open_blockers = false;
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("working"));
     }
 
     #[test]
