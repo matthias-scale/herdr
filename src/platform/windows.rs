@@ -822,9 +822,9 @@ fn available_pane_shell_from_snapshot(
 /// Live descendants of `root_pid`.
 ///
 /// Windows has no terminal foreground process group, so `foreground_process_job`
-/// already reports the selected agent entry together with its descendants; the
-/// pane sub-process probe filters those out by pid and only adds whatever the
-/// foreground job left behind.
+/// already reports the selected agent entry together with its descendants. The
+/// pane sub-process probe reads this tree on its own terms and skips only the
+/// agent itself, so a process appearing in both lists is still counted once.
 pub fn descendant_processes(root_pid: u32) -> Vec<super::ForegroundProcess> {
     let entries = cached_foreground_processes();
     descendant_entries(root_pid, &entries)
