@@ -2011,7 +2011,9 @@ impl AppState {
         self.view
             .visible_agent_activity_instants
             .iter()
-            .filter_map(|observed_at| crate::activity_age::next_change_at(Some(*observed_at), now))
+            .filter_map(|observed_at| {
+                crate::activity_age::next_coarse_change_at(Some(*observed_at), now)
+            })
             .min()
     }
 

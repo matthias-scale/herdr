@@ -2223,7 +2223,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
         let second = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("Second … · cx"))
+            .position(|row| row.contains("working") && row.contains("Second… · cx <1m ago"))
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
         assert!(rows[first].find("working").unwrap() < rows[first].find("First ta…").unwrap());
         assert!(
@@ -2232,11 +2232,11 @@ mod tests {
             rows[first]
         );
         assert!(
-            rows[second].contains("Second … · cx"),
+            rows[second].contains("Second… · cx <1m ago"),
             "mobile tab row must show the provider suffix: {:?}",
             rows[second]
         );
-        assert!(rows[second].find("working").unwrap() < rows[second].find("Second …").unwrap());
+        assert!(rows[second].find("working").unwrap() < rows[second].find("Second…").unwrap());
         assert_eq!(
             second,
             first + 1,
