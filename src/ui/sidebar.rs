@@ -816,9 +816,9 @@ fn sidebar_rows_inner(
             None => agent_panel_entries(app),
         };
         // Partition rather than sort: an entry belongs to exactly one group, so
-        // the row count still equals the agent count. Headers appear only when
-        // something is blocked -- with nothing blocked the list is byte-for-byte
-        // what it was before.
+        // the row count still equals the agent count. The Blocked header stays
+        // visible at zero so the section reads as an always-present worklist
+        // rather than appearing and disappearing.
         let (blocked, rest): (Vec<_>, Vec<_>) = entries
             .into_iter()
             .partition(|entry| entry.state == AgentState::Blocked);
@@ -826,9 +826,6 @@ fn sidebar_rows_inner(
             entry: Box::new(entry),
             depth: 0,
         };
-        if blocked.is_empty() {
-            return rest.into_iter().map(agent_row).collect();
-        }
         let mut rows = Vec::with_capacity(blocked.len() + rest.len() + 2);
         rows.push(SidebarRow::SectionHeader {
             title: BLOCKED_SECTION_TITLE,
@@ -875,27 +872,31 @@ fn sidebar_rows_inner(
         })
         .cloned()
         .collect();
-    let push_group =
-        |rows: &mut Vec<SidebarRow>, title: &'static str, group: Vec<AgentPanelEntry>| {
-            if group.is_empty() {
-                return;
-            }
-            let collapsed = section_is_collapsed(app, title);
-            rows.push(SidebarRow::SectionHeader {
-                title,
-                count: group.len(),
-                collapsed,
-            });
-            if collapsed {
-                return;
-            }
-            rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
-                entry: Box::new(entry),
-                depth: 0,
-            }));
-        };
-    push_group(&mut rows, BLOCKED_SECTION_TITLE, blocked);
-    push_group(&mut rows, PINNED_SECTION_TITLE, pinned);
+    let push_group = |rows: &mut Vec<SidebarRow>,
+                      title: &'static str,
+                      group: Vec<AgentPanelEntry>,
+                      show_when_empty: bool| {
+        if group.is_empty() && !show_when_empty {
+            return;
+        }
+        let collapsed = section_is_collapsed(app, title);
+        rows.push(SidebarRow::SectionHeader {
+            title,
+            count: group.len(),
+            collapsed,
+        });
+        if collapsed {
+            return;
+        }
+        rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
+            entry: Box::new(entry),
+            depth: 0,
+        }));
+    };
+    // Blocked is the always-present worklist; an empty header is the signal
+    // that nothing waits on a human. Pinned only exists while it has rows.
+    push_group(&mut rows, BLOCKED_SECTION_TITLE, blocked, true);
+    push_group(&mut rows, PINNED_SECTION_TITLE, pinned, false);
 
     let mut agents_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
     for entry in agents {
@@ -910,9 +911,9 @@ fn sidebar_rows_inner(
     } else {
         workspace_list_entries(app)
     };
-    // The tree gets a header -- and with it the handle that folds it away --
-    // only once some group sits above it. Alone in the sidebar it needs no
-    // label, and folding it would leave nothing behind to fold back.
+    // The Blocked header above is always present, so the tree always needs its
+    // own label: without one, the workspace rows directly under "Blocked (0)"
+    // read as members of that section rather than as the tree.
     let spaces_collapsed = !rows.is_empty() && section_is_collapsed(app, SPACES_SECTION_TITLE);
     if !rows.is_empty() {
         rows.push(SidebarRow::SectionHeader {
@@ -3095,7 +3096,7 @@ mod tests {
         let app = app_with_agents(&["one", "two"]);
         assert_eq!(
             row_kinds(&app),
-            vec![('w', 0), ('t', 0), ('w', 1), ('t', 1)]
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
 
         let area = Rect::new(0, 0, 28, 20);
@@ -3106,9 +3107,12 @@ mod tests {
         let text = (0..20)
             .map(|row| row_text(terminal.backend().buffer(), row, 27))
             .collect::<Vec<_>>();
+        // "Spaces" now appears twice: once in the top nav title, once in the
+        // tree's own section header (always shown alongside the always-present
+        // Blocked header).
         assert_eq!(
             text.iter().filter(|line| line.contains("Spaces")).count(),
-            1,
+            2,
             "{text:?}"
         );
         assert!(!text
@@ -3592,16 +3596,25 @@ mod tests {
     fn workspace_agent_disclosure_toggles_only_owned_children() {
         let mut app = app_with_agents(&["one", "two"]);
         assert!(app.toggle_workspace_agent_disclosure(1));
-        assert_eq!(row_kinds(&app), vec![('w', 0), ('t', 0), ('w', 1)]);
+        assert_eq!(
+            row_kinds(&app),
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1)]
+        );
         let collapsed_worktrees = app.collapsed_space_keys.clone();
 
         assert!(app.toggle_workspace_agent_disclosure(0));
-        assert_eq!(row_kinds(&app), vec![('w', 0), ('w', 1)]);
+        assert_eq!(
+            row_kinds(&app),
+            vec![('h', 0), ('h', 0), ('w', 0), ('w', 1)]
+        );
         assert!(!app.workspace_agents_expanded(1));
         assert_eq!(app.collapsed_space_keys, collapsed_worktrees);
 
         assert!(app.toggle_workspace_agent_disclosure(0));
-        assert_eq!(row_kinds(&app), vec![('w', 0), ('t', 0), ('w', 1)]);
+        assert_eq!(
+            row_kinds(&app),
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1)]
+        );
     }
 
     #[test]
@@ -3771,7 +3784,10 @@ mod tests {
             Some("Review Auth Migration")
         );
         assert_eq!(entries[0].agent_label.as_deref(), Some("Terminal"));
-        assert_eq!(row_kinds(&app), vec![('w', 0), ('t', 0)]);
+        assert_eq!(
+            row_kinds(&app),
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0)]
+        );
     }
 
     #[test]
@@ -3869,7 +3885,7 @@ mod tests {
         app.begin_workspace_picker_presentation();
         assert_eq!(
             row_kinds(&app),
-            vec![('w', 0), ('t', 0), ('w', 1), ('t', 1)]
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
         app.end_workspace_picker_presentation();
         assert!(sidebar_rows(&app)
@@ -3911,10 +3927,17 @@ mod tests {
         let workspace_cards = compute_workspace_card_areas(&app, area);
         let agent_cards = compute_agent_card_areas(&app, area);
         let geometry_order = compute_sidebar_row_areas(&app, area);
+        let header_rows = rows
+            .iter()
+            .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
+            .count();
 
         assert_eq!(
             rows.len(),
-            workspace_cards.len() + compute_tab_card_areas(&app, area).len() + agent_cards.len()
+            header_rows
+                + workspace_cards.len()
+                + compute_tab_card_areas(&app, area).len()
+                + agent_cards.len()
         );
         assert_eq!(workspace_cards, geometry_order.0);
         assert_eq!(agent_cards, geometry_order.1);
@@ -3969,7 +3992,7 @@ mod tests {
                     SidebarRow::SectionHeader { .. } => ('h', 0),
                 })
                 .collect::<Vec<_>>(),
-            vec![('w', 0), ('t', 0), ('w', 1), ('t', 1)]
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
     }
 
@@ -4353,8 +4376,12 @@ row_gap = 1
         }
         app.reconcile_sidebar_presentation();
 
-        // ac1 + ac2: one Spaces projection and exactly one row per tab/window.
-        assert_eq!(row_kinds(&app), vec![('w', 0), ('t', 0), ('t', 0)]);
+        // ac1 + ac2: one Spaces projection and exactly one row per tab/window,
+        // below the always-present Blocked and Spaces headers.
+        assert_eq!(
+            row_kinds(&app),
+            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('t', 0)]
+        );
         assert!(sidebar_rows(&app)
             .iter()
             .all(|row| !matches!(row, SidebarRow::Agent { .. })));
@@ -5466,7 +5493,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
         let (cards, _) = compute_workspace_list_areas(&app, area);
 
-        assert_eq!(metrics.viewport_rows, 2);
+        // viewport_rows now counts the always-present Blocked and Spaces
+        // headers alongside the workspace cards that fit beneath them.
+        assert_eq!(metrics.viewport_rows, 3);
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].ws_idx, 0);
         assert_eq!(cards[0].rect.height, 1);
@@ -5494,8 +5523,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
-        assert_eq!(metrics.viewport_rows, 1);
-        assert_eq!(metrics.max_offset_from_bottom, 0);
+        // The always-present Blocked header now takes one of the visible
+        // rows alongside the single oversized agent entry, which pushes the
+        // Spaces header (and the single workspace row it fronts) out of the
+        // viewport, making it scrollable.
+        assert_eq!(metrics.viewport_rows, 2);
+        assert_eq!(metrics.max_offset_from_bottom, 1);
         let entry = agent_panel_entries(&app).pop().unwrap();
         assert_eq!(
             agent_entry_height_in_body(&app, &entry, body.height),
@@ -5791,21 +5824,31 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn nothing_pinned_or_blocked_costs_no_header_rows() {
+    fn unpinning_the_only_pin_drops_back_to_blocked_and_spaces_headers() {
         let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
         app.workspaces[0].tabs[0].pinned = true;
-        assert!(
+        assert_eq!(
             sidebar_rows(&app)
                 .iter()
-                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
-            "a pin alone must be enough to open the group"
+                .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
+                .count(),
+            3,
+            "a pin alone must be enough to open its own group, on top of the always-present \
+             Blocked and Spaces headers"
         );
         app.workspaces[0].tabs[0].pinned = false;
-        assert!(
-            !sidebar_rows(&app)
+        // Blocked and Spaces are always present -- unpinning drops only the
+        // Pinned header, leaving exactly those two.
+        assert_eq!(
+            sidebar_rows(&app)
                 .iter()
-                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
-            "with nothing pinned or blocked the sidebar is byte-for-byte what it was"
+                .filter_map(|row| match row {
+                    SidebarRow::SectionHeader { title, .. } => Some(*title),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![BLOCKED_SECTION_TITLE, SPACES_SECTION_TITLE],
+            "with nothing pinned or blocked only the always-present headers remain"
         );
     }
 
@@ -5858,27 +5901,43 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn a_spaces_fold_is_ignored_while_the_tree_stands_alone() {
-        // Without a group above it the tree has no header to unfold from, so a
-        // stale fold from a moment when something was blocked must not strand
-        // the sidebar empty.
+    fn a_spaces_fold_hides_the_tree_even_with_nothing_blocked_or_pinned() {
+        // The Blocked header is always present, so the tree always has its own
+        // Spaces header to fold -- there is no longer a "tree stands alone"
+        // state where a stale Spaces fold has nothing to act on.
         let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
         app.collapsed_sidebar_groups
             .insert(SPACES_SECTION_TITLE.to_string());
-        assert!(priority_row_shape(&app)
-            .iter()
-            .any(|(kind, _)| *kind == "workspace"));
+        let shape = priority_row_shape(&app);
+        assert!(!shape.iter().any(|(kind, _)| *kind == "workspace"));
+        assert_eq!(
+            shape,
+            vec![
+                ("section", BLOCKED_SECTION_TITLE.to_string()),
+                ("section", SPACES_SECTION_TITLE.to_string()),
+            ]
+        );
     }
 
     #[test]
-    fn nothing_blocked_leaves_the_list_exactly_as_it_was() {
+    fn nothing_blocked_leaves_only_the_always_present_headers() {
         let app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
-        assert!(
-            !sidebar_rows(&app)
-                .iter()
-                .any(|row| matches!(row, SidebarRow::SectionHeader { .. })),
-            "an empty blocked group must not cost a header row"
+        let rows = sidebar_rows(&app);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
+                .count(),
+            2,
+            "an empty blocked group still costs its own header row, plus the tree's Spaces header"
         );
+        assert!(matches!(
+            rows[0],
+            SidebarRow::SectionHeader { title, count: 0, .. } if title == BLOCKED_SECTION_TITLE
+        ));
+        assert!(matches!(
+            rows[1],
+            SidebarRow::SectionHeader { title, .. } if title == SPACES_SECTION_TITLE
+        ));
     }
 
     #[test]
@@ -6259,13 +6318,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
                 })
                 .collect::<Vec<_>>(),
-            vec!["space:0", "window:0:0", "window:0:1", "window:1:0"]
+            vec![
+                "section:Blocked",
+                "section:Spaces",
+                "space:0",
+                "window:0:0",
+                "window:0:1",
+                "window:1:0"
+            ]
         );
 
         assert!(app.toggle_workspace_agent_disclosure(0));
         assert!(matches!(
             sidebar_rows(&app).as_slice(),
-            [SidebarRow::Workspace { ws_idx: 0, .. }]
+            [
+                SidebarRow::SectionHeader { .. },
+                SidebarRow::SectionHeader { .. },
+                SidebarRow::Workspace { ws_idx: 0, .. }
+            ]
         ));
         assert!(app.toggle_workspace_agent_disclosure(0));
         assert_eq!(
@@ -6714,7 +6784,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         app.sidebar_spaces.row_gap = 0;
-        let area = Rect::new(0, 0, 30, 3);
+        // Tall enough to clear the always-present Blocked and Spaces headers
+        // above the single grouped workspace row.
+        let area = Rect::new(0, 0, 30, 6);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         assert_eq!(app.view.workspace_card_areas.len(), 1);
         let list_area = workspace_list_rect(area, app.sidebar_section_split);
@@ -6732,7 +6804,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .unwrap();
 
-        let rendered = row_text(terminal.backend().buffer(), 1, area.width);
+        // The workspace row now sits below the always-present Blocked and
+        // Spaces header rows.
+        let workspace_row = app.view.workspace_card_areas[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), workspace_row, area.width);
         assert!(!rendered.contains('├'), "{rendered:?}");
         assert!(!rendered.contains('└'), "{rendered:?}");
     }
@@ -6773,8 +6848,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spacious[0].rect.y + spacious[0].rect.height + 2
         );
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        assert_eq!(spacious_metrics.viewport_rows, 2);
-        assert_eq!(spacious_metrics.max_offset_from_bottom, 0);
+        // viewport_rows now also counts the always-present Blocked and Spaces
+        // headers, leaving room for only one workspace row in this budget.
+        assert_eq!(spacious_metrics.viewport_rows, 3);
+        // With the row_gap in play the headers plus workspace rows overflow
+        // the 5-row viewport, making it scrollable too.
+        assert_eq!(spacious_metrics.max_offset_from_bottom, 2);
 
         app.sidebar_spaces.row_gap = 0;
         let (packed, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
@@ -6782,7 +6861,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        assert_eq!(packed_metrics.viewport_rows, 2);
+        // With no row_gap all 4 entries (2 headers + 2 workspace rows) fit
+        // the 5-row viewport, unlike the spacious case above.
+        assert_eq!(packed_metrics.viewport_rows, 4);
         assert_eq!(packed_metrics.max_offset_from_bottom, 0);
     }
 
@@ -6919,9 +7000,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let ws_area = Rect::new(0, 0, 30, 5);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
-        assert_eq!(metrics.viewport_rows, 2);
-        assert_eq!(metrics.max_offset_from_bottom, 0);
-        assert_eq!(metrics.offset_from_bottom, 0);
+        // The always-present Blocked and Spaces headers are display entries
+        // too, so they count toward the viewport alongside the two
+        // (collapsed-group, notes) workspace rows.
+        assert_eq!(metrics.viewport_rows, 3);
+        // 2 headers + 2 workspace rows overflow the 5-row viewport by one.
+        assert_eq!(metrics.max_offset_from_bottom, 1);
+        assert_eq!(metrics.offset_from_bottom, 1);
     }
 
     #[test]
@@ -6935,7 +7020,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
         app.mode = Mode::Terminal;
-        app.workspace_scroll = 1;
+        // Skip past the always-present Blocked and Spaces headers as well as
+        // the collapsed repo-key group's own row to land on "notes".
+        app.workspace_scroll = 3;
 
         let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 4));
 
