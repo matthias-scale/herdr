@@ -319,10 +319,28 @@ pub(super) fn spawn_herdr_with_config(
     }
 }
 
+/// `Command::output()` gives the child a null stdin, so `herdr agent start`
+/// sees no terminal. These tests stand in for an operator at a terminal, so
+/// they declare the launch interactive the same way a human caller does.
+fn declare_interactive_launch(command: &mut Command) {
+    command.env("HERDR_INTERACTIVE", "1");
+}
+
 pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    declare_interactive_launch(&mut command);
+    command.output().unwrap()
+}
+
+/// Run the CLI exactly as unattended automation does: null stdin, and no
+/// interactive declaration in the environment.
+pub(super) fn run_cli_unattended(socket_path: &Path, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command.args(args);
+    command.env("HERDR_SOCKET_PATH", socket_path);
+    command.env_remove("HERDR_INTERACTIVE");
     command.output().unwrap()
 }
 
@@ -335,6 +353,7 @@ pub(super) fn run_cli_in_dir(
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    declare_interactive_launch(&mut command);
     command.output().unwrap()
 }
 
