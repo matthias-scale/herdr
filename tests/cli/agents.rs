@@ -1206,3 +1206,72 @@ fn agent_wait_ignores_other_panes_and_errors_when_its_pane_closes() {
 
     cleanup_spawned_herdr(herdr, base);
 }
+
+/// The same launch that `agent_start_command_works` performs successfully is
+/// refused when the caller has neither a terminal on stdin nor the explicit
+/// `HERDR_INTERACTIVE=1` declaration. Delete the gate in
+/// `src/cli/agent.rs::agent_start_gated` and this test fails: the exit code
+/// becomes 0 and an agent appears in `agent list`.
+#[test]
+fn agent_start_is_refused_for_an_unattended_caller() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let fake_pi = bin.join("pi");
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\nexport HERDR_AGENT=pi\n'{}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\nwhile IFS= read -r _prompt; do :; done\n",
+            env!("CARGO_BIN_EXE_herdr"),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let refused = run_cli_unattended(
+        &socket_path,
+        &[
+            "agent", "start", "worker", "--kind", "pi", "--pane", &pane_id,
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(3),
+        "unattended agent start must exit 3; stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("run WINDOWLESS"),
+        "refusal must name the windowless alternative: {stderr}"
+    );
+    assert!(
+        stderr.contains("HERDR_INTERACTIVE=1"),
+        "refusal must name the interactive alternative: {stderr}"
+    );
+
+    let listed = run_cli_json(&socket_path, &["agent", "list"]);
+    assert_eq!(
+        listed["result"]["agents"].as_array().map(Vec::len),
+        Some(0),
+        "a refused launch must not start an agent: {listed}"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}

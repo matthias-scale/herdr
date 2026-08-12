@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{self, IsTerminal, Read};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
@@ -369,7 +369,61 @@ fn matched_rule_region_preview<'a>(
         .filter(|preview| !preview.is_empty())
 }
 
+/// Marker a caller sets to declare that this specific launch is one a human
+/// will watch in the Herdr window.
+const INTERACTIVE_LAUNCH_ENV: &str = "HERDR_INTERACTIVE";
+
+/// Exit code for a launch refused by the interactive-surface gate. Distinct
+/// from 2 (CLI usage error) and 1 (server or timeout error) so callers can tell
+/// "you asked for the wrong surface" apart from "you typed it wrong".
+const INTERACTIVE_LAUNCH_REFUSED_EXIT: i32 = 3;
+
+/// Inputs the gate decides on, injected so the decision is testable without a
+/// controlling terminal or process-wide environment mutation.
+#[derive(Debug, Clone, Copy)]
+struct InteractiveLaunchContext<'a> {
+    marker: Option<&'a str>,
+    stdin_is_terminal: bool,
+}
+
+impl InteractiveLaunchContext<'_> {
+    /// A Herdr window is a human-attended surface. Permit a launch only when
+    /// the caller is sitting at a terminal, or has explicitly declared this
+    /// invocation interactive.
+    fn permits_launch(&self) -> bool {
+        self.stdin_is_terminal || self.marker == Some("1")
+    }
+}
+
+fn interactive_launch_refusal() -> &'static str {
+    concat!(
+        "refusing: bounded, non-interactive workers run WINDOWLESS; ",
+        "Herdr windows are for agents a human is watching.\n",
+        "  windowless:  codex exec --model ... --sandbox read-only \"$(cat brief.md)\" < /dev/null &\n",
+        "  interactive: set HERDR_INTERACTIVE=1 for this invocation"
+    )
+}
+
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
+    let marker = std::env::var(INTERACTIVE_LAUNCH_ENV).ok();
+    agent_start_gated(
+        args,
+        InteractiveLaunchContext {
+            marker: marker.as_deref(),
+            stdin_is_terminal: io::stdin().is_terminal(),
+        },
+    )
+}
+
+fn agent_start_gated(
+    args: &[String],
+    launch: InteractiveLaunchContext<'_>,
+) -> std::io::Result<i32> {
+    // Refuse before parsing: the gate must not depend on argument shape.
+    if !launch.permits_launch() {
+        eprintln!("{}", interactive_launch_refusal());
+        return Ok(INTERACTIVE_LAUNCH_REFUSED_EXIT);
+    }
     let Some(name) = args.first() else {
         eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
         return Ok(2);
@@ -920,4 +974,88 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod interactive_launch_gate_tests {
+    use super::{agent_start_gated, InteractiveLaunchContext};
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn headless() -> InteractiveLaunchContext<'static> {
+        InteractiveLaunchContext {
+            marker: None,
+            stdin_is_terminal: false,
+        }
+    }
+
+    fn marked() -> InteractiveLaunchContext<'static> {
+        InteractiveLaunchContext {
+            marker: Some("1"),
+            stdin_is_terminal: false,
+        }
+    }
+
+    fn attended() -> InteractiveLaunchContext<'static> {
+        InteractiveLaunchContext {
+            marker: None,
+            stdin_is_terminal: true,
+        }
+    }
+
+    #[test]
+    fn permits_launch_only_for_a_terminal_or_the_explicit_marker() {
+        assert!(!headless().permits_launch());
+        assert!(marked().permits_launch());
+        assert!(attended().permits_launch());
+        // A present-but-unset marker never counts as a declaration.
+        for value in ["", "0", "false", "no", "yes", "true"] {
+            let context = InteractiveLaunchContext {
+                marker: Some(value),
+                stdin_is_terminal: false,
+            };
+            assert!(
+                !context.permits_launch(),
+                "HERDR_INTERACTIVE={value:?} must not permit a windowed launch"
+            );
+        }
+    }
+
+    // (a) No TTY and no marker: refused, and refused before argument parsing,
+    // so no argument shape can reach the daemon. Both argv shapes below would
+    // exit 2 (usage) if the gate were removed, which is exactly what makes this
+    // assertion load-bearing.
+    #[test]
+    fn refuses_a_windowed_launch_without_a_terminal_or_marker() {
+        assert_eq!(agent_start_gated(&args(&[]), headless()).unwrap(), 3);
+        assert_eq!(
+            agent_start_gated(&args(&["worker"]), headless()).unwrap(),
+            3
+        );
+        assert_eq!(
+            agent_start_gated(&args(&["worker", "--kind", "codex"]), headless()).unwrap(),
+            3
+        );
+    }
+
+    // (b) HERDR_INTERACTIVE=1 passes the gate: the command proceeds and stops
+    // at ordinary argument validation (exit 2), never at the gate (exit 3).
+    #[test]
+    fn allows_a_windowed_launch_when_the_marker_declares_it_interactive() {
+        assert_eq!(agent_start_gated(&args(&["worker"]), marked()).unwrap(), 2);
+    }
+
+    // (c) A controlling terminal passes the gate. CI has no TTY, so the
+    // terminal answer is injected here; the single real `io::stdin()
+    // .is_terminal()` read lives in `agent_start`, matching the
+    // `src/cli/plugin.rs` precedent.
+    #[test]
+    fn allows_a_windowed_launch_from_a_terminal() {
+        assert_eq!(
+            agent_start_gated(&args(&["worker"]), attended()).unwrap(),
+            2
+        );
+    }
 }

@@ -461,9 +461,13 @@ fn agent_cli_rejects_invalid_wait_and_rename_grammar_locally() {
         &["agent", "rename", "reviewer"][..],
         &["agent", "rename", "reviewer", "worker", "--clear"][..],
     ] {
+        // `agent start` refuses an unattended caller before it parses
+        // arguments, so declare the launch interactive to reach the grammar
+        // rejection this test is about.
         let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(args)
             .env("HERDR_SOCKET_PATH", "/nonexistent/herdr.sock")
+            .env("HERDR_INTERACTIVE", "1")
             .output()
             .unwrap();
         assert_eq!(

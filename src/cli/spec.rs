@@ -446,7 +446,7 @@ fn agent_command() -> Command {
                         .last(true),
                 )
                 .after_help(
-                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nnext: herdr agent prompt <TARGET> <TEXT> --wait",
+                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nHerdr windows are for agents a human is watching. Without a terminal on stdin, the launch is refused with exit status 3 unless HERDR_INTERACTIVE=1 is set for the invocation; bounded non-interactive workers should run windowless instead.\n\nnext: herdr agent prompt <TARGET> <TEXT> --wait",
                 ),
         )
         .subcommand(
