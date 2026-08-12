@@ -29,12 +29,28 @@ from typing import Any
 VERSION = 2
 
 
+STATES = ("idle", "working", "blocked")
+
+
 def state_for(blocking: int, agents: int) -> str:
     if blocking > 0:
         return "blocked"
     if agents > 0:
         return "working"
     return "idle"
+
+
+def resolve_state(blocking: int, agents: int, override: str | None) -> str:
+    """Counts imply the state unless a caller names one it knows better.
+
+    A mid-turn source -- the question gate closing itself -- knows the turn is
+    still running, which zero counts alone would read as `idle` and publish as a
+    finished turn. An unknown override is ignored rather than trusted, because a
+    junk state string would otherwise be pushed to the server verbatim.
+    """
+    if isinstance(override, str) and override in STATES:
+        return override
+    return state_for(blocking, agents)
 
 
 def _item_text(item: dict[str, Any]) -> str:
@@ -194,6 +210,7 @@ def report(
     title: str | None = None,
     pane_id: str | None = None,
     sock_path: str | None = None,
+    state: str | None = None,
 ) -> dict:
     """Push one v2 turn-end status. Never raises; returns what it did."""
     gate_objects = [
@@ -214,7 +231,7 @@ def report(
 
     seq = time.time_ns()
     reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    state = state_for(blocking, agents)
+    state = resolve_state(blocking, agents, state)
     payload = {
         "v": VERSION,
         "agent": agent,
