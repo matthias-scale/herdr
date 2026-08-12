@@ -150,9 +150,18 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
     match shell.as_str() {
         // `-NoExit` runs the command and then stays interactive, so such a
         // shell outlives its work and is not evidence that any is running.
+        // PowerShell stops reading switches at the command flag, so the search
+        // stops there too: past it a bare `-NoExit` is a word in the command
+        // being run, not a request to stay.
         "pwsh" | "powershell" => {
-            !arguments().any(|argument| powershell_flag(argument, "noexit", 3))
-                && arguments().any(|argument| powershell_flag(argument, "command", 1))
+            let mut stays_interactive = false;
+            for argument in arguments() {
+                if powershell_command_flag(argument) {
+                    return !stays_interactive;
+                }
+                stays_interactive |= powershell_flag(argument, "noexit", 3);
+            }
+            false
         }
         // `cmd /c`, and only `/c` — `/k` runs the command and then stays.
         "cmd" => arguments().any(|argument| {
@@ -171,6 +180,16 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
                     .all(|flag| flag.is_ascii_alphabetic())
         }),
     }
+}
+
+/// The switches that hand PowerShell the one command it should run: `-Command`
+/// and, since PowerShell 7.4, `-CommandWithArgs` with its own `-cwa` alias.
+fn powershell_command_flag(argument: &str) -> bool {
+    powershell_flag(argument, "command", 1)
+        || powershell_flag(argument, "commandwithargs", 1)
+        || argument
+            .strip_prefix('-')
+            .is_some_and(|flag| flag.eq_ignore_ascii_case("cwa"))
 }
 
 /// PowerShell flags are case-insensitive and accept any unambiguous prefix, so
@@ -644,6 +663,12 @@ mod tests {
             vec!["pwsh", "-nologo", "-command", "Start-Sleep 300"],
             vec!["powershell.exe", "-Comm", "Start-Sleep 300"],
             vec!["pwsh", "-c", "Start-Sleep 300"],
+            // PowerShell 7.4's `-CommandWithArgs`, spelled out and aliased.
+            vec!["pwsh", "-CommandWithArgs", "Start-Sleep 300"],
+            vec!["pwsh", "-cwa", "Start-Sleep 300"],
+            // Past the command flag every word belongs to the command being
+            // run, so this `-NoExit` is an argument to `ping`, not a switch.
+            vec!["pwsh", "-Command", "ping", "--%", "-n", "300", "-NoExit"],
         ] {
             assert!(
                 agent_subprocess_active(
