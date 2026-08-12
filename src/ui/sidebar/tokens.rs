@@ -204,7 +204,6 @@ mod tests {
             has_agent: true,
             foreground_process_name: None,
             prio: false,
-            has_work_context_links: false,
             state: AgentState::Working,
             background_job_count: None,
             seen: true,

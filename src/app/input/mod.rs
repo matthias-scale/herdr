@@ -637,10 +637,6 @@ impl App {
                             }
                         }
                     }
-                    MouseAction::OpenSidebarTabInfo { ws_idx, tab_idx } => {
-                        self.focus_workspace_tab_via_api(ws_idx, tab_idx);
-                        self.state.info_panel_expanded = true;
-                    }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }

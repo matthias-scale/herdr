@@ -799,11 +799,6 @@ fn render_mobile_switcher_content(
                     Span::styled(prio_marker, prio_style.bg(bg)),
                     Span::styled(" ", Style::default().bg(bg)),
                 ]);
-                // Mobile has no info panel, so the cell is always blank — but it must occupy the
-                // same width the desktop layout budgeted, and only on the rows that reserve it.
-                if crate::ui::sidebar::tab_info_cell_width(entry) > 0 {
-                    spans.push(Span::styled("  ", Style::default().bg(bg)));
-                }
                 if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) = state_icon_with_stale(
                         entry.state,
@@ -1484,7 +1479,6 @@ mod tests {
             has_agent: agent_label.is_some(),
             foreground_process_name: None,
             prio: false,
-            has_work_context_links: false,
             state: AgentState::Idle,
             background_job_count: None,
             seen: true,
@@ -1823,7 +1817,7 @@ mod tests {
                 .start as u16
             + 1;
         let prio_col = content.x + 5;
-        let info_col = prio_col + crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16;
+        let after_prio_col = prio_col + crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16;
         assert_eq!(
             terminal.backend().buffer()[(prio_col, tab_row)].symbol(),
             "·"
@@ -1832,22 +1826,10 @@ mod tests {
             terminal.backend().buffer()[(prio_col + 1, tab_row)].symbol(),
             " "
         );
-        // Mobile mirrors the desktop cell order, and an unlinked row reserves no info cell — the
-        // row content resumes immediately after the prio cell.
-        assert_eq!(
-            crate::ui::sidebar::tab_info_cell_width(
-                crate::ui::sidebar_rows(&app)
-                    .iter()
-                    .find_map(|row| match row {
-                        crate::ui::SidebarRow::Tab { entry, .. } => Some(entry),
-                        _ => None,
-                    })
-                    .expect("tab entry")
-            ),
-            0
-        );
+        // Mobile mirrors the desktop cell order: prio is the only gutter cell, so the row content
+        // resumes immediately after it.
         assert_ne!(
-            terminal.backend().buffer()[(info_col, tab_row)].symbol(),
+            terminal.backend().buffer()[(after_prio_col, tab_row)].symbol(),
             " "
         );
         assert_eq!(

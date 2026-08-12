@@ -28,8 +28,6 @@ const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
 const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 pub(crate) const TAB_PRIO_FIELD_WIDTH: usize = 2;
-pub(crate) const TAB_INFO_FIELD_WIDTH: usize = 2;
-pub(crate) const TAB_INFO_MARKER: &str = "↗";
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
@@ -77,17 +75,6 @@ pub(super) struct TabRowLayout {
     pub activity_instant: Option<std::time::Instant>,
 }
 
-/// The prio cell is reserved on every row so its click target never moves; the info cell only
-/// costs width on rows that actually carry work-context links, because on a narrow sidebar an
-/// unconditional second cell pushes the activity age off the row entirely.
-pub(crate) fn tab_info_cell_width(entry: &AgentPanelEntry) -> usize {
-    if entry.has_work_context_links {
-        TAB_INFO_FIELD_WIDTH
-    } else {
-        0
-    }
-}
-
 pub(super) fn tab_row_layout(
     entry: &AgentPanelEntry,
     now: std::time::Instant,
@@ -131,7 +118,10 @@ pub(super) fn tab_row_layout(
         .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
         .unwrap_or_default();
     let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
-    let tab_gutter_width = TAB_PRIO_FIELD_WIDTH + tab_info_cell_width(entry);
+    // The prio cell is reserved on every row so its click target never moves. Overview rows carry
+    // no work-context marker: links live in the session's work-context panel, and on a narrow
+    // sidebar a second gutter cell would push the activity age off the row entirely.
+    let tab_gutter_width = TAB_PRIO_FIELD_WIDTH;
     let tab_title = entry
         .primary_tab_label
         .as_deref()
@@ -305,7 +295,6 @@ pub(crate) struct AgentPanelEntry {
     /// becomes `None` so the provider suffix is not misleading.
     pub has_agent: bool,
     pub prio: bool,
-    pub has_work_context_links: bool,
     pub state: AgentState,
     pub background_job_count: Option<u16>,
     pub seen: bool,
@@ -502,23 +491,6 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
-                    // Clicking the info cell focuses the tab and opens the panel on that tab's own
-                    // focused pane, so only that pane may claim the affordance. Reading any pane of
-                    // a split would promise links the panel then does not show — and hide links it
-                    // does. The tab-level aggregate ORs these, which with this gate yields exactly
-                    // "the tab's focused pane has links".
-                    let has_work_context_links = ws
-                        .tabs
-                        .get(detail.tab_idx)
-                        .filter(|tab| tab.layout.focused() == detail.pane_id)
-                        .and_then(|tab| tab.terminal_id(detail.pane_id))
-                        .and_then(|terminal_id| app.terminals.get(terminal_id))
-                        .is_some_and(|terminal| {
-                            !crate::work_context::work_link_candidates(
-                                terminal.effective_work_context(),
-                            )
-                            .is_empty()
-                        });
                     let projection = ws.tab_display_projection(&app.terminals, detail.tab_idx);
                     let tab_label_leads_with_agent = projection
                         .as_ref()
@@ -543,7 +515,6 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_context: detail.agent_context,
                         has_agent: detail.has_agent,
                         prio,
-                        has_work_context_links,
                         state: detail.state,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
@@ -694,9 +665,6 @@ fn aggregate_tab_entries(
                     }
                     *has_agent |= entry.has_agent;
                     *has_current_agent |= entry.agent.is_some();
-                    // Only the tab's focused pane sets this, so the OR picks that one pane out of
-                    // the split regardless of which pane happened to be aggregated first.
-                    tab_entry.has_work_context_links |= entry.has_work_context_links;
                 },
             )
             .or_insert_with(|| {
@@ -1581,14 +1549,6 @@ fn tab_gutter_rect(card: &crate::app::state::TabCardArea, offset: u16, width: u1
 
 pub(crate) fn tab_prio_rect(card: &crate::app::state::TabCardArea) -> Rect {
     tab_gutter_rect(card, 0, TAB_PRIO_FIELD_WIDTH as u16)
-}
-
-pub(crate) fn tab_info_rect(card: &crate::app::state::TabCardArea) -> Rect {
-    tab_gutter_rect(
-        card,
-        TAB_PRIO_FIELD_WIDTH as u16,
-        TAB_INFO_FIELD_WIDTH as u16,
-    )
 }
 
 pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {
@@ -2641,17 +2601,6 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
     };
     spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
-    if tab_info_cell_width(&entry) > 0 {
-        let info_marker = if crate::ui::info_panel_affordance_available(app) {
-            TAB_INFO_MARKER
-        } else {
-            " "
-        };
-        spans.extend([
-            Span::styled(info_marker, Style::default().fg(p.accent)),
-            Span::raw(" "),
-        ]);
-    }
     if let Some(state) = layout.state.as_deref() {
         let state_icon = state_icon_with_stale(
             entry.state,
@@ -3104,7 +3053,6 @@ mod tests {
             agent_context: None,
             has_agent: true,
             prio: true,
-            has_work_context_links: false,
             state,
             background_job_count: None,
             seen,
@@ -3506,7 +3454,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_tab_gutters_render_prio_for_every_row_and_info_only_for_linked_panes() {
+    fn desktop_tab_gutters_render_prio_and_never_a_work_link_marker() {
         let mut app = app_with_agents(&["one", "two"]);
         add_work_link(&mut app, 0);
         app.view.terminal_area = Rect::new(40, 0, 80, 20);
@@ -3519,9 +3467,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let first_prio = crate::ui::tab_prio_rect(&cards[0]);
-        let first_info = crate::ui::tab_info_rect(&cards[0]);
         let second_prio = crate::ui::tab_prio_rect(&cards[1]);
-        let second_info = crate::ui::tab_info_rect(&cards[1]);
         assert_eq!(
             buffer.cell((first_prio.x, first_prio.y)).unwrap().symbol(),
             "·"
@@ -3533,35 +3479,19 @@ mod tests {
                 .symbol(),
             "·"
         );
-        assert_eq!(
-            buffer.cell((first_info.x, first_info.y)).unwrap().symbol(),
-            "↗"
-        );
-        // A pane without links reserves no info cell at all, so the row content starts two
-        // columns earlier and that column must never carry the affordance marker.
-        assert_ne!(
-            buffer
-                .cell((second_info.x, second_info.y))
-                .unwrap()
-                .symbol(),
-            "↗"
-        );
-        let linked = sidebar_thread_entries(&app)
-            .into_iter()
-            .find(|entry| entry.ws_idx == 0)
-            .expect("linked entry");
-        let unlinked = sidebar_thread_entries(&app)
-            .into_iter()
-            .find(|entry| entry.ws_idx == 1)
-            .expect("unlinked entry");
-        assert!(linked.has_work_context_links);
-        assert!(!unlinked.has_work_context_links);
-        assert_eq!(tab_info_cell_width(&linked), TAB_INFO_FIELD_WIDTH);
-        assert_eq!(tab_info_cell_width(&unlinked), 0);
+        // The overview never advertises work-context links; the session's work-context panel owns
+        // them, so no row may carry the marker even when the pane is linked.
+        for row in 0..area.height {
+            let rendered = row_text(buffer, row, area.width);
+            assert!(
+                !rendered.contains('↗'),
+                "row {row} must not carry a work-link marker: {rendered:?}"
+            );
+        }
     }
 
     #[test]
-    fn tab_row_title_budget_reserves_the_info_cell_only_for_linked_panes() {
+    fn tab_row_title_budget_ignores_work_links() {
         let mut app = app_with_agents(&["one", "two"]);
         app.workspaces[0].tabs[0].custom_name = Some("abcdefghij".into());
         app.workspaces[1].tabs[0].custom_name = Some("abcdefghij".into());
@@ -3593,14 +3523,11 @@ mod tests {
             app.status_indicators,
         );
 
-        assert!(
-            display_width(&linked_layout.title)
-                <= 18 - 4 - TAB_PRIO_FIELD_WIDTH - TAB_INFO_FIELD_WIDTH
-        );
+        assert!(display_width(&linked_layout.title) <= 18 - 4 - TAB_PRIO_FIELD_WIDTH);
         assert_eq!(
             display_width(&unlinked_layout.title),
-            display_width(&linked_layout.title) + TAB_INFO_FIELD_WIDTH,
-            "an unlinked row must spend the info cell's width on its title instead"
+            display_width(&linked_layout.title),
+            "a linked row must spend no width on a work-link cell"
         );
     }
 
@@ -5019,6 +4946,40 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
         assert!(rendered.contains("Add Subabe"), "{rendered:?}");
+    }
+
+    #[test]
+    fn sidebar_tab_row_title_does_not_animate_with_a_circle_spinner() {
+        let area = Rect::new(0, 0, 40, 8);
+        let render_frame = |glyph: &str| {
+            let mut app = app_with_agents(&["one"]);
+            let pane_id = app.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_terminal_title(Some(format!("{glyph} Refactor the parser")));
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+            row_text(terminal.backend().buffer(), tab_row, area.width - 1)
+        };
+
+        let first = render_frame("◐");
+        let second = render_frame("◓");
+        assert!(first.contains("Refactor the"), "{first:?}");
+        assert!(
+            !first.contains('◐') && !second.contains('◓'),
+            "{first:?} / {second:?}"
+        );
+        assert_eq!(
+            first, second,
+            "an agent's spinner frame must not change the sidebar row"
+        );
     }
 
     #[test]
