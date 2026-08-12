@@ -854,6 +854,44 @@ BOLD_FORM_CAP = """\
 """
 
 
+SUFFIXED_PLAIN_FORM_CAP = """\
+Reinstatement details prepared.
+
+Critical action points (1 blocking) — unchanged, still waiting on your answer:
+
+1. noopnutrition: execute the reinstatement now and then create the Missive draft?
+  - (a-rec) yes — reinstate now, then I create the draft with name/address resolved
+  - (b) hold both — send the offer-phrased email first, reinstate only on his reply
+  - (c) reinstate now, draft stays un-created until you say so
+
+Waiting on you — item 1.
+"""
+
+UNLABELED_BOLD_CAP_WITH_TRAILER = """\
+I'll bring you the peer's report the moment it lands, then kill it.
+
+**Critical action points (1 blocking)**
+
+1. `proposals/copy-approval-linear-lane.md` in PR #921
+   - (a-rec) Keep it in #921 — docs-only, inert, zero risk
+   - (b) Split it out into its own PR
+   - (c) Drop it entirely
+
+Waiting on you — item 1.
+"""
+
+UNLABELED_CAP_BEFORE_AGENTS_LINE = """\
+**Critical action points (1 blocking)**
+
+1. PR #921 — ship-critical-skill exception class, your approval only:
+   - (a-rec) approve https://github.com/scalable-so/scalable-agent-fleet/pull/921
+   - (b) request changes — name them and I'll route a repair
+   - (c) hold until the Linear approval-lane slices are also implemented
+
+3 agents running: intake-reuse-fix — REJECT_DUPLICATE fix; fleet-vendor-sync — vendored fleet bump; symphony-skill-intake — SKILL.md intake docs.
+"""
+
+
 class PlainFormTests(unittest.TestCase):
     """The observed unformatted authoring must latch exactly like the strict
     form -- these fixtures pin the two shapes against drifting apart."""
@@ -890,6 +928,59 @@ class PlainFormTests(unittest.TestCase):
                 block = closing_block.parse(header + "\n")
                 self.assertEqual(block.blocking, 3)
                 self.assertEqual(block.herdr_state, "blocked")
+
+    def test_counted_header_with_trailing_suffix_latches(self):
+        block = closing_block.parse(SUFFIXED_PLAIN_FORM_CAP)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.herdr_state, "blocked")
+        gates = block.wire_gates()
+        self.assertEqual(len(gates), 1)
+        self.assertIn("noopnutrition", gates[0]["text"])
+        self.assertIn("(a-rec)", gates[0]["text"])
+
+    def test_counted_header_suffix_variants_latch(self):
+        for header in (
+            "Critical action points (2 blocking) — unchanged, still waiting on your answer:",
+            "Critical action points (2 blocking): still waiting on item 1",
+            "**Critical action points (2 blocking)** — carried from last turn",
+            "## Critical action points (2 blocking) - both from the review",
+        ):
+            with self.subTest(header=header):
+                block = closing_block.parse(header + "\n")
+                self.assertEqual(block.blocking, 2)
+                self.assertEqual(block.herdr_state, "blocked")
+
+    def test_countless_header_stays_full_line_only(self):
+        # Without an explicit count the anchor keeps its strict form so prose
+        # mentions ("the Critical action points above were resolved") never
+        # latch a phantom block.
+        block = closing_block.parse(
+            "Critical action points were all addressed earlier.\n\nDone here.\n"
+        )
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.herdr_state, "idle")
+
+    def test_unlabeled_bold_cap_with_waiting_trailer_latches(self):
+        block = closing_block.parse(UNLABELED_BOLD_CAP_WITH_TRAILER)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.herdr_state, "blocked")
+        gates = block.wire_gates()
+        self.assertEqual(len(gates), 1)
+        self.assertIn("copy-approval-linear-lane", gates[0]["text"])
+        self.assertEqual(gates[0]["pr"], 921)
+
+    def test_unlabeled_cap_before_agents_line_stays_blocked(self):
+        block = closing_block.parse(UNLABELED_CAP_BEFORE_AGENTS_LINE)
+
+        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.agents_running, 3)
+        gates = block.wire_gates()
+        self.assertEqual(len(gates), 1)
+        self.assertIn("ship-critical-skill", gates[0]["text"])
+        self.assertNotIn("agents running", gates[0]["text"])
 
     def test_bare_header_without_count_stays_zero(self):
         block = closing_block.parse("Critical action points\n\nDone here.\n")

@@ -21,7 +21,11 @@ from typing import Any
 # anchor is kept so prose mentions never match.
 _HEADER_RE = re.compile(
     r"^(?:#{1,6}[ \t]*)?(?:\*\*)?Critical action points"
-    r"(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?(?:\*\*)?[ \t]*:?[ \t]*\r?$",
+    r"(?:[ \t]*\((?P<n>\d+)[ \t]+blocking\))?(?:\*\*)?"
+    # A separator-led suffix after an explicit count is authored trailing prose
+    # ("— unchanged, still waiting on your answer:"); the count keeps prose
+    # mentions from matching, so only the countless form stays full-line.
+    r"(?(n)(?:[ \t]*[—–:-].*)?)[ \t]*:?[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 _NOTHING_RE = re.compile(
