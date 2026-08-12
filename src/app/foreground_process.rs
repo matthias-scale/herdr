@@ -122,28 +122,66 @@ fn agent_subprocess_active(job: &ForegroundJob, descendants: &[ForegroundProcess
     let Some(agent_pid) = agent_process_pid(job) else {
         return false;
     };
-    let foreground_pids: std::collections::HashSet<u32> =
-        job.processes.iter().map(|process| process.pid).collect();
 
     descendants.iter().any(|process| {
-        if process.pid == agent_pid || foreground_pids.contains(&process.pid) {
-            return false;
-        }
-        crate::detect::identify_agent_in_job(&single_process_job(process)).is_some()
-            || is_agent_command_shell(process)
+        process.pid != agent_pid
+            && (crate::detect::identify_agent_in_job(&single_process_job(process)).is_some()
+                || is_agent_command_shell(process))
     })
 }
 
 /// A shell the agent started to run one command, as opposed to an interactive
-/// shell. `-c` is the shape every agent uses for a tool call, and such a shell
-/// exits with its command.
+/// shell. A shell told to run one command exits with that command, which is why
+/// its presence is evidence of live work.
 fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
-    if !crate::platform::is_pane_shell_process_name(&process.name) {
+    let Some(shell) = crate::platform::pane_shell_name(&process.name) else {
         return false;
-    }
+    };
 
-    process.argv.as_deref().is_some_and(|argv| {
-        argv.iter().skip(1).any(|argument| {
+    let Some(argv) = process.argv.as_deref() else {
+        return false;
+    };
+    let arguments = || argv.iter().skip(1);
+
+    // The families do not share a syntax, so the flags are read against the
+    // shell that was actually invoked rather than pattern-matched loosely: a
+    // bare `-C` is `noclobber` to bash and an abbreviated `-Command` to
+    // PowerShell.
+    match shell.as_str() {
+        // `-NoExit` runs the command and then stays interactive, so such a
+        // shell outlives its work and is not evidence that any is running.
+        // PowerShell stops reading switches at the command flag, so the search
+        // stops there too: past it a bare `-NoExit` is a word in the command
+        // being run, not a request to stay.
+        "pwsh" | "powershell" => {
+            let mut arguments = arguments();
+            let mut runs_one_thing = false;
+            while let Some(argument) = arguments.next() {
+                if powershell_flag(argument, "noexit", 3) {
+                    return false;
+                }
+                // `-EncodedCommand` takes exactly one value and PowerShell goes
+                // on reading switches after it, so the search continues past it.
+                // The other forms end switch parsing, and what follows is the
+                // command text or the script's own arguments.
+                if powershell_flag(argument, "encodedcommand", 1) {
+                    arguments.next();
+                    runs_one_thing = true;
+                } else if powershell_command_flag(argument) {
+                    return true;
+                }
+            }
+            runs_one_thing
+        }
+        // `cmd /c`, and only `/c` — `/k` runs the command and then stays.
+        // Whichever comes first takes the rest of the line as its command, so a
+        // later `/c` there is a word in that command rather than a switch.
+        "cmd" => arguments()
+            .filter_map(|argument| argument.strip_prefix('/'))
+            .find(|flag| flag.eq_ignore_ascii_case("c") || flag.eq_ignore_ascii_case("k"))
+            .is_some_and(|flag| flag.eq_ignore_ascii_case("c")),
+        // Every Unix shell takes `-c`, bundled with other short flags or not.
+        _ => arguments().any(|argument| {
             argument.starts_with('-')
                 && !argument.starts_with("--")
                 && argument.contains('c')
@@ -151,8 +189,34 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
                     .chars()
                     .skip(1)
                     .all(|flag| flag.is_ascii_alphabetic())
-        })
-    })
+        }),
+    }
+}
+
+/// The switches that hand PowerShell the one thing it should run and end switch
+/// parsing with it: `-Command`, `-File`, and `-CommandWithArgs` from PowerShell
+/// 7.4 with its own `-cwa` alias. Everything after one of these belongs to the
+/// work — the command text, or the script's own arguments — not to the shell.
+///
+/// `-File -` counts: the script arrives on the pipe the agent opened and the
+/// shell is done at end of input.
+fn powershell_command_flag(argument: &str) -> bool {
+    ["command", "commandwithargs", "file"]
+        .iter()
+        .any(|name| powershell_flag(argument, name, 1))
+        || argument
+            .strip_prefix('-')
+            .is_some_and(|flag| flag.eq_ignore_ascii_case("cwa"))
+}
+
+/// PowerShell flags are case-insensitive and accept any unambiguous prefix, so
+/// `-Command`, `-command`, `-comm` and `-c` are one flag. `shortest` is where a
+/// prefix stops being ambiguous with the other switches: `-c` can only be
+/// `-Command`, but `-no` could still become `-NoLogo` or `-NoProfile`.
+fn powershell_flag(argument: &str, name: &str, shortest: usize) -> bool {
+    argument
+        .strip_prefix('-')
+        .is_some_and(|flag| flag.len() >= shortest && name.starts_with(&flag.to_ascii_lowercase()))
 }
 
 fn is_idle_agent_runtime(name: &str) -> bool {
@@ -603,6 +667,99 @@ mod tests {
                 process(33, "sleep"),
                 process_with_argv(34, "zsh", &["-zsh"]),
             ],
+        ));
+    }
+
+    /// The Windows shells spell "run one command" their own way: PowerShell
+    /// takes `-Command` and any unambiguous prefix of it, `cmd` takes `/c`.
+    /// Reading only the Unix `-c` bundle left those panes reading done.
+    #[test]
+    fn windows_command_shells_hold_the_pane_too() {
+        for argv in [
+            vec!["pwsh", "-NoProfile", "-Command", "Start-Sleep 300"],
+            vec!["pwsh", "-nologo", "-command", "Start-Sleep 300"],
+            vec!["powershell.exe", "-Comm", "Start-Sleep 300"],
+            vec!["pwsh", "-c", "Start-Sleep 300"],
+            // PowerShell 7.4's `-CommandWithArgs`, spelled out and aliased.
+            vec!["pwsh", "-CommandWithArgs", "Start-Sleep 300"],
+            vec!["pwsh", "-cwa", "Start-Sleep 300"],
+            // The other two finite forms: an encoded command and a script file.
+            vec![
+                "pwsh",
+                "-EncodedCommand",
+                "UwB0AGEAcgB0AC0AUwBsAGUAZQBwAA==",
+            ],
+            vec!["pwsh", "-File", "C:\\work\\build.ps1"],
+            // Past the command flag every word belongs to the command being
+            // run, so this `-NoExit` is an argument to `ping`, not a switch.
+            vec!["pwsh", "-Command", "ping", "--%", "-n", "300", "-NoExit"],
+        ] {
+            assert!(
+                agent_subprocess_active(
+                    &job(20, vec![process(20, "claude")]),
+                    &[process_with_argv(30, argv[0], &argv)],
+                ),
+                "{argv:?} should read as a command shell"
+            );
+        }
+
+        assert!(agent_subprocess_active(
+            &job(20, vec![process(20, "claude")]),
+            &[process_with_argv(
+                30,
+                "cmd.exe",
+                &["cmd.exe", "/c", "timeout /t 300"],
+            )],
+        ));
+    }
+
+    /// An interactive PowerShell or `cmd` is not work: `-NoExit` and `/k` both
+    /// leave a shell sitting there, and a bare `-C` is bash's `noclobber`.
+    #[test]
+    fn interactive_windows_shells_do_not_hold_the_pane() {
+        for argv in [
+            vec!["pwsh", "-NoProfile", "-NoExit"],
+            // -NoExit with a command: it runs the command and then stays, so
+            // the shell outlives the work and proves nothing about it.
+            vec!["pwsh", "-NoExit", "-Command", "Start-Sleep 1"],
+            vec!["pwsh", "-noex", "-c", "Start-Sleep 1"],
+            vec!["pwsh", "-NoExit", "-File", "C:\\work\\build.ps1"],
+            // `-EncodedCommand` takes one value and switch parsing goes on, so
+            // this `-NoExit` is a switch and the shell stays.
+            vec![
+                "pwsh",
+                "-EncodedCommand",
+                "UwB0AGEAcgB0AC0AUwBsAGUAZQBwAA==",
+                "-NoExit",
+            ],
+            vec!["cmd.exe", "/k", "prompt"],
+            // `/k` takes the rest of the line, so this `/c` is a word in the
+            // command it runs and the shell still stays.
+            vec!["cmd.exe", "/k", "echo", "/c"],
+            vec!["bash", "-C"],
+        ] {
+            assert!(
+                !agent_subprocess_active(
+                    &job(20, vec![process(20, "claude")]),
+                    &[process_with_argv(30, argv[0], &argv)],
+                ),
+                "{argv:?} should not read as a command shell"
+            );
+        }
+    }
+
+    /// Windows has no foreground process group, so `foreground_process_job`
+    /// reports the agent together with its descendants. The command shell is
+    /// then in both lists, and skipping it as "already in the foreground job"
+    /// left the pane reading done while its command ran.
+    #[test]
+    fn a_command_shell_inside_the_foreground_job_still_holds_the_pane() {
+        let claude = process(20, "claude");
+        let shell = process_with_argv(30, "cmd.exe", &["cmd.exe", "/c", "timeout /t 300"]);
+
+        assert!(agent_subprocess_active(
+            &job(20, vec![claude, shell.clone()]),
+            &[shell],
         ));
     }
 

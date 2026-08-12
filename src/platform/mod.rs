@@ -342,6 +342,16 @@ pub(crate) fn quote_powershell_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// The normalized base name of a pane shell, when the process is one.
+///
+/// Callers that have to tell the shells apart need the normalized name, not
+/// just the yes/no answer: `-c`, `-Command` and `/c` all mean "run this one
+/// command", but each belongs to a different family.
+pub(crate) fn pane_shell_name(name: &str) -> Option<String> {
+    let normalized = normalized_process_name(name);
+    is_pane_shell_process_name(&normalized).then_some(normalized)
+}
+
 pub(crate) fn is_pane_shell_process_name(name: &str) -> bool {
     let normalized = normalized_process_name(name);
     matches!(
