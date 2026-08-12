@@ -182,11 +182,14 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
     }
 }
 
-/// The switches that hand PowerShell the one command it should run: `-Command`
-/// and, since PowerShell 7.4, `-CommandWithArgs` with its own `-cwa` alias.
+/// The switches that hand PowerShell the one thing it should run and then be
+/// done with: `-Command`, `-EncodedCommand` and `-File`, plus `-CommandWithArgs`
+/// from PowerShell 7.4 with its own `-cwa` alias. All four end switch parsing,
+/// so everything after them belongs to the work rather than to the shell.
 fn powershell_command_flag(argument: &str) -> bool {
-    powershell_flag(argument, "command", 1)
-        || powershell_flag(argument, "commandwithargs", 1)
+    ["command", "commandwithargs", "encodedcommand", "file"]
+        .iter()
+        .any(|name| powershell_flag(argument, name, 1))
         || argument
             .strip_prefix('-')
             .is_some_and(|flag| flag.eq_ignore_ascii_case("cwa"))
@@ -666,6 +669,13 @@ mod tests {
             // PowerShell 7.4's `-CommandWithArgs`, spelled out and aliased.
             vec!["pwsh", "-CommandWithArgs", "Start-Sleep 300"],
             vec!["pwsh", "-cwa", "Start-Sleep 300"],
+            // The other two finite forms: an encoded command and a script file.
+            vec![
+                "pwsh",
+                "-EncodedCommand",
+                "UwB0AGEAcgB0AC0AUwBsAGUAZQBwAA==",
+            ],
+            vec!["pwsh", "-File", "C:\\work\\build.ps1"],
             // Past the command flag every word belongs to the command being
             // run, so this `-NoExit` is an argument to `ping`, not a switch.
             vec!["pwsh", "-Command", "ping", "--%", "-n", "300", "-NoExit"],
@@ -699,6 +709,7 @@ mod tests {
             // the shell outlives the work and proves nothing about it.
             vec!["pwsh", "-NoExit", "-Command", "Start-Sleep 1"],
             vec!["pwsh", "-noex", "-c", "Start-Sleep 1"],
+            vec!["pwsh", "-NoExit", "-File", "C:\\work\\build.ps1"],
             vec!["cmd.exe", "/k", "prompt"],
             vec!["bash", "-C"],
         ] {
