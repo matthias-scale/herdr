@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.08.07.1"
+version = "2026.08.12.1"
 min_engine_version = 2
-updated_at = "2026-08-07T00:00:00Z"
+updated_at = "2026-08-12T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -29,6 +29,25 @@ contains = ["↑/↓ to scroll", "pgup/pgdn to", "home/end to jump", "q to quit"
 any = [
   { contains = ["esc to edit prev"] },
   { contains = ["esc/← to edit prev"] },
+]
+
+[[rules]]
+# Plan usage exhausted: nobody can answer this, the agent resumes on its own
+# when the window rolls. Ranks above the live blockers (900) and below the
+# working rules (1050+) so a resumed agent clears it without latching.
+id = "usage_limit_reached"
+state = "blocked"
+priority = 960
+region = "bottom_non_empty_lines(8)"
+visible_blocker = true
+usage_limit = true
+any = [
+  { contains = ["hit your usage limit"] },
+  { contains = ["usage limit reached"] },
+  { contains = ["rate limit"], any = [
+    { contains = ["try again at"] },
+    { contains = ["try again later"] },
+  ] },
 ]
 
 [[rules]]

@@ -332,6 +332,7 @@ pub(super) enum DetectionPublishDecision {
         visible_idle: bool,
         visible_blocker: bool,
         visible_working: bool,
+        usage_limited: bool,
         process_exited: bool,
     },
 }
@@ -368,6 +369,7 @@ pub(super) fn decide_screen_detection_publish(
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
     let visible_working = detection.visible_working && new_state == AgentState::Working;
+    let usage_limited = detection.usage_limited && new_state == AgentState::Blocked;
 
     let previous_publish = DetectionPublishState {
         state: input.current_state,
@@ -405,6 +407,7 @@ pub(super) fn decide_screen_detection_publish(
             visible_idle,
             visible_blocker,
             visible_working,
+            usage_limited,
             process_exited: input.process_exited,
         },
     }
@@ -433,6 +436,7 @@ pub(super) fn detection_update_for_publish_with_osc(
             visible_idle: true,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
         });
     }
 
@@ -471,6 +475,7 @@ mod tests {
 
     fn screen_detection(state: AgentState) -> AgentDetection {
         AgentDetection {
+            usage_limited: false,
             state,
             skip_state_update: false,
             visible_idle: state == AgentState::Idle,
@@ -633,6 +638,7 @@ mod tests {
                 &mut pending_idle,
             ),
             DetectionPublishDecision::Publish {
+                usage_limited: false,
                 state: AgentState::Working,
                 visible_idle: false,
                 visible_blocker: false,
@@ -653,6 +659,7 @@ mod tests {
                 &mut pending_idle,
             ),
             DetectionPublishDecision::Publish {
+                usage_limited: false,
                 state: AgentState::Idle,
                 visible_idle: true,
                 visible_blocker: false,
@@ -668,6 +675,7 @@ mod tests {
         let mut input = screen_publish_input(
             AgentState::Idle,
             AgentDetection {
+                usage_limited: false,
                 state: AgentState::Idle,
                 skip_state_update: false,
                 visible_idle: false,
@@ -682,6 +690,7 @@ mod tests {
         assert_eq!(
             decide_screen_detection_publish(input, &mut pending_idle),
             DetectionPublishDecision::Publish {
+                usage_limited: false,
                 state: AgentState::Working,
                 visible_idle: false,
                 visible_blocker: false,
@@ -702,6 +711,7 @@ mod tests {
         assert_eq!(
             decide_screen_detection_publish(input, &mut pending_idle),
             DetectionPublishDecision::Publish {
+                usage_limited: false,
                 state: AgentState::Idle,
                 visible_idle: true,
                 visible_blocker: false,
@@ -734,6 +744,7 @@ mod tests {
         ));
 
         let plain_idle = AgentDetection {
+            usage_limited: false,
             state: AgentState::Idle,
             skip_state_update: false,
             visible_idle: false,
@@ -757,6 +768,7 @@ mod tests {
                 assert_eq!(
                     decision,
                     DetectionPublishDecision::Publish {
+                        usage_limited: false,
                         state: AgentState::Idle,
                         visible_idle: false,
                         visible_blocker: false,

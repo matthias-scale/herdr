@@ -188,6 +188,7 @@ mod tests {
 
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
+            usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),

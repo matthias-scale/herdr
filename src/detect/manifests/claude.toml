@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.08.04.1"
+version = "2026.08.12.1"
 min_engine_version = 2
-updated_at = "2026-08-04T00:00:00Z"
+updated_at = "2026-08-12T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
@@ -63,6 +63,27 @@ priority = 980
 region = "whole_recent"
 visible_blocker = true
 contains = ["run a dynamic workflow?", "esc to cancel"]
+
+[[rules]]
+# Plan usage exhausted: nobody can answer this, the agent resumes on its own
+# when the window rolls. Ranks above the idle prompt box (950) so the banner
+# wins while it is on screen, and below every working rule (975+) so a resumed
+# agent clears it without latching.
+id = "usage_limit_reached"
+state = "blocked"
+priority = 960
+region = "bottom_non_empty_lines(8)"
+visible_blocker = true
+usage_limit = true
+any = [
+  { contains = ["hit your", "limit"], any = [
+    { contains = ["limit resets"] },
+    { contains = ["upgrade to increase your usage limit"] },
+    { contains = ["resets at"] },
+  ] },
+  { contains = ["5-hour limit reached"] },
+  { contains = ["weekly limit reached"] },
+]
 
 [[rules]]
 id = "live_prompt_box"

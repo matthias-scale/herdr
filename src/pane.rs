@@ -187,6 +187,7 @@ async fn publish_state_changed_event(
     state: AgentState,
     visible_blocker: bool,
     visible_working: bool,
+    usage_limited: bool,
     process_exited: bool,
     observed_at: std::time::Instant,
 ) {
@@ -200,6 +201,7 @@ async fn publish_state_changed_event(
             state,
             visible_blocker,
             visible_working,
+            usage_limited,
             process_exited,
             observed_at,
         })
@@ -256,6 +258,7 @@ struct AgentDetectionPublishUpdate {
     visible_idle: bool,
     visible_blocker: bool,
     visible_working: bool,
+    usage_limited: bool,
     process_exited: bool,
 }
 
@@ -291,6 +294,7 @@ async fn apply_agent_detection_publish_update(
         update.state,
         update.visible_blocker,
         update.visible_working,
+        update.usage_limited,
         update.process_exited,
         observed_at,
     )
@@ -908,6 +912,7 @@ fn spawn_basic_detection_task(
                                 false,
                                 false,
                                 false,
+                                false,
                                 now,
                             )
                             .await;
@@ -1068,6 +1073,7 @@ fn spawn_basic_detection_task(
                     visible_idle,
                     visible_blocker,
                     visible_working,
+                    usage_limited,
                     process_exited: publish_process_exited,
                 } => {
                     apply_agent_detection_publish_update(
@@ -1079,6 +1085,7 @@ fn spawn_basic_detection_task(
                             visible_idle,
                             visible_blocker,
                             visible_working,
+                            usage_limited,
                             process_exited: publish_process_exited,
                         },
                         now,
@@ -2483,6 +2490,7 @@ impl PaneRuntime {
                                             false,
                                             false,
                                             false,
+                                            false,
                                             now,
                                         )
                                         .await;
@@ -2673,6 +2681,7 @@ impl PaneRuntime {
                             visible_idle,
                             visible_blocker,
                             visible_working,
+                            usage_limited,
                             process_exited: publish_process_exited,
                         } => {
                             apply_agent_detection_publish_update(
@@ -2684,6 +2693,7 @@ impl PaneRuntime {
                                     visible_idle,
                                     visible_blocker,
                                     visible_working,
+                                    usage_limited,
                                     process_exited: publish_process_exited,
                                 },
                                 now,
@@ -4757,6 +4767,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             std::time::Instant::now(),
         );
         tokio::pin!(publish);
@@ -4794,6 +4805,7 @@ mod tests {
                 state: AgentState::Idle,
                 visible_blocker: false,
                 visible_working: false,
+                usage_limited: false,
                 process_exited: false,
                 observed_at: _,
             } if delivered_pane == pane_id

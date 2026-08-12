@@ -24,6 +24,9 @@ pub struct PaneDetail {
     /// the blocked lifecycle state: output retirement may flip the pane back
     /// to working while the human decision is still open.
     pub open_blockers: bool,
+    /// The pane's agent is refusing to work because its plan usage/rate limit
+    /// is exhausted. Live screen state, never latched.
+    pub usage_limited: bool,
     pub background_job_count: Option<u16>,
     pub foreground_process_name: Option<String>,
     pub seen: bool,
@@ -84,6 +87,7 @@ impl Tab {
                     has_agent: terminal.agent_lifecycle_context().is_some(),
                     state: terminal.state,
                     open_blockers: !terminal.closing_gates.is_empty(),
+                    usage_limited: terminal.usage_limited,
                     background_job_count: terminal.background_job_count,
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen: pane.seen,
