@@ -146,7 +146,7 @@ pub(super) fn tab_row_layout(
             (
                 Some(format!(
                     "{} ago",
-                    crate::activity_age::compact_label(Some(activity_at), now)
+                    crate::activity_age::coarse_label(Some(activity_at), now)
                 )),
                 Some(activity_at),
             )
@@ -2731,7 +2731,7 @@ fn render_agent_card(
         let token_spans = if row_index == 0 && agent_activity_age_fits(app, detail, rect, depth) {
             let label = status_report_age_compact_label(detail.reported_at, app.view_observed_at)
                 .unwrap_or_else(|| {
-                    crate::activity_age::compact_label(detail.activity_at, app.view_observed_at)
+                    crate::activity_age::coarse_label(detail.activity_at, app.view_observed_at)
                 });
             activity_field = Some(format!(" {label:>4}"));
             resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH))
@@ -4473,9 +4473,9 @@ row_gap = 1
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("working"), "{busy_text:?}");
-        assert!(busy_text.ends_with("42s ago"), "{busy_text:?}");
+        assert!(busy_text.ends_with("<1m ago"), "{busy_text:?}");
         // ac7: both the Working label and its live age use activity blue.
-        for token in ["working", "42s ago"] {
+        for token in ["working", "<1m ago"] {
             let token_x = busy_text.find(token).expect("rendered token") as u16;
             assert_eq!(
                 busy.backend().buffer()[(token_x, tab_row)].style().fg,

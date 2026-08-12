@@ -5413,7 +5413,8 @@ mod tests {
 
         let observed = started + Duration::from_secs(7);
         // The space-first tab row shows the latest communication age for the
-        // tab, so redraw at the next visible compact-age boundary.
+        // tab; sub-minute ages render as a static `<1m`, so the next visible
+        // boundary is the first minute mark, never a per-second tick.
         app.state.sidebar_width = app.state.sidebar_max_width;
         crate::ui::compute_view_with_runtime_registry(
             &mut app.state,
@@ -5426,10 +5427,10 @@ mod tests {
 
         assert_eq!(
             app.agent_activity_refresh_deadline,
-            Some(started + Duration::from_secs(8))
+            Some(started + Duration::from_secs(60))
         );
         assert!(!app.take_due_agent_activity_refresh(observed));
-        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(8)));
+        assert!(app.take_due_agent_activity_refresh(started + Duration::from_secs(60)));
         assert!(app.agent_activity_refresh_deadline.is_none());
     }
 
