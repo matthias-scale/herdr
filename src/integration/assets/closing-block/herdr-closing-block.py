@@ -20,14 +20,23 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from closing_block import parse  # noqa: E402
 from herdr_status import report  # noqa: E402
 
+# Claude Code fires Stop hooks concurrently with flushing the final assistant
+# message to the transcript. Reading immediately can find no assistant text at
+# all (first turn) or only the previous turn's text -- both silently corrupt the
+# report. Poll until the newest main-chain assistant text sits after the newest
+# user row, i.e. the reply this Stop belongs to has landed.
+FLUSH_WAIT_SECONDS = 3.0
+FLUSH_POLL_INTERVAL = 0.15
 
-def last_assistant_text(transcript_path: str) -> str | None:
-    rows = []
+
+def _read_rows(transcript_path: str) -> list[dict]:
+    rows: list[dict] = []
     try:
         with open(transcript_path, encoding="utf-8") as fh:
             for line in fh:
@@ -36,12 +45,21 @@ def last_assistant_text(transcript_path: str) -> str | None:
                 try:
                     rows.append(json.loads(line))
                 except ValueError:
-                    # Claude Code appends concurrently with the Stop hook; a
-                    # torn trailing line must not discard the whole transcript.
+                    # A torn trailing line mid-flush must not discard the file.
                     continue
     except OSError:
-        return None
-    for row in reversed(rows):
+        return []
+    return rows
+
+
+def _scan(rows: list[dict]) -> tuple[str | None, bool]:
+    """Newest main-chain assistant text, and whether it postdates user input."""
+    last_user_idx = -1
+    for idx, row in enumerate(rows):
+        if row.get("type") == "user" and not row.get("isSidechain"):
+            last_user_idx = idx
+    for idx in range(len(rows) - 1, -1, -1):
+        row = rows[idx]
         if row.get("type") != "assistant" or row.get("isSidechain"):
             continue
         text = "\n".join(
@@ -50,8 +68,21 @@ def last_assistant_text(transcript_path: str) -> str | None:
             if c.get("type") == "text"
         )
         if text.strip():
+            return text, idx > last_user_idx
+    return None, False
+
+
+def last_assistant_text(transcript_path: str) -> str | None:
+    deadline = time.monotonic() + FLUSH_WAIT_SECONDS
+    while True:
+        text, fresh = _scan(_read_rows(transcript_path))
+        if text is not None and fresh:
             return text
-    return None
+        if time.monotonic() >= deadline:
+            # Fall back to whatever is readable: stale text still beats a
+            # silently dropped report, and None keeps the old skip behavior.
+            return text
+        time.sleep(FLUSH_POLL_INTERVAL)
 
 
 def main() -> int:
