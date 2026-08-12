@@ -174,11 +174,12 @@ fn is_agent_command_shell(process: &ForegroundProcess) -> bool {
             runs_one_thing
         }
         // `cmd /c`, and only `/c` — `/k` runs the command and then stays.
-        "cmd" => arguments().any(|argument| {
-            argument
-                .strip_prefix('/')
-                .is_some_and(|flag| flag.eq_ignore_ascii_case("c"))
-        }),
+        // Whichever comes first takes the rest of the line as its command, so a
+        // later `/c` there is a word in that command rather than a switch.
+        "cmd" => arguments()
+            .filter_map(|argument| argument.strip_prefix('/'))
+            .find(|flag| flag.eq_ignore_ascii_case("c") || flag.eq_ignore_ascii_case("k"))
+            .is_some_and(|flag| flag.eq_ignore_ascii_case("c")),
         // Every Unix shell takes `-c`, bundled with other short flags or not.
         _ => arguments().any(|argument| {
             argument.starts_with('-')
@@ -732,6 +733,9 @@ mod tests {
                 "-NoExit",
             ],
             vec!["cmd.exe", "/k", "prompt"],
+            // `/k` takes the rest of the line, so this `/c` is a word in the
+            // command it runs and the shell still stays.
+            vec!["cmd.exe", "/k", "echo", "/c"],
             vec!["bash", "-C"],
         ] {
             assert!(
