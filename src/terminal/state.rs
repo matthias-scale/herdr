@@ -5562,6 +5562,67 @@ mod tests {
     }
 
     #[test]
+    fn effective_state_arbitration_tracks_working_screen_and_foreground_owners() {
+        let now = Instant::now();
+        let hook_idle_terminal = || {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            terminal.set_hook_authority_at(
+                "herdr:claude".into(),
+                "claude".into(),
+                AgentState::Idle,
+                None,
+                None,
+                None,
+                now,
+            );
+            terminal
+        };
+
+        let mut visible_working = hook_idle_terminal();
+        visible_working.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+
+        let mut detected_working = hook_idle_terminal();
+        detected_working.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+
+        let mut foreground_working = hook_idle_terminal();
+        foreground_working.set_foreground_process(
+            Some("cargo".into()),
+            true,
+            now + Duration::from_millis(1),
+        );
+
+        for (case, terminal, owner) in [
+            ("visible working", visible_working, "screen"),
+            ("detected working", detected_working, "screen"),
+            (
+                "foreground process",
+                foreground_working,
+                "foreground_process",
+            ),
+        ] {
+            assert_eq!(terminal.state, AgentState::Working, "{case}");
+            assert_eq!(terminal.effective_state_arbitration(), owner, "{case}");
+        }
+    }
+
+    #[test]
     fn visible_working_does_not_override_full_lifecycle_hook_idle() {
         let now = Instant::now();
         let mut terminal = test_terminal();
