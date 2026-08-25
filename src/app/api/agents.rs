@@ -219,6 +219,8 @@ impl App {
                     )
             }) {
                 (crate::detect::AgentState::Blocked, "closing_block_gate")
+            } else if terminal.closing_block_non_gate_waits_for_screen_refresh() {
+                (terminal.state, "closing_block_report")
             } else {
                 (explain.state, "screen")
             };
@@ -448,114 +450,124 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn closing_block_authority_is_limited_to_live_blocked_gates_quiet_report_wakes_screen() {
-        let mut app = app_with_agent();
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        let screen = include_bytes!(
-            "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
-        );
-        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen);
-        let reset_notify = runtime.agent_detection_reset_notify_for_test();
-        app.terminal_runtimes.insert(terminal_id, runtime);
+        for report_state in [AgentState::Working, AgentState::Idle, AgentState::Unknown] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            let screen = include_bytes!(
+                "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+            );
+            let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen);
+            let reset_notify = runtime.agent_detection_reset_notify_for_test();
+            app.terminal_runtimes.insert(terminal_id, runtime);
 
-        assert_eq!(
+            assert_eq!(
+                app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                    pane_id,
+                    source: "herdr:claude-closing-block".into(),
+                    agent_label: "claude".into(),
+                    state: report_state,
+                    message: None,
+                    seq: Some(1),
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
+                    session_ref: None,
+                }),
+                Some(true)
+            );
+
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                reset_notify.notified(),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("quiet {report_state:?} closing report must wake screen detection")
+            });
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_block_authority_is_limited_to_live_blocked_gates_explain_matches_effective_state(
+    ) {
+        for (report_state, expected_status, expected_label) in [
+            (AgentState::Working, AgentStatus::Working, "working"),
+            (AgentState::Idle, AgentStatus::Idle, "idle"),
+            (AgentState::Unknown, AgentStatus::Unknown, "unknown"),
+        ] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            let screen = include_bytes!(
+                "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+            );
+            app.terminal_runtimes.insert(
+                terminal_id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen),
+            );
             app.handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,
                 source: "herdr:claude-closing-block".into(),
                 agent_label: "claude".into(),
-                state: AgentState::Working,
+                state: report_state,
                 message: None,
                 seq: Some(1),
                 wait: None,
                 eta_s: None,
                 reported_at: None,
                 session_ref: None,
-            }),
-            Some(true)
-        );
+            });
+            let target = app.public_pane_id(0, pane_id).unwrap();
 
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            reset_notify.notified(),
-        )
-        .await
-        .expect("a quiet nonblocked closing report must wake screen detection");
-    }
+            let info = app.agent_info(0, pane_id).unwrap();
+            let response = app.handle_agent_explain(
+                "before-refresh".into(),
+                AgentTarget {
+                    target: target.clone(),
+                },
+            );
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentExplain { explain } = success.result else {
+                panic!("expected agent explain response");
+            };
+            assert_eq!(info.agent_status, expected_status, "{report_state:?}");
+            assert_eq!(explain["effective_state"], expected_label);
+            assert_eq!(explain["arbitration"], "closing_block_report");
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn closing_block_authority_is_limited_to_live_blocked_gates_explain_matches_effective_state(
-    ) {
-        let mut app = app_with_agent();
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        let screen = include_bytes!(
-            "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
-        );
-        app.terminal_runtimes.insert(
-            terminal_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen),
-        );
-        app.handle_internal_event(crate::events::AppEvent::HookStateReported {
-            pane_id,
-            source: "herdr:claude-closing-block".into(),
-            agent_label: "claude".into(),
-            state: AgentState::Working,
-            message: None,
-            seq: Some(1),
-            wait: None,
-            eta_s: None,
-            reported_at: None,
-            session_ref: None,
-        });
-        let target = app.public_pane_id(0, pane_id).unwrap();
-
-        let info = app.agent_info(0, pane_id).unwrap();
-        let response = app.handle_agent_explain(
-            "before-refresh".into(),
-            AgentTarget {
-                target: target.clone(),
-            },
-        );
-        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
-        let ResponseResult::AgentExplain { explain } = success.result else {
-            panic!("expected agent explain response");
-        };
-        assert_eq!(info.agent_status, AgentStatus::Working);
-        assert_eq!(explain["effective_state"], "working");
-        assert_eq!(explain["arbitration"], "closing_block_report");
-
-        app.handle_internal_event(crate::events::AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Claude),
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: std::time::Instant::now(),
-        });
-        let info = app.agent_info(0, pane_id).unwrap();
-        let response = app.handle_agent_explain("after-refresh".into(), AgentTarget { target });
-        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
-        let ResponseResult::AgentExplain { explain } = success.result else {
-            panic!("expected refreshed agent explain response");
-        };
-        assert_eq!(info.agent_status, AgentStatus::Idle);
-        assert_eq!(explain["effective_state"], "idle");
-        assert_eq!(explain["arbitration"], "screen");
+            app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Claude),
+                state: AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: std::time::Instant::now(),
+            });
+            let info = app.agent_info(0, pane_id).unwrap();
+            let response = app.handle_agent_explain("after-refresh".into(), AgentTarget { target });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentExplain { explain } = success.result else {
+                panic!("expected refreshed agent explain response");
+            };
+            assert_eq!(info.agent_status, AgentStatus::Idle);
+            assert_eq!(explain["effective_state"], "idle");
+            assert_eq!(explain["arbitration"], "screen");
+        }
     }
 
     #[test]

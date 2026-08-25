@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 // Effective state arbitration is intentionally centralized here. Full lifecycle
-// Herdr hook integrations are authoritative while live, except for settled
-// visible working evidence that can start a new turn after hook-reported idle.
+// Herdr hook integrations are authoritative while live, except for a newer
+// structurally visible blocker. Weaker reports can yield to newer screen state.
 // Process-exit updates clear matching hook authority before recomputing state.
 
 use crate::detect::{Agent, AgentState};
@@ -2527,11 +2527,24 @@ impl TerminalState {
     fn closing_block_non_gate_yields_to_screen(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
             authority.retired_at.is_none()
+                && self.hook_authority_is_effective(authority)
                 && authority.state != AgentState::Blocked
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
                 && self
                     .fallback_observed_at
                     .is_some_and(|observed_at| observed_at > authority.reported_at)
+        })
+    }
+
+    pub(crate) fn closing_block_non_gate_waits_for_screen_refresh(&self) -> bool {
+        self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.retired_at.is_none()
+                && self.hook_authority_is_effective(authority)
+                && authority.state != AgentState::Blocked
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+                && self
+                    .fallback_observed_at
+                    .is_none_or(|observed_at| observed_at <= authority.reported_at)
         })
     }
 
@@ -2541,6 +2554,10 @@ impl TerminalState {
         };
         authority.retired_at.is_none()
             && self.hook_authority_is_effective(authority)
+            && !crate::detect::full_lifecycle_hook_authority(
+                &authority.source,
+                &authority.agent_label,
+            )
             && authority.state == AgentState::Idle
             && crate::detect::parse_agent_label(&authority.agent_label) == self.detected_agent
             && self.fallback_visible_working
@@ -2562,6 +2579,10 @@ impl TerminalState {
         };
         authority.retired_at.is_none()
             && self.hook_authority_is_effective(authority)
+            && !crate::detect::full_lifecycle_hook_authority(
+                &authority.source,
+                &authority.agent_label,
+            )
             && authority.state == AgentState::Idle
             && crate::detect::parse_agent_label(&authority.agent_label) == self.detected_agent
             && self

@@ -144,8 +144,18 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
-        let hook_report_pane_id = match &ev {
-            AppEvent::HookStateReported { pane_id, .. } => Some(*pane_id),
+        let hook_report = match &ev {
+            AppEvent::HookStateReported {
+                pane_id,
+                source,
+                agent_label,
+                state,
+                ..
+            } => Some((
+                *pane_id,
+                crate::detect::is_closing_block_source(source, agent_label)
+                    && *state != crate::detect::AgentState::Blocked,
+            )),
             _ => None,
         };
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
@@ -392,7 +402,7 @@ impl App {
         }
         self.sync_full_lifecycle_authority_detection_pauses();
         if hook_state_report_accepted == Some(true) {
-            if let Some(pane_id) = hook_report_pane_id {
+            if let Some((pane_id, closing_non_gate)) = hook_report {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
                     if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
                         &self.terminal_runtimes,
@@ -400,6 +410,12 @@ impl App {
                         pane_id,
                     ) {
                         runtime.rebaseline_hook_authority_output();
+                        if closing_non_gate {
+                            // Closing-block reports describe turn-end/gate state,
+                            // not the full lifecycle. Rescan unchanged terminal
+                            // bytes so a quiet prompt can supersede the report.
+                            runtime.reset_agent_detection();
+                        }
                     }
                 }
             }
