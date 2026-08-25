@@ -4656,6 +4656,26 @@ impl HeadlessServer {
 
         if self
             .app
+            .state
+            .next_full_lifecycle_hook_authority_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let (updates, due) = self
+                .app
+                .state
+                .expire_due_full_lifecycle_hook_authority_at(now);
+            self.app.sync_full_lifecycle_authority_detection_pauses();
+            for update in &updates {
+                self.app.emit_pane_state_update(update);
+            }
+            for (ws_idx, pane_id) in due {
+                self.app.emit_pane_updated(ws_idx, pane_id);
+                changed = true;
+            }
+        }
+
+        if self
+            .app
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -7463,6 +7483,87 @@ next_tab = ""
                         } if title.is_none()
                     )
             }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_full_lifecycle_hook_authority_falls_back_to_screen_in_headless_scheduler() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("hook-expiry")];
+        server.app.state.ensure_test_terminals();
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let reported_at = Instant::now();
+        let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Kimi),
+            crate::detect::AgentState::Idle,
+        );
+        let session_ref = crate::agent_resume::AgentSessionRef::id("headless-expiry").unwrap();
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            Some(session_ref.clone()),
+            Some(1),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            crate::detect::AgentState::Working,
+            None,
+            Some(session_ref),
+            Some(2),
+            reported_at,
+        );
+        server.app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        server.app.sync_full_lifecycle_authority_detection_pauses();
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .hook_authority_runtime_state_for_test(),
+            (true, false)
+        );
+        let deadline = server
+            .app
+            .state
+            .next_full_lifecycle_hook_authority_deadline()
+            .unwrap();
+        let sequence = server.app.event_hub.current_sequence();
+
+        assert!(server.handle_scheduled_tasks_headless(deadline, false));
+        assert_eq!(
+            server.app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
+        assert!(!server.app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .hook_authority_runtime_state_for_test(),
+            (false, false)
+        );
+        assert!(server
+            .app
+            .event_hub
+            .events_after(sequence)
+            .iter()
+            .any(|(_, event)| { event.event == crate::api::schema::EventKind::PaneUpdated }));
+        assert!(server
+            .app
+            .state
+            .next_full_lifecycle_hook_authority_deadline()
+            .is_none());
     }
 
     #[test]

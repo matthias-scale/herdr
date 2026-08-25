@@ -603,6 +603,11 @@ impl App {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             status_bar_enabled: config.ui.status_bar.enabled,
+            full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
+                config
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+            ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1588,6 +1593,14 @@ impl App {
         let invalid_section =
             |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
 
+        if !invalid_section("agent_detection") {
+            self.state.full_lifecycle_hook_authority_timeout = std::time::Duration::from_secs(
+                config
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+            );
+        }
+
         if !invalid_section("keys") {
             match config.live_keybinds_with_diagnostics() {
                 Ok((live, keybind_diagnostics)) => {
@@ -2254,6 +2267,104 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_full_lifecycle_hook_authority_falls_back_to_screen_in_tui_scheduler() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("hook-expiry")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let reported_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Kimi),
+            crate::detect::AgentState::Idle,
+        );
+        let session_ref = crate::agent_resume::AgentSessionRef::id("tui-expiry").unwrap();
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            Some(session_ref.clone()),
+            Some(1),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            crate::detect::AgentState::Working,
+            None,
+            Some(session_ref),
+            Some(2),
+            reported_at,
+        );
+        assert_eq!(terminal.state, crate::detect::AgentState::Working);
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        app.sync_full_lifecycle_authority_detection_pauses();
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .hook_authority_runtime_state_for_test(),
+            (true, false)
+        );
+        let deadline = app
+            .state
+            .next_full_lifecycle_hook_authority_deadline()
+            .unwrap();
+        let sequence = app.event_hub.current_sequence();
+
+        assert!(app.handle_scheduled_tasks(deadline, false));
+        assert_eq!(
+            app.state.terminals[&terminal_id].state,
+            crate::detect::AgentState::Idle
+        );
+        assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .hook_authority_runtime_state_for_test(),
+            (false, false)
+        );
+        assert!(app
+            .event_hub
+            .events_after(sequence)
+            .iter()
+            .any(|(_, event)| { event.event == crate::api::schema::EventKind::PaneUpdated }));
+        assert!(app
+            .state
+            .next_full_lifecycle_hook_authority_deadline()
+            .is_none());
+    }
+
+    #[test]
+    fn stale_full_lifecycle_hook_authority_falls_back_to_screen_invalid_reload_keeps_value() {
+        let mut app = test_app();
+        let mut config = Config::default();
+        config
+            .agent_detection
+            .full_lifecycle_hook_authority_timeout_seconds = 30;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.full_lifecycle_hook_authority_timeout,
+            Duration::from_secs(30)
+        );
+
+        config
+            .agent_detection
+            .full_lifecycle_hook_authority_timeout_seconds = 600;
+        app.apply_live_config(&config, &[], &["agent_detection".into()], false);
+        assert_eq!(
+            app.state.full_lifecycle_hook_authority_timeout,
+            Duration::from_secs(30)
+        );
     }
 
     fn focus_reporting_app() -> (App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {

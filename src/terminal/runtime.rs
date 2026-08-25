@@ -250,8 +250,27 @@ impl TerminalRuntime {
         self.0.agent_detection_enabled_for_test()
     }
 
-    pub fn set_full_lifecycle_authority_state(&self, active: bool, blocked: bool) {
-        self.0.set_full_lifecycle_authority_state(active, blocked);
+    pub fn set_full_lifecycle_authority_state(
+        &self,
+        active: bool,
+        output_retirement_eligible: bool,
+    ) {
+        self.0
+            .set_full_lifecycle_authority_state(active, output_retirement_eligible);
+    }
+
+    pub fn rebaseline_hook_authority_output(&self) {
+        self.0.rebaseline_hook_authority_output();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hook_authority_output_baseline_for_test(&self) -> u64 {
+        self.0.hook_authority_output_baseline_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hook_authority_runtime_state_for_test(&self) -> (bool, bool) {
+        self.0.hook_authority_runtime_state_for_test()
     }
 
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
@@ -557,6 +576,10 @@ impl TerminalRuntime {
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         self.0.test_process_pty_bytes(bytes);
+    }
+
+    pub(crate) fn test_mark_detection_content_changed(&self) {
+        self.0.test_mark_detection_content_changed();
     }
 
     pub(crate) fn test_with_scrollback_bytes(

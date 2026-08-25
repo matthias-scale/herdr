@@ -144,6 +144,10 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        let hook_report_pane_id = match &ev {
+            AppEvent::HookStateReported { pane_id, .. } => Some(*pane_id),
+            _ => None,
+        };
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
         }
@@ -387,6 +391,19 @@ impl App {
             }
         }
         self.sync_full_lifecycle_authority_detection_pauses();
+        if hook_state_report_accepted == Some(true) {
+            if let Some(pane_id) = hook_report_pane_id {
+                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                        &self.terminal_runtimes,
+                        ws_idx,
+                        pane_id,
+                    ) {
+                        runtime.rebaseline_hook_authority_output();
+                    }
+                }
+            }
+        }
         if terminal_cwd_reported {
             if self.state.status_bar_enabled {
                 self.project_status_context_from_cached();
@@ -521,7 +538,7 @@ impl App {
         }
     }
 
-    fn sync_full_lifecycle_authority_detection_pauses(&self) {
+    pub(crate) fn sync_full_lifecycle_authority_detection_pauses(&self) {
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 for pane in tab.panes.values() {
@@ -535,7 +552,7 @@ impl App {
                     };
                     runtime.set_full_lifecycle_authority_state(
                         terminal.full_lifecycle_hook_authority_active(),
-                        terminal.state == crate::detect::AgentState::Blocked,
+                        terminal.hook_authority_output_retirement_eligible(),
                     );
                 }
             }

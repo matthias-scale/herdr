@@ -386,16 +386,14 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
             | ("herdr:opencode", "opencode")
             | ("herdr:kilo", "kilo")
             | ("herdr:kimi", "kimi")
-    ) || is_closing_block_source(source, agent_label)
+    )
 }
 
 /// Turn-end status reported by an agent's own hook, under `herdr:<agent>-closing-block`.
 ///
-/// Screen scraping sees Claude's `❯` prompt box the instant a turn ends and
-/// calls the pane idle (`manifests/claude.toml` `live_prompt_box`, priority
-/// 950). That is right about the harness and wrong about the work: agents may
-/// still be running, or a gate may be waiting on a human. The hook knows both,
-/// so it owns lifecycle for its own source.
+/// Closing-block reports describe turn-end gates, not an agent's full lifecycle.
+/// Only a live Blocked report receives authority; other states yield to newer
+/// screen evidence.
 ///
 /// Matched by shape rather than an allowlist so any agent adopting the contract
 /// works without a herdr release. The source must still name the agent it
@@ -765,7 +763,7 @@ mod tests {
             "herdr:opencode-closing-block",
             "opencode"
         ));
-        assert!(full_lifecycle_hook_authority(
+        assert!(!full_lifecycle_hook_authority(
             "herdr:claude-closing-block",
             "claude"
         ));

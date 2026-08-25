@@ -1220,6 +1220,18 @@
       ]
     },
     {
+      "id": "agent_detection",
+      "title": "Agent detection",
+      "keys": [
+        {
+          "key": "agent_detection.full_lifecycle_hook_authority_timeout_seconds",
+          "type": "integer",
+          "default": "600",
+          "description": "Seconds a full-lifecycle hook report remains authoritative without a fresh accepted report. Valid range: 30–3600. After expiry, cached screen evidence decides the pane state."
+        }
+      ]
+    },
+    {
       "id": "advanced",
       "title": "Advanced",
       "keys": [

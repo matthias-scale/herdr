@@ -172,30 +172,6 @@ impl App {
         let Some(terminal) = self.state.terminals.get(terminal_id) else {
             return agent_not_found(id, &target.target);
         };
-        if terminal.full_lifecycle_hook_authority_active() {
-            let explain = serde_json::json!({
-                "agent": terminal.effective_agent_label().unwrap_or("unknown"),
-                "state": crate::detect::manifest::agent_state_label(terminal.state),
-                "manifest_source": null,
-                "manifest_version": null,
-                "cached_remote_version": null,
-                "local_override_shadowing_remote": false,
-                "remote_update_status": null,
-                "remote_update_error": null,
-                "matched_rule": null,
-                "visible_idle": false,
-                "visible_blocker": false,
-                "visible_working": false,
-                "screen_detection_skipped": true,
-                "screen_detection_skip_reason": "full_lifecycle_hook_authority",
-                "skip_state_update": false,
-                "skipped_update_reason": null,
-                "fallback_reason": null,
-                "warning": null,
-                "evaluated_rules": [],
-            });
-            return encode_success(id, ResponseResult::AgentExplain { explain });
-        }
         let Some(agent) = terminal.effective_known_agent().or(terminal.detected_agent) else {
             return encode_error(
                 id,
@@ -218,7 +194,50 @@ impl App {
                 osc_progress: &osc_progress,
             },
         );
-        let value = crate::detect::manifest::explain_to_json_value(&explain);
+        let mut value = crate::detect::manifest::explain_to_json_value(&explain);
+        if let Some(object) = value.as_object_mut() {
+            let screen_state = crate::detect::manifest::agent_state_label(explain.state);
+            let visible_blocker_override = explain.visible_blocker
+                && terminal.hook_authority.as_ref().is_some_and(|authority| {
+                    authority.retired_at.is_none()
+                        && authority.state != crate::detect::AgentState::Blocked
+                        && crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+                });
+            let (effective_state, arbitration) = if visible_blocker_override {
+                (
+                    crate::detect::AgentState::Blocked,
+                    "visible_blocker_over_hook",
+                )
+            } else if terminal.full_lifecycle_hook_authority_active() {
+                (terminal.state, "fresh_full_lifecycle_hook")
+            } else if terminal.hook_authority.as_ref().is_some_and(|authority| {
+                authority.retired_at.is_none()
+                    && authority.state == crate::detect::AgentState::Blocked
+                    && crate::detect::is_closing_block_source(
+                        &authority.source,
+                        &authority.agent_label,
+                    )
+            }) {
+                (crate::detect::AgentState::Blocked, "closing_block_gate")
+            } else {
+                (explain.state, "screen")
+            };
+            object.insert("screen_state".into(), serde_json::json!(screen_state));
+            object.insert(
+                "state".into(),
+                serde_json::json!(crate::detect::manifest::agent_state_label(effective_state)),
+            );
+            object.insert(
+                "effective_state".into(),
+                serde_json::json!(crate::detect::manifest::agent_state_label(effective_state)),
+            );
+            object.insert("arbitration".into(), serde_json::json!(arbitration));
+            object.insert("screen_detection_skipped".into(), serde_json::json!(false));
+            object.insert(
+                "screen_detection_skip_reason".into(),
+                serde_json::Value::Null,
+            );
+        }
 
         encode_success(id, ResponseResult::AgentExplain { explain: value })
     }
@@ -318,6 +337,149 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn visible_blocker_overrides_fresh_hook_authority_in_explain_api() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            Some(1),
+        );
+        let screen = include_bytes!(
+            "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
+        );
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_agent_explain("explain".into(), AgentTarget { target });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentExplain { explain } = success.result else {
+            panic!("expected agent explain response");
+        };
+        assert_eq!(explain["screen_detection_skipped"], false);
+        assert_eq!(explain["matched_rule"]["id"], "generic_permission_prompt");
+        assert_eq!(explain["screen_state"], "blocked");
+        assert_eq!(explain["effective_state"], "blocked");
+        assert_eq!(explain["arbitration"], "visible_blocker_over_hook");
+
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_hook_authority(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            Some(2),
+        );
+        terminal
+            .retire_output_inconsistent_hook_authority_at(std::time::Instant::now())
+            .expect("closing-block authority should retire");
+        let response = app.handle_agent_explain(
+            "retired-explain".into(),
+            AgentTarget {
+                target: app.public_pane_id(0, pane_id).unwrap(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentExplain { explain } = success.result else {
+            panic!("expected retired agent explain response");
+        };
+        assert_eq!(explain["effective_state"], "blocked");
+        assert_eq!(explain["arbitration"], "screen");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unmatched_output_retires_hook_authority_rebaselines_same_state_report() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        for seq in [1, 2] {
+            assert_eq!(
+                app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                    pane_id,
+                    source: "herdr:claude-closing-block".into(),
+                    agent_label: "claude".into(),
+                    state: AgentState::Blocked,
+                    message: None,
+                    seq: Some(seq),
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
+                    session_ref: None,
+                }),
+                Some(true)
+            );
+            if seq == 1 {
+                app.terminal_runtimes
+                    .get(&terminal_id)
+                    .unwrap()
+                    .test_mark_detection_content_changed();
+            }
+        }
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .hook_authority_output_baseline_for_test(),
+            1,
+            "an accepted same-state report rearms from current content"
+        );
+    }
+
+    #[test]
+    fn fresh_hook_state_wins_over_non_blocker_screen_done_projection() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("done-projection").unwrap();
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            Some(session_ref.clone()),
+            Some(1),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Working,
+            None,
+            Some(session_ref),
+            Some(2),
+        );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+
+        let info = app.agent_info(0, pane_id).unwrap();
+        assert_eq!(info.agent_status, AgentStatus::Working);
+        assert!(!info.screen_detection_skipped);
     }
 
     #[tokio::test]

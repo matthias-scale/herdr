@@ -382,7 +382,7 @@ impl App {
             wait: pane.wait,
             eta_s: pane.eta_s,
             reported_at: pane.reported_at,
-            screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),
+            screen_detection_skipped: false,
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             gates: pane.gates,

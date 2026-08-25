@@ -459,11 +459,11 @@ fn should_skip_process_probe_for_lifecycle_authority(
 }
 
 fn should_skip_screen_detection_for_lifecycle_authority(
-    full_lifecycle_authority_active: bool,
-    full_lifecycle_hook_blocked: bool,
-    process_exited: bool,
+    _full_lifecycle_authority_active: bool,
+    _full_lifecycle_hook_blocked: bool,
+    _process_exited: bool,
 ) -> bool {
-    full_lifecycle_authority_active && full_lifecycle_hook_blocked && !process_exited
+    false
 }
 
 fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
@@ -687,7 +687,7 @@ struct FullLifecycleHookRetirementPorts<'a> {
     state_events: &'a mpsc::Sender<AppEvent>,
 }
 
-/// Retire a blocked turn-end hook gate once the pane is working again.
+/// Retire hook authority once sustained output contradicts its latest state.
 ///
 /// Two detect loops run this: the one `spawn_basic_detection_task` starts for a
 /// freshly spawned pane, and the one the restored/attached path starts. They
@@ -700,7 +700,7 @@ async fn poll_full_lifecycle_hook_retirement(
     process_exited: bool,
     now: std::time::Instant,
 ) {
-    if *lifecycle_authority_active && ports.blocked.load(Ordering::Acquire) && !process_exited {
+    if ports.blocked.load(Ordering::Acquire) && !process_exited {
         if let Some(observed_at) = retirement.observe(
             ports.detection_content_seq.load(Ordering::Relaxed),
             ports.baseline_content_seq.load(Ordering::Acquire),
@@ -716,7 +716,7 @@ async fn poll_full_lifecycle_hook_retirement(
                 })
                 .await;
         }
-    } else if !*lifecycle_authority_active || !ports.blocked.load(Ordering::Acquire) {
+    } else if !ports.blocked.load(Ordering::Acquire) {
         retirement.clear();
     }
 }
@@ -2754,19 +2754,41 @@ impl PaneRuntime {
         self.detect_handle.is_some()
     }
 
-    pub fn set_full_lifecycle_authority_state(&self, active: bool, blocked: bool) {
+    pub fn set_full_lifecycle_authority_state(
+        &self,
+        active: bool,
+        output_retirement_eligible: bool,
+    ) {
         let previous = self
             .full_lifecycle_authority_active
             .swap(active, Ordering::AcqRel);
         let was_blocked = self
             .full_lifecycle_hook_blocked
-            .swap(active && blocked, Ordering::AcqRel);
-        if active && blocked && (!previous || !was_blocked) {
+            .swap(output_retirement_eligible, Ordering::AcqRel);
+        if output_retirement_eligible && !was_blocked {
             self.rebaseline_full_lifecycle_hook_content();
         }
-        if active && !previous {
+        if active != previous {
             self.detect_reset_notify.notify_one();
         }
+    }
+
+    pub fn rebaseline_hook_authority_output(&self) {
+        self.rebaseline_full_lifecycle_hook_content();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hook_authority_output_baseline_for_test(&self) -> u64 {
+        self.full_lifecycle_hook_baseline_content_seq
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hook_authority_runtime_state_for_test(&self) -> (bool, bool) {
+        (
+            self.full_lifecycle_authority_active.load(Ordering::Acquire),
+            self.full_lifecycle_hook_blocked.load(Ordering::Acquire),
+        )
     }
 
     /// Declare every content change so far to be *not* a new turn's output.
@@ -3221,6 +3243,10 @@ impl PaneRuntime {
         let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
     }
 
+    pub(crate) fn test_mark_detection_content_changed(&self) {
+        mark_detection_content_changed(&self.detection_content_seq);
+    }
+
     pub(crate) fn test_with_scrollback_bytes(
         cols: u16,
         rows: u16,
@@ -3364,7 +3390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_retirement_poll_retires_only_on_sustained_output() {
+    async fn unmatched_output_retires_hook_authority_through_observer() {
         let (state_events, mut events) = mpsc::channel(4);
         let mut harness = RetirementHarness::blocked_at(10, state_events);
         let started = std::time::Instant::now();
@@ -4410,8 +4436,8 @@ mod tests {
     }
 
     #[test]
-    fn active_blocked_lifecycle_authority_skips_the_screen() {
-        assert!(should_skip_screen_detection_for_lifecycle_authority(
+    fn active_blocked_lifecycle_authority_reads_visible_blockers() {
+        assert!(!should_skip_screen_detection_for_lifecycle_authority(
             true, true, false
         ));
     }
@@ -4695,7 +4721,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_full_lifecycle_authority_active_notifies_only_on_activation_transitions() {
+    async fn set_full_lifecycle_authority_active_notifies_on_each_transition() {
         let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
         let reset_notify = runtime.agent_detection_reset_notify_for_test();
 
@@ -4719,6 +4745,14 @@ mod tests {
         );
 
         runtime.set_full_lifecycle_authority_state(false, false);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reset_notify.notified(),
+        )
+        .await
+        .expect("authority expiry should wake screen detection");
+
+        runtime.set_full_lifecycle_authority_state(false, false);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(20),
@@ -4726,7 +4760,7 @@ mod tests {
             )
             .await
             .is_err(),
-            "true-to-false transition should not notify detection reset"
+            "repeated false-to-false sync should not notify detection reset"
         );
 
         runtime.set_full_lifecycle_authority_state(true, false);
