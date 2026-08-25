@@ -12,6 +12,7 @@
 - `prefix+b` now jumps to the next blocked tab across all Spaces and wraps at the end. Toggle the sidebar with `prefix+shift+b`.
 
 ### Fixed
+- Agent state detection now expires silent full-lifecycle hook authority after a configurable 10-minute default, keeps evaluating screen rules while hooks are fresh, and lets structurally anchored native Claude Code permission, trust, question, and login controls report `blocked`. Claude manifest `2026.08.25.1001` is a fork-local revision beyond upstream #3165's `2026.08.24.1`; it includes that change from head `cb512903cfb5febfe7b4be5d23f91fe77f260e8b`.
 - Configs containing the retired Herdr-written `ui.agent_panel_scope` setting no longer report it as an unknown key after upgrades. (#2292)
 - Claude Code confirmation prompts using `Enter to confirm · Esc to cancel` now report `blocked` instead of `idle`. (#2268)
 - Sidebar agent lists keep scrolling when differently sized clients are attached to the same session. (#2255, thanks @aiworkflowpro)

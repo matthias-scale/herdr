@@ -663,6 +663,23 @@ fn claude_blocker_screen_outranks_stale_osc_progress() {
 }
 
 #[test]
+fn claude_wrapped_blocker_footer_is_blocked() {
+    // Captured reporter panel at 48 columns: the footer wraps once between
+    // "to" and "cancel" without inserting a blank line.
+    let screen = "────────────────────────────────────────────────\n\
+  4. Chat about this\n\n\
+Enter to select · ↑/↓ to navigate · Esc to\n\
+cancel\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_blocked_form")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
 fn claude_selection_dialog_is_blocked_at_every_wrap_width() {
     let cases = [
         ("50 columns", "──────────────────────────────────────────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n"),
@@ -671,11 +688,16 @@ fn claude_selection_dialog_is_blocked_at_every_wrap_width() {
         ("34 columns", "──────────────────────────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to\nnavigate · Esc to cancel\n"),
         ("24 columns", "────────────────────────\n  4. Chat about this\n\nEnter to\nselect · ↑/↓ to\nnavigate · Esc\nto cancel\n"),
         ("indented continuation", "────────────────────────\n  4. Chat about this\n\n  Enter to select · ↑/↓ to navigate · Esc to\n   cancel\n"),
+        ("Enter to confirm wrap", "────────────────────────\n  Do you trust this folder?\n\nEnter to\nconfirm · Esc to cancel\n"),
     ];
     for (label, screen) in cases {
         let result = osc_explain(Agent::Claude, screen, "", "");
         assert_eq!(result.state, AgentState::Blocked, "{label}");
-        assert_eq!(result.matched_rule.as_ref().map(|rule| rule.id.as_str()), Some("live_blocked_form"), "{label}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("live_blocked_form"),
+            "{label}"
+        );
         assert!(result.visible_blocker, "{label}");
     }
 }
@@ -683,16 +705,46 @@ fn claude_selection_dialog_is_blocked_at_every_wrap_width() {
 #[test]
 fn claude_wrap_tolerant_blocker_leaves_neighbouring_screens_alone() {
     for (label, screen, rule) in [
-        ("streaming", "✽ Cooking… (6s · ↓ 174 tokens · thinking)\n", "live_turn_working"),
-        ("mode line", "⏵⏵ accept edits on · esc to interrupt\n", "live_turn_working"),
-        ("overlay", "  /btw\n  a note\n\nesc to close\n", "btw_overlay_working"),
+        (
+            "streaming",
+            "✽ Cooking… (6s · ↓ 174 tokens · thinking)\n",
+            "live_turn_working",
+        ),
+        (
+            "mode line",
+            "⏵⏵ accept edits on · esc to interrupt\n",
+            "live_turn_working",
+        ),
+        (
+            "overlay",
+            "  /btw\n  a note\n\nesc to close\n",
+            "btw_overlay_working",
+        ),
     ] {
         let result = osc_explain(Agent::Claude, screen, "", "");
         assert_eq!(result.state, AgentState::Working, "{label}");
-        assert_eq!(result.matched_rule.as_ref().map(|matched| matched.id.as_str()), Some(rule), "{label}");
+        assert_eq!(
+            result
+                .matched_rule
+                .as_ref()
+                .map(|matched| matched.id.as_str()),
+            Some(rule),
+            "{label}"
+        );
     }
-    let transcript = osc_explain(Agent::Claude, "Showing detailed transcript · Ctrl+O to toggle\n", "", "");
-    assert_eq!(transcript.matched_rule.as_ref().map(|rule| rule.id.as_str()), Some("transcript_viewer"));
+    let transcript = osc_explain(
+        Agent::Claude,
+        "Showing detailed transcript · Ctrl+O to toggle\n",
+        "",
+        "",
+    );
+    assert_eq!(
+        transcript
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("transcript_viewer")
+    );
     assert!(transcript.skip_state_update);
 }
 
@@ -721,7 +773,7 @@ fn claude_osc_progress_4_0_is_idle() {
 #[test]
 fn claude_blocker_screen_outranks_osc_idle_title() {
     // When the OSC title shows ✳ (idle) but the screen has a bash permission
-    // prompt, the blocked rule at priority 850 beats osc_title_idle at 250.
+    // prompt, the blocked rule at priority 1190 beats osc_title_idle at 250.
     let blocker_screen = "do you want to proceed?\n\
         bash command: rm -rf /tmp/test\n\
         ❯ 1. Yes\n   2. No\n\n\
@@ -767,12 +819,21 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
     let native_permission = include_str!(
         "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
     );
-    let ask = include_str!("../../../tests/fixtures/agent-detection/claude-native-ask-user-question-20260825.txt");
-    let trust = include_str!("../../../tests/fixtures/agent-detection/claude-trust-folder-20260825.txt");
-    let narrow_trust = include_str!("../../../tests/fixtures/agent-detection/claude-trust-folder-narrow-20260825.txt");
-    let login = include_str!("../../../tests/fixtures/agent-detection/claude-login-method-20260825.txt");
-    let quoted = include_str!("../../../tests/fixtures/agent-detection/claude-quoted-blocker-live-prompt-20260825.txt");
-    let model_picker = include_str!("../../../tests/fixtures/agent-detection/claude-model-picker-20260825.txt");
+    let ask = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-20260825.txt"
+    );
+    let trust =
+        include_str!("../../../tests/fixtures/agent-detection/claude-trust-folder-20260825.txt");
+    let narrow_trust = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-trust-folder-narrow-20260825.txt"
+    );
+    let login =
+        include_str!("../../../tests/fixtures/agent-detection/claude-login-method-20260825.txt");
+    let quoted = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-quoted-blocker-live-prompt-20260825.txt"
+    );
+    let model_picker =
+        include_str!("../../../tests/fixtures/agent-detection/claude-model-picker-20260825.txt");
 
     for screen in [claude_idle, kimi_through_claude] {
         let result = explain(Agent::Claude, screen);
@@ -794,7 +855,10 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
         let result = osc_explain(Agent::Claude, screen, "", "4;3;");
         assert_eq!(result.state, AgentState::Blocked, "{label}");
         assert!(result.visible_blocker, "{label}");
-        assert!(!screen.contains("closing-block") && !screen.contains("Gate "), "{label} must not depend on fleet tokens");
+        assert!(
+            !screen.contains("closing-block") && !screen.contains("Gate "),
+            "{label} must not depend on fleet tokens"
+        );
     }
 
     for (label, screen) in [("quoted history", quoted), ("model picker", model_picker)] {
@@ -805,14 +869,35 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
 }
 
 #[test]
+fn visible_blocker_overrides_fresh_hook_authority_priority_1100_working() {
+    let native_permission = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
+    );
+    let result = osc_explain(Agent::Claude, native_permission, "⠋ Claude Code", "4;3;");
+    assert_eq!(result.state, AgentState::Blocked);
+    assert!(result.visible_blocker);
+    assert!(result.matched_rule.as_ref().unwrap().priority > 1100);
+}
+
+#[test]
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
     assert_eq!(claude["version"].as_str(), Some("2026.08.25.1001"));
-    assert!(kimi["version"].as_str().is_some_and(|version| version > "2026.06.10.1"));
+    assert!(kimi["version"]
+        .as_str()
+        .is_some_and(|version| version > "2026.06.10.1"));
     let claude_text = include_str!("../manifests/claude.toml");
-    for working_rule in ["live_turn_working", "background_shell_working", "background_agents_working", "background_mcp_task_working"] {
-        assert!(claude_text.contains(working_rule), "missing deployed working rule {working_rule}");
+    for working_rule in [
+        "live_turn_working",
+        "background_shell_working",
+        "background_agents_working",
+        "background_mcp_task_working",
+    ] {
+        assert!(
+            claude_text.contains(working_rule),
+            "missing deployed working rule {working_rule}"
+        );
     }
 }
 
