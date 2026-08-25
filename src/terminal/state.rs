@@ -7535,12 +7535,20 @@ mod tests {
             true,
             false,
             false,
-            reported_at + CONFIGURED_TIMEOUT + Duration::from_secs(1),
+            reported_at + CONFIGURED_TIMEOUT,
+        );
+
+        assert_eq!(terminal.state, AgentState::Working, "authority is fresh at the threshold");
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        let mutation = terminal.expire_full_lifecycle_hook_authority_at(
+            reported_at + CONFIGURED_TIMEOUT + Duration::from_nanos(1),
+            CONFIGURED_TIMEOUT,
         );
 
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert!(mutation.is_some());
     }
 
     #[test]
@@ -7566,8 +7574,9 @@ mod tests {
             reported_at,
         );
 
-        let retired = idle_hook
-            .retire_blocked_full_lifecycle_hook_authority_at(reported_at + Duration::from_secs(5));
+        let retired = idle_hook.retire_output_inconsistent_hook_authority_at(
+            reported_at + Duration::from_secs(5),
+        );
         assert!(
             retired.is_some(),
             "output contradicts a hook-reported idle state"
@@ -7595,7 +7604,7 @@ mod tests {
         );
 
         assert!(working_hook
-            .retire_blocked_full_lifecycle_hook_authority_at(reported_at + Duration::from_secs(5),)
+            .retire_output_inconsistent_hook_authority_at(reported_at + Duration::from_secs(5))
             .is_none());
         assert_eq!(working_hook.state, AgentState::Working);
         assert!(working_hook.full_lifecycle_hook_authority_active());
@@ -7677,7 +7686,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_block_reports_do_not_claim_full_lifecycle_authority() {
+    fn closing_block_authority_is_limited_to_live_blocked_gates() {
         assert!(crate::detect::is_closing_block_source(
             "herdr:claude-closing-block",
             "claude"
@@ -7686,5 +7695,30 @@ mod tests {
             "herdr:claude-closing-block",
             "claude"
         ));
+
+        let reported_at = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(), "claude".into(), AgentState::Idle,
+            None, None, Some(1), reported_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude), AgentState::Idle, false, true, false, false,
+            reported_at + Duration::from_secs(1),
+        );
+        assert_eq!(terminal.state, AgentState::Idle, "non-blocked closing report yields to newer screen");
+
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(), "claude".into(), AgentState::Blocked,
+            None, None, Some(2), reported_at + Duration::from_secs(2),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude), AgentState::Idle, false, true, false, false,
+            reported_at + Duration::from_secs(700),
+        );
+        assert_eq!(terminal.state, AgentState::Blocked, "live fleet gate ignores general lifecycle timeout");
+        assert!(terminal.retire_output_inconsistent_hook_authority_at(reported_at + Duration::from_secs(705)).is_some());
+        assert_eq!(terminal.state, AgentState::Idle, "sustained new-turn output retires gate");
     }
 }

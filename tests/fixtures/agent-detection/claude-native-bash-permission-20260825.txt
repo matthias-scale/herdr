@@ -1,5 +1,3 @@
-# Captured on Matthiass-MBP, 2026-08-25, Claude Code 2.1.245, Haiku 4.5.
-# Source: herdr agent read w1:p1 --source detection --format text
 ❯ Use the Bash tool to run touch /var/tmp/herdr-cc-permission-probe-20260825. Do not call any other tool and do not explain before calling Bash.
 
 ⏺ Creating file for permission probe

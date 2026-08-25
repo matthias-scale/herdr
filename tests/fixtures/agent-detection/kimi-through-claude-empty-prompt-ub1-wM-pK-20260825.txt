@@ -1,6 +1,3 @@
-# Captured on ub1, 2026-08-25, pane wM:pK, agent kind claude.
-# Kimi drives the Claude Code TUI; no standalone Kimi hook or fleet token is present.
-# Source: herdr agent read wM:pK --source detection --format text
 ────────────────────────────────────────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────────────────────────────────────────

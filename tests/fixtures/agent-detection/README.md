@@ -1,0 +1,17 @@
+# Agent detection fixture provenance
+
+Terminal fixture files contain terminal bytes only. This table records their capture source and any bounded trimming used to keep fixtures focused on stable controls.
+
+| Fixture | Capture | Provenance and threat boundary |
+| --- | --- | --- |
+| `claude-empty-prompt-ub1-wM-pJ-20260825.txt` | `herdr agent read wM:pJ --source detection --format text` on ub1, 2026-08-25 | Claude-kind pane at a live empty prompt. No fleet token in the retained terminal bytes. |
+| `kimi-through-claude-empty-prompt-ub1-wM-pK-20260825.txt` | `herdr agent read wM:pK --source detection --format text` on ub1, 2026-08-25 | Kimi through the Claude Code TUI, reported as `--kind claude`. No standalone Kimi hook or fleet token. |
+| `claude-native-bash-permission-20260825.txt` | `herdr agent read w1:p1 --source detection --format text` on Matthiass-MBP, Claude Code 2.1.245, 2026-08-25 | Native Bash permission panel. The harmless `touch` was rejected; no file was created. |
+| `claude-native-ask-user-question-20260825.txt` | `herdr agent read w1:p1 --source detection --format text` in named session `s3-native-controls-20260825`, Claude Code 2.1.245, 2026-08-25 | Native AskUserQuestion panel. Trimmed to the submitted prompt and live control. Cancelled with Esc without answering. |
+| `claude-quoted-blocker-live-prompt-20260825.txt` | Same named session and command | Completed response quoting blocker words above the live prompt. Negative abuse-path fixture: quoted or historical text must not become a visible blocker. |
+| `claude-model-picker-20260825.txt` | Same named session and command | Native `/model` picker. Trimmed to the live control. Negative abuse-path fixture: a non-blocking selector with `Esc to cancel` must remain Unknown, not Blocked. |
+| `claude-login-method-20260825.txt` | `herdr agent read w1:p1 --source detection --format text` in isolated-config named session `s3-login-controls-20260825`, Claude Code 2.1.245, 2026-08-25 | First-run login-method control after selecting the isolated theme. Trimmed to the banner and live chooser. No method was selected, no browser opened, and no credentials were entered. |
+| `claude-trust-folder-20260825.txt` | `herdr agent read w1:p1 --source detection --format text` in named session `s3-trust-project-20260825`, Claude Code 2.1.245, 2026-08-25 | Fresh project with one harmless project-scoped `Read` permission, enough to trigger Claude's native trust control. The control was cancelled; the daily-driver Claude config was not changed. |
+| `claude-trust-folder-narrow-20260825.txt` | Same live control after a disposable-session split narrowed the pane to 55 columns | Wrapped positive fixture. Resizing changed geometry only; the control remained live and was then cancelled. |
+
+Visible-blocker authority is limited to same-agent, newer, structurally anchored live controls. Whole-recent permission text, quoted transcript text, model selectors, and stale controls above a live prompt must not weaken fresh lifecycle authority. Claude's stale `4;3` OSC progress was observed during the native Bash permission panel; tests pair that observed OSC value with the captured terminal bytes so live blocker evidence wins stale busy metadata.
