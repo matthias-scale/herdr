@@ -142,6 +142,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ),
         help_entry(keybind_label(&kb.next_window), "next tab across all Spaces"),
         help_entry(
+            keybind_label(&kb.next_blocked_window),
+            "next blocked tab across all Spaces",
+        ),
+        help_entry(
             keybind_label(&kb.previous_tab),
             "previous tab in this Space",
         ),

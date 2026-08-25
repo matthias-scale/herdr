@@ -59,7 +59,7 @@ Herdr 是鼠标原生的。你可以点击窗格、标签页、工作区和智�
 | 重命名工作区 | `prefix+shift+w` |
 | 关闭工作区 | `prefix+shift+d` |
 | Goto 选择器 | `prefix+g` |
-| 切换侧边栏 | `prefix+b` |
+| 切换侧边栏 | `prefix+shift+b` |
 | 打开只读 Symphony 仪表板 | `prefix+shift+s` |
 
 Symphony 仪表板轮询运行中的 Temporal 工作流,显示名称、阶段、命名等待项和运行时长。按 Enter 会在匹配的检出目录中打开交互式 Herdr 窗口,并携带工作流、工单、拉取请求和回执上下文;仪表板不能 signal、cancel 或 merge 工作流。
@@ -97,6 +97,7 @@ focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
 previous_window = "prefix+p" # 所有 Space 中的上一个标签页
 next_window = "prefix+n" # 所有 Space 中的下一个标签页
+next_blocked_window = "prefix+b" # 所有 Space 中的下一个 blocked 标签页
 previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
 next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
@@ -105,9 +106,12 @@ split_left = "prefix+shift+v"
 split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
+toggle_sidebar = "prefix+shift+b"
 ```
 
 四个分割方向都有互不冲突的默认绑定:`prefix+v` 向右,`prefix+shift+v` 向左,`prefix+minus` 向下,`prefix+shift+minus` 向上。旧名称 `split_vertical` 和 `split_horizontal` 仍分别表示向右和向下。`next_window` 和 `previous_window` 会按工作区顺序、再按各工作区的标签页顺序循环所有标签页,包括没有智能体的标签页,并在两端循环。侧边栏和 Space 的折叠状态不会改变顺序。`next_tab` 和 `previous_tab` 只在当前 Space 中移动。
+
+`next_blocked_window` 按相同的全局顺序向前移动,只停在窗格状态汇总为 `blocked` 的标签页。到达最后一个匹配项后会回到开头。如果没有 blocked 标签页,焦点保持不变。默认键位是 `prefix+b`;`toggle_sidebar` 使用 `prefix+shift+b`。
 
 无需键位绑定也可使用相同的全局循环:`herdr window next` 和 `herdr window previous`。两者都会在两端循环。
 

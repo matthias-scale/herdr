@@ -155,6 +155,8 @@ command = "lazygit"
         assert!(profile.contains("new_tab = \"prefix+t\""));
         assert!(profile.contains("next_tab = \"prefix+ctrl+n\""));
         assert!(profile.contains("next_window = \"prefix+n\""));
+        assert!(profile.contains("next_blocked_window = \"prefix+b\""));
+        assert!(profile.contains("toggle_sidebar = \"prefix+shift+b\""));
         assert!(!profile.contains("lazygit"));
         assert!(!profile.contains("command ="));
         assert!(!profile.contains("[[keys.command]]"));

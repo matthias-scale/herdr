@@ -207,6 +207,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_tab = "prefix+ctrl+n"     # next tab in the active workspace
 # previous_window = "prefix+p"   # previous tab across all workspaces
 # next_window = "prefix+n"       # next tab across all workspaces
+# next_blocked_window = "prefix+b" # next blocked tab across all workspaces
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"
@@ -224,7 +225,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # close_pane = "prefix+x"
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
-# toggle_sidebar = "prefix+b"
+# toggle_sidebar = "prefix+shift+b"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
 
@@ -962,6 +963,8 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# next_tab = \"prefix+ctrl+n\""));
         assert!(DEFAULT_CONFIG.contains("# previous_window = \"prefix+p\""));
         assert!(DEFAULT_CONFIG.contains("# next_window = \"prefix+n\""));
+        assert!(DEFAULT_CONFIG.contains("# next_blocked_window = \"prefix+b\""));
+        assert!(DEFAULT_CONFIG.contains("# toggle_sidebar = \"prefix+shift+b\""));
     }
 
     #[cfg(unix)]

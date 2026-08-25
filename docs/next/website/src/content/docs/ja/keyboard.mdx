@@ -59,7 +59,7 @@ Herdr はマウスネイティブです。キーバインドをひとつも覚�
 | ワークスペースの名前を変更 | `prefix+shift+w` |
 | ワークスペースを閉じる | `prefix+shift+d` |
 | Goto ピッカー | `prefix+g` |
-| サイドバーの表示切り替え | `prefix+b` |
+| サイドバーの表示切り替え | `prefix+shift+b` |
 | 読み取り専用の Symphony ダッシュボードを開く | `prefix+shift+s` |
 
 Symphony ダッシュボードは、実行中の Temporal ワークフローについて名前、フェーズ、名前付き待機、経過時間を表示します。Enter を押すと、対応するチェックアウトでワークフロー、チケット、プルリクエスト、レシートのコンテキストを持つ対話型 Herdr ウィンドウが開きます。ダッシュボードからワークフローの signal、cancel、merge は実行できません。
@@ -97,6 +97,7 @@ focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
 previous_window = "prefix+p" # 全 Space の前のタブ
 next_window = "prefix+n" # 全 Space の次のタブ
+next_blocked_window = "prefix+b" # 全 Space の次の blocked タブ
 previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
 next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
@@ -105,9 +106,12 @@ split_left = "prefix+shift+v"
 split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
+toggle_sidebar = "prefix+shift+b"
 ```
 
 4 方向の分割には衝突しないデフォルトがあります。`prefix+v` は右、`prefix+shift+v` は左、`prefix+minus` は下、`prefix+shift+minus` は上です。従来の `split_vertical` と `split_horizontal` は引き続き右と下を表します。`next_window` と `previous_window` は、エージェントのないタブも含むすべてのタブを、ワークスペース順、その中のタブ順で循環し、両端でラップします。サイドバーや Space の折りたたみ状態は順序に影響しません。`next_tab` と `previous_tab` はアクティブな Space 内だけを移動します。
+
+`next_blocked_window` は同じグローバル順序を前に進み、ペイン状態が `blocked` に集約されるタブだけで停止します。最後の一致の後は先頭に戻ります。blocked なタブがなければ、フォーカスは移動しません。デフォルトは `prefix+b` です。`toggle_sidebar` は `prefix+shift+b` を使います。
 
 キーバインドなしでも、`herdr window next` と `herdr window previous` で同じグローバル循環を使えます。どちらも両端でラップします。
 

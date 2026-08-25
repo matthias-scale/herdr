@@ -566,6 +566,12 @@
           "description": "Focus the next tab across all workspaces in canonical order."
         },
         {
+          "key": "keys.next_blocked_window",
+          "type": "keybinding",
+          "default": "\"prefix+b\"",
+          "description": "Focus the next blocked tab across all workspaces in canonical order."
+        },
+        {
           "key": "keys.split_vertical",
           "type": "keybinding",
           "default": "\"prefix+v\"",
@@ -610,7 +616,7 @@
         {
           "key": "keys.toggle_sidebar",
           "type": "keybinding",
-          "default": "\"prefix+b\"",
+          "default": "\"prefix+shift+b\"",
           "description": "Toggle sidebar collapse."
         },
         {
