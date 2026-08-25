@@ -238,6 +238,10 @@ impl TerminalRuntime {
         self.0.reset_agent_detection();
     }
 
+    pub fn request_agent_screen_rescan(&self) {
+        self.0.request_agent_screen_rescan();
+    }
+
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(
         &self,

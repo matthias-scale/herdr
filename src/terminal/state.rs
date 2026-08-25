@@ -2548,6 +2548,31 @@ impl TerminalState {
         })
     }
 
+    /// Names the evidence that currently owns `self.state`.
+    ///
+    /// Diagnostic manifest evaluation may observe newer terminal bytes before
+    /// the detector publishes them. API consumers must use this applied-state
+    /// arbitration instead of promoting diagnostic-only evidence.
+    pub(crate) fn effective_state_arbitration(&self) -> &'static str {
+        if self.visible_blocker_overrides_hook() {
+            "visible_blocker_over_hook"
+        } else if self.closing_block_gate_authority() {
+            "closing_block_gate"
+        } else if self.live_full_lifecycle_hook_authority() {
+            "fresh_full_lifecycle_hook"
+        } else if self.closing_block_non_gate_waits_for_screen_refresh() {
+            "closing_block_report"
+        } else if self.closing_block_non_gate_yields_to_screen() {
+            "screen"
+        } else if self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
+        }) {
+            "hook_report"
+        } else {
+            "screen"
+        }
+    }
+
     fn visible_working_overrides_idle_hook(&self) -> bool {
         let Some(authority) = self.hook_authority.as_ref() else {
             return false;

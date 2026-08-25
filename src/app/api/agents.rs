@@ -197,33 +197,8 @@ impl App {
         let mut value = crate::detect::manifest::explain_to_json_value(&explain);
         if let Some(object) = value.as_object_mut() {
             let screen_state = crate::detect::manifest::agent_state_label(explain.state);
-            let visible_blocker_override = explain.visible_blocker
-                && terminal.hook_authority.as_ref().is_some_and(|authority| {
-                    authority.retired_at.is_none()
-                        && authority.state != crate::detect::AgentState::Blocked
-                        && crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
-                });
-            let (effective_state, arbitration) = if visible_blocker_override {
-                (
-                    crate::detect::AgentState::Blocked,
-                    "visible_blocker_over_hook",
-                )
-            } else if terminal.full_lifecycle_hook_authority_active() {
-                (terminal.state, "fresh_full_lifecycle_hook")
-            } else if terminal.hook_authority.as_ref().is_some_and(|authority| {
-                authority.retired_at.is_none()
-                    && authority.state == crate::detect::AgentState::Blocked
-                    && crate::detect::is_closing_block_source(
-                        &authority.source,
-                        &authority.agent_label,
-                    )
-            }) {
-                (crate::detect::AgentState::Blocked, "closing_block_gate")
-            } else if terminal.closing_block_non_gate_waits_for_screen_refresh() {
-                (terminal.state, "closing_block_report")
-            } else {
-                (explain.state, "screen")
-            };
+            let effective_state = terminal.state;
+            let arbitration = terminal.effective_state_arbitration();
             object.insert("screen_state".into(), serde_json::json!(screen_state));
             object.insert(
                 "state".into(),
@@ -418,10 +393,15 @@ mod tests {
             AgentStatus::Blocked
         );
 
-        app.terminal_runtimes
-            .get(&terminal_id)
+        let mut cleared_prompt = b"\x1b[3J\x1b[2J\x1b[H".to_vec();
+        cleared_prompt.extend_from_slice(include_bytes!(
+            "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+        ));
+        app.state.workspaces[0]
+            .test_runtimes
+            .get(&pane_id)
             .unwrap()
-            .test_process_pty_bytes(b"\x1b[2J\x1b[H\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n");
+            .test_process_pty_bytes(&cleared_prompt);
         app.handle_internal_event(crate::events::AppEvent::StateChanged {
             pane_id,
             agent: Some(Agent::Claude),
@@ -526,6 +506,7 @@ mod tests {
                 .get_mut(&pane_id)
                 .unwrap()
                 .seen = false;
+            app.state.active = None;
 
             assert_eq!(
                 app.handle_internal_event(crate::events::AppEvent::HookStateReported {

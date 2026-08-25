@@ -414,7 +414,7 @@ impl App {
                             // Closing-block reports describe turn-end/gate state,
                             // not the full lifecycle. Rescan unchanged terminal
                             // bytes so a quiet prompt can supersede the report.
-                            runtime.reset_agent_detection();
+                            runtime.request_agent_screen_rescan();
                         }
                     }
                 }
