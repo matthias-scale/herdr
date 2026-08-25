@@ -3304,6 +3304,7 @@ impl PaneRuntime {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
+    #[cfg(unix)]
     pub(crate) fn test_with_live_detection_screen_bytes(
         pane_id: PaneId,
         agent: Agent,

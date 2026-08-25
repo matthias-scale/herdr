@@ -543,6 +543,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn closing_block_authority_is_limited_to_live_blocked_gates_quiet_report_wakes_screen() {
         for report_state in [AgentState::Working, AgentState::Idle, AgentState::Unknown] {

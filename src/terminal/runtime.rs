@@ -578,6 +578,7 @@ impl TerminalRuntime {
         ))
     }
 
+    #[cfg(unix)]
     pub(crate) fn test_with_live_detection_screen_bytes(
         pane_id: crate::layout::PaneId,
         agent: crate::detect::Agent,

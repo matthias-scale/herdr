@@ -2269,6 +2269,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn stale_full_lifecycle_hook_authority_falls_back_to_screen_in_tui_scheduler() {
         for (fallback, visible_blocker, visible_working, screen) in [
