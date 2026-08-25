@@ -7503,4 +7503,188 @@ mod tests {
             "custom:pi"
         );
     }
+
+    #[test]
+    fn stale_full_lifecycle_hook_authority_falls_back_to_screen() {
+        const CONFIGURED_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+        let reported_at = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Working);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-stale").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Kimi,
+            "herdr:kimi",
+            "kimi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Working,
+            None,
+            Some(session_ref),
+            Some(10),
+            reported_at,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Kimi),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            reported_at + CONFIGURED_TIMEOUT + Duration::from_secs(1),
+        );
+
+        assert_eq!(terminal.fallback_state, AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+    }
+
+    #[test]
+    fn unmatched_output_retires_hook_authority() {
+        let reported_at = Instant::now();
+        let mut idle_hook = test_terminal();
+        idle_hook.set_detected_state(Some(Agent::Kimi), AgentState::Working);
+        let idle_session = crate::agent_resume::AgentSessionRef::id("kimi-idle").unwrap();
+        anchor_full_lifecycle_session(
+            &mut idle_hook,
+            Agent::Kimi,
+            "herdr:kimi",
+            "kimi",
+            idle_session.clone(),
+        );
+        idle_hook.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Idle,
+            None,
+            Some(idle_session),
+            Some(10),
+            reported_at,
+        );
+
+        let retired = idle_hook
+            .retire_blocked_full_lifecycle_hook_authority_at(reported_at + Duration::from_secs(5));
+        assert!(
+            retired.is_some(),
+            "output contradicts a hook-reported idle state"
+        );
+        assert_eq!(idle_hook.state, AgentState::Working);
+
+        let mut working_hook = test_terminal();
+        working_hook.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let working_session = crate::agent_resume::AgentSessionRef::id("kimi-working").unwrap();
+        anchor_full_lifecycle_session(
+            &mut working_hook,
+            Agent::Kimi,
+            "herdr:kimi",
+            "kimi",
+            working_session.clone(),
+        );
+        working_hook.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Working,
+            None,
+            Some(working_session),
+            Some(10),
+            reported_at,
+        );
+
+        assert!(working_hook
+            .retire_blocked_full_lifecycle_hook_authority_at(reported_at + Duration::from_secs(5),)
+            .is_none());
+        assert_eq!(working_hook.state, AgentState::Working);
+        assert!(working_hook.full_lifecycle_hook_authority_active());
+    }
+
+    #[test]
+    fn fresh_hook_state_wins_over_non_blocker_screen() {
+        let reported_at = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-fresh").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Kimi,
+            "herdr:kimi",
+            "kimi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Working,
+            None,
+            Some(session_ref),
+            Some(10),
+            reported_at,
+        );
+
+        for fallback in [AgentState::Idle, AgentState::Working, AgentState::Unknown] {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Kimi),
+                fallback,
+                false,
+                fallback == AgentState::Idle,
+                fallback == AgentState::Working,
+                false,
+                reported_at + Duration::from_secs(1),
+            );
+            assert_eq!(terminal.state, AgentState::Working);
+            assert!(terminal.full_lifecycle_hook_authority_active());
+        }
+    }
+
+    #[test]
+    fn visible_blocker_overrides_fresh_hook_authority() {
+        let reported_at = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-blocker").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Kimi,
+            "herdr:kimi",
+            "kimi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Working,
+            None,
+            Some(session_ref),
+            Some(10),
+            reported_at,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Kimi),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            reported_at + Duration::from_secs(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+    }
+
+    #[test]
+    fn closing_block_reports_do_not_claim_full_lifecycle_authority() {
+        assert!(crate::detect::is_closing_block_source(
+            "herdr:claude-closing-block",
+            "claude"
+        ));
+        assert!(!crate::detect::full_lifecycle_hook_authority(
+            "herdr:claude-closing-block",
+            "claude"
+        ));
+    }
 }

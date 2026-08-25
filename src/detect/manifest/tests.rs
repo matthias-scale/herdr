@@ -710,6 +710,39 @@ fn claude_live_prompt_box_remains_a_positive_idle_observation() {
     assert!(result.visible_idle);
 }
 
+#[test]
+fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
+    let claude_idle = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+    );
+    let kimi_through_claude = include_str!(
+        "../../../tests/fixtures/agent-detection/kimi-through-claude-empty-prompt-ub1-wM-pK-20260825.txt"
+    );
+    let native_permission = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
+    );
+
+    for screen in [claude_idle, kimi_through_claude] {
+        let result = explain(Agent::Claude, screen);
+        assert_eq!(result.state, AgentState::Idle);
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("live_prompt_box")
+        );
+        assert!(result.visible_idle);
+    }
+
+    let result = explain(Agent::Claude, native_permission);
+    assert_eq!(result.state, AgentState::Blocked);
+    assert!(result.visible_blocker);
+    assert!(
+        native_permission.contains("Do you want to proceed?")
+            && !native_permission.contains("closing-block")
+            && !native_permission.contains("Gate "),
+        "the captured native blocker must not depend on fleet closing-block tokens"
+    );
+}
+
 // --- Codex OSC rules ---
 
 #[test]
