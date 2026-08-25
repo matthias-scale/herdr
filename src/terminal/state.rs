@@ -7721,38 +7721,44 @@ mod tests {
     #[test]
     fn fresh_hook_state_wins_over_non_blocker_screen() {
         let reported_at = Instant::now();
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
-        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-fresh").unwrap();
-        anchor_full_lifecycle_session(
-            &mut terminal,
-            Agent::Kimi,
-            "herdr:kimi",
-            "kimi",
-            session_ref.clone(),
-        );
-        terminal.set_hook_authority_at(
-            "herdr:kimi".into(),
-            "kimi".into(),
-            AgentState::Working,
-            None,
-            Some(session_ref),
-            Some(10),
-            reported_at,
-        );
+        for hook_state in [AgentState::Idle, AgentState::Working, AgentState::Unknown] {
+            for screen_state in [AgentState::Idle, AgentState::Working, AgentState::Unknown] {
+                let mut terminal = test_terminal();
+                terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+                let session_ref =
+                    crate::agent_resume::AgentSessionRef::id("kimi-fresh-matrix").unwrap();
+                anchor_full_lifecycle_session(
+                    &mut terminal,
+                    Agent::Kimi,
+                    "herdr:kimi",
+                    "kimi",
+                    session_ref.clone(),
+                );
+                terminal.set_hook_authority_at(
+                    "herdr:kimi".into(),
+                    "kimi".into(),
+                    hook_state,
+                    None,
+                    Some(session_ref),
+                    Some(10),
+                    reported_at,
+                );
 
-        for fallback in [AgentState::Idle, AgentState::Working, AgentState::Unknown] {
-            terminal.set_detected_state_with_screen_signals_at(
-                Some(Agent::Kimi),
-                fallback,
-                false,
-                fallback == AgentState::Idle,
-                fallback == AgentState::Working,
-                false,
-                reported_at + Duration::from_secs(1),
-            );
-            assert_eq!(terminal.state, AgentState::Working);
-            assert!(terminal.full_lifecycle_hook_authority_active());
+                terminal.set_detected_state_with_screen_signals_at(
+                    Some(Agent::Kimi),
+                    screen_state,
+                    false,
+                    screen_state == AgentState::Idle,
+                    screen_state == AgentState::Working,
+                    false,
+                    reported_at + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+                );
+                assert_eq!(
+                    terminal.state, hook_state,
+                    "fresh {hook_state:?} hook must beat ordinary {screen_state:?} screen"
+                );
+                assert!(terminal.full_lifecycle_hook_authority_active());
+            }
         }
     }
 

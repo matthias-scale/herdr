@@ -822,6 +822,44 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
     let ask = include_str!(
         "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-20260825.txt"
     );
+    let narrow_asks = [
+        (
+            50,
+            include_str!(
+                "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-width-50-20260825.txt"
+            ),
+        ),
+        (
+            48,
+            include_str!(
+                "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-width-48-20260825.txt"
+            ),
+        ),
+        (
+            40,
+            include_str!(
+                "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-width-40-20260825.txt"
+            ),
+        ),
+        (
+            34,
+            include_str!(
+                "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-width-34-20260825.txt"
+            ),
+        ),
+        (
+            24,
+            include_str!(
+                "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-width-24-20260825.txt"
+            ),
+        ),
+    ];
+    let narrow_layouts = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-native-ask-user-question-widths-20260825.layout.ndjson"
+    )
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .collect::<Vec<_>>();
     let trust =
         include_str!("../../../tests/fixtures/agent-detection/claude-trust-folder-20260825.txt");
     let narrow_trust = include_str!(
@@ -858,6 +896,33 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
         assert!(
             !screen.contains("closing-block") && !screen.contains("Gate "),
             "{label} must not depend on fleet tokens"
+        );
+    }
+
+    for ((width, screen), layout) in narrow_asks.into_iter().zip(narrow_layouts) {
+        assert_eq!(
+            layout["result"]["layout"]["area"]["width"].as_u64(),
+            Some(width as u64),
+            "capture must retain exact physical pane width {width}"
+        );
+        assert_eq!(
+            layout["result"]["layout"]["panes"][0]["rect"]["width"].as_u64(),
+            Some(width as u64),
+            "captured pane must match layout area at width {width}"
+        );
+        let top_border = screen.lines().find(|line| !line.is_empty()).unwrap();
+        assert_eq!(
+            top_border.chars().count(),
+            width - 1,
+            "Claude must paint its observed width-minus-one border at width {width}"
+        );
+        assert!(top_border.starts_with('╭') && top_border.ends_with('╮'));
+        let result = osc_explain(Agent::Claude, screen, "", "4;3;");
+        assert_eq!(result.state, AgentState::Blocked, "width {width}");
+        assert!(result.visible_blocker, "width {width}");
+        assert!(
+            !screen.contains("closing-block") && !screen.contains("Gate "),
+            "width {width} must not depend on fleet tokens"
         );
     }
 
