@@ -38,14 +38,16 @@ mod state;
 mod terminal;
 mod xtgettcap;
 
+#[cfg(unix)]
+use self::agent_detection::DetectionPublishState;
 pub(crate) use self::agent_detection::STABLE_VISIBLE_SIGNAL_REFRESH;
 use self::agent_detection::{
     decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed, observe_agent_output,
     observe_detection_content_change, recent_agent_output, DetectionPublishDecision,
-    DetectionPublishState, DetectionScreenReadDecision, DetectionScreenReadInput,
-    FullLifecycleHookOutputRetirement, PendingIdleConfirmation, ScreenDetectionPublishInput,
-    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
+    DetectionScreenReadDecision, DetectionScreenReadInput, FullLifecycleHookOutputRetirement,
+    PendingIdleConfirmation, ScreenDetectionPublishInput, AGENT_PENDING_IDLE_RECHECK,
+    AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{
@@ -729,6 +731,7 @@ type SpawnedDetectionTask = (
     Arc<Mutex<Option<PendingAgentRelease>>>,
 );
 
+#[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
