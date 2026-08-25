@@ -2241,22 +2241,36 @@ switch_tab = "prefix+?"
     }
 
     #[test]
-    fn default_keymap_is_prefix_first_and_tab_centered() {
+    fn global_window_default_bindings() {
         let config = Config::default();
         assert!(config.collect_diagnostics().is_empty());
         let kb = config.keybinds();
         assert_eq!(
-            binding_triggers(&kb.next_tab),
+            binding_triggers(&kb.next_window),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('n'),
                 KeyModifiers::empty()
             ))]
         );
         assert_eq!(
-            binding_triggers(&kb.previous_tab),
+            binding_triggers(&kb.previous_window),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('p'),
                 KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.next_tab),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.previous_tab),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL
             ))]
         );
         assert_eq!(kb.switch_tab.len(), 9);
@@ -2362,7 +2376,7 @@ prefix = "n"
         let kb = config.keybinds();
 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(kb.next_tab.bindings.is_empty());
+        assert!(kb.next_window.bindings.is_empty());
     }
 
     #[test]

@@ -56,7 +56,7 @@ Space disclosure is local to each attached UI. Expanding or collapsing a Space i
 
 The visible tree always keeps repository/Space and direct window ownership order. Legacy priority ordering and API-defined Agent views remain accepted for compatibility but do not replace or reorder it; see [UI and sidebar configuration](/docs/configuration/#ui-and-sidebar) and [Agent view queries](/docs/socket-api/#agent-view-queries) for their remaining effects.
 
-Configured `previous_agent` and `next_agent` actions always traverse every detected agent in workspace, tab, and pane order and wrap at both ends. This canonical navigation is independent of sidebar disclosure, priority mode, filters, scrolling, or collapsed presentation. The default `prefix+p` and `prefix+n` bindings remain previous-tab and next-tab inside the active workspace.
+Configured `previous_agent` and `next_agent` actions always traverse every detected agent in workspace, tab, and pane order and wrap at both ends. This canonical navigation is independent of sidebar disclosure, priority mode, filters, scrolling, or collapsed presentation. The default `prefix+p` and `prefix+n` bindings traverse every tab, including tabs without agents, in workspace order and then tab order. They wrap at both ends and ignore sidebar and Space collapse state, agent state, and cwd. Use `prefix+ctrl+p` and `prefix+ctrl+n` to move only within the active workspace.
 
 ## Session
 

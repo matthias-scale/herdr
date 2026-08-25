@@ -7,6 +7,9 @@
 - Settings and `ui.status_indicators = "symbols"` can now use distinct static shapes for blocked, working, done, idle, and unknown agent states. (#2260)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 
+### Changed
+- `prefix+n` and `prefix+p` now cycle every tab across all Spaces in workspace and tab order. Use `prefix+ctrl+n` and `prefix+ctrl+p` to cycle tabs only in the active Space.
+
 ### Fixed
 - Configs containing the retired Herdr-written `ui.agent_panel_scope` setting no longer report it as an unknown key after upgrades. (#2292)
 - Claude Code confirmation prompts using `Enter to confirm · Esc to cancel` now report `blocked` instead of `idle`. (#2268)

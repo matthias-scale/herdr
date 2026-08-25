@@ -203,8 +203,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # rename_tab = "prefix+shift+t"
 # toggle_tab_prio = "prefix+shift+f"
 # toggle_prio_panel = "" # optional, unset by default
-# previous_tab = "prefix+p"
-# next_tab = "prefix+n"
+# previous_tab = "prefix+ctrl+p" # previous tab in the active workspace
+# next_tab = "prefix+ctrl+n"     # next tab in the active workspace
+# previous_window = "prefix+p"   # previous tab across all workspaces
+# next_window = "prefix+n"       # next tab across all workspaces
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"
@@ -952,6 +954,14 @@ mod tests {
     #[test]
     fn default_config_exposes_status_bar_enabled_setting() {
         assert!(DEFAULT_CONFIG.contains("[ui.status_bar]\n# enabled = true"));
+    }
+
+    #[test]
+    fn default_config_exposes_global_window_bindings() {
+        assert!(DEFAULT_CONFIG.contains("# previous_tab = \"prefix+ctrl+p\""));
+        assert!(DEFAULT_CONFIG.contains("# next_tab = \"prefix+ctrl+n\""));
+        assert!(DEFAULT_CONFIG.contains("# previous_window = \"prefix+p\""));
+        assert!(DEFAULT_CONFIG.contains("# next_window = \"prefix+n\""));
     }
 
     #[cfg(unix)]

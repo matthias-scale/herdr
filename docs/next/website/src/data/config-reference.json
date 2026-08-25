@@ -442,14 +442,14 @@
         {
           "key": "keys.previous_tab",
           "type": "keybinding",
-          "default": "\"prefix+p\"",
-          "description": "Select the previous tab."
+          "default": "\"prefix+ctrl+p\"",
+          "description": "Select the previous tab in the active workspace."
         },
         {
           "key": "keys.next_tab",
           "type": "keybinding",
-          "default": "\"prefix+n\"",
-          "description": "Select the next tab."
+          "default": "\"prefix+ctrl+n\"",
+          "description": "Select the next tab in the active workspace."
         },
         {
           "key": "keys.switch_tab",
@@ -556,14 +556,14 @@
         {
           "key": "keys.previous_window",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the previous tab across all workspaces in canonical order. Unset by default."
+          "default": "\"prefix+p\"",
+          "description": "Focus the previous tab across all workspaces in canonical order."
         },
         {
           "key": "keys.next_window",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the next tab across all workspaces in canonical order. Unset by default."
+          "default": "\"prefix+n\"",
+          "description": "Focus the next tab across all workspaces in canonical order."
         },
         {
           "key": "keys.split_vertical",

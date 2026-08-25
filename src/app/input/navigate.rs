@@ -2378,6 +2378,89 @@ mod tests {
         app
     }
 
+    fn app_with_global_window_fixture() -> App {
+        let mut app = app_with_test_workspaces(&["first", "second"]);
+        app.state.workspaces[0].test_add_tab(Some("first-agentless"));
+        app.state.workspaces[1].test_add_tab(Some("second-agentless"));
+        app.state.ensure_test_terminals();
+        app
+    }
+
+    fn active_window(state: &AppState) -> (usize, usize) {
+        let workspace = state.active.expect("active workspace");
+        (workspace, state.workspaces[workspace].active_tab_index())
+    }
+
+    fn assert_tui_window_cycle(app: &mut App, action: NavigateAction, expected: &[(usize, usize)]) {
+        for expected_window in expected {
+            app.execute_tui_navigate_action(action, ActionContext::Prefix);
+            assert_eq!(active_window(&app.state), *expected_window);
+        }
+    }
+
+    fn assert_headless_window_cycle(
+        state: &mut AppState,
+        action: NavigateAction,
+        expected: &[(usize, usize)],
+    ) {
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        for expected_window in expected {
+            execute_navigate_action_in_context(
+                state,
+                &mut terminal_runtimes,
+                action,
+                ActionContext::Prefix,
+            );
+            assert_eq!(active_window(state), *expected_window);
+        }
+    }
+
+    #[test]
+    fn global_window_cycle_includes_every_tab() {
+        let forward = [(0, 1), (1, 0), (1, 1), (0, 0)];
+        let backward = [(1, 1), (1, 0), (0, 1), (0, 0)];
+
+        let mut app = app_with_global_window_fixture();
+        assert_tui_window_cycle(&mut app, NavigateAction::NextWindow, &forward);
+        assert_tui_window_cycle(&mut app, NavigateAction::PreviousWindow, &backward);
+
+        let mut state = app_with_global_window_fixture().state;
+        assert_headless_window_cycle(&mut state, NavigateAction::NextWindow, &forward);
+        assert_headless_window_cycle(&mut state, NavigateAction::PreviousWindow, &backward);
+    }
+
+    #[test]
+    fn global_window_cycle_ignores_presentation_state() {
+        let mut app = app_with_global_window_fixture();
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 1, "repo-key");
+        app.state.sidebar_collapsed = true;
+        app.state.collapsed_space_keys.insert("repo-key".into());
+        app.state.collapsed_sidebar_groups.insert("agents".into());
+        app.state.workspaces[0].identity_cwd = "/changed/first".into();
+        app.state.workspaces[1].identity_cwd = "/changed/second".into();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.cwd = "/changed/terminal".into();
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Blocked,
+            );
+        }
+
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextWindow,
+            &[(0, 1), (1, 0), (1, 1), (0, 0)],
+        );
+
+        let mut state = app.state;
+        assert_headless_window_cycle(
+            &mut state,
+            NavigateAction::PreviousWindow,
+            &[(1, 1), (1, 0), (0, 1), (0, 0)],
+        );
+    }
+
     fn temporary_checkout(name: &str, origin: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)

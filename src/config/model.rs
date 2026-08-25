@@ -420,13 +420,13 @@ pub struct KeysConfig {
     pub toggle_tab_prio: BindingConfig,
     /// Toggle the expanded sidebar PRIO panel. Unset by default.
     pub toggle_prio_panel: BindingConfig,
-    /// Select the previous tab. Default: "prefix+p".
+    /// Select the previous tab in the active workspace. Default: "prefix+ctrl+p".
     pub previous_tab: BindingConfig,
-    /// Select the next tab. Default: "prefix+n".
+    /// Select the next tab in the active workspace. Default: "prefix+ctrl+n".
     pub next_tab: BindingConfig,
-    /// Focus the previous window (tab) across all spaces. Unset by default.
+    /// Focus the previous tab across all workspaces. Default: "prefix+p".
     pub previous_window: BindingConfig,
-    /// Focus the next window (tab) across all spaces. Unset by default.
+    /// Focus the next tab across all workspaces. Default: "prefix+n".
     pub next_window: BindingConfig,
     /// Switch to tab 1-9. Default: "prefix+1..9".
     pub switch_tab: BindingConfig,
@@ -1135,10 +1135,10 @@ impl Default for KeysConfig {
             rename_tab: BindingConfig::one("prefix+shift+t"),
             toggle_tab_prio: BindingConfig::one("prefix+shift+f"),
             toggle_prio_panel: BindingConfig::empty(),
-            previous_tab: BindingConfig::one("prefix+p"),
-            next_tab: BindingConfig::one("prefix+n"),
-            previous_window: BindingConfig::empty(),
-            next_window: BindingConfig::empty(),
+            previous_tab: BindingConfig::one("prefix+ctrl+p"),
+            next_tab: BindingConfig::one("prefix+ctrl+n"),
+            previous_window: BindingConfig::one("prefix+p"),
+            next_window: BindingConfig::one("prefix+n"),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
