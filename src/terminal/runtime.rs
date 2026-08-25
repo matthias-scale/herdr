@@ -574,6 +574,27 @@ impl TerminalRuntime {
         ))
     }
 
+    pub(crate) fn test_with_live_detection_screen_bytes(
+        pane_id: crate::layout::PaneId,
+        agent: crate::detect::Agent,
+        state: crate::detect::AgentState,
+        visible_idle: bool,
+        visible_blocker: bool,
+        visible_working: bool,
+        bytes: &[u8],
+    ) -> (Self, mpsc::Receiver<crate::events::AppEvent>) {
+        let (runtime, events) = crate::pane::PaneRuntime::test_with_live_detection_screen_bytes(
+            pane_id,
+            agent,
+            state,
+            visible_idle,
+            visible_blocker,
+            visible_working,
+            bytes,
+        );
+        (Self(runtime), events)
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         self.0.test_process_pty_bytes(bytes);
     }

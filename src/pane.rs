@@ -43,9 +43,9 @@ use self::agent_detection::{
     decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed, observe_agent_output,
     observe_detection_content_change, recent_agent_output, DetectionPublishDecision,
-    DetectionScreenReadDecision, DetectionScreenReadInput, FullLifecycleHookOutputRetirement,
-    PendingIdleConfirmation, ScreenDetectionPublishInput, AGENT_PENDING_IDLE_RECHECK,
-    AGENT_STARTUP_GRACE_WINDOW,
+    DetectionPublishState, DetectionScreenReadDecision, DetectionScreenReadInput,
+    FullLifecycleHookOutputRetirement, PendingIdleConfirmation, ScreenDetectionPublishInput,
+    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{
@@ -732,6 +732,8 @@ fn spawn_basic_detection_task(
     full_lifecycle_authority_active: Arc<AtomicBool>,
     full_lifecycle_hook_blocked: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
+    initial_agent: Option<Agent>,
+    initial_publish: DetectionPublishState,
 ) -> (
     tokio::task::AbortHandle,
     Arc<Notify>,
@@ -743,11 +745,11 @@ fn spawn_basic_detection_task(
     let pending_release_for_task = pending_release.clone();
 
     let handle = tokio::spawn(async move {
-        let mut agent_presence = AgentDetectionPresence::from_agent(None);
-        let mut state = AgentState::Unknown;
-        let mut last_visible_idle = false;
-        let mut last_visible_blocker = false;
-        let mut last_visible_working = false;
+        let mut agent_presence = AgentDetectionPresence::from_agent(initial_agent);
+        let mut state = initial_publish.state;
+        let mut last_visible_idle = initial_publish.visible_idle;
+        let mut last_visible_blocker = initial_publish.visible_blocker;
+        let mut last_visible_working = initial_publish.visible_working;
         let mut last_visible_signal_refresh = None;
         let mut last_process_check = std::time::Instant::now();
         let mut last_foreground_pgid = None;
@@ -2107,6 +2109,13 @@ impl PaneRuntime {
             full_lifecycle_authority_active.clone(),
             full_lifecycle_hook_blocked.clone(),
             events,
+            None,
+            DetectionPublishState {
+                state: AgentState::Unknown,
+                visible_idle: false,
+                visible_blocker: false,
+                visible_working: false,
+            },
         );
 
         Ok(Self {
@@ -3236,6 +3245,44 @@ impl PaneRuntime {
 
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
+    }
+
+    pub(crate) fn test_with_live_detection_screen_bytes(
+        pane_id: PaneId,
+        agent: Agent,
+        state: AgentState,
+        visible_idle: bool,
+        visible_blocker: bool,
+        visible_working: bool,
+        bytes: &[u8],
+    ) -> (Self, mpsc::Receiver<AppEvent>) {
+        let (mut runtime, _input_rx) =
+            Self::test_with_channel_and_scrollback_bytes(80, 24, 0, bytes, 4);
+        runtime.pane_id = pane_id;
+        let (state_events, state_rx) = mpsc::channel(16);
+        let agent_output_seq = Arc::new(AtomicU64::new(0));
+        let (handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
+            pane_id,
+            runtime.child_pid.clone(),
+            runtime.terminal.clone(),
+            runtime.detection_content_seq.clone(),
+            runtime.full_lifecycle_hook_baseline_content_seq.clone(),
+            agent_output_seq,
+            runtime.full_lifecycle_authority_active.clone(),
+            runtime.full_lifecycle_hook_blocked.clone(),
+            state_events,
+            Some(agent),
+            DetectionPublishState {
+                state,
+                visible_idle,
+                visible_blocker,
+                visible_working,
+            },
+        );
+        runtime.detect_handle = Some(handle);
+        runtime.detect_reset_notify = detect_reset_notify;
+        runtime.pending_release = pending_release;
+        (runtime, state_rx)
     }
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
