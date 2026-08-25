@@ -427,6 +427,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn explain_api_reports_screen_and_foreground_working_owners() {
+        for (case, visible_working, foreground_process, expected_owner) in [
+            ("visible working", true, false, "screen"),
+            ("detected working", false, false, "screen"),
+            ("foreground process", false, true, "foreground_process"),
+        ] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let now = std::time::Instant::now();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            terminal.set_hook_authority_at(
+                "herdr:claude".into(),
+                "claude".into(),
+                AgentState::Idle,
+                None,
+                None,
+                None,
+                now,
+            );
+            if foreground_process {
+                terminal.set_foreground_process(
+                    Some("cargo".into()),
+                    true,
+                    now + std::time::Duration::from_millis(1),
+                );
+            } else {
+                terminal.set_detected_state_with_screen_signals_at(
+                    Some(Agent::Claude),
+                    AgentState::Working,
+                    false,
+                    false,
+                    visible_working,
+                    false,
+                    now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+                );
+            }
+            let screen = include_bytes!(
+                "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+            );
+            app.state.insert_test_runtime(
+                pane_id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen),
+            );
+
+            let response = app.handle_agent_explain(
+                case.into(),
+                AgentTarget {
+                    target: app.public_pane_id(0, pane_id).unwrap(),
+                },
+            );
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentExplain { explain } = success.result else {
+                panic!("expected {case} explain response");
+            };
+            assert_eq!(explain["effective_state"], "working", "{case}");
+            assert_eq!(explain["arbitration"], expected_owner, "{case}");
+            assert_eq!(
+                app.agent_info(0, pane_id).unwrap().agent_status,
+                AgentStatus::Working,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn unmatched_output_retires_hook_authority_rebaselines_same_state_report() {
         let mut app = app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;

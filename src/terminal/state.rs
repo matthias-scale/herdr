@@ -2554,22 +2554,45 @@ impl TerminalState {
     /// the detector publishes them. API consumers must use this applied-state
     /// arbitration instead of promoting diagnostic-only evidence.
     pub(crate) fn effective_state_arbitration(&self) -> &'static str {
+        self.effective_state_and_arbitration().1
+    }
+
+    fn effective_state_and_arbitration(&self) -> (AgentState, &'static str) {
+        let (detected_state, arbitration) = self.detected_state_and_arbitration();
+        if detected_state == AgentState::Idle
+            && self.effective_agent_label().is_some()
+            && self.foreground_process_active
+        {
+            (AgentState::Working, "foreground_process")
+        } else {
+            (detected_state, arbitration)
+        }
+    }
+
+    fn detected_state_and_arbitration(&self) -> (AgentState, &'static str) {
         if self.visible_blocker_overrides_hook() {
-            "visible_blocker_over_hook"
+            (AgentState::Blocked, "visible_blocker_over_hook")
         } else if self.closing_block_gate_authority() {
-            "closing_block_gate"
-        } else if self.live_full_lifecycle_hook_authority() {
-            "fresh_full_lifecycle_hook"
-        } else if self.closing_block_non_gate_waits_for_screen_refresh() {
-            "closing_block_report"
+            (AgentState::Blocked, "closing_block_gate")
         } else if self.closing_block_non_gate_yields_to_screen() {
-            "screen"
-        } else if self.hook_authority.as_ref().is_some_and(|authority| {
+            (self.fallback_state, "screen")
+        } else if self.visible_working_overrides_idle_hook()
+            || self.detected_working_overrides_idle_hook()
+        {
+            (AgentState::Working, "screen")
+        } else if let Some(authority) = self.hook_authority.as_ref().filter(|authority| {
             authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
         }) {
-            "hook_report"
+            let arbitration = if self.live_full_lifecycle_hook_authority() {
+                "fresh_full_lifecycle_hook"
+            } else if self.closing_block_non_gate_waits_for_screen_refresh() {
+                "closing_block_report"
+            } else {
+                "hook_report"
+            };
+            (authority.state, arbitration)
         } else {
-            "screen"
+            (self.fallback_state, "screen")
         }
     }
 
@@ -2894,33 +2917,7 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        let detected_state = if self.visible_blocker_overrides_hook()
-            || self.closing_block_gate_authority()
-        {
-            AgentState::Blocked
-        } else if self.closing_block_non_gate_yields_to_screen() {
-            self.fallback_state
-        } else if self.visible_working_overrides_idle_hook()
-            || self.detected_working_overrides_idle_hook()
-        {
-            AgentState::Working
-        } else {
-            self.hook_authority
-                .as_ref()
-                .filter(|authority| {
-                    authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
-                })
-                .map(|authority| authority.state)
-                .unwrap_or(self.fallback_state)
-        };
-        let state = if detected_state == AgentState::Idle
-            && self.effective_agent_label().is_some()
-            && self.foreground_process_active
-        {
-            AgentState::Working
-        } else {
-            detected_state
-        };
+        let state = self.effective_state_and_arbitration().0;
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
         let mut activity_owner = self.current_agent_activity_owner();
