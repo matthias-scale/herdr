@@ -722,6 +722,13 @@ async fn poll_full_lifecycle_hook_retirement(
 }
 
 #[cfg(unix)]
+type SpawnedDetectionTask = (
+    tokio::task::AbortHandle,
+    Arc<Notify>,
+    Arc<Notify>,
+    Arc<Mutex<Option<PendingAgentRelease>>>,
+);
+
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
@@ -734,12 +741,7 @@ fn spawn_basic_detection_task(
     state_events: mpsc::Sender<AppEvent>,
     initial_agent: Option<Agent>,
     initial_publish: DetectionPublishState,
-) -> (
-    tokio::task::AbortHandle,
-    Arc<Notify>,
-    Arc<Notify>,
-    Arc<Mutex<Option<PendingAgentRelease>>>,
-) {
+) -> SpawnedDetectionTask {
     let detect_reset_notify = Arc::new(Notify::new());
     let detect_reset = detect_reset_notify.clone();
     let detect_screen_rescan_notify = Arc::new(Notify::new());
