@@ -120,8 +120,10 @@ Herdr 提供类似 tmux 的前缀模式。默认前缀是 `ctrl+b`。按键绑�
 prefix = "ctrl+b"
 goto = "prefix+g"
 new_tab = "prefix+c"
-next_tab = "prefix+n"
-previous_tab = "prefix+p"
+next_window = "prefix+n"
+previous_window = "prefix+p"
+next_tab = "prefix+ctrl+n"
+previous_tab = "prefix+ctrl+p"
 focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
@@ -136,7 +138,7 @@ split_up = "prefix+shift+minus"
 
 ```toml
 [keys]
-next_tab = ["prefix+n", "ctrl+alt+]"]
+next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 ```
 
 可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。

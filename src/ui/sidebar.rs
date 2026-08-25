@@ -3979,8 +3979,10 @@ mod tests {
     #[test]
     fn sidebar_tree_preserves_tab_wrap_and_default_navigation_bindings() {
         let keys = crate::config::Config::default().keys;
-        assert_eq!(keys.previous_tab, BindingConfig::one("prefix+p"));
-        assert_eq!(keys.next_tab, BindingConfig::one("prefix+n"));
+        assert_eq!(keys.previous_window, BindingConfig::one("prefix+p"));
+        assert_eq!(keys.next_window, BindingConfig::one("prefix+n"));
+        assert_eq!(keys.previous_tab, BindingConfig::one("prefix+ctrl+p"));
+        assert_eq!(keys.next_tab, BindingConfig::one("prefix+ctrl+n"));
         assert_eq!(keys.previous_agent, BindingConfig::empty());
         assert_eq!(keys.next_agent, BindingConfig::empty());
 
