@@ -9,6 +9,7 @@
 
 ### Changed
 - `prefix+n` and `prefix+p` now cycle every tab across all Spaces in workspace and tab order. Use `prefix+ctrl+n` and `prefix+ctrl+p` to cycle tabs only in the active Space.
+- `prefix+b` now jumps to the next blocked tab across all Spaces and wraps at the end. Toggle the sidebar with `prefix+shift+b`.
 
 ### Fixed
 - Configs containing the retired Herdr-written `ui.agent_panel_scope` setting no longer report it as an unknown key after upgrades. (#2292)

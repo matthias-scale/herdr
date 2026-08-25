@@ -1073,7 +1073,12 @@ mouse_capture = false
         assert!(!updated.contains("[keys]"));
         assert!(!updated.contains("[[keys.command]]"));
         assert!(!updated.contains("[keys.indexed]"));
-        assert!(toml::from_str::<toml::Value>(&updated).is_ok());
+        let reset_config: Config = toml::from_str(&updated).expect("reset config");
+        let profile = reset_config
+            .local_keybindings_profile_toml()
+            .expect("reset key profile");
+        assert!(profile.contains("next_blocked_window = \"prefix+b\""));
+        assert!(profile.contains("toggle_sidebar = \"prefix+shift+b\""));
     }
 
     #[test]

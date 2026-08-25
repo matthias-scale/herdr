@@ -428,6 +428,8 @@ pub struct KeysConfig {
     pub previous_window: BindingConfig,
     /// Focus the next tab across all workspaces. Default: "prefix+n".
     pub next_window: BindingConfig,
+    /// Focus the next blocked tab across all workspaces. Default: "prefix+b".
+    pub next_blocked_window: BindingConfig,
     /// Switch to tab 1-9. Default: "prefix+1..9".
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
@@ -480,7 +482,7 @@ pub struct KeysConfig {
     pub toggle_pin_tab: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
-    /// Toggle sidebar collapse. Default: "prefix+b"
+    /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
     /// Toggle dock collapse. Default: "prefix+shift+e"
     pub toggle_dock: BindingConfig,
@@ -586,6 +588,8 @@ pub(crate) struct KeysConfigOverlay {
     previous_window: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_window: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_blocked_window: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     switch_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -711,6 +715,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(next_tab);
         apply_field!(previous_window);
         apply_field!(next_window);
+        apply_field!(next_blocked_window);
         apply_field!(switch_tab);
         apply_field!(switch_workspace);
         apply_field!(close_tab);
@@ -828,6 +833,7 @@ impl KeysConfig {
         copy_effective_action_field!(next_tab, keybinds.next_tab);
         copy_effective_action_field!(previous_window, keybinds.previous_window);
         copy_effective_action_field!(next_window, keybinds.next_window);
+        copy_effective_action_field!(next_blocked_window, keybinds.next_blocked_window);
         copy_effective_indexed_field!(switch_tab, keybinds.switch_tab);
         copy_effective_indexed_field!(switch_workspace, keybinds.switch_workspace);
         copy_effective_action_field!(close_tab, keybinds.close_tab);
@@ -1139,6 +1145,7 @@ impl Default for KeysConfig {
             next_tab: BindingConfig::one("prefix+ctrl+n"),
             previous_window: BindingConfig::one("prefix+p"),
             next_window: BindingConfig::one("prefix+n"),
+            next_blocked_window: BindingConfig::one("prefix+b"),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
@@ -1164,7 +1171,7 @@ impl Default for KeysConfig {
             zoom: BindingConfig::one("prefix+z"),
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
-            toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             toggle_dock: BindingConfig::one("prefix+shift+e"),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
