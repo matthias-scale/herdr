@@ -2022,7 +2022,10 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["result"]["type"], "agent_explain");
-        assert_eq!(response["result"]["explain"]["state"], "blocked");
+        assert_eq!(response["result"]["explain"]["screen_state"], "blocked");
+        assert_eq!(response["result"]["explain"]["state"], "unknown");
+        assert_eq!(response["result"]["explain"]["effective_state"], "unknown");
+        assert_eq!(response["result"]["explain"]["arbitration"], "screen");
         assert_eq!(
             response["result"]["explain"]["matched_rule"]["id"],
             "live_strong_blocker"
