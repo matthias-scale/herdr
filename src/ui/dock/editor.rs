@@ -124,7 +124,9 @@ impl App {
                 }
             }
             self.state.dock_editor_errors.remove(&agent_pane_id);
-            self.state.dock_editor_requested_paths.remove(&agent_pane_id);
+            self.state
+                .dock_editor_requested_paths
+                .remove(&agent_pane_id);
         }
     }
 

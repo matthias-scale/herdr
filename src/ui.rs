@@ -12,10 +12,10 @@ mod dialogs;
 pub(crate) mod dock;
 #[path = "ui/dock/context.rs"]
 mod dock_context;
-#[path = "ui/dock/shortcuts.rs"]
-mod dock_shortcuts;
 #[path = "ui/dock/scratchpad.rs"]
 mod dock_scratchpad;
+#[path = "ui/dock/shortcuts.rs"]
+mod dock_shortcuts;
 mod info_panel;
 mod keybind_help;
 mod loop_runs;
@@ -517,8 +517,7 @@ fn dock_tab_hit_areas(tab_bar: Rect) -> Vec<Rect> {
         .collect();
     let wanted: u16 = widths.iter().copied().fold(0u16, u16::saturating_add);
     if wanted <= tab_bar.width {
-        let mut constraints: Vec<Constraint> =
-            widths.into_iter().map(Constraint::Length).collect();
+        let mut constraints: Vec<Constraint> = widths.into_iter().map(Constraint::Length).collect();
         // Without a trailing filler the layout stretches the final tab over the
         // slack, giving it a hit area far wider than its label.
         constraints.push(Constraint::Min(0));

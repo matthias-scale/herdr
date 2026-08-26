@@ -108,9 +108,7 @@ pub(crate) fn focused_repo_root(app: &crate::app::AppState) -> Option<PathBuf> {
     if let Some(worktree) = workspace.worktree_space() {
         return Some(worktree.checkout_path.clone());
     }
-    workspace
-        .git_space()
-        .map(|space| space.repo_root.clone())
+    workspace.git_space().map(|space| space.repo_root.clone())
 }
 
 /// Ensure the scratchpad and its parent directory exist so `$EDITOR` opens a real
