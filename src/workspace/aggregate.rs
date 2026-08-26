@@ -12,6 +12,7 @@ pub struct PaneDetail {
     pub pane_id: PaneId,
     pub tab_idx: usize,
     pub pane_label: Option<String>,
+    pub pane_label_is_agent_identity: bool,
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
     pub agent_label: String,
@@ -64,16 +65,34 @@ impl Tab {
                 let pane = self.panes.get(id)?;
                 let terminal = terminals.get(&pane.attached_terminal_id)?;
                 let agent_kind_label = terminal.effective_agent_label().map(str::to_string);
+                let display_agent = terminal.effective_display_agent();
                 let fallback_agent_label = terminal
                     .agent_name
                     .as_deref()
                     .or(agent_kind_label.as_deref())
                     .map(str::to_string);
-                let agent_label = terminal
-                    .effective_display_agent()
+                let agent_label = display_agent
+                    .clone()
                     .or(fallback_agent_label)
                     .unwrap_or_else(|| "Terminal".to_string());
                 let presentation = terminal.effective_presentation();
+                let (pane_label, pane_label_is_agent_identity) = if let Some(label) =
+                    terminal.manual_label.clone()
+                {
+                    (Some(label), false)
+                } else if let Some(label) = terminal.effective_work_context().work_title.clone() {
+                    (Some(label), false)
+                } else if let Some(label) = display_agent {
+                    (Some(label), true)
+                } else if let Some(label) = terminal.agent_name.clone() {
+                    (Some(label), true)
+                } else if let Some(label) = agent_kind_label.clone() {
+                    (Some(label), true)
+                } else if let Some(label) = terminal.terminal_title_stripped() {
+                    (Some(label), false)
+                } else {
+                    (Some(format!("Pane {}", pane_idx + 1)), false)
+                };
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx,
@@ -81,15 +100,8 @@ impl Tab {
                     // Never derive its label from the effective tab title: that
                     // would render the persisted title twice. Keep this order
                     // deterministic for agentless panes as well.
-                    pane_label: terminal
-                        .manual_label
-                        .clone()
-                        .or_else(|| terminal.effective_work_context().work_title.clone())
-                        .or_else(|| terminal.effective_display_agent())
-                        .or_else(|| terminal.agent_name.clone())
-                        .or(agent_kind_label.clone())
-                        .or_else(|| terminal.terminal_title_stripped())
-                        .or_else(|| Some(format!("Pane {}", pane_idx + 1))),
+                    pane_label,
+                    pane_label_is_agent_identity,
                     terminal_title: terminal.terminal_title.clone(),
                     terminal_title_stripped: terminal.terminal_title_stripped(),
                     agent_label,

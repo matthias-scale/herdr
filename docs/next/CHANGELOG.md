@@ -8,6 +8,7 @@
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 
 ### Changed
+- The sidebar now orders Blocked, Prio, Agents/Pinned, then Spaces. Agent rows omit CLI versions and redundant provider names while retaining compact `cc`, `cx`, or `pi` identity and activity age.
 - `prefix+n` and `prefix+p` now cycle every tab across all Spaces in workspace and tab order. Use `prefix+ctrl+n` and `prefix+ctrl+p` to cycle tabs only in the active Space.
 - `prefix+b` now jumps to the next blocked tab across all Spaces and wraps at the end. Toggle the sidebar with `prefix+shift+b`.
 
