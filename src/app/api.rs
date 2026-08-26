@@ -2212,6 +2212,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2221,6 +2222,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2305,6 +2307,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2314,6 +2317,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2420,6 +2424,7 @@ mod tests {
                 state: AgentState::Idle,
                 visible_blocker: false,
                 visible_working: false,
+                usage_limited: false,
                 process_exited: true,
                 observed_at: std::time::Instant::now(),
             });
@@ -2474,6 +2479,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: true,
             observed_at,
         });
@@ -2647,6 +2653,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: true,
             observed_at: std::time::Instant::now(),
         });
@@ -2713,6 +2720,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2733,6 +2741,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });

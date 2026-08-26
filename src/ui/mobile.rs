@@ -1469,6 +1469,7 @@ mod tests {
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
+            usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: PaneId::from_raw(1),
@@ -2191,6 +2192,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 observed_at,
             );
         }
@@ -2282,6 +2284,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             started,
         );
         terminal_state.background_job_count = Some(2);
@@ -2353,6 +2356,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 started,
             );
         app.active = Some(0);
@@ -2403,6 +2407,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 started,
             );
         app.terminals
@@ -2413,6 +2418,7 @@ mod tests {
                 crate::detect::AgentState::Idle,
                 false,
                 true,
+                false,
                 false,
                 false,
                 started + std::time::Duration::from_secs(1),

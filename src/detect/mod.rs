@@ -36,6 +36,10 @@ pub struct AgentDetection {
     /// activity is the normal working authority; this remains diagnostic
     /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
+    /// True when the current screen shows the agent refusing to work because
+    /// its plan usage/rate limit is exhausted. This is a blocker nobody can
+    /// answer — it clears itself as soon as the agent works again.
+    pub usage_limited: bool,
 }
 
 /// Which agent we detected running in a pane.
@@ -361,6 +365,7 @@ pub fn detect_agent_with_osc(
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
         };
     };
     manifest::detect_with_osc(

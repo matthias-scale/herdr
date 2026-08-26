@@ -333,6 +333,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             screen_observed_at,
         );
         terminal.set_hook_authority_at(
@@ -373,6 +374,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: true,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: hook_reported_at + std::time::Duration::from_secs(1),
         });
@@ -408,6 +410,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            usage_limited: false,
             process_exited: false,
             observed_at: hook_reported_at + std::time::Duration::from_secs(2),
         });
@@ -463,6 +466,7 @@ mod tests {
                     false,
                     false,
                     visible_working,
+                    false,
                     false,
                     now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
                 );
@@ -679,6 +683,7 @@ mod tests {
                 state: AgentState::Idle,
                 visible_blocker: false,
                 visible_working: false,
+                usage_limited: false,
                 process_exited: false,
                 observed_at: std::time::Instant::now(),
             });
@@ -727,6 +732,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             reported_at + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
         );

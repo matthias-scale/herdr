@@ -1,6 +1,6 @@
 use super::{
-    canonical_sidebar_agent_identity, compact_agent_identity, title_repeats_agent_identity,
-    AgentPanelEntry, DEFAULT_THREAD_TITLE,
+    canonical_sidebar_agent_identity, compact_agent_identity, gate_override_label,
+    title_repeats_agent_identity, AgentPanelEntry, DEFAULT_THREAD_TITLE,
 };
 use crate::config::{
     AgentSidebarToken, AgentsSidebarConfig, SidebarTokenStyle, SpaceSidebarToken,
@@ -18,6 +18,7 @@ pub(super) struct ResolvedToken {
 pub(super) enum ResolvedTokenKind {
     StateIcon,
     StateText(String),
+    RequiredStateText(String),
     Workspace(String),
     Tab(String),
     Pane(String),
@@ -138,6 +139,12 @@ pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
             ));
         }
     }
+    if entry.usage_limited {
+        row.push(ResolvedToken::new(
+            ResolvedTokenKind::RequiredStateText(gate_override_label(entry)),
+            SidebarTokenStyle::default(),
+        ));
+    }
     vec![row]
 }
 
@@ -214,6 +221,7 @@ mod tests {
 
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
+            usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
@@ -291,6 +299,25 @@ mod tests {
                     "Review herdr context enrichment".into()
                 )),
                 ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn usage_limited_worklist_row_keeps_the_configured_state_label() {
+        let mut entry = entry();
+        entry.state = AgentState::Blocked;
+        entry.usage_limited = true;
+        entry.terminal_title_stripped = Some("Wait for plan reset".into());
+        entry.state_labels.insert("usage".into(), "limit".into());
+
+        assert_eq!(
+            worklist_row(&entry),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("Wait for plan reset".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::RequiredStateText("limit".into())),
             ]]
         );
     }

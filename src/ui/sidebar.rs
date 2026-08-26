@@ -85,17 +85,35 @@ pub(super) fn compact_agent_identity<'a>(
 
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
     entry.has_agent
-        && (entry.open_blockers || entry.stale || entry.state != AgentState::Idle || !entry.seen)
+        && (entry.open_blockers
+            || entry.usage_limited
+            || entry.stale
+            || entry.state != AgentState::Idle
+            || !entry.seen)
 }
 
 /// A latched gate must never hide behind a lifecycle label: any row that
 /// carries the red blocker dot reads as its blocked label ("gate") too, even
 /// while the agent is still mid-turn working.
 pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
-    entry.open_blockers && !entry.stale && entry.state != AgentState::Blocked
+    entry.usage_limited
+        || (entry.open_blockers && !entry.stale && entry.state != AgentState::Blocked)
+}
+
+/// A usage limit outranks every other label: the pane is not working, and no
+/// answer from the human releases it — only the reset window does.
+pub(super) fn usage_limit_label() -> &'static str {
+    "usage"
 }
 
 pub(super) fn gate_override_label(entry: &AgentPanelEntry) -> String {
+    if entry.usage_limited {
+        return entry
+            .state_labels
+            .get("usage")
+            .cloned()
+            .unwrap_or_else(|| usage_limit_label().to_string());
+    }
     entry
         .state_labels
         .get("blocked")
@@ -399,6 +417,10 @@ pub(crate) struct AgentPanelEntry {
     /// The last closing-block report still names at least one gate, even if
     /// the lifecycle state has moved on. Drives the persistent red blocker dot.
     pub open_blockers: bool,
+    /// The pane's agent stopped on an exhausted plan usage/rate limit. Nobody
+    /// can answer it, so it reads as its own red "usage" label rather than a
+    /// gate or a lifecycle state.
+    pub usage_limited: bool,
     pub background_job_count: Option<u16>,
     pub seen: bool,
     pub stale: bool,
@@ -614,6 +636,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         prio,
                         state: detail.state,
                         open_blockers: detail.open_blockers,
+                        usage_limited: detail.usage_limited,
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         stale: detail.stale,
@@ -704,7 +727,14 @@ fn aggregate_tab_entries(
 ) -> std::collections::HashMap<(usize, usize), AgentPanelEntry> {
     let mut aggregated = std::collections::HashMap::<
         (usize, usize),
-        (AgentPanelEntry, bool, bool, bool, Option<String>),
+        (
+            AgentPanelEntry,
+            bool,
+            bool,
+            bool,
+            Option<String>,
+            Option<String>,
+        ),
     >::new();
 
     for entry in entries {
@@ -719,7 +749,11 @@ fn aggregate_tab_entries(
                     has_agent,
                     has_current_agent,
                     first_foreground_process_name,
+                    usage_label,
                 )| {
+                    if usage_label.is_none() && entry.usage_limited {
+                        *usage_label = entry.state_labels.get("usage").cloned();
+                    }
                     if first_foreground_process_name.is_none() {
                         *first_foreground_process_name = entry.foreground_process_name.clone();
                     }
@@ -764,6 +798,7 @@ fn aggregate_tab_entries(
                     *has_agent |= entry.has_agent;
                     *has_current_agent |= entry.agent.is_some();
                     tab_entry.open_blockers |= entry.open_blockers;
+                    tab_entry.usage_limited |= entry.usage_limited;
                 },
             )
             .or_insert_with(|| {
@@ -773,6 +808,10 @@ fn aggregate_tab_entries(
                     entry.has_agent,
                     entry.agent.is_some(),
                     entry.foreground_process_name.clone(),
+                    entry
+                        .usage_limited
+                        .then(|| entry.state_labels.get("usage").cloned())
+                        .flatten(),
                 )
             });
     }
@@ -780,13 +819,16 @@ fn aggregate_tab_entries(
     aggregated
         .into_iter()
         .map(
-            |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _))| {
+            |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _, usage_label))| {
                 let agent_context = (!mixed_agents).then_some(entry.agent_context).flatten();
                 entry.agent = (has_current_agent && !mixed_agents)
                     .then_some(agent_context)
                     .flatten();
                 entry.agent_context = agent_context;
                 entry.has_agent = has_agent;
+                if let Some(usage_label) = usage_label {
+                    entry.state_labels.insert("usage".into(), usage_label);
+                }
                 (key, entry)
             },
         )
@@ -2334,6 +2376,7 @@ fn resolved_token_spans(
         .iter()
         .map(|token| match &token.kind {
             ResolvedTokenKind::StateText(text)
+            | ResolvedTokenKind::RequiredStateText(text)
             | ResolvedTokenKind::Workspace(text)
             | ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
@@ -2344,6 +2387,24 @@ fn resolved_token_spans(
             _ => 0,
         })
         .collect::<Vec<_>>();
+    let has_required_state = resolved
+        .iter()
+        .any(|token| matches!(token.kind, ResolvedTokenKind::RequiredStateText(_)));
+    let minimum_flexible_widths = resolved
+        .iter()
+        .enumerate()
+        .map(|(index, token)| match &token.kind {
+            ResolvedTokenKind::RequiredStateText(_) => flexible_widths[index].min(8),
+            ResolvedTokenKind::Tab(_)
+            | ResolvedTokenKind::Pane(_)
+            | ResolvedTokenKind::TerminalTitle(_)
+                if has_required_state =>
+            {
+                flexible_widths[index].min(4)
+            }
+            _ => usize::from(flexible_widths[index] > 0),
+        })
+        .collect::<Vec<_>>();
     let minimum_width = |active: &[bool]| {
         let indices = active
             .iter()
@@ -2352,7 +2413,7 @@ fn resolved_token_spans(
             .collect::<Vec<_>>();
         let content = indices
             .iter()
-            .map(|index| fixed_widths[*index] + usize::from(flexible_widths[*index] > 0))
+            .map(|index| fixed_widths[*index] + minimum_flexible_widths[*index])
             .sum::<usize>();
         let separators = indices
             .windows(2)
@@ -2367,7 +2428,27 @@ fn resolved_token_spans(
                 active[index] = false;
             }
         }
-        for index in (0..resolved.len()).rev() {
+        let mut activation_order = Vec::new();
+        if has_required_state {
+            activation_order.extend(resolved.iter().enumerate().filter_map(|(index, token)| {
+                matches!(token.kind, ResolvedTokenKind::RequiredStateText(_)).then_some(index)
+            }));
+            activation_order.extend(resolved.iter().enumerate().filter_map(|(index, token)| {
+                matches!(
+                    token.kind,
+                    ResolvedTokenKind::Tab(_)
+                        | ResolvedTokenKind::Pane(_)
+                        | ResolvedTokenKind::TerminalTitle(_)
+                )
+                .then_some(index)
+            }));
+        }
+        let remaining = (0..resolved.len())
+            .rev()
+            .filter(|index| !activation_order.contains(index))
+            .collect::<Vec<_>>();
+        activation_order.extend(remaining);
+        for index in activation_order {
             if flexible_widths[index] == 0 {
                 continue;
             }
@@ -2393,7 +2474,13 @@ fn resolved_token_spans(
     let mut budgets = flexible_widths
         .iter()
         .enumerate()
-        .map(|(index, width)| usize::from(active[index] && *width > 0))
+        .map(|(index, _)| {
+            if active[index] {
+                minimum_flexible_widths[index]
+            } else {
+                0
+            }
+        })
         .collect::<Vec<_>>();
     let minimum = budgets.iter().sum::<usize>();
     let mut remaining = max_width
@@ -2433,6 +2520,12 @@ fn resolved_token_spans(
                 ));
             }
             ResolvedTokenKind::StateText(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(state_text_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::RequiredStateText(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(state_text_style, token.style),
@@ -2752,7 +2845,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
     };
     spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
-    if entry.open_blockers && entry.state != AgentState::Blocked {
+    if (entry.open_blockers || entry.usage_limited) && entry.state != AgentState::Blocked {
         spans.extend([
             Span::styled("●", Style::default().fg(p.red)),
             Span::raw(" "),
@@ -2866,7 +2959,10 @@ fn render_agent_card(
         let prefix_width = display_width_u16(&prefix);
         let mut spans = vec![Span::raw(prefix)];
         let mut blocker_dot_width = 0u16;
-        if row_index == 0 && detail.open_blockers && detail.state != AgentState::Blocked {
+        if row_index == 0
+            && (detail.open_blockers || detail.usage_limited)
+            && detail.state != AgentState::Blocked
+        {
             spans.extend([
                 Span::styled("●", Style::default().fg(p.red)),
                 Span::raw(" "),
@@ -3196,6 +3292,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             activity_at,
         );
         if state != AgentState::Working {
@@ -3204,6 +3301,7 @@ mod tests {
                 state,
                 state == AgentState::Blocked,
                 state == AgentState::Idle,
+                false,
                 false,
                 false,
                 activity_at + std::time::Duration::from_secs(1),
@@ -3267,6 +3365,7 @@ mod tests {
             state_label.to_string(),
         );
         AgentPanelEntry {
+            usage_limited: false,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::alloc(),
@@ -3514,6 +3613,27 @@ mod tests {
             .remove(&(0, 0))
             .expect("aggregated tab entry");
         assert_eq!(fallback.foreground_process_name.as_deref(), Some("zsh"));
+    }
+
+    #[test]
+    fn tab_aggregation_keeps_the_usage_panes_configured_label() {
+        let ordinary_blocker =
+            aggregation_entry(AgentState::Blocked, true, None, "answer required");
+        let mut usage_limited = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        usage_limited.usage_limited = true;
+        usage_limited
+            .state_labels
+            .insert("usage".into(), "limit".into());
+
+        let aggregated = aggregate_tab_entries(&[ordinary_blocker, usage_limited])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+
+        assert!(aggregated.usage_limited);
+        assert_eq!(
+            aggregated.state_labels.get("usage").map(String::as_str),
+            Some("limit")
+        );
     }
 
     #[test]
@@ -3940,6 +4060,112 @@ mod tests {
             app.status_indicators,
         );
         assert_eq!(layout.state.as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn a_usage_limited_pane_labels_as_usage_and_carries_the_blocker_dot() {
+        let app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let mut entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        entry.state = AgentState::Blocked;
+        entry.usage_limited = true;
+        entry.open_blockers = false;
+
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("usage"));
+        assert_eq!(
+            agent_panel_label_color(&entry, &app.palette),
+            app.palette.red
+        );
+
+        // A configured label wins over the fallback.
+        entry.state_labels.insert("usage".into(), "limit".into());
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("limit"));
+
+        // Live screen only: the moment the agent works again the row is working.
+        entry.usage_limited = false;
+        entry.state = AgentState::Working;
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(
+            agent_panel_label_color(&entry, &app.palette),
+            app.palette.blue
+        );
+    }
+
+    #[test]
+    fn usage_limited_worklist_rows_render_a_non_color_cue_at_supported_widths() {
+        let mut app = app_with_agents(&["Wait for plan reset"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Wait for plan reset".into());
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .set_agent_metadata(crate::terminal::AgentMetadataReport {
+                source: "test:usage-limit-worklist".into(),
+                agent_label: None,
+                applies_to_source: None,
+                title: None,
+                display_agent: None,
+                state_labels: std::collections::HashMap::from([("usage".into(), "limit".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: None,
+            })
+            .expect("test presentation accepted");
+        terminal.state = AgentState::Blocked;
+        terminal.usage_limited = true;
+        app.reconcile_sidebar_presentation();
+
+        for width in [18, 24, 60] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let rows = (0..area.height)
+                .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+                .collect::<Vec<_>>();
+            let usage_row = rows
+                .iter()
+                .find(|row| row.contains("limit"))
+                .unwrap_or_else(|| panic!("width {width} omitted usage cue: {rows:?}"));
+            assert!(
+                usage_row.contains('×') || usage_row.contains('●'),
+                "{usage_row:?}"
+            );
+            assert!(
+                usage_row.contains("Wai") || usage_row.contains("plan"),
+                "width {width} dropped the title before the agent suffix: {usage_row:?}"
+            );
+        }
     }
 
     #[test]
@@ -4852,6 +5078,7 @@ row_gap = 1
             false,
             true,
             false,
+            false,
             started,
         );
 
@@ -4882,6 +5109,7 @@ row_gap = 1
                 AgentState::Idle,
                 false,
                 true,
+                false,
                 false,
                 false,
                 finished,
@@ -4924,6 +5152,7 @@ row_gap = 1
                 false,
                 true,
                 false,
+                false,
                 started,
             );
         let finished = started + std::time::Duration::from_secs(5);
@@ -4935,6 +5164,7 @@ row_gap = 1
                 AgentState::Idle,
                 false,
                 true,
+                false,
                 false,
                 false,
                 finished,
@@ -4998,6 +5228,7 @@ row_gap = 1
                     false,
                     false,
                     true,
+                    false,
                     false,
                     active_at,
                 );
@@ -5240,6 +5471,7 @@ row_gap = 1
                 false,
                 false,
                 true,
+                false,
                 false,
                 started,
             );
@@ -6774,6 +7006,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 false,
                 true,
                 false,
+                false,
                 started,
             );
         app.terminals
@@ -6784,6 +7017,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 AgentState::Idle,
                 false,
                 true,
+                false,
                 false,
                 false,
                 started + std::time::Duration::from_secs(1),
@@ -6808,6 +7042,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 Some(Agent::Pi),
                 AgentState::Blocked,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -6979,6 +7214,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             false,
             true,
             false,
+            false,
             started,
         );
         terminal_state.background_job_count = Some(2);
@@ -7060,6 +7296,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             false,
             true,
             false,
+            false,
             started,
         );
         terminal.set_detected_state_with_screen_signals_at(
@@ -7067,6 +7304,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             AgentState::Idle,
             false,
             true,
+            false,
             false,
             true,
             started + std::time::Duration::from_secs(5),
@@ -7109,6 +7347,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             false,
             true,
             false,
+            false,
             started,
         );
         terminal.set_detected_state_with_screen_signals_at(
@@ -7116,6 +7355,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             AgentState::Idle,
             false,
             true,
+            false,
             false,
             true,
             started + std::time::Duration::from_secs(5),
@@ -7132,6 +7372,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 false,
                 false,
                 true,
+                false,
                 false,
                 started + std::time::Duration::from_secs(6),
             );

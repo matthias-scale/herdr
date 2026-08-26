@@ -948,7 +948,7 @@ fn visible_blocker_overrides_fresh_hook_authority_priority_1100_working() {
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
-    assert_eq!(claude["version"].as_str(), Some("2026.08.25.1001"));
+    assert_eq!(claude["version"].as_str(), Some("2026.08.26.1001"));
     assert!(kimi["version"]
         .as_str()
         .is_some_and(|version| version > "2026.06.10.1"));
@@ -1225,4 +1225,75 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_working")
     );
+}
+
+#[test]
+fn claude_usage_limit_screen_reads_as_a_usage_blocker() {
+    // The plan-limit banner sits right above the live prompt box, so the idle
+    // rule (950) also matches; the usage rule at 960 has to win.
+    let screen = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
+        You've hit your 5-hour limit resets 3pm\n\
+        /upgrade to increase your usage limit.\n\
+        \u{256d}\u{2500}\u{2500}\u{256e}\n\
+        \u{2502} \u{276f}   \u{2502}\n\
+        \u{2570}\u{2500}\u{2500}\u{256f}\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("usage_limit_reached")
+    );
+    assert!(result.visible_blocker);
+    assert!(result.usage_limited);
+}
+
+#[test]
+fn claude_usage_limit_clears_as_soon_as_the_agent_works() {
+    // Live screen only: the banner may still be on screen, but a working OSC
+    // title (1100) outranks it, so nothing latches.
+    let screen = "You've hit your 5-hour limit resets 3pm\n\
+        /upgrade to increase your usage limit.\n";
+    let result = osc_explain(Agent::Claude, screen, "\u{2807} scalable", "");
+
+    assert_eq!(result.state, AgentState::Working);
+    assert!(!result.usage_limited);
+}
+
+#[test]
+fn codex_usage_limit_screen_reads_as_a_usage_blocker() {
+    let screen = "You've hit your usage limit for gpt-5.6-sol.\n\
+        Try again at 4:15pm.\n";
+    let result = osc_explain(Agent::Codex, screen, "", "");
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("usage_limit_reached")
+    );
+    assert!(result.visible_blocker);
+    assert!(result.usage_limited);
+}
+
+#[test]
+fn codex_usage_limit_clears_as_soon_as_the_agent_works() {
+    let screen = "You've hit your usage limit for gpt-5.6-sol.\n\
+        Try again later.\n";
+    let result = osc_explain(Agent::Codex, screen, "\u{2839} llm-proxy", "");
+
+    assert_eq!(result.state, AgentState::Working);
+    assert!(!result.usage_limited);
+}
+
+#[test]
+fn an_ordinary_claude_question_is_not_a_usage_blocker() {
+    let screen = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
+        Do you want to proceed?\n\
+        \u{276f} 1. Yes\n\
+        enter to select \u{00b7} esc to cancel \u{00b7} arrow keys to navigate\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert!(result.visible_blocker);
+    assert!(!result.usage_limited);
 }
