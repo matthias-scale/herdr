@@ -1,4 +1,7 @@
-use super::{AgentPanelEntry, DEFAULT_THREAD_TITLE};
+use super::{
+    canonical_sidebar_agent_identity, compact_agent_identity, title_repeats_agent_identity,
+    AgentPanelEntry, DEFAULT_THREAD_TITLE,
+};
 use crate::config::{
     AgentSidebarToken, AgentsSidebarConfig, SidebarTokenStyle, SpaceSidebarToken,
     SpacesSidebarConfig,
@@ -63,9 +66,9 @@ pub(super) fn agent_rows(
                         AgentSidebarToken::Pane => {
                             entry.pane_label.clone().map(ResolvedTokenKind::Pane)
                         }
-                        AgentSidebarToken::Agent => {
-                            entry.agent_label.clone().map(ResolvedTokenKind::Agent)
-                        }
+                        AgentSidebarToken::Agent => canonical_sidebar_agent_identity(entry)
+                            .map(str::to_string)
+                            .map(ResolvedTokenKind::Agent),
                         AgentSidebarToken::TerminalTitle => entry
                             .terminal_title
                             .clone()
@@ -90,15 +93,31 @@ pub(super) fn agent_rows(
 }
 
 /// Worklist rows point at a thread in the tree, so they ignore the configured
-/// multi-row template and carry only its state and title. The provider and
-/// space are deliberately absent: neither tells you which gate to open next.
+/// multi-row template. The compact agent identity disambiguates otherwise
+/// identical titles without repeating a provider or CLI version.
 pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
+    let visible_terminal_title =
+        |title: String| (!title_repeats_agent_identity(entry, &title)).then_some(title);
     let title = entry
         .terminal_title_stripped
         .clone()
-        .or_else(|| entry.terminal_title.clone())
-        .or_else(|| entry.pane_label.clone())
-        .or_else(|| entry.primary_tab_label.clone())
+        .and_then(&visible_terminal_title)
+        .or_else(|| {
+            entry
+                .terminal_title
+                .clone()
+                .and_then(&visible_terminal_title)
+        })
+        .or_else(|| {
+            (!entry.pane_label_is_agent_identity)
+                .then(|| entry.pane_label.clone())
+                .flatten()
+        })
+        .or_else(|| {
+            (!entry.tab_label_leads_with_agent)
+                .then(|| entry.primary_tab_label.clone())
+                .flatten()
+        })
         // Keep the row identifiable when every live title source is absent;
         // the stable thread fallback is more useful here than a bare state dot.
         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
@@ -107,10 +126,17 @@ pub(super) fn worklist_row(entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
         SidebarTokenStyle::default(),
     )];
     if let Some(title) = title {
+        let identity = compact_agent_identity(entry, &title).map(str::to_string);
         row.push(ResolvedToken::new(
             ResolvedTokenKind::Tab(title),
             SidebarTokenStyle::default(),
         ));
+        if let Some(identity) = identity {
+            row.push(ResolvedToken::new(
+                ResolvedTokenKind::Agent(identity),
+                SidebarTokenStyle::default(),
+            ));
+        }
     }
     vec![row]
 }
@@ -195,6 +221,7 @@ mod tests {
             primary_tab_label: None,
             tab_label_leads_with_agent: false,
             pane_label: None,
+            pane_label_is_agent_identity: false,
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: Some("pi".into()),
@@ -249,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn worklist_rows_are_one_line_of_title_without_space_or_provider() {
+    fn worklist_rows_are_one_line_of_title_and_compact_agent_identity() {
         let mut entry = entry();
         entry.terminal_title_stripped = Some("Review herdr context enrichment".into());
         entry.agent_label = Some("codex".into());
@@ -263,6 +290,59 @@ mod tests {
                 ResolvedToken::unstyled(ResolvedTokenKind::Tab(
                     "Review herdr context enrichment".into()
                 )),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn known_suffixless_agent_uses_canonical_identity_instead_of_version() {
+        let mut entry = entry();
+        entry.agent = Some(crate::detect::Agent::Gemini);
+        entry.agent_context = entry.agent;
+        entry.agent_kind_label = Some("gemini".into());
+        entry.agent_label = Some("0.9.3".into());
+        entry.primary_tab_label = Some("0.9.3".into());
+        entry.pane_label = Some("0.9.3".into());
+        entry.pane_label_is_agent_identity = true;
+        entry.tab_label_leads_with_agent = true;
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![AgentSidebarToken::Agent]],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            agent_rows(&config, &entry, "working"),
+            vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
+                "gemini".into()
+            ))]]
+        );
+        assert_eq!(
+            worklist_row(&entry),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("New Thread".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("gemini".into())),
+            ]]
+        );
+    }
+
+    #[test]
+    fn worklist_identity_compares_against_final_visible_title() {
+        let mut entry = entry();
+        entry.agent = Some(crate::detect::Agent::Codex);
+        entry.agent_context = entry.agent;
+        entry.agent_kind_label = Some("codex".into());
+        entry.agent_label = Some("2.1.245".into());
+        entry.terminal_title_stripped = Some("2.1.245".into());
+        entry.primary_tab_label = Some("Codex".into());
+        entry.tab_label_leads_with_agent = false;
+
+        assert_eq!(
+            worklist_row(&entry),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("Codex".into())),
             ]]
         );
     }
@@ -275,6 +355,7 @@ mod tests {
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
                 ResolvedToken::unstyled(ResolvedTokenKind::Tab("New Thread".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
             ]]
         );
     }
@@ -339,12 +420,12 @@ mod tests {
             .rows_by_agent
             .insert("pi".into(), vec![vec![AgentSidebarToken::Agent]]);
         let mut pi = entry();
-        pi.agent_label = Some("renamed pi".into());
+        pi.agent_label = Some("2.1.245".into());
 
         assert_eq!(
             agent_rows(&config, &pi, "working"),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
-                "renamed pi".into()
+                "pi".into()
             ))]]
         );
 
@@ -354,6 +435,47 @@ mod tests {
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Workspace(
                 "repo".into()
             ))]]
+        );
+    }
+
+    #[test]
+    fn dotted_unknown_agent_names_remain_valid_agent_tokens() {
+        for label in ["3.5", "2026.08", "2026.08.26"] {
+            let mut custom = entry();
+            custom.agent = None;
+            custom.agent_kind_label = None;
+            custom.agent_label = Some(label.into());
+            let config = AgentsSidebarConfig {
+                rows: vec![vec![AgentSidebarToken::Agent]],
+                ..Default::default()
+            };
+
+            assert_eq!(
+                agent_rows(&config, &custom, "working"),
+                vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
+                    label.into()
+                ))]]
+            );
+        }
+    }
+
+    #[test]
+    fn dotted_manual_title_remains_visible_for_known_agent() {
+        let mut entry = entry();
+        entry.agent = Some(crate::detect::Agent::Codex);
+        entry.agent_context = entry.agent;
+        entry.agent_kind_label = Some("codex".into());
+        entry.agent_label = Some("2.1.245".into());
+        entry.primary_tab_label = Some("2026.08.26".into());
+        entry.tab_label_leads_with_agent = false;
+
+        assert_eq!(
+            worklist_row(&entry),
+            vec![vec![
+                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                ResolvedToken::unstyled(ResolvedTokenKind::Tab("2026.08.26".into())),
+                ResolvedToken::unstyled(ResolvedTokenKind::Agent("cx".into())),
+            ]]
         );
     }
 
