@@ -457,6 +457,17 @@ droid = "off"
 claude = "on"
 ```
 
+## Agent detection authority
+
+Full-lifecycle hook state wins while its latest accepted report is fresh. If an integration stops reporting, Herdr falls back to cached screen evidence after 10 minutes. Set a 30–3600 second timeout when the integration needs a different bound:
+
+```toml
+[agent_detection]
+full_lifecycle_hook_authority_timeout_seconds = 600
+```
+
+Visible native approval and login controls can still report `blocked` while hook authority is fresh.
+
 ## Advanced configuration
 
 Search the [Config reference](/docs/config-reference/) for scrollback limits, nested launches, and other advanced or experimental settings. See [Session state and restore](/docs/session-state/) before enabling pane screen history; that guide explains the security trade-off of saving pane contents.

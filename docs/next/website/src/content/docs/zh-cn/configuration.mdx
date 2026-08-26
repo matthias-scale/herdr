@@ -407,6 +407,17 @@ droid = "off"
 claude = "on"
 ```
 
+## 代理检测权限
+
+完整生命周期钩子的最新报告仍新鲜时，钩子状态优先。如果集成停止报告，Herdr 会在 10 分钟后回退到缓存的屏幕检测。可将超时设为 30–3600 秒。
+
+```toml
+[agent_detection]
+full_lifecycle_hook_authority_timeout_seconds = 600
+```
+
+原生审批或登录界面可在钩子状态仍新鲜时优先报告为 `blocked`。
+
 ## 高级配置
 
 在[配置参考](/docs/config-reference/)中搜索回滚缓冲区限制、嵌套启动以及其他高级或实验性设置。启用窗格屏幕历史前，请参阅[会话状态与恢复](/docs/session-state/)；该指南说明了保存窗格内容带来的安全取舍。

@@ -452,6 +452,11 @@ pane_history = false
 # Values: block, steady_block (default), underline, steady_underline, bar, steady_bar.
 # cjk_ime_cursor_shape = "steady_block"
 
+[agent_detection]
+# Seconds a full-lifecycle hook report remains authoritative without a fresh
+# accepted lifecycle event. Valid range: 30..=3600. Default: 600.
+# full_lifecycle_hook_authority_timeout_seconds = 600
+
 [advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.
 # Matches Ghostty's default scrollback-limit behavior.
@@ -955,6 +960,10 @@ mod tests {
     #[test]
     fn default_config_exposes_status_bar_enabled_setting() {
         assert!(DEFAULT_CONFIG.contains("[ui.status_bar]\n# enabled = true"));
+        assert!(DEFAULT_CONFIG.contains(
+            "[agent_detection]\n# Seconds a full-lifecycle hook report remains authoritative"
+        ));
+        assert!(DEFAULT_CONFIG.contains("# full_lifecycle_hook_authority_timeout_seconds = 600"));
     }
 
     #[test]

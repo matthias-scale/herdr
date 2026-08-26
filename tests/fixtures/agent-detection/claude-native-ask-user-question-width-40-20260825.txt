@@ -1,0 +1,34 @@
+
+╭─ Claude Code ───────────────────────╮
+│                                     │
+│   Welcome back Matthias Schedel!    │
+│                                     │
+│               ▐▛███▛█               │
+│              ▝▜██████▀              │
+│                ▝▝ ▝▝                │
+│                                     │
+│              Haiku 4.5              │
+│             Claude Max              │
+│          /…/trust-project           │
+│                                     │
+╰─────────────────────────────────────╯
+
+
+❯ Use AskUserQuestion now to ask:
+  Which test path? Offer Alpha and
+  Beta. Do nothing else.
+───────────────────────────────────────
+ ☐ Test Path
+
+Which test path would you like to use?
+
+❯ 1. Alpha
+     Use the Alpha test path
+  2. Beta
+     Use the Beta test path
+  3. Type something.
+───────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc
+to cancel

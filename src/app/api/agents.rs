@@ -172,30 +172,6 @@ impl App {
         let Some(terminal) = self.state.terminals.get(terminal_id) else {
             return agent_not_found(id, &target.target);
         };
-        if terminal.full_lifecycle_hook_authority_active() {
-            let explain = serde_json::json!({
-                "agent": terminal.effective_agent_label().unwrap_or("unknown"),
-                "state": crate::detect::manifest::agent_state_label(terminal.state),
-                "manifest_source": null,
-                "manifest_version": null,
-                "cached_remote_version": null,
-                "local_override_shadowing_remote": false,
-                "remote_update_status": null,
-                "remote_update_error": null,
-                "matched_rule": null,
-                "visible_idle": false,
-                "visible_blocker": false,
-                "visible_working": false,
-                "screen_detection_skipped": true,
-                "screen_detection_skip_reason": "full_lifecycle_hook_authority",
-                "skip_state_update": false,
-                "skipped_update_reason": null,
-                "fallback_reason": null,
-                "warning": null,
-                "evaluated_rules": [],
-            });
-            return encode_success(id, ResponseResult::AgentExplain { explain });
-        }
         let Some(agent) = terminal.effective_known_agent().or(terminal.detected_agent) else {
             return encode_error(
                 id,
@@ -218,7 +194,27 @@ impl App {
                 osc_progress: &osc_progress,
             },
         );
-        let value = crate::detect::manifest::explain_to_json_value(&explain);
+        let mut value = crate::detect::manifest::explain_to_json_value(&explain);
+        if let Some(object) = value.as_object_mut() {
+            let screen_state = crate::detect::manifest::agent_state_label(explain.state);
+            let effective_state = terminal.state;
+            let arbitration = terminal.effective_state_arbitration();
+            object.insert("screen_state".into(), serde_json::json!(screen_state));
+            object.insert(
+                "state".into(),
+                serde_json::json!(crate::detect::manifest::agent_state_label(effective_state)),
+            );
+            object.insert(
+                "effective_state".into(),
+                serde_json::json!(crate::detect::manifest::agent_state_label(effective_state)),
+            );
+            object.insert("arbitration".into(), serde_json::json!(arbitration));
+            object.insert("screen_detection_skipped".into(), serde_json::json!(false));
+            object.insert(
+                "screen_detection_skip_reason".into(),
+                serde_json::Value::Null,
+            );
+        }
 
         encode_success(id, ResponseResult::AgentExplain { explain: value })
     }
@@ -318,6 +314,431 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn visible_blocker_overrides_fresh_hook_authority_in_explain_api() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let screen_observed_at = std::time::Instant::now();
+        let hook_reported_at = screen_observed_at + std::time::Duration::from_secs(1);
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            screen_observed_at,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(1),
+            hook_reported_at,
+        );
+        let screen = include_bytes!(
+            "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
+        );
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_agent_explain("explain".into(), AgentTarget { target });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentExplain { explain } = success.result else {
+            panic!("expected agent explain response");
+        };
+        assert_eq!(explain["screen_detection_skipped"], false);
+        assert_eq!(explain["matched_rule"]["id"], "generic_permission_prompt");
+        assert_eq!(explain["screen_state"], "blocked");
+        assert_eq!(explain["effective_state"], "working");
+        assert_eq!(explain["arbitration"], "closing_block_report");
+        assert_eq!(app.state.terminals[&terminal_id].state, AgentState::Working);
+        assert_eq!(
+            app.agent_info(0, pane_id).unwrap().agent_status,
+            AgentStatus::Working
+        );
+
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: hook_reported_at + std::time::Duration::from_secs(1),
+        });
+        let response = app.handle_agent_explain(
+            "newer-blocker".into(),
+            AgentTarget {
+                target: app.public_pane_id(0, pane_id).unwrap(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentExplain { explain } = success.result else {
+            panic!("expected newer blocker explain response");
+        };
+        assert_eq!(explain["effective_state"], "blocked");
+        assert_eq!(explain["arbitration"], "visible_blocker_over_hook");
+        assert_eq!(
+            app.agent_info(0, pane_id).unwrap().agent_status,
+            AgentStatus::Blocked
+        );
+
+        let mut cleared_prompt = b"\x1b[3J\x1b[2J\x1b[H".to_vec();
+        cleared_prompt.extend_from_slice(include_bytes!(
+            "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+        ));
+        app.state.workspaces[0]
+            .test_runtimes
+            .get(&pane_id)
+            .unwrap()
+            .test_process_pty_bytes(&cleared_prompt);
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: hook_reported_at + std::time::Duration::from_secs(2),
+        });
+        let response = app.handle_agent_explain(
+            "panel-removed".into(),
+            AgentTarget {
+                target: app.public_pane_id(0, pane_id).unwrap(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentExplain { explain } = success.result else {
+            panic!("expected panel-removed explain response");
+        };
+        assert_eq!(explain["screen_state"], "idle");
+        assert_eq!(explain["effective_state"], "idle");
+        assert_eq!(explain["arbitration"], "screen");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explain_api_reports_screen_and_foreground_working_owners() {
+        for (case, visible_working, foreground_process, expected_owner) in [
+            ("visible working", true, false, "screen"),
+            ("detected working", false, false, "screen"),
+            ("foreground process", false, true, "foreground_process"),
+        ] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let now = std::time::Instant::now();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            terminal.set_hook_authority_at(
+                "herdr:claude".into(),
+                "claude".into(),
+                AgentState::Idle,
+                None,
+                None,
+                None,
+                now,
+            );
+            if foreground_process {
+                terminal.set_foreground_process(
+                    Some("cargo".into()),
+                    true,
+                    now + std::time::Duration::from_millis(1),
+                );
+            } else {
+                terminal.set_detected_state_with_screen_signals_at(
+                    Some(Agent::Claude),
+                    AgentState::Working,
+                    false,
+                    false,
+                    visible_working,
+                    false,
+                    now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+                );
+            }
+            let screen = include_bytes!(
+                "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+            );
+            app.state.insert_test_runtime(
+                pane_id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen),
+            );
+
+            let response = app.handle_agent_explain(
+                case.into(),
+                AgentTarget {
+                    target: app.public_pane_id(0, pane_id).unwrap(),
+                },
+            );
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentExplain { explain } = success.result else {
+                panic!("expected {case} explain response");
+            };
+            assert_eq!(explain["effective_state"], "working", "{case}");
+            assert_eq!(explain["arbitration"], expected_owner, "{case}");
+            assert_eq!(
+                app.agent_info(0, pane_id).unwrap().agent_status,
+                AgentStatus::Working,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unmatched_output_retires_hook_authority_rebaselines_same_state_report() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        for seq in [1, 2] {
+            assert_eq!(
+                app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                    pane_id,
+                    source: "herdr:claude-closing-block".into(),
+                    agent_label: "claude".into(),
+                    state: AgentState::Blocked,
+                    message: None,
+                    seq: Some(seq),
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
+                    session_ref: None,
+                }),
+                Some(true)
+            );
+            if seq == 1 {
+                app.terminal_runtimes
+                    .get(&terminal_id)
+                    .unwrap()
+                    .test_mark_detection_content_changed();
+            }
+        }
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .hook_authority_output_baseline_for_test(),
+            1,
+            "an accepted same-state report rearms from current content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_block_authority_is_limited_to_live_blocked_gates_quiet_report_wakes_screen() {
+        for report_state in [AgentState::Working, AgentState::Idle, AgentState::Unknown] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            let screen = include_bytes!(
+                "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+            );
+            let (runtime, mut detection_events) =
+                crate::terminal::TerminalRuntime::test_with_live_detection_screen_bytes(
+                    pane_id,
+                    Agent::Claude,
+                    AgentState::Idle,
+                    true,
+                    false,
+                    false,
+                    screen,
+                );
+            app.terminal_runtimes.insert(terminal_id, runtime);
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .seen = false;
+            app.state.active = None;
+
+            assert_eq!(
+                app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                    pane_id,
+                    source: "herdr:claude-closing-block".into(),
+                    agent_label: "claude".into(),
+                    state: report_state,
+                    message: None,
+                    seq: Some(1),
+                    wait: None,
+                    eta_s: None,
+                    reported_at: None,
+                    session_ref: None,
+                }),
+                Some(true)
+            );
+
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    let event = detection_events.recv().await.expect("detector event");
+                    if matches!(event, crate::events::AppEvent::StateChanged { .. }) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("quiet {report_state:?} closing report must force a real screen scan")
+            });
+            let crate::events::AppEvent::StateChanged { state, .. } = &event else {
+                unreachable!()
+            };
+            assert_eq!(*state, AgentState::Idle, "no synthetic transition");
+            app.handle_internal_event(event);
+            assert_eq!(
+                app.agent_info(0, pane_id).unwrap().agent_status,
+                AgentStatus::Done,
+                "hidden pane reaches Done only from the manifest-confirmed idle screen"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_block_authority_is_limited_to_live_blocked_gates_explain_matches_effective_state(
+    ) {
+        for (report_state, expected_status, expected_label) in [
+            (AgentState::Working, AgentStatus::Working, "working"),
+            (AgentState::Idle, AgentStatus::Idle, "idle"),
+            (AgentState::Unknown, AgentStatus::Unknown, "unknown"),
+        ] {
+            let mut app = app_with_agent();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            let screen = include_bytes!(
+                "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
+            );
+            app.terminal_runtimes.insert(
+                terminal_id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen),
+            );
+            app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: "herdr:claude-closing-block".into(),
+                agent_label: "claude".into(),
+                state: report_state,
+                message: None,
+                seq: Some(1),
+                wait: None,
+                eta_s: None,
+                reported_at: None,
+                session_ref: None,
+            });
+            let target = app.public_pane_id(0, pane_id).unwrap();
+
+            let info = app.agent_info(0, pane_id).unwrap();
+            let response = app.handle_agent_explain(
+                "before-refresh".into(),
+                AgentTarget {
+                    target: target.clone(),
+                },
+            );
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentExplain { explain } = success.result else {
+                panic!("expected agent explain response");
+            };
+            assert_eq!(info.agent_status, expected_status, "{report_state:?}");
+            assert_eq!(explain["effective_state"], expected_label);
+            assert_eq!(explain["arbitration"], "closing_block_report");
+
+            app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Claude),
+                state: AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: std::time::Instant::now(),
+            });
+            let info = app.agent_info(0, pane_id).unwrap();
+            let response = app.handle_agent_explain("after-refresh".into(), AgentTarget { target });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentExplain { explain } = success.result else {
+                panic!("expected refreshed agent explain response");
+            };
+            assert_eq!(info.agent_status, AgentStatus::Idle);
+            assert_eq!(explain["effective_state"], "idle");
+            assert_eq!(explain["arbitration"], "screen");
+        }
+    }
+
+    #[test]
+    fn fresh_hook_state_wins_over_non_blocker_screen_done_projection() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("done-projection").unwrap();
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            Some(session_ref.clone()),
+            Some(1),
+            Some("startup".into()),
+        );
+        let reported_at = std::time::Instant::now();
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Idle,
+            None,
+            Some(session_ref),
+            Some(2),
+            reported_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Kimi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            reported_at + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
+        );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+
+        let info = app.agent_info(0, pane_id).unwrap();
+        assert_eq!(info.agent_status, AgentStatus::Done);
+        assert!(!info.screen_detection_skipped);
     }
 
     #[tokio::test]

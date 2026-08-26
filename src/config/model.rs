@@ -335,6 +335,54 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub agent_detection: AgentDetectionConfig,
+}
+
+pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AgentDetectionConfig {
+    pub full_lifecycle_hook_authority_timeout_seconds: u64,
+}
+
+impl Default for AgentDetectionConfig {
+    fn default() -> Self {
+        Self {
+            full_lifecycle_hook_authority_timeout_seconds:
+                DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentDetectionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            full_lifecycle_hook_authority_timeout_seconds: u64,
+        }
+        impl Default for Raw {
+            fn default() -> Self {
+                Self {
+                    full_lifecycle_hook_authority_timeout_seconds:
+                        DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS,
+                }
+            }
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if !(30..=3600).contains(&raw.full_lifecycle_hook_authority_timeout_seconds) {
+            return Err(de::Error::custom(
+                "full_lifecycle_hook_authority_timeout_seconds must be between 30 and 3600",
+            ));
+        }
+        Ok(Self {
+            full_lifecycle_hook_authority_timeout_seconds: raw
+                .full_lifecycle_hook_authority_timeout_seconds,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -1694,6 +1742,34 @@ mouse_capture = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.mouse_capture);
+    }
+
+    #[test]
+    fn stale_full_lifecycle_hook_authority_falls_back_to_screen_config_bounds() {
+        assert_eq!(
+            Config::default()
+                .agent_detection
+                .full_lifecycle_hook_authority_timeout_seconds,
+            600
+        );
+        for value in [30, 600, 3600] {
+            let config: Config = toml::from_str(&format!(
+                "[agent_detection]\nfull_lifecycle_hook_authority_timeout_seconds = {value}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                config
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+                value
+            );
+        }
+        for value in [0, 29, 3601] {
+            assert!(toml::from_str::<Config>(&format!(
+                "[agent_detection]\nfull_lifecycle_hook_authority_timeout_seconds = {value}\n"
+            ))
+            .is_err());
+        }
     }
 
     #[test]

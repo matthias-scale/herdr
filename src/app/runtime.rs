@@ -352,6 +352,22 @@ impl App {
         }
 
         if self
+            .state
+            .next_full_lifecycle_hook_authority_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let (updates, due) = self.state.expire_due_full_lifecycle_hook_authority_at(now);
+            self.sync_full_lifecycle_authority_detection_pauses();
+            for update in &updates {
+                self.emit_pane_state_update(update);
+            }
+            for (ws_idx, pane_id) in due {
+                self.emit_pane_updated(ws_idx, pane_id);
+                changed = true;
+            }
+        }
+
+        if self
             .copy_feedback_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -732,6 +748,7 @@ impl App {
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
             self.state.next_agent_watchdog_deadline(),
+            self.state.next_full_lifecycle_hook_authority_deadline(),
             self.copy_feedback_deadline,
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh

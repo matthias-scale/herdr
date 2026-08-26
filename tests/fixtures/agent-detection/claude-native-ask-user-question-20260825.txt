@@ -1,0 +1,15 @@
+❯ Use AskUserQuestion now to ask which harmless label I prefer, with choices Alpha and Beta. Do not call any other tool, do not choose for me, and do not explain before calling it.
+──────────────────────────────────────────────────────────────────────────────
+ ☐ Label
+
+Which label do you prefer?
+
+❯ 1. Alpha
+     Option A
+  2. Beta
+     Option B
+  3. Type something.
+──────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

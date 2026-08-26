@@ -603,6 +603,11 @@ impl App {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             status_bar_enabled: config.ui.status_bar.enabled,
+            full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
+                config
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+            ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1588,6 +1593,14 @@ impl App {
         let invalid_section =
             |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
 
+        if !invalid_section("agent_detection") {
+            self.state.full_lifecycle_hook_authority_timeout = std::time::Duration::from_secs(
+                config
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+            );
+        }
+
         if !invalid_section("keys") {
             match config.live_keybinds_with_diagnostics() {
                 Ok((live, keybind_diagnostics)) => {
@@ -2254,6 +2267,129 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_full_lifecycle_hook_authority_falls_back_to_screen_in_tui_scheduler() {
+        for (fallback, visible_blocker, visible_working, screen) in [
+            (
+                crate::detect::AgentState::Blocked,
+                true,
+                false,
+                b"\xe2\x96\xb3 Permission required\n".as_slice(),
+            ),
+            (
+                crate::detect::AgentState::Working,
+                false,
+                true,
+                b"esc interrupt\n".as_slice(),
+            ),
+        ] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("hook-expiry")];
+            app.state.ensure_test_terminals();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let reported_at = Instant::now();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Kilo),
+                fallback,
+                visible_blocker,
+                false,
+                visible_working,
+                false,
+                reported_at,
+            );
+            let session_ref = crate::agent_resume::AgentSessionRef::id("tui-expiry").unwrap();
+            terminal.set_agent_session_ref_for_session_start(
+                "herdr:kilo".into(),
+                "kilo".into(),
+                Some(session_ref.clone()),
+                Some(1),
+                Some("startup".into()),
+            );
+            terminal.set_hook_authority_at(
+                "herdr:kilo".into(),
+                "kilo".into(),
+                crate::detect::AgentState::Working,
+                None,
+                Some(session_ref),
+                Some(2),
+                reported_at,
+            );
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .seen = false;
+            let (runtime, mut detection_events) =
+                crate::terminal::TerminalRuntime::test_with_live_detection_screen_bytes(
+                    pane_id,
+                    crate::detect::Agent::Kilo,
+                    fallback,
+                    false,
+                    visible_blocker,
+                    visible_working,
+                    screen,
+                );
+            app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+            app.sync_full_lifecycle_authority_detection_pauses();
+            let deadline = app
+                .state
+                .next_full_lifecycle_hook_authority_deadline()
+                .unwrap();
+
+            assert!(app.handle_scheduled_tasks(deadline, false));
+            let event = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let event = detection_events.recv().await.expect("detector event");
+                    if matches!(event, AppEvent::StateChanged { .. }) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("expiry must rescan cached {fallback:?} evidence"));
+            let AppEvent::StateChanged { state, .. } = &event else {
+                unreachable!()
+            };
+            assert_eq!(*state, fallback, "expiry must not synthesize Idle");
+            app.handle_internal_event(event);
+            assert_eq!(app.state.terminals[&terminal_id].state, fallback);
+            assert_ne!(
+                app.agent_info(0, pane_id).unwrap().agent_status,
+                crate::api::schema::AgentStatus::Done,
+                "hidden pane must not flicker Done during detector rescan"
+            );
+            assert!(!app.state.terminals[&terminal_id].full_lifecycle_hook_authority_active());
+        }
+    }
+
+    #[test]
+    fn stale_full_lifecycle_hook_authority_falls_back_to_screen_invalid_reload_keeps_value() {
+        let mut app = test_app();
+        let mut config = Config::default();
+        config
+            .agent_detection
+            .full_lifecycle_hook_authority_timeout_seconds = 30;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.full_lifecycle_hook_authority_timeout,
+            Duration::from_secs(30)
+        );
+
+        config
+            .agent_detection
+            .full_lifecycle_hook_authority_timeout_seconds = 600;
+        app.apply_live_config(&config, &[], &["agent_detection".into()], false);
+        assert_eq!(
+            app.state.full_lifecycle_hook_authority_timeout,
+            Duration::from_secs(30)
+        );
     }
 
     fn focus_reporting_app() -> (App, tokio::sync::mpsc::Receiver<bytes::Bytes>) {

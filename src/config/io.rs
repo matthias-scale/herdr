@@ -6,6 +6,7 @@ use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
+    "agent_detection",
     "experimental",
     "keys",
     "onboarding",
@@ -307,6 +308,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.ui = section,
+    );
+    load_live_section(
+        table,
+        "agent_detection",
+        "agent detection config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.agent_detection = section,
     );
     load_live_section(
         table,
@@ -1087,5 +1096,34 @@ mouse_capture = false
         let (updated, removed) = remove_keybinding_config_sections(content);
         assert!(!removed);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn stale_full_lifecycle_hook_authority_falls_back_to_screen_live_config_section() {
+        let valid = load_live_config_from_str(
+            "[agent_detection]\nfull_lifecycle_hook_authority_timeout_seconds = 30\n",
+        )
+        .unwrap();
+        assert_eq!(
+            valid
+                .config
+                .agent_detection
+                .full_lifecycle_hook_authority_timeout_seconds,
+            30
+        );
+        assert!(valid.invalid_sections.is_empty());
+
+        let invalid = load_live_config_from_str(
+            "[agent_detection]\nfull_lifecycle_hook_authority_timeout_seconds = 29\n",
+        )
+        .unwrap();
+        assert_eq!(invalid.invalid_sections, vec!["agent_detection"]);
+        assert_eq!(
+            invalid
+                .config
+                .agent_detection
+                .full_lifecycle_hook_authority_timeout_seconds,
+            600
+        );
     }
 }
