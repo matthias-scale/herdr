@@ -164,6 +164,11 @@ class ClosingBlock:
     agents: list[str] = field(default_factory=list)
     declared_agents: int | None = None
     done_here: bool = False
+    # Whether the author labeled anything themselves, and whether any parsed
+    # line was discarded for carrying no label. Both are needed to tell a
+    # miscounted header apart from an incomplete parse.
+    authored_labels: bool = False
+    discarded_items: int = 0
 
     @property
     def gates(self) -> list[Item]:
@@ -186,7 +191,13 @@ class ClosingBlock:
         # The header still wins when nothing labeled parsed at all: there
         # under-reporting a gate is the real failure mode, and a declared
         # count is the only evidence left.
-        if any(item.label for item in self.items):
+        # Both conditions matter. `authored_labels` excludes gates this parser
+        # promoted itself: a block with no labels at all and fewer parsed lines
+        # than it declared has lost a gate somewhere, and the header is the only
+        # evidence left. `discarded_items` excludes a parse that dropped an
+        # unlabeled or malformed line beside real labels -- a mistyped `Gate`
+        # next to an `Answer` must not silently retire the human decision.
+        if self.authored_labels and self.discarded_items == 0:
             return len(self.gates)
         return max(len(self.gates), self.declared_blocking or 0)
 
@@ -500,12 +511,15 @@ def parse(text: str) -> ClosingBlock:
             # their gates, so the unlabeled line is prose, not a silent gate.
             labeled_gates = len(block.gates)
             declared = block.declared_blocking or 0
-            if not any(item.label for item in block.items):
+            block.authored_labels = any(item.label for item in block.items)
+            if not block.authored_labels:
                 for item in block.items:
                     if item.label == "" and labeled_gates < declared:
                         item.label = "Gate"
                         labeled_gates += 1
-            block.items = [item for item in block.items if item.label]
+            kept = [item for item in block.items if item.label]
+            block.discarded_items = len(block.items) - len(kept)
+            block.items = kept
             block.items.extend(
                 _parse_what_to_test(
                     text, start, selected.end, block.items, fences

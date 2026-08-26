@@ -595,6 +595,69 @@ class ClosingBlockV2Tests(unittest.TestCase):
                     ["Answer", "Verify"],
                 )
 
+    def test_an_incomplete_unlabeled_parse_keeps_the_declared_floor(self):
+        # Promotion labels what it finds, but finding fewer lines than the
+        # header declared means a gate was lost in parsing, not that the
+        # header was wrong. The promoted label must not be read back as proof
+        # the author labeled anything.
+        block = closing_block.parse(
+            "**Critical action points (2 blocking)**\n"
+            "\n"
+            "1. Approve the production rollout.\n"
+            "\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 2)
+        self.assertEqual(block.herdr_state, "blocked")
+
+    def test_a_discarded_line_beside_a_label_keeps_the_declared_floor(self):
+        # An unlabeled line dropped next to a real label is the one case where
+        # labels are present but the parse is still incomplete. Trusting the
+        # labels there retires a human decision the author did declare.
+        for body in (
+            "1. Approve the production rollout.\n2. Answer — which lane?\n",
+            "1. **Gate:** Merge approval for PR #3078\n2. Answer — which lane?\n",
+        ):
+            with self.subTest(body=body):
+                block = closing_block.parse(
+                    "**Critical action points (1 blocking)**\n"
+                    "\n" + body + "\n"
+                    "Done here.\n"
+                )
+
+                self.assertEqual(block.blocking, 1)
+                self.assertEqual(block.herdr_state, "blocked")
+
+    def test_a_complete_labeled_parse_still_lets_labels_win(self):
+        # The Part 2 fix itself: nothing was discarded and the author labeled
+        # every line, so a miscounted header loses to the labels.
+        block = closing_block.parse(
+            "**Critical action points (1 blocking)**\n"
+            "\n"
+            "1. Answer — which lane?\n"
+            "\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.herdr_state, "idle")
+
+        # A real gate beside an answer is unaffected.
+        mixed = closing_block.parse(
+            "**Critical action points (1 blocking)**\n"
+            "\n"
+            "1. Gate — merge approval for PR #3078\n"
+            "2. Answer — which lane?\n"
+            "\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(mixed.blocking, 1)
+        self.assertEqual(
+            [item["label"] for item in mixed.wire_gates()], ["Gate"]
+        )
+
     def test_declared_count_still_floors_blocking_with_nothing_labeled(self):
         # The header remains the only evidence when no label parsed at all, so
         # it keeps flooring the count there: under-reporting a gate is the
@@ -613,9 +676,16 @@ class ClosingBlockV2Tests(unittest.TestCase):
             [item["label"] for item in block.wire_gates()], ["Gate", "Gate"]
         )
 
-    def test_an_unlabeled_line_beside_a_label_is_prose_not_a_silent_gate(self):
-        # Mixed block: the author did label their gate, so the trailing
-        # unlabeled line must not be promoted to make the header's count.
+    def test_an_unlabeled_line_beside_a_label_is_never_promoted(self):
+        # Mixed block: the author did label their item, so the trailing
+        # unlabeled line is not promoted into a gate -- its text is prose and
+        # must never be published as a decision the human owes.
+        #
+        # The count is a separate question. Dropping that line means the parse
+        # did not account for everything the header declared, so the header
+        # keeps flooring the count: a pane parked at "2 blocking" with no gate
+        # text is visible and self-correcting, while a silently retired gate is
+        # neither.
         block = closing_block.parse(
             "**Critical action points (2 blocking)**\n"
             "\n"
@@ -625,8 +695,11 @@ class ClosingBlockV2Tests(unittest.TestCase):
             "Done here.\n"
         )
 
-        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.blocking, 2)
         self.assertEqual(block.wire_gates(), [])
+        self.assertEqual(
+            [item["label"] for item in block.wire_items()], ["Answer"]
+        )
 
     def test_mirror_write_keeps_newest_seq(self):
         with mock.patch.dict(
