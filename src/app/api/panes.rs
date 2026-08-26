@@ -1304,7 +1304,7 @@ impl App {
                 }
             }
         }
-        self.sync_terminal_titles();
+        let _ = self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1335,7 +1335,7 @@ impl App {
                 params.session_start_source,
             ),
         });
-        self.sync_terminal_titles();
+        let _ = self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
     }

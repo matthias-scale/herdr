@@ -571,8 +571,11 @@ impl HeadlessServer {
                 needs_render = true;
                 crate::render_prof::event("render.request.signal");
             }
-            let terminal_title_changed = self.app.sync_terminal_titles();
-            if terminal_title_changed && self.app.terminal_title_sidebar_configured() {
+            let terminal_title_change = self.app.sync_terminal_titles();
+            if terminal_title_change.chrome_changed
+                || (terminal_title_change.raw_changed
+                    && self.app.terminal_title_sidebar_configured())
+            {
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.terminal_title");

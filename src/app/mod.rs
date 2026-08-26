@@ -1110,8 +1110,10 @@ impl App {
             if self.render_dirty.is_pending() {
                 needs_render = true;
             }
-            let terminal_title_changed = self.sync_terminal_titles();
-            if terminal_title_changed && self.terminal_title_sidebar_configured() {
+            let terminal_title_change = self.sync_terminal_titles();
+            if terminal_title_change.chrome_changed
+                || (terminal_title_change.raw_changed && self.terminal_title_sidebar_configured())
+            {
                 needs_render = true;
             }
 

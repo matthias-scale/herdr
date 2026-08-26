@@ -1091,7 +1091,7 @@ impl App {
             crate::api::schema::Method::PaneReportAgent(_)
                 | crate::api::schema::Method::PaneReportAgentSession(_)
         ) {
-            self.sync_terminal_titles();
+            let _ = self.sync_terminal_titles();
         }
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
