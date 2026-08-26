@@ -1216,6 +1216,18 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        },
+        {
+          "key": "remote.fleet.timeout_ms",
+          "type": "integer",
+          "default": "5000",
+          "description": "Whole-read deadline per configured fleet host in milliseconds. Valid range: 100–60000."
+        },
+        {
+          "key": "remote.fleet.heartbeat_stale_ms",
+          "type": "integer",
+          "default": "1800000",
+          "description": "Age in milliseconds after which a non-terminal windowless run has unknown liveness. Minimum: 100."
         }
       ]
     },

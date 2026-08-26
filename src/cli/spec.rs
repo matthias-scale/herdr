@@ -30,6 +30,7 @@ pub(super) fn command() -> Command {
         .subcommand(update_command())
         .subcommand(status_command())
         .subcommand(config_command())
+        .subcommand(fleet_command())
         .subcommand(channel_command())
         .subcommand(server_command())
         .subcommand(api_command())
@@ -140,6 +141,19 @@ fn config_command() -> Command {
         .about("Manage local configuration")
         .subcommand(Command::new("check").about("Validate config.toml and print diagnostics"))
         .subcommand(Command::new("reset-keys").about("Reset custom keybindings"))
+}
+
+fn fleet_command() -> Command {
+    Command::new("fleet")
+        .about("Inspect agents across configured hosts")
+        .subcommand(
+            Command::new("status")
+                .about("Show cross-host agent and run status")
+                .arg(option("hosts", "NAMES").help("Comma-separated configured host names"))
+                .arg(json_flag().help("Print structured rows as JSON"))
+                .arg(flag("blocked-only").help("Show only rows with blocked evidence"))
+                .arg(flag("watch").help("Emit each observed transition once as JSON Lines")),
+        )
 }
 
 fn channel_command() -> Command {
