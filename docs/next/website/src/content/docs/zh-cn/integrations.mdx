@@ -93,6 +93,12 @@ Herdr 以两种不同方式使用集成:
 
 原生会话恢复需要最新的 Herdr 集成: Pi 集成版本 `2`、OMP 版本 `3`、Claude Code 版本 `6`、Codex 版本 `5`、GitHub Copilot CLI 版本 `2`、Devin CLI 版本 `2`、Droid 版本 `2`、Kimi Code CLI 版本 `3`、Qoder CLI 版本 `2`、Cursor Agent CLI 版本 `1`、Grok CLI 版本 `1`、OpenCode 版本 `5`、Kilo Code CLI 版本 `1`、Hermes Agent 版本 `2`、MastraCode 版本 `1`、Antigravity CLI 版本 `1`。用 `herdr integration status` 查看已安装版本。
 
+## 自动工作标题
+
+Claude Code 和 Codex 集成会在提供方开始回合之前，于每次 `UserPromptSubmit` 时重新计算所属标签页唯一的 Herdr 标题。Claude Code 和 Codex 都需要集成版本 **8** 才能生成自动工作标题。运行 `herdr integration status`，并重新安装被标记为过期的集成。每个钩子都会调用拥有该窗格的 Herdr 二进制文件，两个适配器使用同一个确定性标题引擎，不会额外请求模型或加入提示上下文。工作标题只使用展示元数据，不会改变生命周期权威、原生模型标签或会话标识，因此 Pi 等其他集成仍然兼容。
+
+标题包含 1–7 个词，最多 48 个可见字符。引擎会移除终端转义、控制字符、路径、用户标识和类似 secret 的值，然后从最后一个有意义的段落生成具体结果。只有简短续写或元指令时，它会保留该窗格、提供方和原生会话初始简报的主题。Herdr 会跳过未变化的标题，并把每个已接受更新绑定到上报窗格、提供方、原生会话 ID 和单调递增的序列。来自旧回合或旧会话的延迟上报不能替换更新的标题。钩子、socket、窗格或独立子智能体窗格不支持时，该操作会静默跳过。
+
 ## Pi
 
 安装 Pi 集成:

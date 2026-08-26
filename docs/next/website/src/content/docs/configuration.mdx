@@ -264,15 +264,18 @@ Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `rese
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Its default `spaces` ordering is one repository tree: each repository and its linked worktrees share one Space row, and every tab appears once as a direct window child even when it has no detected agent or owns multiple panes. Compact and mobile navigation preserve the same ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
+The sidebar is the main Herdr dashboard. On desktop it starts with attention and organization sections in this order: Blocked, Prio, then Agents or Pinned when applicable, with Spaces last. Blocked remains visible at zero so you can confirm that no pane needs input. The Spaces section is the canonical ownership tree: each repository and its linked worktrees share one Space row, and every tab appears once as a direct window child even when it has no detected agent or owns multiple panes. Compact and mobile navigation preserve that ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
 
-`ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but the visible sidebar always keeps canonical workspace, tab, and pane order. Lifecycle changes never move identity rows. A transient `agent.view.set` query also leaves the ownership tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
+`ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but lifecycle changes never reorder the Spaces ownership tree. A transient `agent.view.set` query also leaves that tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Each section can collapse independently. Section-header collapse is keyed by title, so reordering does not reset it; the version 3 session layout continues to preserve the Prio panel and individual Space collapse state. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
 
-Each expanded tab shows its persisted title once on one row, even when it owns
-multiple panes. Agent-backed rows roll up pane state as `working`, `blocked`, or
-`done`; agentless rows omit lifecycle status. Opening a completed tab clears
-`done` without moving it. Activity age is supplementary only and never replaces
-an unseen `done` state.
+Each worklist or expanded tab row shows its persisted title once, even when the
+tab owns multiple panes. At supported widths the compact shape is `<state>
+<title> · <cc|cx|pi> · <age>`. The sidebar never renders the agent CLI version.
+When the short suffix identifies the agent, Herdr omits a redundant provider
+word; agents without a short suffix keep their provider label. Agent-backed rows
+roll up pane state as `working`, `blocked`, or `done`; plan exhaustion uses
+`usage` until the live screen resumes. Agentless rows omit lifecycle status.
+Opening a completed tab clears `done` without moving it.
 
 ### Status row
 
@@ -300,12 +303,12 @@ The symbols are static, so this option does not enable spinner animation.
 
 ### Sidebar row layouts
 
-The visible sidebar is always the Spaces tree. A repository and its linked
+The final Spaces section is the ownership tree. A repository and its linked
 worktrees form one Space. Its fixed one-line row renders the disclosure icon,
 Space title, and direct window count; branch, model, agent, and pane subtitles
 are not rendered. Every disclosed tab/window below it uses one fixed line:
-state icon, state text, separator, and its single title. A tab with several
-panes still has one row.
+state, its single title, short agent suffix when available, and activity age.
+A tab with several panes still has one row.
 
 The Space group gap remains configurable:
 
@@ -318,8 +321,8 @@ row_gap = 1
 the visible Space projection always uses disclosure, title, and window count.
 
 Legacy `ui.sidebar.agents` row declarations remain accepted so existing
-configuration does not fail to load, but they do not create a separate Agents
-view or child rows in the visible sidebar. Their accepted tokens are:
+configuration does not fail to load, but they do not change the fixed worklist
+or Spaces rows. Their accepted tokens are:
 
 - `state_icon` — colored icon for the agent's semantic state.
 - `state_text` — `idle`, `working`, `blocked`, `done`, or `unknown`, including a reported display label when present.
@@ -366,7 +369,9 @@ parseable and default to `0`.
 
 Rows backed by one recognized provider append its short identifier immediately
 after the title: Claude uses `· cc`, Codex uses `· cx`, and Pi uses `· pi`.
-Agentless, unsupported, mixed-provider, and exited-agent rows omit the suffix.
+The suffix replaces a redundant provider word, and the CLI version is never
+shown in the sidebar. Agents without a short suffix keep their provider label;
+agentless, mixed-provider, and exited-agent rows omit the suffix.
 When Codex explicitly reports background terminals, a nonzero count appears
 after that suffix as `N >_`. The count is summed across panes owned by that tab,
 omitted when zero or unsupported, cleared when Codex exits, and never changes
