@@ -542,6 +542,28 @@ impl App {
                 }
                 return;
             }
+
+            // Scratchpad rows open rather than copy: the note is being read, and
+            // the reason a link is in it is to be followed.
+            if let Some(url) = self
+                .state
+                .view
+                .scratchpad_link_rows
+                .iter()
+                .find(|row| {
+                    mouse.column >= row.rect.x
+                        && mouse.column < row.rect.x.saturating_add(row.rect.width)
+                        && mouse.row >= row.rect.y
+                        && mouse.row < row.rect.y.saturating_add(row.rect.height)
+                })
+                .map(|row| row.url.clone())
+            {
+                if let Err(error) = crate::platform::open_url(&url) {
+                    tracing::warn!(%error, %url, "failed to open scratchpad link");
+                    self.show_work_link_notice("could not open link");
+                }
+                return;
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))

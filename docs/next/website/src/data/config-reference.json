@@ -638,6 +638,12 @@
           "description": "Select the next dock tab."
         },
         {
+          "key": "keys.edit_scratchpad",
+          "type": "keybinding",
+          "default": "\"prefix+shift+o\"",
+          "description": "Open the focused repository's scratchpad in the dock editor."
+        },
+        {
           "key": "keys.toggle_pin_tab",
           "type": "keybinding",
           "default": "unset",

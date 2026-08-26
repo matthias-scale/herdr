@@ -879,16 +879,25 @@ pub enum DockTab {
     Editor,
     Shortcuts,
     Context,
+    Scratchpad,
 }
 
 impl DockTab {
-    pub const ALL: [Self; 3] = [Self::Editor, Self::Shortcuts, Self::Context];
+    pub const ALL: [Self; 4] = [
+        Self::Editor,
+        Self::Shortcuts,
+        Self::Context,
+        Self::Scratchpad,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Editor => "Editor",
             Self::Shortcuts => "Shortcuts",
             Self::Context => "Context",
+            // Four labels plus one space each must fit the 32-column default dock;
+            // a longer name here truncates "Shortcuts" instead of itself.
+            Self::Scratchpad => "Note",
         }
     }
 
@@ -931,12 +940,21 @@ pub struct ViewState {
     pub dock_tab_bar_rect: Rect,
     pub dock_tab_hit_areas: Vec<Rect>,
     pub dock_body_rect: Rect,
+    pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InfoPanelLinkRow {
     pub rect: Rect,
     pub copy_value: String,
+}
+
+/// A scratchpad link row opens its URL; the work-context rows copy instead, so
+/// the two cannot share a type without making the click semantics ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScratchpadLinkRow {
+    pub rect: Rect,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1679,6 +1697,10 @@ pub struct AppState {
     pub(crate) dock_editor_focused: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
+    /// A file the next editor spawn for this agent pane should open. Absent, the
+    /// editor opens the pane's directory exactly as it always has.
+    pub(crate) dock_editor_requested_paths: std::collections::HashMap<PaneId, std::path::PathBuf>,
+    pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
@@ -2343,6 +2365,7 @@ impl AppState {
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
+                scratchpad_link_rows: Vec::new(),
             },
             drag: None,
             workspace_press: None,
@@ -2372,6 +2395,8 @@ impl AppState {
             dock_editor_focused: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
+            dock_editor_requested_paths: std::collections::HashMap::new(),
+            scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,

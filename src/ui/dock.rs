@@ -67,5 +67,8 @@ pub(super) fn render_dock(
         DockTab::Context => {
             super::dock_context::render_context(app, frame, app.view.dock_body_rect)
         }
+        DockTab::Scratchpad => {
+            super::dock_scratchpad::render_scratchpad(app, frame, app.view.dock_body_rect)
+        }
     }
 }
