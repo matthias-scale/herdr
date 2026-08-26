@@ -92,6 +92,23 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
             || !entry.seen)
 }
 
+/// Membership in the Blocked worklist.
+///
+/// A latched gate outlives the blocked lifecycle state -- see
+/// `PaneDetail::open_blockers`: output retirement flips the pane back to
+/// working while the human decision is still open -- and liveness is a
+/// separate dimension from blocked-ness, so a supervisor that went quiet
+/// leaves the gate unanswered rather than closing it. Neither may drop a row
+/// out of the worklist.
+///
+/// This sits next to `gate_overrides_label` on purpose: the section header
+/// count, the section membership and the row's red gate chip must all be
+/// answers to the same question, or the sidebar reads `Blocked (0)` above
+/// visible gate rows.
+pub(super) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
+    entry.state == AgentState::Blocked || entry.open_blockers || entry.usage_limited
+}
+
 /// A latched gate must never hide behind a lifecycle label: any row that
 /// carries the red blocker dot reads as its blocked label ("gate") too, even
 /// while the agent is still mid-turn working.
@@ -981,9 +998,7 @@ fn sidebar_rows_inner(
         // the row count still equals the agent count. The Blocked header stays
         // visible at zero so the section reads as an always-present worklist
         // rather than appearing and disappearing.
-        let (blocked, rest): (Vec<_>, Vec<_>) = entries
-            .into_iter()
-            .partition(|entry| entry.state == AgentState::Blocked);
+        let (blocked, rest): (Vec<_>, Vec<_>) = entries.into_iter().partition(entry_is_blocked);
         let agent_row = |entry: AgentPanelEntry| SidebarRow::Agent {
             entry: Box::new(entry),
             depth: 0,
@@ -1022,7 +1037,7 @@ fn sidebar_rows_inner(
     let mut rows = Vec::new();
     let blocked: Vec<AgentPanelEntry> = agents
         .iter()
-        .filter(|entry| entry.state == AgentState::Blocked)
+        .filter(|entry| entry_is_blocked(entry))
         .cloned()
         .collect();
     // A pinned tab that is also blocked appears once, under Blocked: the gate
@@ -1030,9 +1045,7 @@ fn sidebar_rows_inner(
     // make the groups read as a queue you have to de-duplicate by eye.
     let pinned: Vec<AgentPanelEntry> = agents
         .iter()
-        .filter(|entry| {
-            entry.state != AgentState::Blocked && tab_is_pinned(app, entry.ws_idx, entry.tab_idx)
-        })
+        .filter(|entry| !entry_is_blocked(entry) && tab_is_pinned(app, entry.ws_idx, entry.tab_idx))
         .cloned()
         .collect();
     let push_group = |rows: &mut Vec<SidebarRow>,
@@ -3992,6 +4005,83 @@ mod tests {
             .find(|entry| entry.pane_id == pane)
             .expect("pane entry");
         assert!(!entry.open_blockers);
+    }
+
+    /// The reported bug: the sidebar read `Blocked (0)` while gate rows were
+    /// visible below it. The header counted `state == Blocked` while the row
+    /// chip and the red dot ran off the latched gate, so every pane whose
+    /// agent had resumed working -- or whose supervisor had gone quiet --
+    /// carried a gate chip the section refused to count.
+    #[test]
+    fn the_blocked_section_counts_a_latched_gate_on_a_working_pane() {
+        let mut app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.state = AgentState::Working;
+        terminal.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the open PR".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        // The precondition the bug needed: chip says gate, lifecycle says working.
+        assert!(entry.open_blockers);
+        assert_eq!(entry.state, AgentState::Working);
+        assert!(gate_overrides_label(&entry));
+
+        // The chip and the header must now be answers to the same question.
+        assert!(entry_is_blocked(&entry));
+        let rows = sidebar_rows(&app);
+        let count = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::SectionHeader { title, count, .. }
+                    if *title == BLOCKED_SECTION_TITLE =>
+                {
+                    Some(*count)
+                }
+                _ => None,
+            })
+            .expect("blocked header");
+        assert_eq!(count, 1, "a latched gate belongs to the Blocked worklist");
+
+        // A quiet supervisor is a liveness fact, not an answered gate: the row
+        // stays in the worklist rather than being sorted out of sight.
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.supervisor_stale = true;
+        app.reconcile_sidebar_presentation();
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        assert!(entry.stale);
+        assert!(entry_is_blocked(&entry));
+
+        // Answering the gate is what clears it, and only that.
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.supervisor_stale = false;
+        terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
+        app.reconcile_sidebar_presentation();
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        assert!(!entry_is_blocked(&entry));
     }
 
     #[test]

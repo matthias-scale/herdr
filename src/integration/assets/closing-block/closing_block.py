@@ -175,9 +175,19 @@ class ClosingBlock:
 
     @property
     def blocking(self) -> int:
-        # Labeled gates are authoritative for detail, but a header that
-        # declares more blocking items than could be parsed still blocks:
-        # under-reporting a gate is the failure mode this exists to prevent.
+        # Labels are the authority on what blocks: Gate means authority is
+        # owed before the agent may execute, while Answer and Verify are
+        # non-blocking by definition and the agent proceeds past them. So
+        # once *any* item parsed with a label, the labeled gates are the
+        # count -- a header that says "(1 blocking)" above a lone Answer is
+        # a miscounted header, not a hidden gate, and latching it would
+        # block a pane whose agent is not actually waiting on anything.
+        #
+        # The header still wins when nothing labeled parsed at all: there
+        # under-reporting a gate is the real failure mode, and a declared
+        # count is the only evidence left.
+        if any(item.label for item in self.items):
+            return len(self.gates)
         return max(len(self.gates), self.declared_blocking or 0)
 
     @property
@@ -485,12 +495,16 @@ def parse(text: str) -> ClosingBlock:
             # Promote them to gates, oldest first, until the declared blocking
             # count is met; the rest are dropped exactly as the strict parser
             # always dropped them, so labeled authoring is unchanged.
+            # Only for a block that carries no labels at all. Mixing an
+            # unlabeled line in beside real labels means the author did label
+            # their gates, so the unlabeled line is prose, not a silent gate.
             labeled_gates = len(block.gates)
             declared = block.declared_blocking or 0
-            for item in block.items:
-                if item.label == "" and labeled_gates < declared:
-                    item.label = "Gate"
-                    labeled_gates += 1
+            if not any(item.label for item in block.items):
+                for item in block.items:
+                    if item.label == "" and labeled_gates < declared:
+                        item.label = "Gate"
+                        labeled_gates += 1
             block.items = [item for item in block.items if item.label]
             block.items.extend(
                 _parse_what_to_test(

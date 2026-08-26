@@ -578,19 +578,55 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
         self.assertEqual(block.wire_decisions(), [])
 
-    def test_declared_counts_floor_blocking_but_never_relabel_items(self):
+    def test_labeled_items_outrank_the_declared_count_and_keep_their_labels(self):
+        # Reverses the previous "declared count floors blocking" contract.
+        # Answer and Verify are non-blocking by definition, so a header that
+        # over-declares above them is a miscounted header, not a hidden gate.
+        # Latching it parked panes as blocked whose agent was free to proceed,
+        # which is the whole point of the non-blocking labels.
         for count, text in DECLARED_COUNT_WITH_ONLY_NONBLOCKING_ITEMS.items():
             with self.subTest(count=count):
                 block = closing_block.parse(text)
 
-                # The declared count blocks even when every parsed item is
-                # nonblocking; labeled items keep their labels regardless.
-                self.assertEqual(block.blocking, count)
+                self.assertEqual(block.blocking, 0)
                 self.assertEqual(block.wire_gates(), [])
                 self.assertEqual(
                     [item["label"] for item in block.wire_items()],
                     ["Answer", "Verify"],
                 )
+
+    def test_declared_count_still_floors_blocking_with_nothing_labeled(self):
+        # The header remains the only evidence when no label parsed at all, so
+        # it keeps flooring the count there: under-reporting a gate is the
+        # failure mode that guard exists for.
+        block = closing_block.parse(
+            "**Critical action points (2 blocking)**\n"
+            "\n"
+            "1. Approve the production rollout.\n"
+            "2. Approve the secret rotation.\n"
+            "\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 2)
+        self.assertEqual(
+            [item["label"] for item in block.wire_gates()], ["Gate", "Gate"]
+        )
+
+    def test_an_unlabeled_line_beside_a_label_is_prose_not_a_silent_gate(self):
+        # Mixed block: the author did label their gate, so the trailing
+        # unlabeled line must not be promoted to make the header's count.
+        block = closing_block.parse(
+            "**Critical action points (2 blocking)**\n"
+            "\n"
+            "1. **Answer** — Post the summary after CI settles?\n"
+            "2. Some trailing prose that is not an item.\n"
+            "\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.wire_gates(), [])
 
     def test_mirror_write_keeps_newest_seq(self):
         with mock.patch.dict(

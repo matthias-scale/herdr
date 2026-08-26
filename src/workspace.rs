@@ -1777,11 +1777,18 @@ mod tests {
         assert!(first.starts_with('w'));
         assert!(second.starts_with('w'));
         assert_ne!(first, second);
-        assert!(first.len() <= 3, "unexpectedly long workspace id: {first}");
-        assert!(
-            second.len() <= 3,
-            "unexpectedly long workspace id: {second}"
-        );
+        // Compactness is a property of the encoder, not of how many
+        // workspaces this binary's other tests happened to allocate first:
+        // `NEXT_WORKSPACE_ID` is process-global, so asserting a length on the
+        // two ambient ids made this test fail the moment any test elsewhere
+        // pushed the shared counter past two base32 digits.
+        for counter in 1..=1024 {
+            let encoded = encode_public_number(counter);
+            assert!(
+                encoded.len() <= 2,
+                "unexpectedly long handle for {counter}: {encoded}"
+            );
+        }
     }
 
     #[test]
