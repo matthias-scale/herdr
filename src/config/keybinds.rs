@@ -372,6 +372,7 @@ pub struct Keybinds {
     pub edit_scratchpad: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
+    pub inbox: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -555,6 +556,7 @@ impl Config {
             edit_scratchpad: empty_action!(),
             toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
+            inbox: empty_action!(),
             custom_commands: Vec::new(),
         };
 
@@ -717,6 +719,7 @@ impl Config {
             apply_action!(keybinds.edit_scratchpad, edit_scratchpad, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
+            apply_action!(keybinds.inbox, inbox, source);
 
             if source == field_source!(indexed) {
                 append_legacy_indexed_bindings(

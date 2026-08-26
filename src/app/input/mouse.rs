@@ -90,7 +90,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) {
-        if self.mode != Mode::Terminal || self.symphony_detail.is_some() {
+        if self.mode != Mode::Terminal || self.symphony_detail.is_some() || self.inbox.is_some() {
             return;
         }
         let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {

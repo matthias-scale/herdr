@@ -3356,6 +3356,10 @@ impl AppState {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
+                // Only a transition reaches here, so entering Blocked stamps a fresh
+                // wait and leaving it discards the old one.
+                terminal.blocked_since = (change.state == crate::detect::AgentState::Blocked)
+                    .then(std::time::Instant::now);
             }
         }
         let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;

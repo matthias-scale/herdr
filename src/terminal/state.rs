@@ -304,6 +304,9 @@ pub struct TerminalState {
     pub(crate) foreground_process_name: Option<String>,
     foreground_process_active: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    /// When this pane most recently entered `Blocked`. Cleared on any transition
+    /// out of it, so it always measures the current wait rather than a past one.
+    pub blocked_since: Option<Instant>,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
     agent_activity_owner: Option<AgentActivityOwner>,
@@ -371,6 +374,7 @@ impl TerminalState {
             foreground_process_name: None,
             foreground_process_active: false,
             last_agent_state_change_seq: None,
+            blocked_since: None,
             agent_active_since: None,
             agent_last_active_at: None,
             agent_activity_owner: None,

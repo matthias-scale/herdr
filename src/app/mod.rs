@@ -16,6 +16,7 @@ mod creation;
 pub(crate) mod foreground_process;
 mod git_refresh;
 mod ids;
+pub(crate) mod inbox;
 mod input;
 mod popup;
 mod runtime;
@@ -252,6 +253,12 @@ async fn sleep_until_or_pending(deadline: Option<Instant>) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalInputTarget {
     terminal_id: crate::terminal::TerminalId,
+}
+
+impl TerminalInputTarget {
+    pub(crate) fn new(terminal_id: crate::terminal::TerminalId) -> Self {
+        Self { terminal_id }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -601,6 +608,7 @@ impl App {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            inbox: None,
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,
@@ -1837,7 +1845,10 @@ impl App {
 
 impl App {
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
-        if self.state.symphony_detail.is_some() {
+        // The inbox forwards keys to a pane that is not the focused one, so the
+        // ordinary pane context would name the wrong terminal; it sends directly
+        // instead and takes itself out of the lease path, as Symphony does.
+        if self.state.symphony_detail.is_some() || self.state.inbox.is_some() {
             None
         } else if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
@@ -2065,6 +2076,9 @@ impl App {
             return;
         }
         if self.handle_loop_run_history_key(key_event) {
+            return;
+        }
+        if self.handle_inbox_key_headless(key_event) {
             return;
         }
         if input::modal_paste_target_active(&self.state)

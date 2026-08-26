@@ -16,6 +16,7 @@ mod dock_context;
 mod dock_scratchpad;
 #[path = "ui/dock/shortcuts.rs"]
 mod dock_shortcuts;
+mod inbox;
 mod info_panel;
 mod keybind_help;
 mod loop_runs;
@@ -685,6 +686,17 @@ fn render_with_runtime_registry_inner(
             &detail.loop_id,
             terminal_area,
             detail.observed_at,
+            frame,
+        );
+    } else if let Some(inbox) = app.inbox.as_ref() {
+        let queue = app.blocked_agents();
+        inbox::render_inbox(
+            app,
+            terminal_runtimes,
+            inbox.current(&queue),
+            queue.len(),
+            inbox.deferred_count(&queue),
+            terminal_area,
             frame,
         );
     } else if app

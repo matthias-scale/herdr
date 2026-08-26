@@ -7,7 +7,9 @@ use ratatui::{
     widgets::Borders,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct PaneId(u32);
 
 /// Global atomic counter for unique PaneId generation across all workspaces.

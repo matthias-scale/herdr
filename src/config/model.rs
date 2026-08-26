@@ -544,6 +544,8 @@ pub struct KeysConfig {
     pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
     pub symphony: BindingConfig,
+    /// Open the blocked-agent inbox. Default: "prefix+shift+i"
+    pub inbox: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -702,6 +704,7 @@ pub(crate) struct KeysConfigOverlay {
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symphony: Option<BindingConfig>,
+    inbox: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
@@ -799,6 +802,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(edit_scratchpad);
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
+        apply_field!(inbox);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -918,6 +922,7 @@ impl KeysConfig {
         copy_effective_action_field!(edit_scratchpad, keybinds.edit_scratchpad);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
+        copy_effective_action_field!(inbox, keybinds.inbox);
         copy_user_field!(indexed);
 
         profile
@@ -1269,6 +1274,7 @@ impl Default for KeysConfig {
             edit_scratchpad: BindingConfig::one("prefix+shift+o"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
+            inbox: BindingConfig::one("prefix+shift+i"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),
