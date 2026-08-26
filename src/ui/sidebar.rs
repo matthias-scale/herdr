@@ -2387,11 +2387,21 @@ fn resolved_token_spans(
             _ => 0,
         })
         .collect::<Vec<_>>();
+    let has_required_state = resolved
+        .iter()
+        .any(|token| matches!(token.kind, ResolvedTokenKind::RequiredStateText(_)));
     let minimum_flexible_widths = resolved
         .iter()
         .enumerate()
         .map(|(index, token)| match &token.kind {
             ResolvedTokenKind::RequiredStateText(_) => flexible_widths[index].min(8),
+            ResolvedTokenKind::Tab(_)
+            | ResolvedTokenKind::Pane(_)
+            | ResolvedTokenKind::TerminalTitle(_)
+                if has_required_state =>
+            {
+                flexible_widths[index].min(4)
+            }
             _ => usize::from(flexible_widths[index] > 0),
         })
         .collect::<Vec<_>>();
@@ -2418,9 +2428,6 @@ fn resolved_token_spans(
                 active[index] = false;
             }
         }
-        let has_required_state = resolved
-            .iter()
-            .any(|token| matches!(token.kind, ResolvedTokenKind::RequiredStateText(_)));
         let mut activation_order = Vec::new();
         if has_required_state {
             activation_order.extend(resolved.iter().enumerate().filter_map(|(index, token)| {
