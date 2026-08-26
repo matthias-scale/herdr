@@ -2468,9 +2468,11 @@ fn resolved_token_spans(
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            active[index]
-                .then_some(minimum_flexible_widths[index])
-                .unwrap_or(0)
+            if active[index] {
+                minimum_flexible_widths[index]
+            } else {
+                0
+            }
         })
         .collect::<Vec<_>>();
     let minimum = budgets.iter().sum::<usize>();
