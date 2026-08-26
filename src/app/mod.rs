@@ -2302,6 +2302,7 @@ mod tests {
                 false,
                 visible_working,
                 false,
+                false,
                 reported_at,
             );
             let session_ref = crate::agent_resume::AgentSessionRef::id("tui-expiry").unwrap();

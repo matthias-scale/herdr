@@ -151,6 +151,18 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
             with self.assertRaisesRegex(check.CheckError, "exceeds engine"):
                 check.load_manifest_dir(bundled, engine_version=1)
 
+    def test_accepts_usage_limit_rule_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled = Path(tmp) / "bundled"
+            bundled.mkdir()
+            content = manifest("codex", "2026.06.10.1").replace(
+                'state = "idle"',
+                'state = "blocked"\nusage_limit = true',
+            )
+            (bundled / "codex.toml").write_text(content)
+
+            check.load_manifest_dir(bundled, engine_version=1)
+
     def test_rejects_top_non_empty_lines_below_engine_three(self):
         with tempfile.TemporaryDirectory() as tmp:
             bundled = Path(tmp) / "bundled"

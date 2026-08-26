@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.08.12.1"
+version = "2026.08.26.1001"
 min_engine_version = 2
-updated_at = "2026-08-12T00:00:00Z"
+updated_at = "2026-08-26T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"

@@ -3223,6 +3223,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             activity_at,
         );
         if state != AgentState::Working {
@@ -3231,6 +3232,7 @@ mod tests {
                 state,
                 state == AgentState::Blocked,
                 state == AgentState::Idle,
+                false,
                 false,
                 false,
                 activity_at + std::time::Duration::from_secs(1),

@@ -25,6 +25,7 @@ RULE_KEYS = {
     "visible_idle",
     "visible_blocker",
     "visible_working",
+    "usage_limit",
     "skip_state_update",
     "all",
     "any",

@@ -5644,6 +5644,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             now + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
         );
 
@@ -5651,6 +5652,7 @@ mod tests {
         detected_working.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),
             AgentState::Working,
+            false,
             false,
             false,
             false,
@@ -7815,6 +7817,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             reported_at + CONFIGURED_TIMEOUT,
         );
 
@@ -7938,6 +7941,7 @@ mod tests {
                     screen_state == AgentState::Idle,
                     screen_state == AgentState::Working,
                     false,
+                    false,
                     reported_at + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH,
                 );
                 assert_eq!(
@@ -7979,6 +7983,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             reported_at + Duration::from_secs(1),
         );
 
@@ -8016,6 +8021,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             reported_at + Duration::from_secs(1),
         );
         assert_eq!(
@@ -8038,6 +8044,7 @@ mod tests {
             AgentState::Idle,
             false,
             true,
+            false,
             false,
             false,
             reported_at + Duration::from_secs(700),
