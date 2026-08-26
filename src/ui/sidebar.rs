@@ -727,7 +727,14 @@ fn aggregate_tab_entries(
 ) -> std::collections::HashMap<(usize, usize), AgentPanelEntry> {
     let mut aggregated = std::collections::HashMap::<
         (usize, usize),
-        (AgentPanelEntry, bool, bool, bool, Option<String>),
+        (
+            AgentPanelEntry,
+            bool,
+            bool,
+            bool,
+            Option<String>,
+            Option<String>,
+        ),
     >::new();
 
     for entry in entries {
@@ -742,7 +749,11 @@ fn aggregate_tab_entries(
                     has_agent,
                     has_current_agent,
                     first_foreground_process_name,
+                    usage_label,
                 )| {
+                    if usage_label.is_none() && entry.usage_limited {
+                        *usage_label = entry.state_labels.get("usage").cloned();
+                    }
                     if first_foreground_process_name.is_none() {
                         *first_foreground_process_name = entry.foreground_process_name.clone();
                     }
@@ -797,6 +808,10 @@ fn aggregate_tab_entries(
                     entry.has_agent,
                     entry.agent.is_some(),
                     entry.foreground_process_name.clone(),
+                    entry
+                        .usage_limited
+                        .then(|| entry.state_labels.get("usage").cloned())
+                        .flatten(),
                 )
             });
     }
@@ -804,13 +819,16 @@ fn aggregate_tab_entries(
     aggregated
         .into_iter()
         .map(
-            |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _))| {
+            |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _, usage_label))| {
                 let agent_context = (!mixed_agents).then_some(entry.agent_context).flatten();
                 entry.agent = (has_current_agent && !mixed_agents)
                     .then_some(agent_context)
                     .flatten();
                 entry.agent_context = agent_context;
                 entry.has_agent = has_agent;
+                if let Some(usage_label) = usage_label {
+                    entry.state_labels.insert("usage".into(), usage_label);
+                }
                 (key, entry)
             },
         )
@@ -2358,6 +2376,7 @@ fn resolved_token_spans(
         .iter()
         .map(|token| match &token.kind {
             ResolvedTokenKind::StateText(text)
+            | ResolvedTokenKind::RequiredStateText(text)
             | ResolvedTokenKind::Workspace(text)
             | ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
@@ -2368,6 +2387,14 @@ fn resolved_token_spans(
             _ => 0,
         })
         .collect::<Vec<_>>();
+    let minimum_flexible_widths = resolved
+        .iter()
+        .enumerate()
+        .map(|(index, token)| match &token.kind {
+            ResolvedTokenKind::RequiredStateText(_) => flexible_widths[index].min(8),
+            _ => usize::from(flexible_widths[index] > 0),
+        })
+        .collect::<Vec<_>>();
     let minimum_width = |active: &[bool]| {
         let indices = active
             .iter()
@@ -2376,7 +2403,7 @@ fn resolved_token_spans(
             .collect::<Vec<_>>();
         let content = indices
             .iter()
-            .map(|index| fixed_widths[*index] + usize::from(flexible_widths[*index] > 0))
+            .map(|index| fixed_widths[*index] + minimum_flexible_widths[*index])
             .sum::<usize>();
         let separators = indices
             .windows(2)
@@ -2391,7 +2418,30 @@ fn resolved_token_spans(
                 active[index] = false;
             }
         }
-        for index in (0..resolved.len()).rev() {
+        let has_required_state = resolved
+            .iter()
+            .any(|token| matches!(token.kind, ResolvedTokenKind::RequiredStateText(_)));
+        let mut activation_order = Vec::new();
+        if has_required_state {
+            activation_order.extend(resolved.iter().enumerate().filter_map(|(index, token)| {
+                matches!(token.kind, ResolvedTokenKind::RequiredStateText(_)).then_some(index)
+            }));
+            activation_order.extend(resolved.iter().enumerate().filter_map(|(index, token)| {
+                matches!(
+                    token.kind,
+                    ResolvedTokenKind::Tab(_)
+                        | ResolvedTokenKind::Pane(_)
+                        | ResolvedTokenKind::TerminalTitle(_)
+                )
+                .then_some(index)
+            }));
+        }
+        let remaining = (0..resolved.len())
+            .rev()
+            .filter(|index| !activation_order.contains(index))
+            .collect::<Vec<_>>();
+        activation_order.extend(remaining);
+        for index in activation_order {
             if flexible_widths[index] == 0 {
                 continue;
             }
@@ -2417,7 +2467,11 @@ fn resolved_token_spans(
     let mut budgets = flexible_widths
         .iter()
         .enumerate()
-        .map(|(index, width)| usize::from(active[index] && *width > 0))
+        .map(|(index, _)| {
+            active[index]
+                .then_some(minimum_flexible_widths[index])
+                .unwrap_or(0)
+        })
         .collect::<Vec<_>>();
     let minimum = budgets.iter().sum::<usize>();
     let mut remaining = max_width
@@ -2457,6 +2511,12 @@ fn resolved_token_spans(
                 ));
             }
             ResolvedTokenKind::StateText(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(state_text_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::RequiredStateText(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(state_text_style, token.style),
@@ -3547,6 +3607,27 @@ mod tests {
     }
 
     #[test]
+    fn tab_aggregation_keeps_the_usage_panes_configured_label() {
+        let ordinary_blocker =
+            aggregation_entry(AgentState::Blocked, true, None, "answer required");
+        let mut usage_limited = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        usage_limited.usage_limited = true;
+        usage_limited
+            .state_labels
+            .insert("usage".into(), "limit".into());
+
+        let aggregated = aggregate_tab_entries(&[ordinary_blocker, usage_limited])
+            .remove(&(0, 0))
+            .expect("aggregated tab entry");
+
+        assert!(aggregated.usage_limited);
+        assert_eq!(
+            aggregated.state_labels.get("usage").map(String::as_str),
+            Some("limit")
+        );
+    }
+
+    #[test]
     fn prio_panel_height_matches_content_until_split_cap() {
         let area = Rect::new(0, 0, 40, 16);
 
@@ -4026,6 +4107,56 @@ mod tests {
             agent_panel_label_color(&entry, &app.palette),
             app.palette.blue
         );
+    }
+
+    #[test]
+    fn usage_limited_worklist_rows_render_a_non_color_cue_at_supported_widths() {
+        let mut app = app_with_agents(&["Wait for plan reset"]);
+        app.workspaces[0].tabs[0].custom_name = Some("Wait for plan reset".into());
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .set_agent_metadata(crate::terminal::AgentMetadataReport {
+                source: "test:usage-limit-worklist".into(),
+                agent_label: None,
+                applies_to_source: None,
+                title: None,
+                display_agent: None,
+                state_labels: std::collections::HashMap::from([("usage".into(), "limit".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: None,
+            })
+            .expect("test presentation accepted");
+        terminal.state = AgentState::Blocked;
+        terminal.usage_limited = true;
+        app.reconcile_sidebar_presentation();
+
+        for width in [18, 24, 60] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let rows = (0..area.height)
+                .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+                .collect::<Vec<_>>();
+            let usage_row = rows
+                .iter()
+                .find(|row| row.contains("limit"))
+                .unwrap_or_else(|| panic!("width {width} omitted usage cue: {rows:?}"));
+            assert!(
+                usage_row.contains('×') || usage_row.contains('●'),
+                "{usage_row:?}"
+            );
+            assert!(
+                usage_row.contains("Wai") || usage_row.contains("plan"),
+                "width {width} dropped the title before the agent suffix: {usage_row:?}"
+            );
+        }
     }
 
     #[test]

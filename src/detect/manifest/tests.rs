@@ -948,7 +948,7 @@ fn visible_blocker_overrides_fresh_hook_authority_priority_1100_working() {
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
-    assert_eq!(claude["version"].as_str(), Some("2026.08.25.1001"));
+    assert_eq!(claude["version"].as_str(), Some("2026.08.26.1001"));
     assert!(kimi["version"]
         .as_str()
         .is_some_and(|version| version > "2026.06.10.1"));
