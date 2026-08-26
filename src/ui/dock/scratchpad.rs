@@ -25,7 +25,7 @@ fn dim_line(app: &AppState, message: &str) -> Line<'static> {
 fn empty_state(app: &AppState) -> Option<Line<'static>> {
     let doc = &app.scratchpad;
     if doc.path.is_none() {
-        return Some(dim_line(app, "focused pane belongs to no repository"));
+        return Some(dim_line(app, "no repository for this pane"));
     }
     if let Some(error) = doc.error.as_deref() {
         return Some(dim_line(app, &format!("scratchpad unreadable: {error}")));
@@ -241,7 +241,10 @@ mod tests {
     fn a_pane_outside_a_repository_says_so() {
         let app = AppState::test_new();
         let text = rendered_text(Rect::new(0, 0, 40, 3), &app);
-        assert!(text.contains("no repository"), "rendered: {text:?}");
+        assert!(
+            text.contains("no repository for this pane"),
+            "rendered: {text:?}"
+        );
     }
 
     #[test]

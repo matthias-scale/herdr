@@ -135,7 +135,7 @@ impl App {
     /// cannot be redirected at a file after the fact.
     pub(crate) fn open_scratchpad_in_editor(&mut self) {
         let Some(root) = crate::scratchpad::focused_repo_root(&self.state) else {
-            self.show_work_link_notice("no repository for the focused pane");
+            self.show_work_link_notice("no repository for this pane");
             return;
         };
         let Some(agent_pane_id) = focused_agent_pane_id(&self.state) else {
