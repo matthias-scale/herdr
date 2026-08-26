@@ -6,13 +6,27 @@
 - `theme.custom.sidebar_bg` can now give the desktop sidebar its own background without changing built-in theme defaults.
 - Settings and `ui.status_indicators = "symbols"` can now use distinct static shapes for blocked, working, done, idle, and unknown agent states. (#2260)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
+- Desktop sessions now have a theme-derived native status row for Git branch, device name, CPU, and memory. Disable it with `ui.status_bar.enabled = false`. (#2, #13)
+- Agent work context now persists and appears in the CLI, API, info panel, Prio view, and copy picker. Hooks and Git metadata can supply work titles plus ticket, pull request, preview, and Missive links. (#22-#27, #37)
+- The info panel now shows Claude and Codex subscription usage windows. (#30)
+- Loops now have a receipt-backed run-history detail view with live updates, `prefix+ctrl+h`, the read-only `loop.run_history` API, and `loop.run_history_updated` events. (#47, MAT-126)
+- The sidebar now includes a read-only Symphony workflow dashboard. (#52, MAT-138)
+- Agent supervision now tracks turn-end closing blocks, gates and decisions, declared waits, stale deadlines, and child-process activity across sidebar and API views. (#39, #41, #44, #45, #48, #53-#57, #59-#62, #64-#66)
+- Claude and Codex plan exhaustion now appears as a distinct `usage` gate and clears when the agent screen resumes. (#67)
 
 ### Changed
+- Repository worktrees now flatten into one Space row with direct tab/window children. Space rows show disclosure, title, and window count on one line without a branch subtitle; nonzero Codex-reported background terminals render as `N >_` after the window title, clear when Codex exits, and do not change lifecycle state or ordering. Expanded Space groups keep one compact blank row between them by default, selected Space and tab titles use stronger foreground emphasis on light themes, and working status uses the blue activity accent across sidebar, navigator, and mobile views without changing warning or machine-status colors.
+- The sidebar now presents Blocked, Prio, Agents/Pinned, and Spaces as stable collapsible sections. Every tab renders once under its owning Space, including agentless and multi-pane tabs, while the worklists provide direct attention views. (#12, #16-#18, #28, #36, #40, #43, #46, #49, #50, #56, #58, #60, #66)
+- User prompt hooks for Claude Code and Codex recalculate a sanitized, session-guarded title through the pane-owning Herdr binary without an additional model call. (#28)
+- `herdr agent start` now refuses unattended startup instead of opening a new window. (#63)
 - The sidebar now orders Blocked, Prio, Agents/Pinned, then Spaces. Agent rows omit CLI versions and redundant provider names while retaining compact `cc`, `cx`, or `pi` identity and activity age.
 - `prefix+n` and `prefix+p` now cycle every tab across all Spaces in workspace and tab order. Use `prefix+ctrl+n` and `prefix+ctrl+p` to cycle tabs only in the active Space.
 - `prefix+b` now jumps to the next blocked tab across all Spaces and wraps at the end. Toggle the sidebar with `prefix+shift+b`.
 
 ### Fixed
+- Session topology and optional pane history now persist as one crash-safe generation; failed background saves retry without losing dirty state, and unverifiable history is dropped instead of being attached to a reused pane identity. (#20)
+- Git metadata refresh is bounded so slow repository probes cannot stall the interface. (#21)
+- Agent state no longer sticks after closing-block flushes, blocker retirement, declared-wait expiry, or torn transcripts, and nested child work keeps active panes in `working`. (#42, #54, #55, #57, #59-#62, #64-#66)
 - Agent state detection now expires silent full-lifecycle hook authority after a configurable 10-minute default, keeps evaluating screen rules while hooks are fresh, and lets structurally anchored native Claude Code permission, trust, question, and login controls report `blocked`. Claude manifest `2026.08.25.1001` is a fork-local revision beyond upstream #3165's `2026.08.24.1`; it includes that change from head `cb512903cfb5febfe7b4be5d23f91fe77f260e8b`.
 - Configs containing the retired Herdr-written `ui.agent_panel_scope` setting no longer report it as an unknown key after upgrades. (#2292)
 - Claude Code confirmation prompts using `Enter to confirm · Esc to cancel` now report `blocked` instead of `idle`. (#2268)
@@ -34,12 +48,8 @@
 - Added a Simplified Chinese README. (#1990, thanks @patrick-xin)
 
 ### Changed
-- Repository worktrees now flatten into one Space row with direct tab/window children. Space rows show disclosure, title, and window count on one line without a branch subtitle; nonzero Codex-reported background terminals render as `N >_` after the window title, clear when Codex exits, and do not change lifecycle state or ordering. Expanded Space groups keep one compact blank row between them by default, selected Space and tab titles use stronger foreground emphasis on light themes, and working status uses the blue activity accent across sidebar, navigator, and mobile views without changing warning or machine-status colors.
 - Experimental options are no longer exposed in the Settings TUI and remain available through the config file.
 - Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
-- Desktop sessions now show a theme-derived, right-aligned native status row containing the Git branch, device name, CPU, and memory. The left side stays blank; the row does not collect or display network details or usernames, and it does not show the focused folder, Herdr version, battery, date, or time. Set `ui.status_bar.enabled = false` to hide the row and stop its background sampling.
-- The sidebar is now one stable Spaces → tab/window tree, including agentless tabs. Every tab renders as one title row even when it owns multiple panes; lifecycle status appears only for agent-backed tabs, and completed tabs stay `done` until opened. Claude, Codex, and Pi rows append `· cc`, `· cx`, or `· pi` after the title and before any background-terminal count. Selected Space/tab titles use darker bold text, and agent-backed rows end with the latest communication age. Priority configuration remains compatible but cannot reorder identity rows.
-- User prompt hooks for Claude Code and Codex recalculate a sanitized, session-guarded title through the pane-owning Herdr binary without an additional model call.
 - Hidden pane output no longer triggers unnecessary TUI rendering.
 - Windows preview downloads now include Herdr and a modern app-local ConPTY runtime in one archive. (#1533, #1644, #1828)
 - Worktree parents and children now stay packed together in the sidebar, including while groups are reordered.
@@ -48,7 +58,6 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
-- Session topology and optional pane history now persist as one crash-safe generation; failed background saves retry without losing dirty state, and unverifiable history is dropped instead of being attached to a reused pane identity.
 - Pane applications now receive semantic light/dark query responses and live Mode 2031 updates when the host appearance changes. (#714)
 - Remote attach now falls back to `sh` when the login shell cannot perform path discovery. (#1201)
 - PTY output continues to be read while pane input is temporarily blocked. (#1295)
