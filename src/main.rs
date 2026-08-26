@@ -422,6 +422,19 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
+# Read-only host inventory for `herdr fleet status`.
+# [remote.fleet]
+# timeout_ms = 5000
+# heartbeat_stale_ms = 1800000
+# [[remote.fleet.hosts]]
+# name = "local"
+# local = true
+# socket = "/path/to/herdr.sock" # optional
+# [[remote.fleet.hosts]]
+# name = "workbox"
+# target = "workbox"             # OpenSSH config alias or user@host
+# socket = "/path/to/herdr.sock" # optional
+
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
@@ -620,6 +633,7 @@ fn main() -> io::Result<()> {
         println!("       herdr api <subcommand> ...");
         println!("       herdr completion <shell>");
         println!("       herdr config <subcommand> ...");
+        println!("       herdr fleet <subcommand> ...");
         println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
@@ -662,6 +676,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr api <subcommand>",
                 "Inspect socket API metadata and live runtime state",
+            ),
+            (
+                "herdr fleet status",
+                "Inspect agents across configured hosts",
             ),
             (
                 "herdr workspace <subcommand>",

@@ -327,6 +327,35 @@ Start returns only after the expected agent owns the same terminal and is ready 
 
 `agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
 
+## Fleet status
+
+```bash
+herdr fleet status
+herdr fleet status --hosts laptop,workbox --blocked-only
+herdr fleet status --json
+herdr fleet status --watch
+```
+
+Fleet status reads every configured host in parallel and merges pane-backed Herdr agents with windowless `~/.agents/runs/<run_id>/state.json` records. The `source` field remains `herdr` or `run_state` in JSON so consumers never confuse the evidence classes. Missing run-state files are normal. A run-state file with `schema` other than `1` produces a loud `run_state` error row.
+
+The human table sorts blocked rows first, then working or active rows. `--blocked-only` uses the blocked fact, independent of liveness. `--watch` prints JSON Lines only after the initial snapshot and emits each observed state transition once. Newly blocked events include the gate summary.
+
+Fleet status models two separate facts:
+
+| Input evidence | Liveness | Blocked |
+| --- | --- | --- |
+| Herdr `idle`, `working`, or `blocked` | live | true for `blocked` or any unanswered gate |
+| Herdr `done` | terminal for that agent only | true if an unanswered gate remains |
+| Herdr `stale` or `unknown` | unknown | true if an unanswered gate remains |
+| Run `active`, `waiting`, or `blocked` with a fresh heartbeat | live | true only for `blocked` |
+| Non-terminal run with an old or invalid heartbeat | unknown | preserves the run's blocked fact |
+| Run `done` or `failed` | terminal | false |
+| Host read failure or disappeared row | unknown | false unless retained evidence says blocked |
+
+This split prevents a quiet gate from being demoted to stale. A stale Herdr record with unanswered gates appears as `BLOCKED · UNKNOWN`. It also prevents silence from being called complete or blocked without evidence.
+
+Windowless run records may name a parent run or native agent session. Fleet status scores every known descendant when it computes `closure_liveness` and `closure_blocked`. A parent reporting `done` is terminal only for its own row; a live, unknown, or blocked child keeps the parent closure non-terminal or blocked. Relationships absent from the run-state contract cannot be inferred.
+
 Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for ordinary terminals, servers, tests, shells, or low-level terminal control. Use `pane run` when you want to submit a command with Enter.
 
 ## Direct terminal attach

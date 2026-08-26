@@ -1094,14 +1094,52 @@ pub struct RemoteConfig {
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Read-only cross-host agent inventory used by `herdr fleet status`.
+    pub fleet: FleetConfig,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+            fleet: FleetConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FleetConfig {
+    /// Per-host read deadline. Default: 5000 milliseconds.
+    pub timeout_ms: u64,
+    /// A non-terminal run heartbeat older than this has unknown liveness.
+    /// Default: 1800000 milliseconds (30 minutes).
+    pub heartbeat_stale_ms: u64,
+    /// Configured local and SSH hosts. Empty by default.
+    pub hosts: Vec<FleetHostConfig>,
+}
+
+impl Default for FleetConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5_000,
+            heartbeat_stale_ms: 30 * 60 * 1_000,
+            hosts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FleetHostConfig {
+    /// Stable display name and `--hosts` selector.
+    pub name: String,
+    /// OpenSSH target. Required unless `local = true`.
+    pub target: String,
+    /// Read this machine's socket and run-state directory without SSH.
+    pub local: bool,
+    /// Optional Herdr socket override for this host.
+    pub socket: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

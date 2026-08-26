@@ -107,6 +107,30 @@ manage_ssh_config = true
 
 When enabled, `herdr --remote` writes a private temporary SSH config that includes your user and system SSH configs first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own keepalive settings win. Linux and macOS clients also use a private per-attach OpenSSH control socket to reuse the first authenticated connection; Windows OpenSSH does not. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
 
+## Fleet status hosts
+
+`herdr fleet status` reads the local Herdr socket and remote hosts in parallel. Configure each display name and SSH target under `[remote.fleet]`:
+
+```toml
+[remote.fleet]
+timeout_ms = 5000
+heartbeat_stale_ms = 1800000
+
+[[remote.fleet.hosts]]
+name = "laptop"
+local = true
+socket = "/Users/you/.config/herdr/herdr.sock"
+
+[[remote.fleet.hosts]]
+name = "workbox"
+target = "workbox"
+socket = "/home/you/.config/herdr/herdr.sock"
+```
+
+`name` is the table label and the value accepted by `--hosts`. `target` is an OpenSSH config alias or `user@host`. Set `local = true` on an entry that should read the local socket without SSH. `socket` is optional and overrides the normal Herdr socket path on that host.
+
+The per-host timeout applies to the entire read. An unreachable or slow host produces a `STATUS UNKNOWN` host row while reachable hosts still appear. `heartbeat_stale_ms` controls when a non-terminal windowless run loses live status; its default is 30 minutes.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).
