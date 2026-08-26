@@ -172,6 +172,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.edit_scratchpad), "edit scratchpad"),
         help_entry(keybind_label(&kb.toggle_info_panel), "toggle info panel"),
         help_entry(keybind_label(&kb.symphony), "open Symphony dashboard"),
+        help_entry(keybind_label(&kb.inbox), "open blocked inbox"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
         help_entry(keybind_label(&kb.focus_pane_up), "focus pane up"),

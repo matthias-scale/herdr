@@ -1579,6 +1579,9 @@ pub struct AppState {
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
+    /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
+    /// keyboard, exactly like the Symphony and loop-history details above it.
+    pub(crate) inbox: Option<crate::app::inbox::InboxState>,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
@@ -2271,6 +2274,7 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            inbox: None,
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),

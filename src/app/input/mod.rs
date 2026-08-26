@@ -90,6 +90,9 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
+        if self.state.inbox.is_some() {
+            return self.handle_inbox_key(key).await;
+        }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
@@ -140,6 +143,72 @@ impl App {
             self.state.mode = Mode::Terminal;
         }
         true
+    }
+
+    /// Inbox keys go to the blocked agent on screen, never to the focused pane.
+    /// Only Esc and the defer key are the inbox's own; everything else is the
+    /// operator answering the agent, which is the entire point of the mode.
+    pub(crate) async fn handle_inbox_key(
+        &mut self,
+        key: crate::input::TerminalKey,
+    ) -> Option<super::TerminalInputTarget> {
+        let event = key.as_key_event();
+        if event.code == KeyCode::Esc && event.modifiers.is_empty() {
+            self.state.clear_inbox();
+            self.state.mode = Mode::Terminal;
+            return None;
+        }
+        let queue = self.state.blocked_agents();
+        if event.code == KeyCode::Tab && event.modifiers.is_empty() {
+            self.defer_current_inbox_agent(&queue);
+            return None;
+        }
+        let target = super::TerminalInputTarget::new(self.inbox_target(&queue)?);
+        self.forward_terminal_key_to_target(&target, key).await;
+        Some(target)
+    }
+
+    /// Headless mirror. Returns whether the inbox consumed the key.
+    pub(crate) fn handle_inbox_key_headless(&mut self, key: KeyEvent) -> bool {
+        if self.state.inbox.is_none() {
+            return false;
+        }
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            self.state.clear_inbox();
+            self.state.mode = Mode::Terminal;
+            return true;
+        }
+        let queue = self.state.blocked_agents();
+        if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            self.defer_current_inbox_agent(&queue);
+        }
+        true
+    }
+
+    fn inbox_target(
+        &self,
+        queue: &[crate::app::inbox::BlockedAgent],
+    ) -> Option<crate::terminal::TerminalId> {
+        self.state
+            .inbox
+            .as_ref()?
+            .current(queue)
+            .map(|agent| agent.terminal_id.clone())
+    }
+
+    fn defer_current_inbox_agent(&mut self, queue: &[crate::app::inbox::BlockedAgent]) {
+        let Some(pane_id) = self
+            .state
+            .inbox
+            .as_ref()
+            .and_then(|inbox| inbox.current(queue))
+            .map(|agent| agent.pane_id)
+        else {
+            return;
+        };
+        if let Some(inbox) = self.state.inbox.as_mut() {
+            inbox.defer(pane_id, queue);
+        }
     }
 
     pub(crate) fn handle_symphony_key(&mut self, key: KeyEvent) -> bool {

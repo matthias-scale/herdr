@@ -662,6 +662,12 @@
           "description": "Open the read-only Symphony workflow dashboard."
         },
         {
+          "key": "keys.inbox",
+          "type": "keybinding",
+          "default": "\"prefix+shift+i\"",
+          "description": "Open the blocked-agent inbox."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",
