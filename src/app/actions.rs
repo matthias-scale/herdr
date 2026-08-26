@@ -3411,6 +3411,47 @@ impl AppState {
             .min()
     }
 
+    pub(crate) fn next_full_lifecycle_hook_authority_deadline(&self) -> Option<Instant> {
+        let timeout = self.full_lifecycle_hook_authority_timeout;
+        self.terminals
+            .values()
+            .filter_map(|terminal| terminal.full_lifecycle_hook_authority_deadline(timeout))
+            .min()
+    }
+
+    pub(crate) fn expire_due_full_lifecycle_hook_authority_at(
+        &mut self,
+        now: Instant,
+    ) -> (Vec<PaneStateUpdate>, Vec<(usize, PaneId)>) {
+        let timeout = self.full_lifecycle_hook_authority_timeout;
+        let mut due = Vec::new();
+        for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let is_due = self
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .and_then(|terminal| {
+                            terminal.full_lifecycle_hook_authority_deadline(timeout)
+                        })
+                        .is_some_and(|deadline| now >= deadline);
+                    if is_due {
+                        due.push((ws_idx, *pane_id));
+                    }
+                }
+            }
+        }
+        let updates = due
+            .iter()
+            .filter_map(|(_, pane_id)| {
+                self.update_terminal_state_at(*pane_id, now, |terminal| {
+                    terminal.expire_full_lifecycle_hook_authority_at(now, timeout)
+                })
+            })
+            .collect();
+        (updates, due)
+    }
+
     pub(crate) fn mark_due_agent_status_stale_at(&mut self, now: Instant) -> Vec<PaneStateUpdate> {
         let pane_ids = self
             .workspaces

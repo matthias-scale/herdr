@@ -442,14 +442,14 @@
         {
           "key": "keys.previous_tab",
           "type": "keybinding",
-          "default": "\"prefix+p\"",
-          "description": "Select the previous tab."
+          "default": "\"prefix+ctrl+p\"",
+          "description": "Select the previous tab in the active workspace."
         },
         {
           "key": "keys.next_tab",
           "type": "keybinding",
-          "default": "\"prefix+n\"",
-          "description": "Select the next tab."
+          "default": "\"prefix+ctrl+n\"",
+          "description": "Select the next tab in the active workspace."
         },
         {
           "key": "keys.switch_tab",
@@ -556,14 +556,20 @@
         {
           "key": "keys.previous_window",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the previous tab across all workspaces in canonical order. Unset by default."
+          "default": "\"prefix+p\"",
+          "description": "Focus the previous tab across all workspaces in canonical order."
         },
         {
           "key": "keys.next_window",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the next tab across all workspaces in canonical order. Unset by default."
+          "default": "\"prefix+n\"",
+          "description": "Focus the next tab across all workspaces in canonical order."
+        },
+        {
+          "key": "keys.next_blocked_window",
+          "type": "keybinding",
+          "default": "\"prefix+b\"",
+          "description": "Focus the next blocked tab across all workspaces in canonical order."
         },
         {
           "key": "keys.split_vertical",
@@ -610,7 +616,7 @@
         {
           "key": "keys.toggle_sidebar",
           "type": "keybinding",
-          "default": "\"prefix+b\"",
+          "default": "\"prefix+shift+b\"",
           "description": "Toggle sidebar collapse."
         },
         {
@@ -1210,6 +1216,18 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        }
+      ]
+    },
+    {
+      "id": "agent_detection",
+      "title": "Agent detection",
+      "keys": [
+        {
+          "key": "agent_detection.full_lifecycle_hook_authority_timeout_seconds",
+          "type": "integer",
+          "default": "600",
+          "description": "Seconds a full-lifecycle hook report remains authoritative without a fresh accepted report. Valid range: 30–3600. After expiry, cached screen evidence decides the pane state."
         }
       ]
     },

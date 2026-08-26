@@ -120,8 +120,12 @@ Herdr 提供类似 tmux 的前缀模式。默认前缀是 `ctrl+b`。按键绑�
 prefix = "ctrl+b"
 goto = "prefix+g"
 new_tab = "prefix+c"
-next_tab = "prefix+n"
-previous_tab = "prefix+p"
+next_window = "prefix+n"
+previous_window = "prefix+p"
+next_blocked_window = "prefix+b"
+next_tab = "prefix+ctrl+n"
+previous_tab = "prefix+ctrl+p"
+toggle_sidebar = "prefix+shift+b"
 focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
@@ -136,7 +140,7 @@ split_up = "prefix+shift+minus"
 
 ```toml
 [keys]
-next_tab = ["prefix+n", "ctrl+alt+]"]
+next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 ```
 
 可选动作默认不设置。使用 `prefix+` 可获得前缀模式行为；当你确实需要直接快捷键时，请使用显式的修饰组合键。
@@ -402,6 +406,17 @@ request_path = "sounds/request.mp3"
 droid = "off"
 claude = "on"
 ```
+
+## 代理检测权限
+
+完整生命周期钩子的最新报告仍新鲜时，钩子状态优先。如果集成停止报告，Herdr 会在 10 分钟后回退到缓存的屏幕检测。可将超时设为 30–3600 秒。
+
+```toml
+[agent_detection]
+full_lifecycle_hook_authority_timeout_seconds = 600
+```
+
+原生审批或登录界面可在钩子状态仍新鲜时优先报告为 `blocked`。
 
 ## 高级配置
 

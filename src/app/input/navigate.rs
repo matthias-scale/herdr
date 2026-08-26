@@ -353,6 +353,10 @@ impl App {
                 self.focus_relative_window(true);
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::NextBlockedWindow => {
+                self.focus_next_blocked_window();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CloseTab => {
                 if !self.close_active_tab_via_api_requires_confirmation() {
                     leave_navigate_mode(&mut self.state);
@@ -732,6 +736,16 @@ impl App {
             return;
         };
         self.runtime_tab_focus("tui.window.focus_relative", tab_id);
+    }
+
+    fn focus_next_blocked_window(&mut self) {
+        let Some((ws_idx, tab_idx)) = next_blocked_window_target(&self.state) else {
+            return;
+        };
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return;
+        };
+        self.runtime_tab_focus("tui.window.focus_next_blocked", tab_id);
     }
 
     pub(crate) fn close_active_tab_via_api_requires_confirmation(&mut self) -> bool {
@@ -1616,6 +1630,30 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+fn next_blocked_window_target(state: &AppState) -> Option<(usize, usize)> {
+    let windows = state
+        .workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(ws_idx, ws)| (0..ws.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx)))
+        .collect::<Vec<_>>();
+    if windows.is_empty() {
+        return None;
+    }
+    let active_ws = state.active?;
+    let active_tab = state.workspaces.get(active_ws)?.active_tab_index();
+    let current = windows
+        .iter()
+        .position(|window| *window == (active_ws, active_tab))?;
+
+    (1..=windows.len()).find_map(|offset| {
+        let target = windows[(current + offset) % windows.len()];
+        let tab = &state.workspaces[target.0].tabs[target.1];
+        (tab.aggregate_state(&state.terminals).0 == crate::detect::AgentState::Blocked)
+            .then_some(target)
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavigateAction {
     NewWorkspace,
@@ -1640,6 +1678,7 @@ pub(crate) enum NavigateAction {
     NextTab,
     PreviousWindow,
     NextWindow,
+    NextBlockedWindow,
     CloseTab,
     RenamePane,
     FocusPaneLeft,
@@ -1699,6 +1738,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::ToggleTabPrio
             | NavigateAction::PreviousWindow
             | NavigateAction::NextWindow
+            | NavigateAction::NextBlockedWindow
             | NavigateAction::FocusPaneLeft
             | NavigateAction::FocusPaneDown
             | NavigateAction::FocusPaneUp
@@ -1803,6 +1843,7 @@ fn non_indexed_action_for_key(
         (&kb.next_tab, NavigateAction::NextTab),
         (&kb.previous_window, NavigateAction::PreviousWindow),
         (&kb.next_window, NavigateAction::NextWindow),
+        (&kb.next_blocked_window, NavigateAction::NextBlockedWindow),
         (&kb.close_tab, NavigateAction::CloseTab),
         (&kb.rename_pane, NavigateAction::RenamePane),
         (&kb.edit_scrollback, NavigateAction::EditScrollback),
@@ -2052,6 +2093,13 @@ pub(super) fn execute_navigate_action_in_context(
                         state.switch_tab(tab_idx);
                     }
                 }
+            }
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NextBlockedWindow => {
+            if let Some((ws_idx, tab_idx)) = next_blocked_window_target(state) {
+                state.switch_workspace(ws_idx);
+                state.switch_tab(tab_idx);
             }
             leave_navigate_mode(state);
         }
@@ -2376,6 +2424,207 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    fn app_with_global_window_fixture() -> App {
+        let mut app = app_with_test_workspaces(&["first", "second"]);
+        app.state.workspaces[0].test_add_tab(Some("first-agentless"));
+        app.state.workspaces[1].test_add_tab(Some("second-agentless"));
+        app.state.ensure_test_terminals();
+        app
+    }
+
+    fn active_window(state: &AppState) -> (usize, usize) {
+        let workspace = state.active.expect("active workspace");
+        (workspace, state.workspaces[workspace].active_tab_index())
+    }
+
+    fn assert_tui_window_cycle(app: &mut App, action: NavigateAction, expected: &[(usize, usize)]) {
+        for expected_window in expected {
+            app.execute_tui_navigate_action(action, ActionContext::Prefix);
+            assert_eq!(active_window(&app.state), *expected_window);
+        }
+    }
+
+    fn assert_headless_window_cycle(
+        state: &mut AppState,
+        action: NavigateAction,
+        expected: &[(usize, usize)],
+    ) {
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        for expected_window in expected {
+            execute_navigate_action_in_context(
+                state,
+                &mut terminal_runtimes,
+                action,
+                ActionContext::Prefix,
+            );
+            assert_eq!(active_window(state), *expected_window);
+        }
+    }
+
+    #[test]
+    fn global_window_cycle_includes_every_tab() {
+        let forward = [(0, 1), (1, 0), (1, 1), (0, 0)];
+        let backward = [(1, 1), (1, 0), (0, 1), (0, 0)];
+
+        let mut app = app_with_global_window_fixture();
+        assert_tui_window_cycle(&mut app, NavigateAction::NextWindow, &forward);
+        assert_tui_window_cycle(&mut app, NavigateAction::PreviousWindow, &backward);
+
+        let mut state = app_with_global_window_fixture().state;
+        assert_headless_window_cycle(&mut state, NavigateAction::NextWindow, &forward);
+        assert_headless_window_cycle(&mut state, NavigateAction::PreviousWindow, &backward);
+    }
+
+    #[test]
+    fn global_window_cycle_ignores_presentation_state() {
+        let mut app = app_with_global_window_fixture();
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 1, "repo-key");
+        app.state.sidebar_collapsed = true;
+        app.state.collapsed_space_keys.insert("repo-key".into());
+        app.state.collapsed_sidebar_groups.insert("agents".into());
+        app.state.workspaces[0].identity_cwd = "/changed/first".into();
+        app.state.workspaces[1].identity_cwd = "/changed/second".into();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.cwd = "/changed/terminal".into();
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Blocked,
+            );
+        }
+
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextWindow,
+            &[(0, 1), (1, 0), (1, 1), (0, 0)],
+        );
+
+        let mut state = app.state;
+        assert_headless_window_cycle(
+            &mut state,
+            NavigateAction::PreviousWindow,
+            &[(1, 1), (1, 0), (0, 1), (0, 0)],
+        );
+    }
+
+    fn set_tab_agent_state(
+        state: &mut AppState,
+        workspace: usize,
+        tab: usize,
+        agent_state: crate::detect::AgentState,
+    ) {
+        let root_pane = state.workspaces[workspace].tabs[tab].root_pane;
+        set_pane_agent_state(state, workspace, tab, root_pane, agent_state);
+    }
+
+    fn set_pane_agent_state(
+        state: &mut AppState,
+        workspace: usize,
+        tab: usize,
+        pane: crate::layout::PaneId,
+        agent_state: crate::detect::AgentState,
+    ) {
+        let terminal_id = state.workspaces[workspace].tabs[tab].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .set_detected_state(Some(crate::detect::Agent::Claude), agent_state);
+    }
+
+    fn app_with_blocked_window_fixture() -> App {
+        let mut app = app_with_global_window_fixture();
+        let blocked_child = app.state.workspaces[1].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        set_tab_agent_state(&mut app.state, 0, 1, crate::detect::AgentState::Blocked);
+        set_tab_agent_state(&mut app.state, 1, 0, crate::detect::AgentState::Working);
+        set_pane_agent_state(
+            &mut app.state,
+            1,
+            0,
+            blocked_child,
+            crate::detect::AgentState::Blocked,
+        );
+        app
+    }
+
+    #[test]
+    fn next_blocked_window_cycles_canonical_order() {
+        let mut app = app_with_blocked_window_fixture();
+
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextBlockedWindow,
+            &[(0, 1), (1, 0), (0, 1)],
+        );
+
+        let mut state = app_with_blocked_window_fixture().state;
+        assert_headless_window_cycle(
+            &mut state,
+            NavigateAction::NextBlockedWindow,
+            &[(0, 1), (1, 0), (0, 1)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_default_binding_dispatches_action() {
+        let state = state_with_workspaces(&["test"]);
+
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('b'), KeyModifiers::empty()),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::NextBlockedWindow)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('b'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::ToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_handles_no_match_and_nonblocked_current() {
+        let mut app = app_with_global_window_fixture();
+        app.state.switch_tab(1);
+        app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
+        assert_eq!(active_window(&app.state), (0, 1));
+
+        set_tab_agent_state(&mut app.state, 0, 0, crate::detect::AgentState::Blocked);
+        set_tab_agent_state(&mut app.state, 1, 1, crate::detect::AgentState::Blocked);
+        assert_tui_window_cycle(
+            &mut app,
+            NavigateAction::NextBlockedWindow,
+            &[(1, 1), (0, 0)],
+        );
+
+        let mut state = app_with_global_window_fixture().state;
+        state.switch_tab(1);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextBlockedWindow,
+            ActionContext::Prefix,
+        );
+        assert_eq!(active_window(&state), (0, 1));
+
+        set_tab_agent_state(&mut state, 0, 0, crate::detect::AgentState::Blocked);
+        set_tab_agent_state(&mut state, 1, 1, crate::detect::AgentState::Blocked);
+        assert_headless_window_cycle(
+            &mut state,
+            NavigateAction::NextBlockedWindow,
+            &[(1, 1), (0, 0)],
+        );
     }
 
     fn temporary_checkout(name: &str, origin: &str) -> std::path::PathBuf {

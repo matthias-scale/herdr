@@ -141,6 +141,7 @@ impl App {
                     cache_now,
                     batch_deadline,
                     batch_deadline,
+                    WORK_CONTEXT_TARGET_TIMEOUT,
                     &git_program,
                     &gh_program,
                 );
@@ -317,6 +318,7 @@ fn refresh_git_work_contexts(
     now: Instant,
     git_deadline: Instant,
     gh_deadline: Instant,
+    target_timeout: Duration,
     git_program: &Path,
     gh_program: &Path,
 ) -> GitWorkContextRefreshOutput {
@@ -328,8 +330,8 @@ fn refresh_git_work_contexts(
     for target in targets {
         // Clamp to the batch ceiling so the per-target budget can extend a probe
         // but never outlive the refresh as a whole.
-        let target_git_deadline = (Instant::now() + WORK_CONTEXT_TARGET_TIMEOUT).min(git_deadline);
-        let target_gh_deadline = (Instant::now() + WORK_CONTEXT_TARGET_TIMEOUT).min(gh_deadline);
+        let target_git_deadline = (Instant::now() + target_timeout).min(git_deadline);
+        let target_gh_deadline = (Instant::now() + target_timeout).min(gh_deadline);
         let input = if let Some(input) = discovered.get(&target.cwd) {
             input.clone()
         } else {
@@ -608,6 +610,7 @@ mod tests {
             now,
             deadline,
             deadline,
+            Duration::from_secs(5),
             git,
             gh,
         )
@@ -632,6 +635,7 @@ mod tests {
             now,
             git_deadline,
             gh_deadline,
+            Duration::from_secs(5),
             git,
             gh,
         )
@@ -843,6 +847,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             Instant::now(),
             Instant::now() + Duration::from_secs(3),
             Instant::now() + Duration::from_secs(3),
+            WORK_CONTEXT_TARGET_TIMEOUT,
             &git,
             &gh,
         );

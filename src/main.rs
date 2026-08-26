@@ -203,8 +203,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # rename_tab = "prefix+shift+t"
 # toggle_tab_prio = "prefix+shift+f"
 # toggle_prio_panel = "" # optional, unset by default
-# previous_tab = "prefix+p"
-# next_tab = "prefix+n"
+# previous_tab = "prefix+ctrl+p" # previous tab in the active workspace
+# next_tab = "prefix+ctrl+n"     # next tab in the active workspace
+# previous_window = "prefix+p"   # previous tab across all workspaces
+# next_window = "prefix+n"       # next tab across all workspaces
+# next_blocked_window = "prefix+b" # next blocked tab across all workspaces
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"
@@ -222,7 +225,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # close_pane = "prefix+x"
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
-# toggle_sidebar = "prefix+b"
+# toggle_sidebar = "prefix+shift+b"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
 
@@ -448,6 +451,11 @@ pane_history = false
 # Cursor shape rendered when reveal_hidden_cursor_for_cjk_ime is true.
 # Values: block, steady_block (default), underline, steady_underline, bar, steady_bar.
 # cjk_ime_cursor_shape = "steady_block"
+
+[agent_detection]
+# Seconds a full-lifecycle hook report remains authoritative without a fresh
+# accepted lifecycle event. Valid range: 30..=3600. Default: 600.
+# full_lifecycle_hook_authority_timeout_seconds = 600
 
 [advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.
@@ -952,6 +960,20 @@ mod tests {
     #[test]
     fn default_config_exposes_status_bar_enabled_setting() {
         assert!(DEFAULT_CONFIG.contains("[ui.status_bar]\n# enabled = true"));
+        assert!(DEFAULT_CONFIG.contains(
+            "[agent_detection]\n# Seconds a full-lifecycle hook report remains authoritative"
+        ));
+        assert!(DEFAULT_CONFIG.contains("# full_lifecycle_hook_authority_timeout_seconds = 600"));
+    }
+
+    #[test]
+    fn default_config_exposes_global_window_bindings() {
+        assert!(DEFAULT_CONFIG.contains("# previous_tab = \"prefix+ctrl+p\""));
+        assert!(DEFAULT_CONFIG.contains("# next_tab = \"prefix+ctrl+n\""));
+        assert!(DEFAULT_CONFIG.contains("# previous_window = \"prefix+p\""));
+        assert!(DEFAULT_CONFIG.contains("# next_window = \"prefix+n\""));
+        assert!(DEFAULT_CONFIG.contains("# next_blocked_window = \"prefix+b\""));
+        assert!(DEFAULT_CONFIG.contains("# toggle_sidebar = \"prefix+shift+b\""));
     }
 
     #[cfg(unix)]

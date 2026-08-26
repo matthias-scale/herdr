@@ -38,6 +38,8 @@ mod state;
 mod terminal;
 mod xtgettcap;
 
+#[cfg(unix)]
+use self::agent_detection::DetectionPublishState;
 pub(crate) use self::agent_detection::STABLE_VISIBLE_SIGNAL_REFRESH;
 use self::agent_detection::{
     decide_detection_screen_read, decide_screen_detection_publish,
@@ -463,11 +465,11 @@ fn should_skip_process_probe_for_lifecycle_authority(
 }
 
 fn should_skip_screen_detection_for_lifecycle_authority(
-    full_lifecycle_authority_active: bool,
-    full_lifecycle_hook_blocked: bool,
-    process_exited: bool,
+    _full_lifecycle_authority_active: bool,
+    _full_lifecycle_hook_blocked: bool,
+    _process_exited: bool,
 ) -> bool {
-    full_lifecycle_authority_active && full_lifecycle_hook_blocked && !process_exited
+    false
 }
 
 fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
@@ -691,7 +693,7 @@ struct FullLifecycleHookRetirementPorts<'a> {
     state_events: &'a mpsc::Sender<AppEvent>,
 }
 
-/// Retire a blocked turn-end hook gate once the pane is working again.
+/// Retire hook authority once sustained output contradicts its latest state.
 ///
 /// Two detect loops run this: the one `spawn_basic_detection_task` starts for a
 /// freshly spawned pane, and the one the restored/attached path starts. They
@@ -704,7 +706,7 @@ async fn poll_full_lifecycle_hook_retirement(
     process_exited: bool,
     now: std::time::Instant,
 ) {
-    if *lifecycle_authority_active && ports.blocked.load(Ordering::Acquire) && !process_exited {
+    if ports.blocked.load(Ordering::Acquire) && !process_exited {
         if let Some(observed_at) = retirement.observe(
             ports.detection_content_seq.load(Ordering::Relaxed),
             ports.baseline_content_seq.load(Ordering::Acquire),
@@ -720,10 +722,18 @@ async fn poll_full_lifecycle_hook_retirement(
                 })
                 .await;
         }
-    } else if !*lifecycle_authority_active || !ports.blocked.load(Ordering::Acquire) {
+    } else if !ports.blocked.load(Ordering::Acquire) {
         retirement.clear();
     }
 }
+
+#[cfg(unix)]
+type SpawnedDetectionTask = (
+    tokio::task::AbortHandle,
+    Arc<Notify>,
+    Arc<Notify>,
+    Arc<Mutex<Option<PendingAgentRelease>>>,
+);
 
 #[cfg(unix)]
 fn spawn_basic_detection_task(
@@ -736,22 +746,22 @@ fn spawn_basic_detection_task(
     full_lifecycle_authority_active: Arc<AtomicBool>,
     full_lifecycle_hook_blocked: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
-) -> (
-    tokio::task::AbortHandle,
-    Arc<Notify>,
-    Arc<Mutex<Option<PendingAgentRelease>>>,
-) {
+    initial_agent: Option<Agent>,
+    initial_publish: DetectionPublishState,
+) -> SpawnedDetectionTask {
     let detect_reset_notify = Arc::new(Notify::new());
     let detect_reset = detect_reset_notify.clone();
+    let detect_screen_rescan_notify = Arc::new(Notify::new());
+    let detect_screen_rescan = detect_screen_rescan_notify.clone();
     let pending_release = Arc::new(Mutex::new(None));
     let pending_release_for_task = pending_release.clone();
 
     let handle = tokio::spawn(async move {
-        let mut agent_presence = AgentDetectionPresence::from_agent(None);
-        let mut state = AgentState::Unknown;
-        let mut last_visible_idle = false;
-        let mut last_visible_blocker = false;
-        let mut last_visible_working = false;
+        let mut agent_presence = AgentDetectionPresence::from_agent(initial_agent);
+        let mut state = initial_publish.state;
+        let mut last_visible_idle = initial_publish.visible_idle;
+        let mut last_visible_blocker = initial_publish.visible_blocker;
+        let mut last_visible_working = initial_publish.visible_working;
         let mut last_visible_signal_refresh = None;
         let mut last_process_check = std::time::Instant::now();
         let mut last_foreground_pgid = None;
@@ -771,6 +781,7 @@ fn spawn_basic_detection_task(
         let mut last_background_job_count = None;
         let mut last_background_scan_seq = None;
         let mut last_background_process_exited = None;
+        let mut force_screen_rescan = false;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -781,6 +792,7 @@ fn spawn_basic_detection_task(
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {}
                 _ = detect_reset.notified() => {
+                    force_screen_rescan = false;
                     agent_presence = AgentDetectionPresence::from_agent(None);
                     state = AgentState::Unknown;
                     last_visible_idle = false;
@@ -804,6 +816,10 @@ fn spawn_basic_detection_task(
                     last_background_job_count = None;
                     last_background_scan_seq = None;
                     last_background_process_exited = None;
+                }
+                _ = detect_screen_rescan.notified() => {
+                    last_screen_scan_detection_content_seq = None;
+                    force_screen_rescan = true;
                 }
             }
 
@@ -988,19 +1004,21 @@ fn spawn_basic_detection_task(
                 continue;
             }
 
-            if let Some(until) = agent_startup_grace_until {
-                if process_exited {
-                    agent_startup_grace_until = None;
-                    pending_idle.clear();
-                } else {
-                    if now < until {
+            if !force_screen_rescan {
+                if let Some(until) = agent_startup_grace_until {
+                    if process_exited {
+                        agent_startup_grace_until = None;
+                        pending_idle.clear();
+                    } else {
+                        if now < until {
+                            pending_idle.clear();
+                            continue;
+                        }
+                        agent_startup_grace_until = None;
+                        last_screen_scan_detection_content_seq = None;
                         pending_idle.clear();
                         continue;
                     }
-                    agent_startup_grace_until = None;
-                    last_screen_scan_detection_content_seq = None;
-                    pending_idle.clear();
-                    continue;
                 }
             }
 
@@ -1028,6 +1046,7 @@ fn spawn_basic_detection_task(
             last_detection_text.clone_from(&content);
             if !process_exited && crate::detect::should_skip_state_update(agent, &content) {
                 pending_idle.clear();
+                force_screen_rescan = false;
                 continue;
             }
             sync_content_change_acquisition(
@@ -1063,6 +1082,7 @@ fn spawn_basic_detection_task(
                     last_visible_signal_refresh,
                     process_exited,
                     agent_changed,
+                    force_publish: std::mem::take(&mut force_screen_rescan),
                     now,
                 },
                 &mut pending_idle,
@@ -1102,7 +1122,12 @@ fn spawn_basic_detection_task(
         }
     });
 
-    (handle.abort_handle(), detect_reset_notify, pending_release)
+    (
+        handle.abort_handle(),
+        detect_reset_notify,
+        detect_screen_rescan_notify,
+        pending_release,
+    )
 }
 
 impl AgentDetectionPresence {
@@ -1176,6 +1201,7 @@ pub struct PaneRuntime {
     full_lifecycle_authority_active: Arc<AtomicBool>,
     full_lifecycle_hook_blocked: Arc<AtomicBool>,
     detect_reset_notify: Arc<Notify>,
+    detect_screen_rescan_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
@@ -2104,17 +2130,25 @@ impl PaneRuntime {
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_hook_blocked = Arc::new(AtomicBool::new(false));
-        let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
-            pane_id,
-            child_pid.clone(),
-            terminal.clone(),
-            detection_content_seq.clone(),
-            full_lifecycle_hook_baseline_content_seq.clone(),
-            agent_output_seq.clone(),
-            full_lifecycle_authority_active.clone(),
-            full_lifecycle_hook_blocked.clone(),
-            events,
-        );
+        let (detect_handle, detect_reset_notify, detect_screen_rescan_notify, pending_release) =
+            spawn_basic_detection_task(
+                pane_id,
+                child_pid.clone(),
+                terminal.clone(),
+                detection_content_seq.clone(),
+                full_lifecycle_hook_baseline_content_seq.clone(),
+                agent_output_seq.clone(),
+                full_lifecycle_authority_active.clone(),
+                full_lifecycle_hook_blocked.clone(),
+                events,
+                None,
+                DetectionPublishState {
+                    state: AgentState::Unknown,
+                    visible_idle: false,
+                    visible_blocker: false,
+                    visible_working: false,
+                },
+            );
 
         Ok(Self {
             pane_id,
@@ -2132,6 +2166,7 @@ impl PaneRuntime {
             full_lifecycle_authority_active,
             full_lifecycle_hook_blocked,
             detect_reset_notify,
+            detect_screen_rescan_notify,
             pending_release,
             preserve_processes_on_drop: true,
             detect_handle: Some(detect_handle),
@@ -2276,9 +2311,7 @@ impl PaneRuntime {
         };
 
         // --- Detection task ---
-        let (detect_handle, detect_reset_notify, pending_release) = if agent_detection
-            == AgentDetection::Enabled
-        {
+        let detection_task = if agent_detection == AgentDetection::Enabled {
             use crate::detect;
             use std::time::{Duration, Instant};
 
@@ -2299,6 +2332,8 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let detect_reset_notify = Arc::new(Notify::new());
             let detect_reset = detect_reset_notify.clone();
+            let detect_screen_rescan_notify = Arc::new(Notify::new());
+            let detect_screen_rescan = detect_screen_rescan_notify.clone();
             let pending_release = Arc::new(Mutex::new(None));
             let pending_release_for_task = pending_release.clone();
 
@@ -2329,6 +2364,7 @@ impl PaneRuntime {
                 let mut last_background_job_count = None;
                 let mut last_background_scan_seq = None;
                 let mut last_background_process_exited = None;
+                let mut force_screen_rescan = false;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2349,6 +2385,7 @@ impl PaneRuntime {
                     tokio::select! {
                         _ = tokio::time::sleep(tick) => {}
                         _ = detect_reset.notified() => {
+                            force_screen_rescan = false;
                             agent_presence = AgentDetectionPresence::from_agent(None);
                             state = AgentState::Unknown;
                             last_visible_idle = false;
@@ -2372,6 +2409,10 @@ impl PaneRuntime {
                             last_background_job_count = None;
                             last_background_scan_seq = None;
                             last_background_process_exited = None;
+                        }
+                        _ = detect_screen_rescan.notified() => {
+                            last_screen_scan_detection_content_seq = None;
+                            force_screen_rescan = true;
                         }
                     }
 
@@ -2596,19 +2637,21 @@ impl PaneRuntime {
                         continue;
                     }
 
-                    if let Some(until) = agent_startup_grace_until {
-                        if process_exited {
-                            agent_startup_grace_until = None;
-                            last_screen_scan_detection_content_seq = None;
-                            pending_idle.clear();
-                        } else {
-                            if now < until {
+                    if !force_screen_rescan {
+                        if let Some(until) = agent_startup_grace_until {
+                            if process_exited {
+                                agent_startup_grace_until = None;
+                                last_screen_scan_detection_content_seq = None;
+                                pending_idle.clear();
+                            } else {
+                                if now < until {
+                                    pending_idle.clear();
+                                    continue;
+                                }
+                                agent_startup_grace_until = None;
                                 pending_idle.clear();
                                 continue;
                             }
-                            agent_startup_grace_until = None;
-                            pending_idle.clear();
-                            continue;
                         }
                     }
 
@@ -2636,6 +2679,7 @@ impl PaneRuntime {
                     last_detection_text.clone_from(&content);
                     if detect::should_skip_state_update(agent, &content) {
                         pending_idle.clear();
+                        force_screen_rescan = false;
                         continue;
                     }
                     sync_content_change_acquisition(
@@ -2671,6 +2715,7 @@ impl PaneRuntime {
                             last_visible_signal_refresh,
                             process_exited,
                             agent_changed,
+                            force_publish: std::mem::take(&mut force_screen_rescan),
                             now,
                         },
                         &mut pending_idle,
@@ -2712,11 +2757,19 @@ impl PaneRuntime {
             (
                 Some(handle.abort_handle()),
                 detect_reset_notify,
+                detect_screen_rescan_notify,
                 pending_release,
             )
         } else {
-            (None, Arc::new(Notify::new()), Arc::new(Mutex::new(None)))
+            (
+                None,
+                Arc::new(Notify::new()),
+                Arc::new(Notify::new()),
+                Arc::new(Mutex::new(None)),
+            )
         };
+        let (detect_handle, detect_reset_notify, detect_screen_rescan_notify, pending_release) =
+            detection_task;
 
         Ok(Self {
             pane_id,
@@ -2734,6 +2787,7 @@ impl PaneRuntime {
             full_lifecycle_authority_active,
             full_lifecycle_hook_blocked,
             detect_reset_notify,
+            detect_screen_rescan_notify,
             pending_release,
             preserve_processes_on_drop: false,
             detect_handle,
@@ -2754,9 +2808,21 @@ impl PaneRuntime {
         self.detect_reset_notify.notify_one();
     }
 
+    /// Re-evaluate the current detection buffer without forgetting process or
+    /// detector state. Used when arbitration changes while terminal bytes stay
+    /// unchanged.
+    pub fn request_agent_screen_rescan(&self) {
+        self.detect_screen_rescan_notify.notify_one();
+    }
+
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(&self) -> Arc<Notify> {
         self.detect_reset_notify.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_detection_screen_rescan_notify_for_test(&self) -> Arc<Notify> {
+        self.detect_screen_rescan_notify.clone()
     }
 
     #[cfg(test)]
@@ -2764,19 +2830,41 @@ impl PaneRuntime {
         self.detect_handle.is_some()
     }
 
-    pub fn set_full_lifecycle_authority_state(&self, active: bool, blocked: bool) {
+    pub fn set_full_lifecycle_authority_state(
+        &self,
+        active: bool,
+        output_retirement_eligible: bool,
+    ) {
         let previous = self
             .full_lifecycle_authority_active
             .swap(active, Ordering::AcqRel);
         let was_blocked = self
             .full_lifecycle_hook_blocked
-            .swap(active && blocked, Ordering::AcqRel);
-        if active && blocked && (!previous || !was_blocked) {
+            .swap(output_retirement_eligible, Ordering::AcqRel);
+        if output_retirement_eligible && !was_blocked {
             self.rebaseline_full_lifecycle_hook_content();
         }
-        if active && !previous {
-            self.detect_reset_notify.notify_one();
+        if previous && !active {
+            self.request_agent_screen_rescan();
         }
+    }
+
+    pub fn rebaseline_hook_authority_output(&self) {
+        self.rebaseline_full_lifecycle_hook_content();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hook_authority_output_baseline_for_test(&self) -> u64 {
+        self.full_lifecycle_hook_baseline_content_seq
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hook_authority_runtime_state_for_test(&self) -> (bool, bool) {
+        (
+            self.full_lifecycle_authority_active.load(Ordering::Acquire),
+            self.full_lifecycle_hook_blocked.load(Ordering::Acquire),
+        )
     }
 
     /// Declare every content change so far to be *not* a new turn's output.
@@ -3226,9 +3314,54 @@ impl PaneRuntime {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn test_with_live_detection_screen_bytes(
+        pane_id: PaneId,
+        agent: Agent,
+        state: AgentState,
+        visible_idle: bool,
+        visible_blocker: bool,
+        visible_working: bool,
+        bytes: &[u8],
+    ) -> (Self, mpsc::Receiver<AppEvent>) {
+        let (mut runtime, _input_rx) =
+            Self::test_with_channel_and_scrollback_bytes(80, 24, 0, bytes, 4);
+        runtime.pane_id = pane_id;
+        let (state_events, state_rx) = mpsc::channel(16);
+        let agent_output_seq = Arc::new(AtomicU64::new(0));
+        let (handle, detect_reset_notify, detect_screen_rescan_notify, pending_release) =
+            spawn_basic_detection_task(
+                pane_id,
+                runtime.child_pid.clone(),
+                runtime.terminal.clone(),
+                runtime.detection_content_seq.clone(),
+                runtime.full_lifecycle_hook_baseline_content_seq.clone(),
+                agent_output_seq,
+                runtime.full_lifecycle_authority_active.clone(),
+                runtime.full_lifecycle_hook_blocked.clone(),
+                state_events,
+                Some(agent),
+                DetectionPublishState {
+                    state,
+                    visible_idle,
+                    visible_blocker,
+                    visible_working,
+                },
+            );
+        runtime.detect_handle = Some(handle);
+        runtime.detect_reset_notify = detect_reset_notify;
+        runtime.detect_screen_rescan_notify = detect_screen_rescan_notify;
+        runtime.pending_release = pending_release;
+        (runtime, state_rx)
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         let (tx, _rx) = mpsc::channel(1);
         let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
+    }
+
+    pub(crate) fn test_mark_detection_content_changed(&self) {
+        mark_detection_content_changed(&self.detection_content_seq);
     }
 
     pub(crate) fn test_with_scrollback_bytes(
@@ -3274,6 +3407,7 @@ impl PaneRuntime {
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
                 full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
                 detect_reset_notify: Arc::new(Notify::new()),
+                detect_screen_rescan_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
@@ -3374,7 +3508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_retirement_poll_retires_only_on_sustained_output() {
+    async fn unmatched_output_retires_hook_authority_through_observer() {
         let (state_events, mut events) = mpsc::channel(4);
         let mut harness = RetirementHarness::blocked_at(10, state_events);
         let started = std::time::Instant::now();
@@ -4016,6 +4150,7 @@ mod tests {
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
+            detect_screen_rescan_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
@@ -4050,6 +4185,7 @@ mod tests {
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             full_lifecycle_hook_blocked: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
+            detect_screen_rescan_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
@@ -4420,8 +4556,8 @@ mod tests {
     }
 
     #[test]
-    fn active_blocked_lifecycle_authority_skips_the_screen() {
-        assert!(should_skip_screen_detection_for_lifecycle_authority(
+    fn active_blocked_lifecycle_authority_reads_visible_blockers() {
+        assert!(!should_skip_screen_detection_for_lifecycle_authority(
             true, true, false
         ));
     }
@@ -4705,19 +4841,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_full_lifecycle_authority_active_notifies_only_on_activation_transitions() {
+    async fn authority_expiry_requests_screen_rescan_without_resetting_detector() {
         let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
         let reset_notify = runtime.agent_detection_reset_notify_for_test();
+        let rescan_notify = runtime.agent_detection_screen_rescan_notify_for_test();
 
         runtime.set_full_lifecycle_authority_state(true, false);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            reset_notify.notified(),
-        )
-        .await
-        .expect("false-to-true transition should notify detection reset");
-
-        runtime.set_full_lifecycle_authority_state(true, false);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                rescan_notify.notified()
+            )
+            .await
+            .is_err(),
+            "entering authority should preserve the current detector evidence"
+        );
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(20),
@@ -4725,27 +4863,58 @@ mod tests {
             )
             .await
             .is_err(),
-            "repeated true-to-true sync should not notify detection reset"
+            "entering authority must not reset detector state"
+        );
+
+        runtime.set_full_lifecycle_authority_state(true, false);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                rescan_notify.notified()
+            )
+            .await
+            .is_err(),
+            "repeated true-to-true sync should not request a rescan"
+        );
+
+        runtime.set_full_lifecycle_authority_state(false, false);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            rescan_notify.notified(),
+        )
+        .await
+        .expect("authority expiry should wake screen detection");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                reset_notify.notified()
+            )
+            .await
+            .is_err(),
+            "authority expiry must preserve detector process and cache state"
         );
 
         runtime.set_full_lifecycle_authority_state(false, false);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(20),
-                reset_notify.notified()
+                rescan_notify.notified()
             )
             .await
             .is_err(),
-            "true-to-false transition should not notify detection reset"
+            "repeated false-to-false sync should not request a rescan"
         );
 
         runtime.set_full_lifecycle_authority_state(true, false);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            reset_notify.notified(),
-        )
-        .await
-        .expect("re-entering active authority should notify detection reset");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                rescan_notify.notified()
+            )
+            .await
+            .is_err(),
+            "a new accepted report rearms authority without discarding screen evidence"
+        );
     }
 
     #[tokio::test]

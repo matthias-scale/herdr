@@ -153,7 +153,10 @@ command = "lazygit"
         assert!(profile.contains("[keys]"));
         assert!(profile.contains("prefix = \"ctrl+a\""));
         assert!(profile.contains("new_tab = \"prefix+t\""));
-        assert!(profile.contains("next_tab = \"prefix+n\""));
+        assert!(profile.contains("next_tab = \"prefix+ctrl+n\""));
+        assert!(profile.contains("next_window = \"prefix+n\""));
+        assert!(profile.contains("next_blocked_window = \"prefix+b\""));
+        assert!(profile.contains("toggle_sidebar = \"prefix+shift+b\""));
         assert!(!profile.contains("lazygit"));
         assert!(!profile.contains("command ="));
         assert!(!profile.contains("[[keys.command]]"));
@@ -197,8 +200,8 @@ prefix = "n"
         let round_tripped: Config = toml::from_str(&profile).unwrap();
 
         assert!(profile.contains("prefix = \"n\""));
-        assert!(!profile.contains("next_tab = \"prefix+n\""));
-        assert!(round_tripped.keybinds().next_tab.bindings.is_empty());
+        assert!(!profile.contains("next_window = \"prefix+n\""));
+        assert!(round_tripped.keybinds().next_window.bindings.is_empty());
     }
 
     #[test]
@@ -264,8 +267,8 @@ command = "echo next"
 
         assert!(!profile.contains("[[keys.command]]"));
         assert!(!profile.contains("command ="));
-        assert!(profile.contains("next_tab = \"\""));
-        assert!(round_tripped.keybinds().next_tab.bindings.is_empty());
+        assert!(profile.contains("next_window = \"\""));
+        assert!(round_tripped.keybinds().next_window.bindings.is_empty());
     }
 
     #[test]

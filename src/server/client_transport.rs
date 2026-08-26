@@ -1152,10 +1152,16 @@ new_tab = "ctrl+notakey"
         assert!(keybindings.keybinds.new_tab.bindings.is_empty());
         assert!(keybindings
             .keybinds
-            .next_tab
+            .next_window
             .bindings
             .iter()
             .any(|binding| binding.label == "prefix+n"));
+        assert!(keybindings
+            .keybinds
+            .next_tab
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+ctrl+n"));
     }
 
     #[test]

@@ -9,8 +9,8 @@ use ratatui::{
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
-    mobile_sidebar_rows, mobile_sidebar_rows_from, sidebar_row_belongs_to_workspace,
-    sidebar_space_member_indices, tab_row_layout, AgentPanelEntry, SidebarRow,
+    mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, AgentPanelEntry, SidebarRow,
 };
 use super::status::{
     state_icon, state_icon_symbol, state_icon_with_stale, state_label_color_with_stale,
@@ -162,7 +162,7 @@ fn mobile_switcher_target_for_row(
                 }
             }
         }
-        SidebarRow::SectionHeader { .. } => return None,
+        SidebarRow::SectionHeader { .. } | SidebarRow::PrioPanel { .. } => return None,
     })
 }
 
@@ -181,7 +181,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
     match row {
         SidebarRow::Workspace { .. }
         | SidebarRow::Tab { .. }
-        | SidebarRow::SectionHeader { .. } => 1,
+        | SidebarRow::SectionHeader { .. }
+        | SidebarRow::PrioPanel { .. } => 1,
         SidebarRow::Agent { .. } => 2,
     }
 }
@@ -240,7 +241,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 return None;
             };
             let indent = " ".repeat(2 + usize::from(*depth) * 3);
-            let layout = tab_row_layout(
+            let layout = mobile_tab_row_layout(
                 entry,
                 app.view_observed_at,
                 usize::from(content.width),
@@ -772,6 +773,7 @@ fn render_mobile_switcher_content(
                     )),
                 );
             }
+            SidebarRow::PrioPanel { .. } => {}
             SidebarRow::Tab { entry, depth } => {
                 let active = app.active == Some(entry.ws_idx)
                     && app
@@ -780,7 +782,7 @@ fn render_mobile_switcher_content(
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
                 let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let layout = tab_row_layout(
+                let layout = mobile_tab_row_layout(
                     entry,
                     app.view_observed_at,
                     usize::from(content.width),
@@ -1475,6 +1477,7 @@ mod tests {
             primary_tab_label: primary_tab_label.map(str::to_string),
             tab_label_leads_with_agent: false,
             pane_label: None,
+            pane_label_is_agent_identity: false,
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: agent_label.map(str::to_string),

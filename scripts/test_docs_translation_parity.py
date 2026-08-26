@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,25 @@ from scripts.docs_translation_parity import check_docs_translation_parity, headi
 
 
 class DocsTranslationParityTests(unittest.TestCase):
+    def test_keyboard_quick_reference_uses_sidebar_default_from_rust(self) -> None:
+        model = Path("src/config/model.rs").read_text(encoding="utf-8")
+        match = re.search(
+            r'toggle_sidebar: BindingConfig::one\("([^"]+)"\)',
+            model,
+        )
+        if match is None:
+            self.fail("toggle_sidebar default is missing from src/config/model.rs")
+        sidebar_binding = match.group(1)
+        docs_root = Path("docs/next/website/src/content/docs")
+
+        for relative, label in (
+            (Path("keyboard.mdx"), "Toggle sidebar"),
+            (Path("ja/keyboard.mdx"), "サイドバーの表示切り替え"),
+            (Path("zh-cn/keyboard.mdx"), "切换侧边栏"),
+        ):
+            content = (docs_root / relative).read_text(encoding="utf-8")
+            self.assertIn(f"| {label} | `{sidebar_binding}` |", content)
+
     def test_heading_outline_ignores_fenced_code_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "doc.mdx"

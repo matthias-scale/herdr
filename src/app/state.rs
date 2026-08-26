@@ -1571,6 +1571,7 @@ pub struct AppState {
     pub(crate) status_focus_projection_initialized: bool,
     /// Whether the full-width top status row is enabled by configuration.
     pub(crate) status_bar_enabled: bool,
+    pub(crate) full_lifecycle_hook_authority_timeout: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -2257,6 +2258,11 @@ impl AppState {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             status_bar_enabled: true,
+            full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
+                crate::config::Config::default()
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+            ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),

@@ -335,6 +335,54 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub agent_detection: AgentDetectionConfig,
+}
+
+pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AgentDetectionConfig {
+    pub full_lifecycle_hook_authority_timeout_seconds: u64,
+}
+
+impl Default for AgentDetectionConfig {
+    fn default() -> Self {
+        Self {
+            full_lifecycle_hook_authority_timeout_seconds:
+                DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentDetectionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            full_lifecycle_hook_authority_timeout_seconds: u64,
+        }
+        impl Default for Raw {
+            fn default() -> Self {
+                Self {
+                    full_lifecycle_hook_authority_timeout_seconds:
+                        DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS,
+                }
+            }
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if !(30..=3600).contains(&raw.full_lifecycle_hook_authority_timeout_seconds) {
+            return Err(de::Error::custom(
+                "full_lifecycle_hook_authority_timeout_seconds must be between 30 and 3600",
+            ));
+        }
+        Ok(Self {
+            full_lifecycle_hook_authority_timeout_seconds: raw
+                .full_lifecycle_hook_authority_timeout_seconds,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -420,14 +468,16 @@ pub struct KeysConfig {
     pub toggle_tab_prio: BindingConfig,
     /// Toggle the expanded sidebar PRIO panel. Unset by default.
     pub toggle_prio_panel: BindingConfig,
-    /// Select the previous tab. Default: "prefix+p".
+    /// Select the previous tab in the active workspace. Default: "prefix+ctrl+p".
     pub previous_tab: BindingConfig,
-    /// Select the next tab. Default: "prefix+n".
+    /// Select the next tab in the active workspace. Default: "prefix+ctrl+n".
     pub next_tab: BindingConfig,
-    /// Focus the previous window (tab) across all spaces. Unset by default.
+    /// Focus the previous tab across all workspaces. Default: "prefix+p".
     pub previous_window: BindingConfig,
-    /// Focus the next window (tab) across all spaces. Unset by default.
+    /// Focus the next tab across all workspaces. Default: "prefix+n".
     pub next_window: BindingConfig,
+    /// Focus the next blocked tab across all workspaces. Default: "prefix+b".
+    pub next_blocked_window: BindingConfig,
     /// Switch to tab 1-9. Default: "prefix+1..9".
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
@@ -480,7 +530,7 @@ pub struct KeysConfig {
     pub toggle_pin_tab: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
-    /// Toggle sidebar collapse. Default: "prefix+b"
+    /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
     /// Toggle dock collapse. Default: "prefix+shift+e"
     pub toggle_dock: BindingConfig,
@@ -586,6 +636,8 @@ pub(crate) struct KeysConfigOverlay {
     previous_window: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_window: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_blocked_window: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     switch_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -711,6 +763,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(next_tab);
         apply_field!(previous_window);
         apply_field!(next_window);
+        apply_field!(next_blocked_window);
         apply_field!(switch_tab);
         apply_field!(switch_workspace);
         apply_field!(close_tab);
@@ -828,6 +881,7 @@ impl KeysConfig {
         copy_effective_action_field!(next_tab, keybinds.next_tab);
         copy_effective_action_field!(previous_window, keybinds.previous_window);
         copy_effective_action_field!(next_window, keybinds.next_window);
+        copy_effective_action_field!(next_blocked_window, keybinds.next_blocked_window);
         copy_effective_indexed_field!(switch_tab, keybinds.switch_tab);
         copy_effective_indexed_field!(switch_workspace, keybinds.switch_workspace);
         copy_effective_action_field!(close_tab, keybinds.close_tab);
@@ -1135,10 +1189,11 @@ impl Default for KeysConfig {
             rename_tab: BindingConfig::one("prefix+shift+t"),
             toggle_tab_prio: BindingConfig::one("prefix+shift+f"),
             toggle_prio_panel: BindingConfig::empty(),
-            previous_tab: BindingConfig::one("prefix+p"),
-            next_tab: BindingConfig::one("prefix+n"),
-            previous_window: BindingConfig::empty(),
-            next_window: BindingConfig::empty(),
+            previous_tab: BindingConfig::one("prefix+ctrl+p"),
+            next_tab: BindingConfig::one("prefix+ctrl+n"),
+            previous_window: BindingConfig::one("prefix+p"),
+            next_window: BindingConfig::one("prefix+n"),
+            next_blocked_window: BindingConfig::one("prefix+b"),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
@@ -1164,7 +1219,7 @@ impl Default for KeysConfig {
             zoom: BindingConfig::one("prefix+z"),
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
-            toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             toggle_dock: BindingConfig::one("prefix+shift+e"),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
@@ -1687,6 +1742,34 @@ mouse_capture = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.mouse_capture);
+    }
+
+    #[test]
+    fn stale_full_lifecycle_hook_authority_falls_back_to_screen_config_bounds() {
+        assert_eq!(
+            Config::default()
+                .agent_detection
+                .full_lifecycle_hook_authority_timeout_seconds,
+            600
+        );
+        for value in [30, 600, 3600] {
+            let config: Config = toml::from_str(&format!(
+                "[agent_detection]\nfull_lifecycle_hook_authority_timeout_seconds = {value}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                config
+                    .agent_detection
+                    .full_lifecycle_hook_authority_timeout_seconds,
+                value
+            );
+        }
+        for value in [0, 29, 3601] {
+            assert!(toml::from_str::<Config>(&format!(
+                "[agent_detection]\nfull_lifecycle_hook_authority_timeout_seconds = {value}\n"
+            ))
+            .is_err());
+        }
     }
 
     #[test]

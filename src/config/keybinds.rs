@@ -339,6 +339,7 @@ pub struct Keybinds {
     pub next_tab: ActionKeybinds,
     pub previous_window: ActionKeybinds,
     pub next_window: ActionKeybinds,
+    pub next_blocked_window: ActionKeybinds,
     pub switch_tab: Vec<IndexedKeybind>,
     pub switch_workspace: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
@@ -520,6 +521,7 @@ impl Config {
             next_tab: empty_action!(),
             previous_window: empty_action!(),
             next_window: empty_action!(),
+            next_blocked_window: empty_action!(),
             switch_tab: Vec::new(),
             switch_workspace: Vec::new(),
             close_tab: empty_action!(),
@@ -670,6 +672,7 @@ impl Config {
             apply_action!(keybinds.next_tab, next_tab, source);
             apply_action!(keybinds.previous_window, previous_window, source);
             apply_action!(keybinds.next_window, next_window, source);
+            apply_action!(keybinds.next_blocked_window, next_blocked_window, source);
             apply_indexed!(
                 keybinds.switch_tab,
                 switch_tab,
@@ -2241,22 +2244,36 @@ switch_tab = "prefix+?"
     }
 
     #[test]
-    fn default_keymap_is_prefix_first_and_tab_centered() {
+    fn global_window_default_bindings() {
         let config = Config::default();
         assert!(config.collect_diagnostics().is_empty());
         let kb = config.keybinds();
         assert_eq!(
-            binding_triggers(&kb.next_tab),
+            binding_triggers(&kb.next_window),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('n'),
                 KeyModifiers::empty()
             ))]
         );
         assert_eq!(
-            binding_triggers(&kb.previous_tab),
+            binding_triggers(&kb.previous_window),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('p'),
                 KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.next_tab),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.previous_tab),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL
             ))]
         );
         assert_eq!(kb.switch_tab.len(), 9);
@@ -2301,6 +2318,27 @@ switch_tab = "prefix+?"
             binding_triggers(&kb.swap_pane_right),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('l'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_default_binding() {
+        let config = Config::default();
+        assert!(config.collect_diagnostics().is_empty());
+        let kb = config.keybinds();
+        assert_eq!(
+            binding_triggers(&kb.next_blocked_window),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('b'),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.toggle_sidebar),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('b'),
                 KeyModifiers::SHIFT
             ))]
         );
@@ -2362,7 +2400,7 @@ prefix = "n"
         let kb = config.keybinds();
 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(kb.next_tab.bindings.is_empty());
+        assert!(kb.next_window.bindings.is_empty());
     }
 
     #[test]

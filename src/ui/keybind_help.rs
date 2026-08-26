@@ -136,8 +136,20 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.rename_tab), "rename tab"),
         help_entry(keybind_label(&kb.toggle_tab_prio), "toggle tab PRIO"),
         help_entry(keybind_label(&kb.toggle_prio_panel), "toggle PRIO panel"),
-        help_entry(keybind_label(&kb.previous_tab), "previous tab"),
-        help_entry(keybind_label(&kb.next_tab), "next tab"),
+        help_entry(
+            keybind_label(&kb.previous_window),
+            "previous tab across all Spaces",
+        ),
+        help_entry(keybind_label(&kb.next_window), "next tab across all Spaces"),
+        help_entry(
+            keybind_label(&kb.next_blocked_window),
+            "next blocked tab across all Spaces",
+        ),
+        help_entry(
+            keybind_label(&kb.previous_tab),
+            "previous tab in this Space",
+        ),
+        help_entry(keybind_label(&kb.next_tab), "next tab in this Space"),
         help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),
         help_entry(keybind_label(&kb.close_tab), "close tab"),
     ];
@@ -429,5 +441,30 @@ mod tests {
         assert_eq!(filtered[0].1[0].1, "close pane");
 
         assert!(filter_keybind_help_groups(groups(), "panes").is_empty());
+    }
+
+    #[test]
+    fn global_window_bindings_appear_in_help() {
+        let mut app = AppState::test_new();
+        app.keybinds = crate::config::Config::default().keybinds();
+
+        let entries = keybind_help_groups(&app)
+            .into_iter()
+            .find(|(title, _)| *title == "workspaces / tabs")
+            .expect("workspace and tab help group")
+            .1;
+
+        assert!(entries.iter().any(|(key, label)| {
+            key == "prefix+p" && label == "previous tab across all Spaces"
+        }));
+        assert!(entries
+            .iter()
+            .any(|(key, label)| key == "prefix+n" && label == "next tab across all Spaces"));
+        assert!(entries.iter().any(|(key, label)| {
+            key == "prefix+ctrl+p" && label == "previous tab in this Space"
+        }));
+        assert!(entries
+            .iter()
+            .any(|(key, label)| { key == "prefix+ctrl+n" && label == "next tab in this Space" }));
     }
 }

@@ -144,6 +144,20 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        let hook_report = match &ev {
+            AppEvent::HookStateReported {
+                pane_id,
+                source,
+                agent_label,
+                state,
+                ..
+            } => Some((
+                *pane_id,
+                crate::detect::is_closing_block_source(source, agent_label)
+                    && *state != crate::detect::AgentState::Blocked,
+            )),
+            _ => None,
+        };
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
         }
@@ -387,6 +401,25 @@ impl App {
             }
         }
         self.sync_full_lifecycle_authority_detection_pauses();
+        if hook_state_report_accepted == Some(true) {
+            if let Some((pane_id, closing_non_gate)) = hook_report {
+                if let Some((ws_idx, _)) = self.find_pane(pane_id) {
+                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                        &self.terminal_runtimes,
+                        ws_idx,
+                        pane_id,
+                    ) {
+                        runtime.rebaseline_hook_authority_output();
+                        if closing_non_gate {
+                            // Closing-block reports describe turn-end/gate state,
+                            // not the full lifecycle. Rescan unchanged terminal
+                            // bytes so a quiet prompt can supersede the report.
+                            runtime.request_agent_screen_rescan();
+                        }
+                    }
+                }
+            }
+        }
         if terminal_cwd_reported {
             if self.state.status_bar_enabled {
                 self.project_status_context_from_cached();
@@ -521,7 +554,7 @@ impl App {
         }
     }
 
-    fn sync_full_lifecycle_authority_detection_pauses(&self) {
+    pub(crate) fn sync_full_lifecycle_authority_detection_pauses(&self) {
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 for pane in tab.panes.values() {
@@ -535,7 +568,7 @@ impl App {
                     };
                     runtime.set_full_lifecycle_authority_state(
                         terminal.full_lifecycle_hook_authority_active(),
-                        terminal.state == crate::detect::AgentState::Blocked,
+                        terminal.hook_authority_output_retirement_eligible(),
                     );
                 }
             }
@@ -1989,7 +2022,10 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["result"]["type"], "agent_explain");
-        assert_eq!(response["result"]["explain"]["state"], "blocked");
+        assert_eq!(response["result"]["explain"]["screen_state"], "blocked");
+        assert_eq!(response["result"]["explain"]["state"], "unknown");
+        assert_eq!(response["result"]["explain"]["effective_state"], "unknown");
+        assert_eq!(response["result"]["explain"]["arbitration"], "screen");
         assert_eq!(
             response["result"]["explain"]["matched_rule"]["id"],
             "live_strong_blocker"

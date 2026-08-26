@@ -57,7 +57,8 @@ Tabs:
 
 | Action | Key |
 | --- | --- |
-| Next / previous tab | `prefix+n` / `prefix+p` |
+| Next / previous tab across all Spaces | `prefix+n` / `prefix+p` |
+| Next / previous tab in this Space | `prefix+ctrl+n` / `prefix+ctrl+p` |
 | Jump to tab 1–9 | `prefix+1..9` |
 | Rename tab | `prefix+shift+t` |
 | Close tab | `prefix+shift+x` |
@@ -70,7 +71,7 @@ Workspaces and session:
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
 | Goto picker | `prefix+g` |
-| Toggle sidebar | `prefix+b` |
+| Toggle sidebar | `prefix+shift+b` |
 | Open read-only Symphony dashboard | `prefix+shift+s` |
 
 The Symphony dashboard polls open Temporal workflows and shows name, phase, named wait, and age. Enter opens an interactive Herdr window in the matching checkout with workflow, ticket, pull request, and receipt context; the dashboard cannot signal, cancel, or merge workflows.
@@ -106,19 +107,23 @@ focus_pane_left = ["prefix+h", "ctrl+alt+h"]
 focus_pane_down = ["prefix+j", "ctrl+alt+j"]
 focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
-previous_tab = ["prefix+p", "ctrl+alt+["]
-next_tab = ["prefix+n", "ctrl+alt+]"]
+previous_window = "prefix+p" # previous tab across all Spaces
+next_window = "prefix+n" # next tab across all Spaces
+next_blocked_window = "prefix+b" # next blocked tab across all Spaces
+previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
+next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
 split_left = "prefix+shift+v"
 split_up = "prefix+shift+minus"
-next_window = "prefix+shift+n" # optional, cycles tabs across spaces
-previous_window = "prefix+shift+p" # optional, cycles tabs across spaces
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
+toggle_sidebar = "prefix+shift+b"
 ```
 
-The four split directions have collision-free defaults: `prefix+v` is right, `prefix+shift+v` is left, `prefix+minus` is down, and `prefix+shift+minus` is up. The legacy `split_vertical` and `split_horizontal` names remain right and down. `next_window` and `previous_window` remain optional; they cycle every tab in canonical workspace/tab order, including tabs without agents.
+The four split directions have collision-free defaults: `prefix+v` is right, `prefix+shift+v` is left, `prefix+minus` is down, and `prefix+shift+minus` is up. The legacy `split_vertical` and `split_horizontal` names remain right and down. `next_window` and `previous_window` cycle every tab, including tabs without agents. The order follows the workspace list, then each workspace's tab list, and wraps at both ends. Sidebar and Space collapse state do not change it. `next_tab` and `previous_tab` stay within the active Space.
+
+`next_blocked_window` moves forward through that same global order and stops only on a tab whose pane state rolls up to `blocked`. It wraps after the last match. If no tab is blocked, focus stays where it is. The default is `prefix+b`; `toggle_sidebar` uses `prefix+shift+b`.
 
 The same global cycle is available without a keybinding: `herdr window next` and `herdr window previous`. Both use the existing tab list/focus API and wrap at either end.
 

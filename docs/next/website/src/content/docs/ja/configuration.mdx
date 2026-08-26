@@ -120,8 +120,12 @@ Herdr には tmux に似たプレフィックスモードがあります。デ�
 prefix = "ctrl+b"
 goto = "prefix+g"
 new_tab = "prefix+c"
-next_tab = "prefix+n"
-previous_tab = "prefix+p"
+next_window = "prefix+n"
+previous_window = "prefix+p"
+next_blocked_window = "prefix+b"
+next_tab = "prefix+ctrl+n"
+previous_tab = "prefix+ctrl+p"
+toggle_sidebar = "prefix+shift+b"
 focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
@@ -136,7 +140,7 @@ split_up = "prefix+shift+minus"
 
 ```toml
 [keys]
-next_tab = ["prefix+n", "ctrl+alt+]"]
+next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 ```
 
 任意のアクションはデフォルトでは未設定です。プレフィックスモードの挙動には `prefix+` でバインドし、意図的に直接ショートカットにする場合は明示的な修飾キーコードを使ってください。
@@ -402,6 +406,17 @@ request_path = "sounds/request.mp3"
 droid = "off"
 claude = "on"
 ```
+
+## エージェント検出の権限
+
+完全なライフサイクルフックの最新レポートが新しい間は、フック状態が優先されます。連携からのレポートが止まると、Herdr は10分後にキャッシュ済みの画面検出へ戻ります。30〜3600秒の範囲で変更できます。
+
+```toml
+[agent_detection]
+full_lifecycle_hook_authority_timeout_seconds = 600
+```
+
+ネイティブの承認画面やログイン画面が表示されている場合は、新しいフック状態より `blocked` が優先されます。
 
 ## 高度な設定
 

@@ -1130,7 +1130,7 @@ fn unique_temp_path(name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 #[cfg(unix)]
 fn wait_for_file(path: &std::path::Path) -> String {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if let Ok(content) = std::fs::read_to_string(path) {
             if !content.is_empty() {

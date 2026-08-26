@@ -120,8 +120,12 @@ A small keybinding override looks like this:
 prefix = "ctrl+b"
 goto = "prefix+g"
 new_tab = "prefix+c"
-next_tab = "prefix+n"
-previous_tab = "prefix+p"
+next_window = "prefix+n"
+previous_window = "prefix+p"
+next_blocked_window = "prefix+b"
+next_tab = "prefix+ctrl+n"
+previous_tab = "prefix+ctrl+p"
+toggle_sidebar = "prefix+shift+b"
 focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
@@ -136,7 +140,7 @@ A binding may also be an array when one action needs multiple shortcuts:
 
 ```toml
 [keys]
-next_tab = ["prefix+n", "ctrl+alt+]"]
+next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 ```
 
 Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or use an explicit modified chord when you intentionally want a direct shortcut.
@@ -452,6 +456,17 @@ Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent l
 droid = "off"
 claude = "on"
 ```
+
+## Agent detection authority
+
+Full-lifecycle hook state wins while its latest accepted report is fresh. If an integration stops reporting, Herdr falls back to cached screen evidence after 10 minutes. Set a 30–3600 second timeout when the integration needs a different bound:
+
+```toml
+[agent_detection]
+full_lifecycle_hook_authority_timeout_seconds = 600
+```
+
+Visible native approval and login controls can still report `blocked` while hook authority is fresh.
 
 ## Advanced configuration
 

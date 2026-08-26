@@ -294,6 +294,7 @@ pub(super) struct DetectionTransitionInput {
     pub(super) agent_changed: bool,
     pub(super) process_exited: bool,
     pub(super) stable_refresh_due: bool,
+    pub(super) force_publish: bool,
     pub(super) now: std::time::Instant,
 }
 
@@ -301,6 +302,11 @@ pub(super) fn decide_detection_transition(
     input: DetectionTransitionInput,
     pending_idle: &mut PendingIdleConfirmation,
 ) -> DetectionTransitionDecision {
+    if input.force_publish {
+        pending_idle.clear();
+        return DetectionTransitionDecision::PublishNext;
+    }
+
     if pending_idle.should_hold_working_to_idle(
         input.previous_publish,
         input.next_publish,
@@ -348,6 +354,7 @@ pub(super) struct ScreenDetectionPublishInput {
     pub(super) recent_output: bool,
     pub(super) process_exited: bool,
     pub(super) agent_changed: bool,
+    pub(super) force_publish: bool,
     pub(super) now: std::time::Instant,
 }
 
@@ -397,6 +404,7 @@ pub(super) fn decide_screen_detection_publish(
             agent_changed: input.agent_changed,
             process_exited: input.process_exited,
             stable_refresh_due,
+            force_publish: input.force_publish,
             now: input.now,
         },
         pending_idle,
@@ -499,6 +507,7 @@ mod tests {
             recent_output: false,
             process_exited: false,
             agent_changed: false,
+            force_publish: false,
             now,
         }
     }
@@ -619,6 +628,7 @@ mod tests {
                     agent_changed: false,
                     process_exited: false,
                     stable_refresh_due: false,
+                    force_publish: false,
                     now,
                 },
                 &mut pending_idle,
