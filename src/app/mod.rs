@@ -119,6 +119,10 @@ pub struct App {
     pub(crate) loop_history_reader: Option<crate::loop_runs::ReceiptReader>,
     pub(crate) loop_receipt_watch_health: Arc<crate::loop_runs::ReceiptWatchHealth>,
     pub(crate) _loop_receipt_watcher: Option<notify::RecommendedWatcher>,
+    /// Held only to keep the scratchpad watcher alive; replaced when focus moves
+    /// to a different repository.
+    pub(crate) scratchpad_watcher: Option<notify::RecommendedWatcher>,
+    pub(crate) scratchpad_watched_path: Option<std::path::PathBuf>,
     pub(crate) loop_receipt_fallback_deadline: Option<Instant>,
     pub(crate) loop_receipt_watch_degraded: bool,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
@@ -696,6 +700,7 @@ impl App {
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
+                scratchpad_link_rows: Vec::new(),
             },
             drag: None,
             workspace_press: None,
@@ -725,6 +730,8 @@ impl App {
             dock_editor_focused: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
+            dock_editor_requested_paths: std::collections::HashMap::new(),
+            scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
@@ -861,6 +868,8 @@ impl App {
             loop_history_reader,
             loop_receipt_watch_health,
             _loop_receipt_watcher: loop_receipt_watcher,
+            scratchpad_watcher: None,
+            scratchpad_watched_path: None,
             loop_receipt_fallback_deadline,
             loop_receipt_watch_degraded: false,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -1280,6 +1289,7 @@ impl App {
                     }
                     self.ensure_dock_editor();
                     self.resize_dock_editor();
+                    self.ensure_scratchpad();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
                         &self.terminal_runtimes,

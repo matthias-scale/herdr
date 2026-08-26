@@ -65,6 +65,7 @@ impl App {
             AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
                 self.refresh_symphony_snapshot(snapshot)
             }
+            AppEvent::ScratchpadChanged => self.reload_scratchpad(),
             AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
@@ -160,6 +161,10 @@ impl App {
         };
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {
             return Some(self.refresh_symphony_snapshot(snapshot));
+        }
+
+        if let AppEvent::ScratchpadChanged = ev {
+            return Some(self.reload_scratchpad());
         }
 
         if let AppEvent::LoopRunHistoryChanged = ev {

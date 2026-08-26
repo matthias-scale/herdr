@@ -454,6 +454,10 @@ impl App {
                 }
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::EditScratchpad => {
+                self.open_scratchpad_in_editor();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CyclePaneNext => {
                 self.cycle_pane_via_api(false);
                 leave_navigate_mode(&mut self.state);
@@ -512,7 +516,7 @@ impl App {
         self.runtime_workspace_focus("tui.workspace.focus", workspace_id);
     }
 
-    pub(super) fn show_work_link_notice(&mut self, message: &str) {
+    pub(crate) fn show_work_link_notice(&mut self, message: &str) {
         self.state.copy_feedback = Some(crate::app::state::CopyFeedback {
             message: message.to_string(),
         });
@@ -1703,6 +1707,7 @@ pub(crate) enum NavigateAction {
     ToggleDock,
     PreviousDockTab,
     NextDockTab,
+    EditScratchpad,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -1871,6 +1876,7 @@ fn non_indexed_action_for_key(
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
+        (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -2193,6 +2199,8 @@ pub(super) fn execute_navigate_action_in_context(
             }
             leave_navigate_mode(state);
         }
+        // Spawning the editor needs an `App`; the state-only mirror cannot do it.
+        NavigateAction::EditScratchpad => leave_navigate_mode(state),
         NavigateAction::CyclePaneNext => {
             state.cycle_pane(false);
             leave_navigate_mode(state);

@@ -15,7 +15,7 @@ use crate::{
     terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry},
 };
 
-fn focused_agent_pane_id(app: &AppState) -> Option<PaneId> {
+pub(crate) fn focused_agent_pane_id(app: &AppState) -> Option<PaneId> {
     let ws_idx = app.active?;
     let workspace = app.workspaces.get(ws_idx)?;
     let pane_id = workspace.focused_pane_id()?;
@@ -124,7 +124,41 @@ impl App {
                 }
             }
             self.state.dock_editor_errors.remove(&agent_pane_id);
+            self.state.dock_editor_requested_paths.remove(&agent_pane_id);
         }
+    }
+
+    /// Opens the focused repository's scratchpad in the dock's `$EDITOR`. The
+    /// existing session is torn down first: it was started on a directory and
+    /// cannot be redirected at a file after the fact.
+    pub(crate) fn open_scratchpad_in_editor(&mut self) {
+        let Some(root) = crate::scratchpad::focused_repo_root(&self.state) else {
+            self.show_work_link_notice("no repository for the focused pane");
+            return;
+        };
+        let Some(agent_pane_id) = focused_agent_pane_id(&self.state) else {
+            self.show_work_link_notice("focus an agent first");
+            return;
+        };
+        let path = crate::scratchpad::scratchpad_path(&root);
+        if let Err(error) = crate::scratchpad::ensure_scratchpad_file(&path) {
+            tracing::warn!(path = %path.display(), %error, "could not create scratchpad");
+            self.show_work_link_notice("could not create the scratchpad");
+            return;
+        }
+        if let Some(session) = self.state.dock_editor_sessions.remove(&agent_pane_id) {
+            if let Some(runtime) = self.terminal_runtimes.remove(&session.terminal_id) {
+                runtime.shutdown();
+            }
+        }
+        self.state.dock_editor_errors.remove(&agent_pane_id);
+        self.state
+            .dock_editor_requested_paths
+            .insert(agent_pane_id, path);
+        self.state.dock_collapsed = false;
+        self.state.dock_tab = DockTab::Editor;
+        self.state.dock_editor_focused = true;
+        self.ensure_dock_editor();
     }
 
     pub(crate) fn ensure_dock_editor(&mut self) {
@@ -156,7 +190,12 @@ impl App {
         let launch_env = PaneLaunchEnv::default();
         let mut last_error = None;
 
-        for argv in editor_argv_candidates() {
+        let requested_path = self
+            .state
+            .dock_editor_requested_paths
+            .get(&agent_pane_id)
+            .cloned();
+        for argv in editor_argv_candidates(requested_path.as_deref()) {
             match TerminalRuntime::spawn_argv_command(
                 editor_pane_id,
                 rows,
@@ -240,6 +279,9 @@ impl App {
         self.state
             .dock_editor_errors
             .insert(agent_pane_id, "editor exited".to_string());
+        self.state
+            .dock_editor_requested_paths
+            .remove(&agent_pane_id);
         if let Some(runtime) = self.terminal_runtimes.remove(&session.terminal_id) {
             runtime.shutdown();
         }
@@ -249,7 +291,9 @@ impl App {
     }
 }
 
-fn editor_argv_candidates() -> Vec<Vec<String>> {
+/// `path` is the file the editor should open. Without one the editor starts in the
+/// pane's directory, which is the dock editor's original behaviour.
+fn editor_argv_candidates(path: Option<&std::path::Path>) -> Vec<Vec<String>> {
     let mut candidates = Vec::new();
     if let Ok(editor) = std::env::var("EDITOR") {
         if let Some(argv) = parse_editor_command(&editor) {
@@ -261,6 +305,12 @@ fn editor_argv_candidates() -> Vec<Vec<String>> {
     candidates.push(vec!["notepad.exe".to_string()]);
     #[cfg(not(windows))]
     candidates.push(vec!["vi".to_string()]);
+    if let Some(path) = path {
+        let argument = path.to_string_lossy().into_owned();
+        for candidate in candidates.iter_mut() {
+            candidate.push(argument.clone());
+        }
+    }
     candidates
 }
 
@@ -336,6 +386,27 @@ mod tests {
 
         assert!(app.state.dock_editor_sessions.is_empty());
         assert!(app.terminal_runtimes.get(&editor_terminal_id).is_none());
+    }
+
+    #[test]
+    fn a_requested_file_is_appended_to_every_editor_candidate() {
+        let path = std::path::Path::new("/repo/.herdr/scratchpad.md");
+        let with_path = editor_argv_candidates(Some(path));
+        let without_path = editor_argv_candidates(None);
+
+        assert_eq!(with_path.len(), without_path.len());
+        assert!(
+            with_path
+                .iter()
+                .all(|argv| argv.last().map(String::as_str) == Some(path.to_str().unwrap())),
+            "candidates: {with_path:?}"
+        );
+        assert!(
+            without_path
+                .iter()
+                .all(|argv| argv.last().map(String::as_str) != Some(path.to_str().unwrap())),
+            "candidates: {without_path:?}"
+        );
     }
 
     #[test]

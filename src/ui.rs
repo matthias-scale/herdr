@@ -14,6 +14,8 @@ pub(crate) mod dock;
 mod dock_context;
 #[path = "ui/dock/shortcuts.rs"]
 mod dock_shortcuts;
+#[path = "ui/dock/scratchpad.rs"]
+mod dock_scratchpad;
 mod info_panel;
 mod keybind_help;
 mod loop_runs;
@@ -443,6 +445,13 @@ fn compute_view_internal(
             }
             rows
         },
+        scratchpad_link_rows: if !app.dock_collapsed
+            && app.dock_tab == crate::app::DockTab::Scratchpad
+        {
+            dock_scratchpad::scratchpad_link_rows(app, dock_body_rect)
+        } else {
+            Vec::new()
+        },
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
@@ -492,14 +501,38 @@ fn dock_geometry(area: Rect, collapsed: bool) -> (Rect, Rect, Rect, Vec<Rect>, R
     let content = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
     let [tab_bar, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
-    let [editor, shortcuts, context] = Layout::horizontal([
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-    ])
-    .areas(tab_bar);
-    let tab_hit_areas = vec![editor, shortcuts, context];
+    let tab_hit_areas = dock_tab_hit_areas(tab_bar);
     (handle, divider, tab_bar, tab_hit_areas, body)
+}
+
+/// Tabs take the width their labels need so that adding one does not truncate the
+/// labels already there. Only when the labels genuinely do not fit does the bar
+/// fall back to equal shares, which truncates every label evenly rather than
+/// starving the ones at the end.
+fn dock_tab_hit_areas(tab_bar: Rect) -> Vec<Rect> {
+    let count = crate::app::DockTab::ALL.len();
+    let widths: Vec<u16> = crate::app::DockTab::ALL
+        .iter()
+        .map(|tab| u16::try_from(tab.label().chars().count().saturating_add(1)).unwrap_or(u16::MAX))
+        .collect();
+    let wanted: u16 = widths.iter().copied().fold(0u16, u16::saturating_add);
+    if wanted <= tab_bar.width {
+        let mut constraints: Vec<Constraint> =
+            widths.into_iter().map(Constraint::Length).collect();
+        // Without a trailing filler the layout stretches the final tab over the
+        // slack, giving it a hit area far wider than its label.
+        constraints.push(Constraint::Min(0));
+        let areas = Layout::horizontal(constraints).split(tab_bar);
+        return areas[..count].to_vec();
+    }
+    let ratio = u32::try_from(count).unwrap_or(1).max(1);
+    Layout::horizontal(
+        (0..count)
+            .map(|_| Constraint::Ratio(1, ratio))
+            .collect::<Vec<_>>(),
+    )
+    .split(tab_bar)
+    .to_vec()
 }
 
 pub(crate) fn status_bar_is_renderable(app: &AppState, area: Rect) -> bool {
@@ -566,6 +599,7 @@ fn compute_mobile_view(
         terminal_area,
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),
+        scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
@@ -998,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_dock_exposes_three_named_tabs_and_a_body_area() {
+    fn an_open_dock_exposes_every_named_tab_and_a_body_area() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
         app.workspaces = vec![Workspace::test_new("one")];
@@ -1017,7 +1051,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert_eq!(app.view.dock_tab_hit_areas.len(), 3);
+        assert_eq!(
+            app.view.dock_tab_hit_areas.len(),
+            crate::app::DockTab::ALL.len()
+        );
         assert!(app.view.dock_body_rect.height > 0);
         for tab in crate::app::DockTab::ALL {
             assert!(

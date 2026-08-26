@@ -56,6 +56,8 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only Symphony Temporal workflow poll completed.
     SymphonyWorkflowsRefreshed { snapshot: crate::symphony::Snapshot },
+    /// The focused repository's scratchpad file changed on disk; reload it.
+    ScratchpadChanged,
     /// The append-only loop receipt source changed; refresh its cursor.
     LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.

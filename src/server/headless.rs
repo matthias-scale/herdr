@@ -4309,6 +4309,7 @@ impl HeadlessServer {
                     if is_foreground {
                         self.app.ensure_dock_editor();
                         self.app.resize_dock_editor();
+                        self.app.ensure_scratchpad();
                     }
                     if let Some(deadline) = self
                         .app

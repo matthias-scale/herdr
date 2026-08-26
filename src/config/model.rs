@@ -538,6 +538,8 @@ pub struct KeysConfig {
     pub previous_dock_tab: BindingConfig,
     /// Select the next dock tab. Default: "prefix+shift+]"
     pub next_dock_tab: BindingConfig,
+    /// Open the focused repository's scratchpad in the dock editor. Default: "prefix+shift+o"
+    pub edit_scratchpad: BindingConfig,
     /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
     pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
@@ -695,6 +697,7 @@ pub(crate) struct KeysConfigOverlay {
     previous_dock_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_dock_tab: Option<BindingConfig>,
+    edit_scratchpad: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -793,6 +796,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
+        apply_field!(edit_scratchpad);
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(indexed);
@@ -911,6 +915,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
+        copy_effective_action_field!(edit_scratchpad, keybinds.edit_scratchpad);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_user_field!(indexed);
@@ -1223,6 +1228,7 @@ impl Default for KeysConfig {
             toggle_dock: BindingConfig::one("prefix+shift+e"),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
+            edit_scratchpad: BindingConfig::one("prefix+shift+o"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             indexed: IndexedKeysConfig::default(),

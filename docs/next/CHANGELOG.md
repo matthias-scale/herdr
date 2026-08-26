@@ -13,6 +13,7 @@
 - The sidebar now includes a read-only Symphony workflow dashboard. (#52, MAT-138)
 - Agent supervision now tracks turn-end closing blocks, gates and decisions, declared waits, stale deadlines, and child-process activity across sidebar and API views. (#39, #41, #44, #45, #48, #53-#57, #59-#62, #64-#66)
 - Claude and Codex plan exhaustion now appears as a distinct `usage` gate and clears when the agent screen resumes. (#67)
+- The dock now has a Note tab showing the focused repository's `.herdr/scratchpad.md` read-only, refreshed as the file changes, with its ticket, pull request, preview, and Missive links as clickable rows. `prefix+shift+o` opens that file in the dock editor.
 
 ### Changed
 - Repository worktrees now flatten into one Space row with direct tab/window children. Space rows show disclosure, title, and window count on one line without a branch subtitle; nonzero Codex-reported background terminals render as `N >_` after the window title, clear when Codex exits, and do not change lifecycle state or ordering. Expanded Space groups keep one compact blank row between them by default, selected Space and tab titles use stronger foreground emphasis on light themes, and working status uses the blue activity accent across sidebar, navigator, and mobile views without changing warning or machine-status colors.
