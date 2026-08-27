@@ -541,6 +541,14 @@ fn restore_tab(
         let imported_agent_activity = imported_runtime
             .as_ref()
             .and_then(|imported| imported.state.agent_activity.clone());
+        #[cfg(unix)]
+        let imported_agent_state = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.agent_state.clone());
+        #[cfg(unix)]
+        let imported_pane_seen = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.pane_seen);
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -695,8 +703,23 @@ fn restore_tab(
                             std::time::Instant::now(),
                         );
                     }
+                    if let Some(agent_state) = imported_agent_state {
+                        terminal.restore_terminal_agent_handoff_state(
+                            agent_state,
+                            std::time::Instant::now(),
+                        );
+                    }
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let pane = PaneState::new(terminal_id.clone());
+                #[cfg(unix)]
+                let pane = {
+                    let mut pane = pane;
+                    if let Some(seen) = imported_pane_seen {
+                        pane.seen = seen;
+                    }
+                    pane
+                };
+                panes.insert(*id, pane);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }

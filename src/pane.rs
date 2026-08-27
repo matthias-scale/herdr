@@ -1812,6 +1812,8 @@ impl PaneRuntime {
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
             agent_activity: None,
+            agent_state: None,
+            pane_seen: None,
         }
     }
 
@@ -2014,6 +2016,11 @@ impl PaneRuntime {
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<Self> {
         let crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state } = import;
+        let (initial_agent, initial_state) = state
+            .agent_state
+            .as_ref()
+            .map(crate::terminal::TerminalAgentHandoffState::handoff_detection_seed)
+            .unwrap_or((None, AgentState::Unknown));
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
@@ -2027,6 +2034,8 @@ impl PaneRuntime {
             terminal_title,
             initial_history_ansi,
             agent_activity: _,
+            agent_state: _,
+            pane_seen: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2141,9 +2150,9 @@ impl PaneRuntime {
                 full_lifecycle_authority_active.clone(),
                 full_lifecycle_hook_blocked.clone(),
                 events,
-                None,
+                initial_agent,
                 DetectionPublishState {
-                    state: AgentState::Unknown,
+                    state: initial_state,
                     visible_idle: false,
                     visible_blocker: false,
                     visible_working: false,

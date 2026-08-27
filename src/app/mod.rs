@@ -1019,6 +1019,8 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        app.sync_agent_metadata_deadline();
+        app.sync_agent_activity_refresh_deadline(now);
         Ok(app)
     }
 

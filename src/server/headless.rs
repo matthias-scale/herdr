@@ -1170,7 +1170,10 @@ impl HeadlessServer {
         for ws in &self.app.state.workspaces {
             for tab in &ws.tabs {
                 for (pane_id, pane) in &tab.panes {
-                    pane_by_terminal.insert(pane.attached_terminal_id.clone(), pane_id.raw());
+                    pane_by_terminal.insert(
+                        pane.attached_terminal_id.clone(),
+                        (pane_id.raw(), pane.seen),
+                    );
                 }
             }
         }
@@ -1215,22 +1218,18 @@ impl HeadlessServer {
         let mut handoff_entries = Vec::new();
         let handoff_captured_at = Instant::now();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
-            let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
+            let Some((pane_id, pane_seen)) = pane_by_terminal.get(terminal_id).copied() else {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
-            handoff_runtime.agent_activity = self
-                .app
-                .state
-                .terminals
-                .get(terminal_id)
+            let terminal = self.app.state.terminals.get(terminal_id);
+            handoff_runtime.agent_activity = terminal
                 .and_then(|terminal| terminal.agent_activity_handoff_state(handoff_captured_at));
-            let has_agent_session = self
-                .app
-                .state
-                .terminals
-                .get(terminal_id)
-                .is_some_and(|terminal| terminal.persisted_agent_session.is_some());
+            handoff_runtime.agent_state = terminal
+                .and_then(|terminal| terminal.terminal_agent_handoff_state(handoff_captured_at));
+            handoff_runtime.pane_seen = Some(pane_seen);
+            let has_agent_session =
+                terminal.is_some_and(|terminal| terminal.persisted_agent_session.is_some());
             if !has_agent_session {
                 handoff_runtime.initial_history_ansi = runtime.handoff_history_ansi();
             }
