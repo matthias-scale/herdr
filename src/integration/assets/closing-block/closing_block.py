@@ -44,9 +44,18 @@ _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 # A label is bold in the authored form; a plain `Gate — ...` prefix counts too,
 # but only with a following separator so an item that merely *starts* with the
 # word (`Verify the deploy...`) stays unlabeled instead of being half-eaten.
-_ITEM_START = r"^\d+[.)][ \t]"
+# The item opener and the body terminator must accept exactly the same shapes.
+# When the terminator was stricter, a real item it failed to recognise was
+# swallowed into the previous item's body instead: `2)**Gate**` and an indented
+# `  2. **Gate**` both vanished into an `Answer` above them, taking a declared
+# gate with them and leaving nothing discarded for the count to notice.
+#
+# The trailing lookahead keeps a decimal at the start of a body line (`1.5x
+# faster`) from reading as an item marker, which the old `[ \t]` requirement
+# had been doing incidentally.
+_ITEM_START = r"^[ \t]*\d+[.)](?=[ \t]|\*\*|$)"
 _ITEM_RE = re.compile(
-    rf"^(?P<idx>\d+)[.)]\s*"
+    rf"^[ \t]*(?P<idx>\d+)[.)]\s*"
     rf"(?:\*\*(?P<label>Gate|Answer|Verify)\*\*"
     rf"|(?P<plain_label>Gate|Answer|Verify)(?=[ \t]*(?:[—–:]|-[ \t])))?"
     rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\*\*What to test\b|"

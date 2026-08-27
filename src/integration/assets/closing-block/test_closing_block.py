@@ -595,6 +595,45 @@ class ClosingBlockV2Tests(unittest.TestCase):
                     ["Answer", "Verify"],
                 )
 
+    def test_an_item_marker_the_terminator_missed_is_still_its_own_item(self):
+        # The body terminator used to be stricter than the item opener, so an
+        # item it did not recognise was absorbed into the previous item's body.
+        # A gate lost that way left nothing discarded, so the count could not
+        # notice it either -- the decision simply disappeared.
+        for second in ("2)**Gate** — Approve the rollout.",
+                       "  2. **Gate** — Approve the rollout."):
+            with self.subTest(second=second):
+                block = closing_block.parse(
+                    "**Critical action points (1 blocking)**\n"
+                    "\n"
+                    "1. Answer — which lane?\n"
+                    + second + "\n"
+                    "\n"
+                    "Done here.\n"
+                )
+
+                self.assertEqual(block.blocking, 1)
+                self.assertEqual(
+                    [item["label"] for item in block.wire_gates()], ["Gate"]
+                )
+                self.assertEqual(block.herdr_state, "blocked")
+
+    def test_a_decimal_opening_a_body_line_is_not_an_item_marker(self):
+        # Relaxing the terminator must not let prose split into items.
+        block = closing_block.parse(
+            "**Critical action points (1 blocking)**\n"
+            "\n"
+            "1. Answer — which lane?\n"
+            "1.5x faster than before.\n"
+            "\n"
+            "Done here.\n"
+        )
+
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(
+            [item["label"] for item in block.wire_items()], ["Answer"]
+        )
+
     def test_an_incomplete_unlabeled_parse_keeps_the_declared_floor(self):
         # Promotion labels what it finds, but finding fewer lines than the
         # header declared means a gate was lost in parsing, not that the
