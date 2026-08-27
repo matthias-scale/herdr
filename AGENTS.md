@@ -270,3 +270,36 @@ agent sessions, so replacing the binary interrupts work that is not visible
 from the build host. Building, testing, and staging an artifact on those hosts
 is fine; swapping the running server is not. Approval covers the one change it
 was given for and does not carry to the next version.
+
+### Deploying a fork build
+
+Use `herdr-session-rescue upgrade --binary <artifact>` (from `matthias-scale/dotfiles`,
+`bin/herdr-session-rescue`). It is the only sanctioned path. It snapshots the live
+agent inventory first and refuses to restart without a restore point, replaces the
+binary, restarts the server, and rebuilds workspaces and agents from the snapshot.
+
+Never `cp` over `~/.local/bin/herdr` directly. On `ub2` that file carries the
+immutable attribute (`chattr +i`) so herdr's own updater cannot swap the fork build
+for upstream; a plain `mv` fails with `Operation not permitted`. The rescue script
+already clears and reapplies the flag (`chflags` on macOS, `sudo chattr` on Linux),
+which is why it is the entry point rather than an install step you write yourself.
+
+Verify after installing by comparing `sha256sum` of the installed binary against the
+build artifact. `strings | grep` for a new keybinding default is not a reliable check;
+binding literals do not always survive as searchable strings.
+
+The build needs Zig exactly 0.15.2, which is usually not the system Zig:
+
+| host | Zig |
+| --- | --- |
+| mac | `$(brew --prefix zig@0.15)/bin/zig` |
+| ub1 | `~/.local/zig-0.15.2/zig` |
+| ub2 | `~/.local/bin/zig` |
+
+Pass it as `ZIG=<path>` or put it first on `PATH`; `cargo build` otherwise fails in
+the `build.zig` step against a newer Zig, and it fails identically on an untouched
+checkout, so the error is not evidence of a bad change.
+
+Do not run the upgrade from a pane owned by the server being restarted: `herdr server
+stop` kills that pane, so the run dies partway with the old server already down.
+Drive it over SSH, from a different multiplexer, or accept losing the session.
