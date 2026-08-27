@@ -13,7 +13,7 @@
 - The sidebar now includes a read-only Symphony workflow dashboard. (#52, MAT-138)
 - Agent supervision now tracks turn-end closing blocks, gates and decisions, declared waits, stale deadlines, and child-process activity across sidebar and API views. (#39, #41, #44, #45, #48, #53-#57, #59-#62, #64-#66)
 - Claude and Codex plan exhaustion now appears as a distinct `usage` gate and clears when the agent screen resumes. (#67)
-- The dock now has a Note tab showing the focused repository's `.herdr/scratchpad.md` read-only, refreshed as the file changes, with its ticket, pull request, preview, and Missive links as clickable rows. `prefix+shift+o` opens that file in the dock editor.
+- The dock now has a Note tab showing the focused repository's `.herdr/scratchpad.md` read-only, refreshed as the file changes, with its ticket, pull request, preview, and Missive links as clickable rows. `ctrl+alt+e` opens that file in the dock editor.
 - `prefix+shift+i` opens an inbox of blocked agents: the longest-waiting one with its terminal inline, a count of how many remain, and Tab to defer. Keys typed there reach that agent without moving focus. An empty queue says nothing is blocked.
 - The top status row now carries clickable `inbox`, `note`, and `dock` buttons on its left, where it was previously blank. The inbox button shows the blocked count. Prefix-free shortcuts `ctrl+alt+i`, `ctrl+alt+n`, and `ctrl+alt+d` reach the same three surfaces, and `ctrl+alt+n` shows the scratchpad without opening an editor.
 

@@ -538,7 +538,7 @@ pub struct KeysConfig {
     pub previous_dock_tab: BindingConfig,
     /// Select the next dock tab. Default: "prefix+shift+]"
     pub next_dock_tab: BindingConfig,
-    /// Open the focused repository's scratchpad in the dock editor. Default: "prefix+shift+o"
+    /// Open the focused repository's scratchpad in the dock editor. Default: "ctrl+alt+e"
     pub edit_scratchpad: BindingConfig,
     /// Show the scratchpad in the dock without opening an editor. Default: "ctrl+alt+n"
     pub show_scratchpad: BindingConfig,
@@ -1276,7 +1276,7 @@ impl Default for KeysConfig {
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
-            edit_scratchpad: BindingConfig::one("prefix+shift+o"),
+            edit_scratchpad: BindingConfig::one("ctrl+alt+e"),
             show_scratchpad: BindingConfig::one("ctrl+alt+n"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
