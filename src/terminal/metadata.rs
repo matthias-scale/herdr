@@ -43,6 +43,81 @@ pub struct EffectivePresentation {
     pub state_labels: HashMap<String, String>,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AgentMetadataHandoffState {
+    source: String,
+    agent_label: Option<String>,
+    applies_to_source: Option<String>,
+    title: Option<String>,
+    display_agent: Option<String>,
+    state_labels: HashMap<String, String>,
+    reported_elapsed: Duration,
+    title_reported_elapsed: Option<Duration>,
+    display_agent_reported_elapsed: Option<Duration>,
+    state_label_reported_elapsed: HashMap<String, Duration>,
+    ttl: Option<Duration>,
+    expiry_event_pending: bool,
+}
+
+#[cfg(unix)]
+impl AgentMetadataHandoffState {
+    fn capture(metadata: &AgentMetadata, now: Instant) -> Self {
+        Self {
+            source: metadata.source.clone(),
+            agent_label: metadata.agent_label.clone(),
+            applies_to_source: metadata.applies_to_source.clone(),
+            title: metadata.title.clone(),
+            display_agent: metadata.display_agent.clone(),
+            state_labels: metadata.state_labels.clone(),
+            reported_elapsed: now.saturating_duration_since(metadata.reported_at),
+            title_reported_elapsed: metadata
+                .title_reported_at
+                .map(|reported_at| now.saturating_duration_since(reported_at)),
+            display_agent_reported_elapsed: metadata
+                .display_agent_reported_at
+                .map(|reported_at| now.saturating_duration_since(reported_at)),
+            state_label_reported_elapsed: metadata
+                .state_label_reported_at
+                .iter()
+                .map(|(state, reported_at)| {
+                    (state.clone(), now.saturating_duration_since(*reported_at))
+                })
+                .collect(),
+            ttl: metadata.ttl,
+            expiry_event_pending: metadata.expiry_event_pending,
+        }
+    }
+
+    fn restore(self, now: Instant) -> AgentMetadata {
+        AgentMetadata {
+            source: self.source,
+            agent_label: self.agent_label,
+            applies_to_source: self.applies_to_source,
+            title: self.title,
+            display_agent: self.display_agent,
+            state_labels: self.state_labels,
+            reported_at: now.checked_sub(self.reported_elapsed).unwrap_or(now),
+            title_reported_at: self
+                .title_reported_elapsed
+                .and_then(|elapsed| now.checked_sub(elapsed)),
+            display_agent_reported_at: self
+                .display_agent_reported_elapsed
+                .and_then(|elapsed| now.checked_sub(elapsed)),
+            state_label_reported_at: self
+                .state_label_reported_elapsed
+                .into_iter()
+                .filter_map(|(state, elapsed)| {
+                    now.checked_sub(elapsed)
+                        .map(|reported_at| (state, reported_at))
+                })
+                .collect(),
+            ttl: self.ttl,
+            expiry_event_pending: self.expiry_event_pending,
+        }
+    }
+}
+
 impl EffectivePresentation {
     fn empty() -> Self {
         Self {
@@ -54,6 +129,32 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
+    #[cfg(unix)]
+    pub(crate) fn agent_metadata_handoff_state(
+        &self,
+        now: Instant,
+    ) -> Vec<AgentMetadataHandoffState> {
+        self.agent_metadata
+            .values()
+            .map(|metadata| AgentMetadataHandoffState::capture(metadata, now))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_agent_metadata_handoff_state(
+        &mut self,
+        metadata: Vec<AgentMetadataHandoffState>,
+        now: Instant,
+    ) {
+        self.agent_metadata = metadata
+            .into_iter()
+            .map(|metadata| {
+                let metadata = metadata.restore(now);
+                (metadata.source.clone(), metadata)
+            })
+            .collect();
+    }
+
     pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }

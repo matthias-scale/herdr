@@ -11,7 +11,7 @@ pub use runtime::TerminalRuntime;
 pub(crate) use runtime_registry::TerminalRuntimeRegistry;
 pub(crate) use state::counts_as_blocked;
 #[cfg(unix)]
-pub(crate) use state::AgentActivityHandoffState;
+pub(crate) use state::{AgentActivityHandoffState, TerminalAgentHandoffState};
 pub use state::{
     AgentMetadataReport, EffectivePresentation, EffectiveStateChange, TerminalState,
     TerminalStateMutation,

@@ -966,6 +966,183 @@ fn live_handoff_preserves_pane_process_io() {
 }
 
 #[test]
+fn live_handoff_preserves_latched_gate_and_done_label() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let fake_codex = base.join("codex");
+
+    fs::create_dir_all(&base).unwrap();
+    fs::write(&fake_codex, "#!/bin/sh\nsleep 30\n").unwrap();
+    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let done_created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done-workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let done_pane_id = done_created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:run-agent",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": done_pane_id,
+                "text": fake_codex.display().to_string(),
+                "keys": ["Enter"]
+            }
+        }),
+    ));
+    // The shell echoes the launch command into the PTY. Wait beyond the
+    // recent-output window so that echo cannot turn the later idle report back
+    // into Working during the report-triggered screen rescan.
+    thread::sleep(Duration::from_secs(9));
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:gate-workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:working",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": done_pane_id,
+                "source": "herdr:codex-closing-block",
+                "agent": "codex",
+                "state": "working",
+                "seq": 1,
+                "v": 2,
+                "gates": [],
+                "items": [],
+                "decisions": []
+            }
+        }),
+    ));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:idle",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": done_pane_id,
+                "source": "herdr:codex-closing-block",
+                "agent": "codex",
+                "state": "idle",
+                "seq": 2,
+                "v": 2,
+                "gates": [],
+                "items": [],
+                "decisions": []
+            }
+        }),
+    ));
+    let source = "herdr:codex-closing-block";
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": source,
+                "agent": "codex",
+                "state": "blocked",
+                "seq": 1,
+                "v": 2,
+                "gates": [{"n": 1, "label": "Gate", "text": "Choose the release path"}],
+                "items": [],
+                "decisions": []
+            }
+        }),
+    ));
+    let before = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:before",
+            "method": "pane.get",
+            "params": {"pane_id": pane_id}
+        }),
+    );
+    assert_eq!(before["result"]["pane"]["agent_status"], "blocked");
+    assert_eq!(
+        before["result"]["pane"]["gates"].as_array().unwrap().len(),
+        1
+    );
+    let done_before = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:before",
+            "method": "pane.get",
+            "params": {"pane_id": done_pane_id}
+        }),
+    );
+    assert_eq!(done_before["result"]["pane"]["agent_status"], "done");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    // Let the imported runtime complete several detector ticks. A restored
+    // lifecycle label is not preserved if the new detector immediately
+    // replaces it with its own default Unknown state.
+    thread::sleep(Duration::from_secs(1));
+
+    let after = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:after",
+            "method": "pane.get",
+            "params": {"pane_id": pane_id}
+        }),
+    );
+    assert_eq!(
+        after["result"]["pane"]["gates"].as_array().unwrap().len(),
+        1
+    );
+    let done_after = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:after",
+            "method": "pane.get",
+            "params": {"pane_id": done_pane_id}
+        }),
+    );
+    assert_eq!(done_after["result"]["pane"]["agent_status"], "done");
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_preserves_keyboard_protocol_for_client_input() {
     let _lock = test_lock();
     let base = unique_test_dir();
