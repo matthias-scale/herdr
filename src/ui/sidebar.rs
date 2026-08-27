@@ -105,7 +105,7 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 /// count, the section membership and the row's red gate chip must all be
 /// answers to the same question, or the sidebar reads `Blocked (0)` above
 /// visible gate rows.
-pub(super) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
+pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
     entry.state == AgentState::Blocked || entry.open_blockers || entry.usage_limited
 }
 

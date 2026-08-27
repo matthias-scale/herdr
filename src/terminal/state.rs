@@ -1176,6 +1176,24 @@ impl TerminalState {
             .map(|authority| authority.reported_at)
     }
 
+    /// Whether this pane is waiting on a human, for every worklist that asks.
+    ///
+    /// The lifecycle `state` alone is not the answer. A latched closing-block
+    /// gate deliberately outlives `AgentState::Blocked`: output retirement and
+    /// screen arbitration move the lifecycle on while the gate stays latched,
+    /// because the human decision it names has not been made yet. A usage limit
+    /// is the same shape of fact from a different source.
+    ///
+    /// Every consumer that ranks or counts "needs me" panes must ask this, so
+    /// that a pane cannot be blocked for one surface and idle for another. The
+    /// sidebar asks it through the aggregated projection
+    /// (`ui::sidebar::entry_is_blocked`), which must stay equivalent to this;
+    /// `app::inbox::tests::the_inbox_queue_and_the_sidebar_agree_on_every_combination`
+    /// pins the two together.
+    pub fn is_blocked_or_gated(&self) -> bool {
+        self.state == AgentState::Blocked || !self.closing_gates.is_empty() || self.usage_limited
+    }
+
     /// True while the pane only reads as working because sub-process evidence
     /// outranks the agent's own report.
     ///
