@@ -61,6 +61,34 @@ fn test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// `pane.get` and the event stream are eventually consistent: the status change is
+/// published before the queried snapshot is updated, so an immediate read can still
+/// return the previous status. Poll rather than assert once.
+fn wait_for_pane_agent_status(
+    socket_path: &Path,
+    request_id: &str,
+    pane_id: &str,
+    expected: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pane = send_request(
+            socket_path,
+            &format!(
+                r#"{{"id":"{request_id}","method":"pane.get","params":{{"pane_id":"{pane_id}"}}}}"#
+            ),
+        );
+        if pane["result"]["pane"]["agent_status"] == expected {
+            return pane;
+        }
+        if Instant::now() >= deadline {
+            panic!("pane {pane_id} never reported agent_status {expected}; last: {pane}");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn wait_for_socket(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -2384,14 +2412,13 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
     assert_eq!(status_event["data"]["agent_status"], "done");
     assert_eq!(status_event["data"]["agent"], "pi");
 
-    let pane = send_request(
+    wait_for_pane_agent_status(
         &socket_path,
-        &format!(
-            r#"{{"id":"req_status_5","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
-            background_pane_id
-        ),
+        "req_status_5",
+        &background_pane_id,
+        "done",
+        Duration::from_secs(5),
     );
-    assert_eq!(pane["result"]["pane"]["agent_status"], "done");
 
     let mut already_done_reader = open_subscription(
         &socket_path,
