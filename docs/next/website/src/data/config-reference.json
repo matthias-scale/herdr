@@ -640,7 +640,7 @@
         {
           "key": "keys.edit_scratchpad",
           "type": "keybinding",
-          "default": "\"prefix+shift+o\"",
+          "default": "\"ctrl+alt+e\"",
           "description": "Open the focused repository's scratchpad in the dock editor."
         },
         {
