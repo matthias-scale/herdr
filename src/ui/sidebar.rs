@@ -94,27 +94,22 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 
 /// Membership in the Blocked worklist.
 ///
-/// A latched gate outlives the blocked lifecycle state -- see
-/// `PaneDetail::open_blockers`: output retirement flips the pane back to
-/// working while the human decision is still open -- and liveness is a
-/// separate dimension from blocked-ness, so a supervisor that went quiet
-/// leaves the gate unanswered rather than closing it. Neither may drop a row
-/// out of the worklist.
-///
-/// This sits next to `gate_overrides_label` on purpose: the section header
-/// count, the section membership and the row's red gate chip must all be
-/// answers to the same question, or the sidebar reads `Blocked (0)` above
-/// visible gate rows.
+/// The terminal predicate is the single rule for this section and the inbox.
+/// A human gate blocks only after the pane stops working. Usage limits remain
+/// blocked because the pane cannot proceed until the reset window.
 pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
-    entry.state == AgentState::Blocked || entry.open_blockers || entry.usage_limited
+    crate::terminal::counts_as_blocked(entry.state, entry.open_blockers, entry.usage_limited)
 }
 
-/// A latched gate must never hide behind a lifecycle label: any row that
-/// carries the red blocker dot reads as its blocked label ("gate") too, even
-/// while the agent is still mid-turn working.
+/// A working pane keeps its blue lifecycle label while a human gate is latched.
+/// Once work stops, the gate becomes blocking and supplies the blocked label.
+/// Usage limits still override every lifecycle label.
 pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
     entry.usage_limited
-        || (entry.open_blockers && !entry.stale && entry.state != AgentState::Blocked)
+        || (entry.open_blockers
+            && !entry.stale
+            && entry.state != AgentState::Blocked
+            && entry.state != AgentState::Working)
 }
 
 /// A usage limit outranks every other label: the pane is not working, and no
@@ -432,7 +427,8 @@ pub(crate) struct AgentPanelEntry {
     pub prio: bool,
     pub state: AgentState,
     /// The last closing-block report still names at least one gate, even if
-    /// the lifecycle state has moved on. Drives the persistent red blocker dot.
+    /// the lifecycle state has moved on. It becomes a red blocker dot once the
+    /// pane stops working.
     pub open_blockers: bool,
     /// The pane's agent stopped on an exhausted plan usage/rate limit. Nobody
     /// can answer it, so it reads as its own red "usage" label rather than a
@@ -2858,7 +2854,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
     };
     spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
-    if (entry.open_blockers || entry.usage_limited) && entry.state != AgentState::Blocked {
+    if entry_is_blocked(&entry) && entry.state != AgentState::Blocked {
         spans.extend([
             Span::styled("●", Style::default().fg(p.red)),
             Span::raw(" "),
@@ -2972,10 +2968,7 @@ fn render_agent_card(
         let prefix_width = display_width_u16(&prefix);
         let mut spans = vec![Span::raw(prefix)];
         let mut blocker_dot_width = 0u16;
-        if row_index == 0
-            && (detail.open_blockers || detail.usage_limited)
-            && detail.state != AgentState::Blocked
-        {
+        if row_index == 0 && entry_is_blocked(detail) && detail.state != AgentState::Blocked {
             spans.extend([
                 Span::styled("●", Style::default().fg(p.red)),
                 Span::raw(" "),
@@ -3968,7 +3961,7 @@ mod tests {
     }
 
     #[test]
-    fn a_working_pane_with_persisted_gates_keeps_a_red_blocker_dot() {
+    fn a_working_pane_with_persisted_gates_keeps_only_the_blue_working_dot() {
         let mut app = app_with_agents(&["one"]);
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
@@ -3996,8 +3989,44 @@ mod tests {
             .expect("pane entry");
         assert!(entry.open_blockers);
         assert_eq!(entry.state, AgentState::Working);
+        assert!(!entry_is_blocked(&entry));
+        assert!(!gate_overrides_label(&entry));
 
-        // The dot clears once a later report carries no gates.
+        let layout = tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            60,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(
+            agent_panel_label_color(&entry, &app.palette),
+            app.palette.blue
+        );
+
+        for width in [18, 60] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut rendered = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            rendered
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let buffer = rendered.backend().buffer();
+            let colored_dots = |color| {
+                (0..area.height)
+                    .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+                    .filter(|(x, y)| {
+                        let cell = &buffer[(*x, *y)];
+                        cell.symbol() == "●" && cell.fg == color
+                    })
+                    .count()
+            };
+            assert_eq!(colored_dots(app.palette.red), 0, "width {width}");
+            assert_eq!(colored_dots(app.palette.blue), 1, "width {width}");
+        }
+
+        // Clearing the gate does not change the already-correct working row.
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
         let entry = sidebar_thread_entries(&app)
@@ -4007,13 +4036,11 @@ mod tests {
         assert!(!entry.open_blockers);
     }
 
-    /// The reported bug: the sidebar read `Blocked (0)` while gate rows were
-    /// visible below it. The header counted `state == Blocked` while the row
-    /// chip and the red dot ran off the latched gate, so every pane whose
-    /// agent had resumed working -- or whose supervisor had gone quiet --
-    /// carried a gate chip the section refused to count.
+    /// Owner correction to #77: the same latched gate is not blocking while
+    /// work runs, then becomes blocking without a new gate report once work
+    /// stops.
     #[test]
-    fn the_blocked_section_counts_a_latched_gate_on_a_working_pane() {
+    fn the_blocked_section_counts_a_latched_gate_only_after_work_stops() {
         let mut app = app_with_agents(&["one"]);
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
@@ -4039,53 +4066,46 @@ mod tests {
             .into_iter()
             .find(|entry| entry.pane_id == pane)
             .expect("pane entry");
-        // The precondition the bug needed: chip says gate, lifecycle says working.
         assert!(entry.open_blockers);
         assert_eq!(entry.state, AgentState::Working);
-        assert!(gate_overrides_label(&entry));
-
-        // The chip and the header must now be answers to the same question.
-        assert!(entry_is_blocked(&entry));
-        let rows = sidebar_rows(&app);
-        let count = rows
-            .iter()
-            .find_map(|row| match row {
-                SidebarRow::SectionHeader { title, count, .. }
-                    if *title == BLOCKED_SECTION_TITLE =>
-                {
-                    Some(*count)
-                }
-                _ => None,
-            })
-            .expect("blocked header");
-        assert_eq!(count, 1, "a latched gate belongs to the Blocked worklist");
-
-        // A quiet supervisor is a liveness fact, not an answered gate: the row
-        // stays in the worklist rather than being sorted out of sight.
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.supervisor_stale = true;
-        app.reconcile_sidebar_presentation();
-        let entry = sidebar_thread_entries(&app)
-            .into_iter()
-            .find(|entry| entry.pane_id == pane)
-            .expect("pane entry");
-        assert!(entry.stale);
-        assert!(entry_is_blocked(&entry));
-
-        // Answering the gate is what clears it, and only that.
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.supervisor_stale = false;
-        terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
-        app.reconcile_sidebar_presentation();
-        let entry = sidebar_thread_entries(&app)
-            .into_iter()
-            .find(|entry| entry.pane_id == pane)
-            .expect("pane entry");
         assert!(!entry_is_blocked(&entry));
+        assert!(!gate_overrides_label(&entry));
+
+        let blocked_summary = |rows: &[SidebarRow]| {
+            let count = rows
+                .iter()
+                .find_map(|row| match row {
+                    SidebarRow::SectionHeader { title, count, .. }
+                        if *title == BLOCKED_SECTION_TITLE =>
+                    {
+                        Some(*count)
+                    }
+                    _ => None,
+                })
+                .expect("blocked header");
+            let visible_rows = rows
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Agent { depth: 0, .. }))
+                .count();
+            (count, visible_rows)
+        };
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (0, 0));
+
+        app.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        app.reconcile_sidebar_presentation();
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| entry.pane_id == pane)
+            .expect("pane entry");
+        assert!(entry.open_blockers, "the gate stays latched");
+        assert_eq!(entry.state, AgentState::Idle);
+        assert!(entry_is_blocked(&entry));
+        assert!(gate_overrides_label(&entry));
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (1, 1));
     }
 
     #[test]
-    fn a_working_pane_with_persisted_gates_labels_as_blocked() {
+    fn a_working_pane_with_persisted_gates_labels_as_working() {
         let mut app = app_with_agents(&["one"]);
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
@@ -4122,9 +4142,18 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("blocked"));
+        assert_eq!(layout.state.as_deref(), Some("working"));
+        let mobile_layout = mobile_tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            18,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(mobile_layout.state.as_deref(), Some("working"));
 
-        // A configured blocked label ("gate") wins over the fallback.
+        // A configured blocked label cannot hide the blue working state.
         entry.state_labels.insert("blocked".into(), "gate".into());
         entry
             .state_labels
@@ -4137,10 +4166,10 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("gate"));
+        assert_eq!(layout.state.as_deref(), Some("working"));
 
-        // Without a latched gate the same working pane reads as working.
-        entry.open_blockers = false;
+        // Once the pane stops, the unchanged gate supplies that label.
+        entry.state = AgentState::Idle;
         let layout = tab_row_layout(
             &entry,
             app.view_observed_at,
@@ -4149,7 +4178,16 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.state.as_deref(), Some("gate"));
+        let mobile_layout = mobile_tab_row_layout(
+            &entry,
+            app.view_observed_at,
+            18,
+            4,
+            &app.palette,
+            app.status_indicators,
+        );
+        assert_eq!(mobile_layout.state.as_deref(), Some("gate"));
     }
 
     #[test]

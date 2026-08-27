@@ -30,8 +30,8 @@ mod scrollbar;
 mod settings;
 mod sidebar;
 /// Exposed so the inbox tests can assert the queue and the sidebar answer the
-/// blocked question identically. Production code reaches the same rule through
-/// `TerminalState::is_blocked_or_gated`.
+/// blocked question identically. Both production paths use
+/// `terminal::counts_as_blocked`.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
 /// Gutter cell widths are asserted by mouse-dispatch tests that live outside this module.
