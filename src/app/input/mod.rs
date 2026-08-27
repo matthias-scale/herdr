@@ -211,6 +211,19 @@ impl App {
         }
     }
 
+    /// A status-bar button does exactly what its keybinding does, so the two
+    /// affordances can never drift into meaning different things.
+    fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
+        use crate::app::state::StatusButtonAction;
+        match action {
+            StatusButtonAction::Inbox => self.state.toggle_inbox(),
+            StatusButtonAction::Scratchpad => self.state.show_scratchpad_tab(),
+            StatusButtonAction::Dock => {
+                self.state.dock_collapsed = !self.state.dock_collapsed;
+            }
+        }
+    }
+
     pub(crate) fn handle_symphony_key(&mut self, key: KeyEvent) -> bool {
         let Some(detail) = self.state.symphony_detail.as_mut() else {
             return false;
@@ -609,6 +622,23 @@ impl App {
                 } else {
                     self.show_work_link_notice("copied");
                 }
+                return;
+            }
+
+            if let Some(action) = self
+                .state
+                .view
+                .status_buttons
+                .iter()
+                .find(|button| {
+                    mouse.column >= button.rect.x
+                        && mouse.column < button.rect.x.saturating_add(button.rect.width)
+                        && mouse.row >= button.rect.y
+                        && mouse.row < button.rect.y.saturating_add(button.rect.height)
+                })
+                .map(|button| button.action)
+            {
+                self.activate_status_button(action);
                 return;
             }
 

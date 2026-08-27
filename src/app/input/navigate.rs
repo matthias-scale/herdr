@@ -458,6 +458,10 @@ impl App {
                 self.open_scratchpad_in_editor();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::ShowScratchpad => {
+                self.state.show_scratchpad_tab();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CyclePaneNext => {
                 self.cycle_pane_via_api(false);
                 leave_navigate_mode(&mut self.state);
@@ -1713,6 +1717,7 @@ pub(crate) enum NavigateAction {
     NextDockTab,
     OpenInbox,
     EditScratchpad,
+    ShowScratchpad,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -1882,6 +1887,7 @@ fn non_indexed_action_for_key(
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
         (&kb.edit_scratchpad, NavigateAction::EditScratchpad),
+        (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.inbox, NavigateAction::OpenInbox),
@@ -2207,6 +2213,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         // Spawning the editor needs an `App`; the state-only mirror cannot do it.
         NavigateAction::EditScratchpad => leave_navigate_mode(state),
+        NavigateAction::ShowScratchpad => {
+            state.show_scratchpad_tab();
+            leave_navigate_mode(state);
+        }
         NavigateAction::CyclePaneNext => {
             state.cycle_pane(false);
             leave_navigate_mode(state);

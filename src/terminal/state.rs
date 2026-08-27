@@ -161,6 +161,115 @@ pub(crate) struct AgentActivityHandoffState {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TerminalAgentHandoffState {
+    state: AgentActivityHandoffStatus,
+    #[serde(default)]
+    detected_agent: Option<String>,
+    #[serde(default)]
+    recent_agent_process_exit: Option<RecentAgentProcessExitHandoffState>,
+    hook_authority: Option<HookAuthorityHandoffState>,
+    supervisor_stale: bool,
+    metadata: Vec<metadata::AgentMetadataHandoffState>,
+    closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
+    closing_items: Vec<crate::api::schema::ClosingBlockItem>,
+    closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RecentAgentProcessExitHandoffState {
+    agent_label: String,
+    observed_elapsed: Duration,
+}
+
+#[cfg(unix)]
+impl TerminalAgentHandoffState {
+    pub(crate) fn handoff_detection_seed(&self) -> (Option<Agent>, AgentState) {
+        (
+            self.detected_agent
+                .as_deref()
+                .and_then(crate::detect::parse_canonical_agent_label)
+                .or_else(|| {
+                    self.hook_authority.as_ref().and_then(|authority| {
+                        crate::detect::parse_canonical_agent_label(&authority.agent_label)
+                    })
+                }),
+            self.state.into(),
+        )
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HookAuthorityHandoffState {
+    source: String,
+    agent_label: String,
+    state: AgentActivityHandoffStatus,
+    message: Option<String>,
+    reported_elapsed: Duration,
+    wait: Option<String>,
+    eta_s: Option<u64>,
+    reported_at_wire: Option<String>,
+    session_ref: Option<AgentSessionRefHandoffState>,
+    retired_elapsed: Option<Duration>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AgentSessionRefHandoffState {
+    kind: crate::agent_resume::AgentSessionRefKind,
+    value: String,
+}
+
+#[cfg(unix)]
+impl HookAuthorityHandoffState {
+    fn capture(authority: &HookAuthority, now: Instant) -> Self {
+        Self {
+            source: authority.source.clone(),
+            agent_label: authority.agent_label.clone(),
+            state: authority.state.into(),
+            message: authority.message.clone(),
+            reported_elapsed: now.saturating_duration_since(authority.reported_at),
+            wait: authority.wait.clone(),
+            eta_s: authority.eta_s,
+            reported_at_wire: authority.reported_at_wire.clone(),
+            session_ref: authority.session_ref.as_ref().map(|session_ref| {
+                AgentSessionRefHandoffState {
+                    kind: session_ref.kind,
+                    value: session_ref.value.clone(),
+                }
+            }),
+            retired_elapsed: authority
+                .retired_at
+                .map(|retired_at| now.saturating_duration_since(retired_at)),
+        }
+    }
+
+    fn restore(self, now: Instant) -> HookAuthority {
+        HookAuthority {
+            source: self.source,
+            agent_label: self.agent_label,
+            state: self.state.into(),
+            message: self.message,
+            reported_at: now.checked_sub(self.reported_elapsed).unwrap_or(now),
+            wait: self.wait,
+            eta_s: self.eta_s,
+            reported_at_wire: self.reported_at_wire,
+            session_ref: self
+                .session_ref
+                .map(|session_ref| crate::agent_resume::AgentSessionRef {
+                    kind: session_ref.kind,
+                    value: session_ref.value,
+                }),
+            retired_at: self
+                .retired_elapsed
+                .and_then(|elapsed| now.checked_sub(elapsed)),
+        }
+    }
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum AgentActivityHandoffStatus {
     Idle,
@@ -2507,6 +2616,78 @@ impl TerminalState {
     }
 
     #[cfg(unix)]
+    pub(crate) fn terminal_agent_handoff_state(
+        &self,
+        now: Instant,
+    ) -> Option<TerminalAgentHandoffState> {
+        let metadata = self.agent_metadata_handoff_state(now);
+        if self.state == AgentState::Unknown
+            && self.detected_agent.is_none()
+            && self.recent_agent_process_exit.is_none()
+            && self.hook_authority.is_none()
+            && !self.supervisor_stale
+            && metadata.is_empty()
+            && self.closing_gates.is_empty()
+            && self.closing_items.is_empty()
+            && self.closing_decisions.is_empty()
+        {
+            return None;
+        }
+        Some(TerminalAgentHandoffState {
+            state: self.state.into(),
+            detected_agent: self
+                .detected_agent
+                .map(crate::detect::agent_label)
+                .map(str::to_string),
+            recent_agent_process_exit: self.recent_agent_process_exit.map(|exit| {
+                RecentAgentProcessExitHandoffState {
+                    agent_label: crate::detect::agent_label(exit.agent).to_string(),
+                    observed_elapsed: now.saturating_duration_since(exit.observed_at),
+                }
+            }),
+            hook_authority: self
+                .hook_authority
+                .as_ref()
+                .map(|authority| HookAuthorityHandoffState::capture(authority, now)),
+            supervisor_stale: self.supervisor_stale,
+            metadata,
+            closing_gates: self.closing_gates.clone(),
+            closing_items: self.closing_items.clone(),
+            closing_decisions: self.closing_decisions.clone(),
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_terminal_agent_handoff_state(
+        &mut self,
+        handoff: TerminalAgentHandoffState,
+        now: Instant,
+    ) {
+        self.state = handoff.state.into();
+        self.fallback_state = self.state;
+        self.detected_agent = handoff
+            .detected_agent
+            .as_deref()
+            .and_then(crate::detect::parse_canonical_agent_label);
+        self.recent_agent_process_exit = handoff.recent_agent_process_exit.and_then(|exit| {
+            crate::detect::parse_canonical_agent_label(&exit.agent_label).map(|agent| {
+                RecentAgentProcessExit {
+                    agent,
+                    observed_at: now.checked_sub(exit.observed_elapsed).unwrap_or(now),
+                }
+            })
+        });
+        self.hook_authority = handoff
+            .hook_authority
+            .map(|authority| authority.restore(now));
+        self.supervisor_stale = handoff.supervisor_stale;
+        self.restore_agent_metadata_handoff_state(handoff.metadata, now);
+        self.closing_gates = handoff.closing_gates;
+        self.closing_items = handoff.closing_items;
+        self.closing_decisions = handoff.closing_decisions;
+    }
+
+    #[cfg(unix)]
     pub(crate) fn restore_agent_activity_handoff_state(
         &mut self,
         handoff: AgentActivityHandoffState,
@@ -3399,6 +3580,131 @@ mod tests {
             Some(started + Duration::from_secs(2))
         );
         assert_eq!(restored.agent_activity_owner, source.agent_activity_owner);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_latched_gate_without_a_followup_report() {
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        source.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Choose the release path".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let encoded = serde_json::to_string(
+            &source
+                .terminal_agent_handoff_state(captured_at)
+                .expect("latched gate should create handoff state"),
+        )
+        .unwrap();
+        let decoded: TerminalAgentHandoffState = serde_json::from_str(&encoded).unwrap();
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
+
+        assert_eq!(restored.closing_gates, source.closing_gates);
+        assert_eq!(restored.state, AgentState::Unknown);
+        assert!(restored.hook_authority.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_stale_lifecycle_and_guarded_state_labels() {
+        let reported_at = Instant::now();
+        let source_name = "herdr:codex-closing-block";
+        let mut source = test_terminal();
+        source
+            .set_hook_authority_report_at(
+                source_name.into(),
+                "codex".into(),
+                AgentState::Working,
+                None,
+                None,
+                None,
+                Some("2026-08-27T10:00:00Z".into()),
+                None,
+                Some(1),
+                reported_at,
+            )
+            .expect("working report accepted");
+        source
+            .set_agent_metadata(AgentMetadataReport {
+                source: source_name.into(),
+                agent_label: Some("codex".into()),
+                applies_to_source: Some(source_name.into()),
+                title: None,
+                display_agent: None,
+                state_labels: HashMap::from([("stale".into(), "overdue".into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: None,
+            })
+            .expect("metadata report accepted");
+        source.supervisor_stale = true;
+
+        let captured_at = reported_at + Duration::from_secs(30);
+        let handoff = source
+            .terminal_agent_handoff_state(captured_at)
+            .expect("stale lifecycle should create handoff state");
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(handoff, captured_at + Duration::from_secs(1));
+
+        assert_eq!(restored.state, AgentState::Working);
+        assert!(restored.supervisor_stale);
+        assert_eq!(
+            restored.effective_presentation().state_labels.get("stale"),
+            Some(&"overdue".to_string())
+        );
+        assert_eq!(
+            restored
+                .hook_authority
+                .as_ref()
+                .map(|authority| authority.reported_at),
+            Some(reported_at + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_recent_agent_exit_context_and_detection_seed() {
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        source.set_detected_state_with_visible_blocker(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            false,
+            true,
+        );
+
+        let handoff = source
+            .terminal_agent_handoff_state(captured_at)
+            .expect("recent agent exit should create handoff state");
+        assert_eq!(
+            handoff.handoff_detection_seed(),
+            (Some(Agent::Codex), AgentState::Idle)
+        );
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(handoff, captured_at + Duration::from_secs(1));
+
+        assert_eq!(restored.agent_lifecycle_context(), Some(Agent::Codex));
+        assert_eq!(restored.effective_agent_label(), None);
+        assert_eq!(restored.state, AgentState::Idle);
     }
 
     #[test]

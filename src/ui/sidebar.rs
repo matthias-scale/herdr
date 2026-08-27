@@ -694,7 +694,17 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         open_blockers: detail.open_blockers,
                         usage_limited: detail.usage_limited,
-                        active_subagents: detail.active_subagents.filter(|count| *count > 0),
+                        // Prefer the live count; fall back to the reported
+                        // token so panes without a live source keep a count.
+                        active_subagents: detail
+                            .active_subagents
+                            .or_else(|| {
+                                detail
+                                    .tokens
+                                    .get("closing_agents")
+                                    .and_then(|value| value.parse::<u32>().ok())
+                            })
+                            .filter(|count| *count > 0),
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         stale: detail.stale,
@@ -3556,6 +3566,43 @@ mod tests {
         }
     }
 
+    fn set_closing_agents_token(app: &mut AppState, ws_idx: usize, value: Option<&str>) {
+        let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .metadata_tokens
+            .patch(
+                std::collections::HashMap::from([(
+                    "closing_agents".into(),
+                    value.map(str::to_string),
+                )]),
+                None,
+                std::time::Instant::now(),
+            );
+    }
+
+    #[test]
+    fn sidebar_entry_parses_only_positive_closing_agent_counts() {
+        for (value, expected) in [
+            (None, None),
+            (Some(""), None),
+            (Some("0"), None),
+            (Some("invalid"), None),
+            (Some("4294967296"), None),
+            (Some("3"), Some(3)),
+        ] {
+            let mut app = app_with_agents(&["one"]);
+            if value.is_some() {
+                set_closing_agents_token(&mut app, 0, value);
+            }
+            let entry = all_agent_panel_entries(&app).remove(0);
+            assert_eq!(entry.active_subagents, expected, "value {value:?}");
+        }
+    }
     fn configure_real_sidebar_agent(
         app: &mut AppState,
         ws_idx: usize,

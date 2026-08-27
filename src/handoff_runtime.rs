@@ -29,6 +29,10 @@ pub(crate) struct HandoffRuntimeState {
     pub initial_history_ansi: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_activity: Option<crate::terminal::AgentActivityHandoffState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<crate::terminal::TerminalAgentHandoffState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_seen: Option<bool>,
 }
 
 #[cfg(unix)]

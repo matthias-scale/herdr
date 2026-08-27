@@ -941,6 +941,26 @@ pub struct ViewState {
     pub dock_tab_hit_areas: Vec<Rect>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
+    /// Left-aligned status-bar buttons, computed once per frame so the rendered
+    /// label and the clickable rect can never disagree.
+    pub status_buttons: Vec<StatusButton>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusButtonAction {
+    Inbox,
+    Scratchpad,
+    Dock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusButton {
+    pub rect: Rect,
+    pub label: String,
+    pub action: StatusButtonAction,
+    /// Drawn with the accent instead of the dim overlay: the inbox has work in
+    /// it, or the surface this button opens is already showing.
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1899,6 +1919,15 @@ impl AppState {
         self.loop_run_history_detail = None;
     }
 
+    /// Reveal the scratchpad without spawning an editor: the dock opens if it was
+    /// collapsed and selects the Note tab. Reading the note is the common case;
+    /// editing it is the deliberate one.
+    pub(crate) fn show_scratchpad_tab(&mut self) {
+        self.dock_collapsed = false;
+        self.dock_tab = DockTab::Scratchpad;
+        self.dock_editor_focused = false;
+    }
+
     pub(crate) fn toggle_loop_run_history(&mut self) {
         if self.loop_run_history_detail.is_some() {
             self.clear_loop_run_history();
@@ -2370,6 +2399,7 @@ impl AppState {
                 dock_tab_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
+                status_buttons: Vec::new(),
             },
             drag: None,
             workspace_press: None,
