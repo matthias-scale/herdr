@@ -694,11 +694,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         open_blockers: detail.open_blockers,
                         usage_limited: detail.usage_limited,
-                        active_subagents: detail
-                            .tokens
-                            .get("closing_agents")
-                            .and_then(|value| value.parse::<u32>().ok())
-                            .filter(|count| *count > 0),
+                        active_subagents: detail.active_subagents.filter(|count| *count > 0),
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         stale: detail.stale,
@@ -3406,7 +3402,7 @@ mod tests {
         app
     }
 
-    fn set_closing_agents_token(app: &mut AppState, ws_idx: usize, value: Option<&str>) {
+    fn set_active_subagents(app: &mut AppState, ws_idx: usize, value: Option<u32>) {
         let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
         let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -3414,15 +3410,7 @@ mod tests {
         app.terminals
             .get_mut(&terminal_id)
             .expect("test terminal")
-            .metadata_tokens
-            .patch(
-                std::collections::HashMap::from([(
-                    "closing_agents".into(),
-                    value.map(str::to_string),
-                )]),
-                None,
-                std::time::Instant::now(),
-            );
+            .set_active_subagents(value);
     }
 
     fn render_first_tab_row(app: &AppState, width: u16) -> String {
@@ -3439,18 +3427,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_entry_parses_only_positive_closing_agent_counts() {
-        for (value, expected) in [
-            (None, None),
-            (Some(""), None),
-            (Some("0"), None),
-            (Some("invalid"), None),
-            (Some("4294967296"), None),
-            (Some("3"), Some(3)),
-        ] {
+    fn sidebar_entry_shows_only_positive_active_subagent_counts() {
+        for (value, expected) in [(None, None), (Some(0), None), (Some(3), Some(3))] {
             let mut app = app_with_agents(&["one"]);
             if value.is_some() {
-                set_closing_agents_token(&mut app, 0, value);
+                set_active_subagents(&mut app, 0, value);
             }
             let entry = all_agent_panel_entries(&app).remove(0);
             assert_eq!(entry.active_subagents, expected, "value {value:?}");
@@ -3461,7 +3442,7 @@ mod tests {
     fn active_subagent_count_is_dimmed_and_right_aligned() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("render sidebar count".into());
-        set_closing_agents_token(&mut app, 0, Some("3"));
+        set_active_subagents(&mut app, 0, Some(3));
         let area = Rect::new(0, 0, 40, 20);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -3488,7 +3469,7 @@ mod tests {
         missing.workspaces[0].tabs[0].custom_name = Some("quiet row".into());
         let mut zero = app_with_agents(&["one"]);
         zero.workspaces[0].tabs[0].custom_name = Some("quiet row".into());
-        set_closing_agents_token(&mut zero, 0, Some("0"));
+        set_active_subagents(&mut zero, 0, Some(0));
 
         let missing_row = render_first_tab_row(&missing, 40);
         let zero_row = render_first_tab_row(&zero, 40);
@@ -3500,7 +3481,7 @@ mod tests {
     fn narrow_subagent_count_preserves_title_and_column_alignment() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("narrow sidebar title".into());
-        set_closing_agents_token(&mut app, 0, Some("3"));
+        set_active_subagents(&mut app, 0, Some(3));
         let area = Rect::new(0, 0, 18, 20);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -3542,7 +3523,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        set_closing_agents_token(&mut app, 0, Some("3"));
+        set_active_subagents(&mut app, 0, Some(3));
         app.reconcile_sidebar_presentation();
 
         for width in [18, 40] {
