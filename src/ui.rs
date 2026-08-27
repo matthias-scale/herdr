@@ -446,6 +446,11 @@ fn compute_view_internal(
             }
             rows
         },
+        status_buttons: if status_bar_is_renderable(app, area) {
+            status::status_buttons(app, status_bar_rect)
+        } else {
+            Vec::new()
+        },
         scratchpad_link_rows: if !app.dock_collapsed
             && app.dock_tab == crate::app::DockTab::Scratchpad
         {
@@ -599,6 +604,7 @@ fn compute_mobile_view(
         terminal_area,
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),
+        status_buttons: Vec::new(),
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
@@ -2144,9 +2150,11 @@ mod tests {
         assert!(panes
             .iter()
             .any(|(key, label)| key == "prefix+l" && label.as_ref() == "focus pane right"));
+        // Both routes are listed: the dock is reachable by prefix and by shorthand.
         assert!(panes
             .iter()
-            .any(|(key, label)| key == "prefix+shift+e" && label.as_ref() == "toggle dock"));
+            .any(|(key, label)| key == "prefix+shift+e / ctrl+alt+d"
+                && label.as_ref() == "toggle dock"));
     }
 
     #[test]

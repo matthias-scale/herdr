@@ -370,6 +370,7 @@ pub struct Keybinds {
     pub previous_dock_tab: ActionKeybinds,
     pub next_dock_tab: ActionKeybinds,
     pub edit_scratchpad: ActionKeybinds,
+    pub show_scratchpad: ActionKeybinds,
     pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
     pub inbox: ActionKeybinds,
@@ -554,6 +555,7 @@ impl Config {
             previous_dock_tab: empty_action!(),
             next_dock_tab: empty_action!(),
             edit_scratchpad: empty_action!(),
+            show_scratchpad: empty_action!(),
             toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
             inbox: empty_action!(),
@@ -717,6 +719,7 @@ impl Config {
             apply_action!(keybinds.previous_dock_tab, previous_dock_tab, source);
             apply_action!(keybinds.next_dock_tab, next_dock_tab, source);
             apply_action!(keybinds.edit_scratchpad, edit_scratchpad, source);
+            apply_action!(keybinds.show_scratchpad, show_scratchpad, source);
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.inbox, inbox, source);

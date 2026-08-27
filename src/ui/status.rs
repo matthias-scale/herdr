@@ -11,7 +11,9 @@ use ratatui::{
 use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
-    app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
+    app::state::{
+        CopyFeedback, Palette, StatusButton, StatusButtonAction, ToastKind, ToastNotification,
+    },
     app::AppState,
     config::{StatusIndicatorStyle, ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
@@ -64,6 +66,98 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(seg.text.clone(), style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), area);
+
+    for button in &app.view.status_buttons {
+        let style = if button.active {
+            Style::default().fg(p.accent).bg(p.panel_bg)
+        } else {
+            Style::default()
+                .fg(p.overlay0)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::DIM)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(button.label.clone(), style))),
+            button.rect,
+        );
+    }
+}
+
+/// Left-aligned quick-access buttons. The status bar's own segments are
+/// right-aligned, so the left half is otherwise pure padding.
+///
+/// The inbox button carries its count so the number is readable without opening
+/// anything, which is the whole reason the count exists.
+pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let blocked = app.blocked_agents().len();
+    let specs = [
+        (
+            StatusButtonAction::Inbox,
+            if blocked > 0 {
+                format!(" inbox {blocked} ")
+            } else {
+                " inbox ".to_string()
+            },
+            blocked > 0,
+        ),
+        (
+            StatusButtonAction::Scratchpad,
+            " note ".to_string(),
+            !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Scratchpad,
+        ),
+        (
+            StatusButtonAction::Dock,
+            " dock ".to_string(),
+            !app.dock_collapsed,
+        ),
+    ];
+
+    // The right-aligned segments are load-bearing; buttons yield to them rather
+    // than overlapping, and drop whole rather than truncating to an unreadable stub.
+    let reserved = segment_width(&fitted_segments(
+        status_segments(app, metrics_or_unavailable(app), &app.palette),
+        area.width as usize,
+    ));
+    let budget = (area.width as usize).saturating_sub(reserved);
+
+    let mut buttons = Vec::new();
+    let mut x = area.x;
+    let mut used = 0usize;
+    for (action, label, active) in specs {
+        let width = display_width(&label);
+        if used + width > budget {
+            break;
+        }
+        let Ok(cell_width) = u16::try_from(width) else {
+            break;
+        };
+        buttons.push(StatusButton {
+            rect: Rect::new(x, area.y, cell_width, 1),
+            label,
+            action,
+            active,
+        });
+        x = x.saturating_add(cell_width);
+        used += width;
+    }
+    buttons
+}
+
+fn metrics_or_unavailable(app: &AppState) -> &crate::platform::status_metrics::StatusMetrics {
+    static UNAVAILABLE: std::sync::OnceLock<crate::platform::status_metrics::StatusMetrics> =
+        std::sync::OnceLock::new();
+    app.status_metrics
+        .as_ref()
+        .map(|snapshot| &snapshot.metrics)
+        .unwrap_or_else(|| {
+            UNAVAILABLE.get_or_init(|| crate::platform::status_metrics::StatusMetrics {
+                hostname: "--".into(),
+                ..Default::default()
+            })
+        })
 }
 
 struct Segment {
@@ -1116,5 +1210,82 @@ mod tests {
                 .fg,
             Some(app.palette.red)
         );
+    }
+
+    #[test]
+    fn quick_buttons_sit_at_the_left_edge_in_a_stable_order() {
+        let app = AppState::test_new();
+        let buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
+
+        let actions: Vec<StatusButtonAction> = buttons.iter().map(|button| button.action).collect();
+        assert_eq!(
+            actions,
+            vec![
+                StatusButtonAction::Inbox,
+                StatusButtonAction::Scratchpad,
+                StatusButtonAction::Dock
+            ]
+        );
+        assert_eq!(buttons[0].rect.x, 0);
+        // Adjacent, never overlapping: a click can only ever hit one button.
+        for pair in buttons.windows(2) {
+            assert_eq!(pair[0].rect.x + pair[0].rect.width, pair[1].rect.x);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_inbox_button_carries_the_blocked_count_and_lights_up() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("quick")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        let idle = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert_eq!(idle[0].label.trim(), "inbox");
+        assert!(!idle[0].active, "no blockers must not light the button");
+
+        let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .state = AgentState::Blocked;
+
+        let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert_eq!(blocked[0].label.trim(), "inbox 1");
+        assert!(blocked[0].active);
+    }
+
+    #[test]
+    fn the_note_button_lights_up_only_while_its_tab_is_showing() {
+        let mut app = AppState::test_new();
+        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+
+        app.show_scratchpad_tab();
+
+        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+    }
+
+    #[test]
+    fn buttons_yield_to_the_metrics_rather_than_overlapping_them() {
+        let app = AppState::test_new();
+        let narrow = Rect::new(0, 0, minimum_required_status_width(&app) as u16 + 2, 1);
+
+        let buttons = status_buttons(&app, narrow);
+
+        // Whole buttons drop; none is truncated into an unreadable stub.
+        assert!(buttons.len() < 3, "buttons: {buttons:?}");
+        for button in &buttons {
+            assert!(button.rect.width as usize == display_width(&button.label));
+        }
+    }
+
+    #[test]
+    fn a_zero_width_status_bar_registers_no_buttons() {
+        let app = AppState::test_new();
+        assert!(status_buttons(&app, Rect::new(0, 0, 0, 0)).is_empty());
     }
 }
