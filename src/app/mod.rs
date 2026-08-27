@@ -709,6 +709,7 @@ impl App {
                 dock_tab_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
+                status_buttons: Vec::new(),
             },
             drag: None,
             workspace_press: None,

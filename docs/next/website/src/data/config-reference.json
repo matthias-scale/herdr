@@ -622,7 +622,7 @@
         {
           "key": "keys.toggle_dock",
           "type": "keybinding",
-          "default": "\"prefix+shift+e\"",
+          "default": "[\"prefix+shift+e\", \"ctrl+alt+d\"]",
           "description": "Toggle dock collapse."
         },
         {
@@ -642,6 +642,12 @@
           "type": "keybinding",
           "default": "\"prefix+shift+o\"",
           "description": "Open the focused repository's scratchpad in the dock editor."
+        },
+        {
+          "key": "keys.show_scratchpad",
+          "type": "keybinding",
+          "default": "\"ctrl+alt+n\"",
+          "description": "Show the scratchpad in the dock without opening an editor."
         },
         {
           "key": "keys.toggle_pin_tab",
@@ -664,7 +670,7 @@
         {
           "key": "keys.inbox",
           "type": "keybinding",
-          "default": "\"prefix+shift+i\"",
+          "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",
           "description": "Open the blocked-agent inbox."
         },
         {

@@ -170,6 +170,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.previous_dock_tab), "previous dock tab"),
         help_entry(keybind_label(&kb.next_dock_tab), "next dock tab"),
         help_entry(keybind_label(&kb.edit_scratchpad), "edit scratchpad"),
+        help_entry(keybind_label(&kb.show_scratchpad), "show scratchpad"),
         help_entry(keybind_label(&kb.toggle_info_panel), "toggle info panel"),
         help_entry(keybind_label(&kb.symphony), "open Symphony dashboard"),
         help_entry(keybind_label(&kb.inbox), "open blocked inbox"),

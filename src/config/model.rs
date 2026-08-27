@@ -532,7 +532,7 @@ pub struct KeysConfig {
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
-    /// Toggle dock collapse. Default: "prefix+shift+e"
+    /// Toggle dock collapse. Default: ["prefix+shift+e", "ctrl+alt+d"]
     pub toggle_dock: BindingConfig,
     /// Select the previous dock tab. Default: "prefix+shift+["
     pub previous_dock_tab: BindingConfig,
@@ -540,11 +540,13 @@ pub struct KeysConfig {
     pub next_dock_tab: BindingConfig,
     /// Open the focused repository's scratchpad in the dock editor. Default: "prefix+shift+o"
     pub edit_scratchpad: BindingConfig,
+    /// Show the scratchpad in the dock without opening an editor. Default: "ctrl+alt+n"
+    pub show_scratchpad: BindingConfig,
     /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
     pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
     pub symphony: BindingConfig,
-    /// Open the blocked-agent inbox. Default: "prefix+shift+i"
+    /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
@@ -700,6 +702,7 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_dock_tab: Option<BindingConfig>,
     edit_scratchpad: Option<BindingConfig>,
+    show_scratchpad: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -800,6 +803,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
         apply_field!(edit_scratchpad);
+        apply_field!(show_scratchpad);
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(inbox);
@@ -920,6 +924,7 @@ impl KeysConfig {
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
         copy_effective_action_field!(edit_scratchpad, keybinds.edit_scratchpad);
+        copy_effective_action_field!(show_scratchpad, keybinds.show_scratchpad);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(inbox, keybinds.inbox);
@@ -1268,13 +1273,14 @@ impl Default for KeysConfig {
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
-            toggle_dock: BindingConfig::one("prefix+shift+e"),
+            toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
             edit_scratchpad: BindingConfig::one("prefix+shift+o"),
+            show_scratchpad: BindingConfig::one("ctrl+alt+n"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
-            inbox: BindingConfig::one("prefix+shift+i"),
+            inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),
