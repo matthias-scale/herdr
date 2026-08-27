@@ -241,6 +241,7 @@ mod tests {
             prio: false,
             state: AgentState::Working,
             open_blockers: false,
+            active_subagents: None,
             background_job_count: None,
             seen: true,
             stale: false,

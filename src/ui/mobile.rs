@@ -10,7 +10,8 @@ use ratatui::{
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, AgentPanelEntry, SidebarRow,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, tab_blocker_dot_visible,
+    AgentPanelEntry, SidebarRow,
 };
 use super::status::{
     state_icon, state_icon_symbol, state_icon_with_stale, state_label_color_with_stale,
@@ -801,6 +802,12 @@ fn render_mobile_switcher_content(
                     Span::styled(prio_marker, prio_style.bg(bg)),
                     Span::styled(" ", Style::default().bg(bg)),
                 ]);
+                if tab_blocker_dot_visible(entry) {
+                    spans.extend([
+                        Span::styled("●", Style::default().fg(p.red).bg(bg)),
+                        Span::styled(" ", Style::default().bg(bg)),
+                    ]);
+                }
                 if let Some(state) = layout.state.as_deref() {
                     let (icon, icon_style) = state_icon_with_stale(
                         entry.state,
@@ -851,6 +858,11 @@ fn render_mobile_switcher_content(
                         Style::default().fg(p.overlay0).bg(bg),
                     ));
                 }
+                let active_subagents = layout.active_subagents;
+                let active_subagents_width = active_subagents
+                    .as_deref()
+                    .map(|label| 1 + display_width(label))
+                    .unwrap_or_default();
                 if let Some(activity_age) = layout.activity_age {
                     let used_width = spans
                         .iter()
@@ -858,7 +870,8 @@ fn render_mobile_switcher_content(
                         .sum::<usize>();
                     let padding = usize::from(content.width)
                         .saturating_sub(used_width)
-                        .saturating_sub(display_width(&activity_age));
+                        .saturating_sub(display_width(&activity_age))
+                        .saturating_sub(active_subagents_width);
                     spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
                     let activity_color = if entry.state == AgentState::Working && !entry.stale {
                         p.blue
@@ -869,6 +882,27 @@ fn render_mobile_switcher_content(
                         activity_age,
                         Style::default().fg(activity_color).bg(bg),
                     ));
+                } else if active_subagents.is_some() {
+                    let used_width = spans
+                        .iter()
+                        .map(|span| display_width(span.content.as_ref()))
+                        .sum::<usize>();
+                    let padding = usize::from(content.width)
+                        .saturating_sub(used_width)
+                        .saturating_sub(active_subagents_width);
+                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
+                }
+                if let Some(active_subagents) = active_subagents {
+                    spans.extend([
+                        Span::styled(" ", Style::default().bg(bg)),
+                        Span::styled(
+                            active_subagents,
+                            Style::default()
+                                .fg(p.overlay0)
+                                .bg(bg)
+                                .add_modifier(Modifier::DIM),
+                        ),
+                    ]);
                 }
                 let title = Line::from(spans);
                 render_one_line_item(
@@ -1489,6 +1523,7 @@ mod tests {
             prio: false,
             state: AgentState::Idle,
             open_blockers: false,
+            active_subagents: None,
             background_job_count: None,
             seen: true,
             stale: false,
@@ -1870,6 +1905,61 @@ mod tests {
             }),
             "the column after the cell must still focus the tab"
         );
+    }
+
+    #[test]
+    fn mobile_subagent_count_is_dimmed_and_aligned_at_supported_widths() {
+        for width in [18, 40] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-count")];
+            app.workspaces[0].tabs[0].custom_name = Some("mobile worker".into());
+            app.ensure_test_terminals();
+            let pane_id = app.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
+            let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal_state.detected_agent = Some(crate::detect::Agent::Pi);
+            terminal_state.state = AgentState::Working;
+            terminal_state.metadata_tokens.patch(
+                std::collections::HashMap::from([("closing_agents".into(), Some("3".into()))]),
+                None,
+                std::time::Instant::now(),
+            );
+            app.active = Some(0);
+            app.selected = 0;
+            app.mode = crate::app::Mode::Navigate;
+            app.view.layout = crate::app::state::ViewLayout::Mobile;
+            app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
+            app.view.terminal_area = Rect::new(0, 2, width, 16);
+            app.reconcile_sidebar_presentation();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 18)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_mobile_panel(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        Rect::new(0, 0, width, 18),
+                    )
+                })
+                .unwrap();
+
+            let viewport = mobile_switcher_areas(&app).viewport;
+            let content = inset_for_left_scrollbar(viewport);
+            let gear = (viewport.y..viewport.y + viewport.height)
+                .flat_map(|y| (content.x..content.x + content.width).map(move |x| (x, y)))
+                .find(|(x, y)| terminal.backend().buffer()[(*x, *y)].symbol() == "⚙")
+                .unwrap_or_else(|| panic!("width {width} omitted sub-agent count"));
+            assert_eq!(gear.0, content.x + content.width - 2, "width {width}");
+            assert_eq!(
+                terminal.backend().buffer()[(gear.0 + 1, gear.1)].symbol(),
+                "3"
+            );
+            let style = terminal.backend().buffer()[gear].style();
+            assert_eq!(style.fg, Some(app.palette.overlay0));
+            assert!(style.add_modifier.contains(Modifier::DIM));
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 pub(crate) const TAB_PRIO_FIELD_WIDTH: usize = 2;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
+const ACTIVE_SUBAGENT_GLYPH: &str = "⚙";
 
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
@@ -101,6 +102,10 @@ pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
     crate::terminal::counts_as_blocked(entry.state, entry.open_blockers, entry.usage_limited)
 }
 
+pub(super) fn tab_blocker_dot_visible(entry: &AgentPanelEntry) -> bool {
+    entry_is_blocked(entry) && entry.state != AgentState::Blocked
+}
+
 /// A working pane keeps its blue lifecycle label while a human gate is latched.
 /// Once work stops, the gate becomes blocking and supplies the blocked label.
 /// Usage limits still override every lifecycle label.
@@ -152,6 +157,21 @@ pub(super) struct TabRowLayout {
     pub background_jobs: Option<String>,
     pub activity_age: Option<String>,
     pub activity_instant: Option<std::time::Instant>,
+    pub active_subagents: Option<String>,
+}
+
+fn active_subagent_label(entry: &AgentPanelEntry) -> Option<String> {
+    entry
+        .active_subagents
+        .filter(|count| *count > 0)
+        .map(|count| format!("{ACTIVE_SUBAGENT_GLYPH}{count}"))
+}
+
+fn active_subagent_field_width(entry: &AgentPanelEntry) -> usize {
+    active_subagent_label(entry)
+        .as_deref()
+        .map(|label| 1 + display_width(label))
+        .unwrap_or_default()
 }
 
 pub(super) fn tab_row_layout(
@@ -242,7 +262,9 @@ fn tab_row_layout_with_density(
     // The prio cell is reserved on every row so its click target never moves. Overview rows carry
     // no work-context marker: links live in the session's work-context panel, and on a narrow
     // sidebar a second gutter cell would push the activity age off the row entirely.
-    let tab_gutter_width = TAB_PRIO_FIELD_WIDTH;
+    let blocker_dot_width =
+        usize::from(tab_blocker_dot_visible(entry)) * (display_width("●") + display_width(" "));
+    let tab_gutter_width = TAB_PRIO_FIELD_WIDTH + blocker_dot_width;
     let raw_tab_title = entry
         .primary_tab_label
         .as_deref()
@@ -252,12 +274,25 @@ fn tab_row_layout_with_density(
     } else {
         raw_tab_title
     };
-    let agent_suffix =
+    let mut agent_suffix =
         compact_agent_identity(entry, tab_title).map(|suffix| format!(" · {suffix}"));
-    let agent_suffix_width = agent_suffix
+    let mut agent_suffix_width = agent_suffix
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
+    let active_subagents = active_subagent_label(entry);
+    let active_subagents_width = active_subagent_field_width(entry);
+    if width
+        < prefix_width
+            + tab_gutter_width
+            + dot_status_width
+            + agent_suffix_width
+            + active_subagents_width
+            + 1
+    {
+        agent_suffix = None;
+        agent_suffix_width = 0;
+    }
     let mut background_jobs = entry
         .background_job_count
         .filter(|count| *count > 0)
@@ -298,6 +333,7 @@ fn tab_row_layout_with_density(
                 + agent_suffix_width
                 + background_width
                 + activity_width
+                + active_subagents_width
                 + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH,
         );
         if process_budget < display_width(" · ") + 1 {
@@ -326,6 +362,7 @@ fn tab_row_layout_with_density(
                 + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
                 + 1
                 + display_width(label)
+                + active_subagents_width
     }) {
         activity_age = None;
         activity_instant = None;
@@ -342,6 +379,7 @@ fn tab_row_layout_with_density(
             + foreground_process_width
             + background_width
             + activity_width
+            + active_subagents_width
             + 1
     {
         background_jobs = None;
@@ -356,7 +394,8 @@ fn tab_row_layout_with_density(
             + full_status_width
             + agent_suffix_width
             + background_width
-            + activity_width;
+            + activity_width
+            + active_subagents_width;
     let status_width = if show_state_label {
         full_status_width
     } else {
@@ -368,7 +407,8 @@ fn tab_row_layout_with_density(
         + agent_suffix_width
         + foreground_process_width
         + background_width
-        + activity_width;
+        + activity_width
+        + active_subagents_width;
     let title = truncate_end(tab_title, width.saturating_sub(fixed_width));
 
     TabRowLayout {
@@ -380,6 +420,7 @@ fn tab_row_layout_with_density(
         background_jobs,
         activity_age,
         activity_instant,
+        active_subagents,
     }
 }
 
@@ -434,6 +475,9 @@ pub(crate) struct AgentPanelEntry {
     /// can answer it, so it reads as its own red "usage" label rather than a
     /// gate or a lifecycle state.
     pub usage_limited: bool,
+    /// Positive count from the current sub-agent source. Rendering depends on
+    /// this field only so the source can change without changing row layout.
+    pub active_subagents: Option<u32>,
     pub background_job_count: Option<u16>,
     pub seen: bool,
     pub stale: bool,
@@ -650,6 +694,11 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         open_blockers: detail.open_blockers,
                         usage_limited: detail.usage_limited,
+                        active_subagents: detail
+                            .tokens
+                            .get("closing_agents")
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .filter(|count| *count > 0),
                         background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         stale: detail.stale,
@@ -793,6 +842,13 @@ fn aggregate_tab_entries(
                     };
                     tab_entry.background_job_count =
                         match (tab_entry.background_job_count, entry.background_job_count) {
+                            (Some(current), Some(candidate)) => {
+                                Some(current.saturating_add(candidate))
+                            }
+                            (current, candidate) => current.or(candidate),
+                        };
+                    tab_entry.active_subagents =
+                        match (tab_entry.active_subagents, entry.active_subagents) {
                             (Some(current), Some(candidate)) => {
                                 Some(current.saturating_add(candidate))
                             }
@@ -2205,6 +2261,9 @@ fn render_prio_panel(
 fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEntry, rect: Rect) {
     let p = &app.palette;
     let width = usize::from(rect.width);
+    let active_subagents = active_subagent_label(entry);
+    let active_subagents_width = active_subagent_field_width(entry);
+    let main_width = width.saturating_sub(active_subagents_width);
     let prefix = "  ";
     let state_icon = state_icon_with_stale(
         entry.state,
@@ -2229,19 +2288,25 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
 
     let mut spans = Vec::new();
     let mut used = 0usize;
-    push_prio_panel_span(&mut spans, &mut used, width, prefix, Style::default());
+    push_prio_panel_span(&mut spans, &mut used, main_width, prefix, Style::default());
     push_prio_panel_span(
         &mut spans,
         &mut used,
-        width,
+        main_width,
         "●",
         Style::default().fg(p.peach),
     );
-    push_prio_panel_span(&mut spans, &mut used, width, " ", Style::default());
-    push_prio_panel_span(&mut spans, &mut used, width, state_icon.0, state_icon.1);
-    push_prio_panel_span(&mut spans, &mut used, width, " ", Style::default());
+    push_prio_panel_span(&mut spans, &mut used, main_width, " ", Style::default());
+    push_prio_panel_span(
+        &mut spans,
+        &mut used,
+        main_width,
+        state_icon.0,
+        state_icon.1,
+    );
+    push_prio_panel_span(&mut spans, &mut used, main_width, " ", Style::default());
 
-    let remaining = width.saturating_sub(used);
+    let remaining = main_width.saturating_sub(used);
     let agent_width = agent.as_deref().map(display_width).unwrap_or_default();
     let include_agent = agent.as_ref().is_some_and(|_| {
         remaining >= 1 + display_width(" · ") + display_width(workspace) + agent_width
@@ -2256,21 +2321,21 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
         push_prio_panel_span(
             &mut spans,
             &mut used,
-            width,
+            main_width,
             &title,
             Style::default().fg(p.subtext0),
         );
         push_prio_panel_span(
             &mut spans,
             &mut used,
-            width,
+            main_width,
             " · ",
             Style::default().fg(p.overlay0),
         );
         push_prio_panel_span(
             &mut spans,
             &mut used,
-            width,
+            main_width,
             &truncate_end(workspace, workspace_width),
             Style::default().fg(p.overlay1),
         );
@@ -2279,7 +2344,7 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
                 push_prio_panel_span(
                     &mut spans,
                     &mut used,
-                    width,
+                    main_width,
                     &agent,
                     Style::default().fg(p.overlay0),
                 );
@@ -2296,10 +2361,21 @@ fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEn
         push_prio_panel_span(
             &mut spans,
             &mut used,
-            width,
+            main_width,
             &title,
             Style::default().fg(p.subtext0),
         );
+    }
+    if let Some(active_subagents) = active_subagents {
+        let padding = width.saturating_sub(used + active_subagents_width);
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.extend([
+            Span::raw(" "),
+            Span::styled(
+                active_subagents,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ),
+        ]);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
@@ -2854,7 +2930,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
     };
     spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
-    if entry_is_blocked(&entry) && entry.state != AgentState::Blocked {
+    if tab_blocker_dot_visible(&entry) {
         spans.extend([
             Span::styled("●", Style::default().fg(p.red)),
             Span::raw(" "),
@@ -2897,6 +2973,11 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             Style::default().fg(p.overlay0),
         ));
     }
+    let active_subagents = layout.active_subagents;
+    let active_subagents_width = active_subagents
+        .as_deref()
+        .map(|label| 1 + display_width(label))
+        .unwrap_or_default();
     if let Some(activity_age) = layout.activity_age {
         let used_width = spans
             .iter()
@@ -2904,7 +2985,8 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             .sum::<usize>();
         let padding = usize::from(card.rect.width)
             .saturating_sub(used_width)
-            .saturating_sub(display_width(&activity_age));
+            .saturating_sub(display_width(&activity_age))
+            .saturating_sub(active_subagents_width);
         spans.push(Span::raw(" ".repeat(padding)));
         let activity_style = if entry.state == AgentState::Working && !entry.stale {
             Style::default().fg(p.blue)
@@ -2912,6 +2994,24 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
             Style::default().fg(p.green).add_modifier(Modifier::DIM)
         };
         spans.push(Span::styled(activity_age, activity_style));
+    } else if active_subagents.is_some() {
+        let used_width = spans
+            .iter()
+            .map(|span| display_width(span.content.as_ref()))
+            .sum::<usize>();
+        let padding = usize::from(card.rect.width)
+            .saturating_sub(used_width)
+            .saturating_sub(active_subagents_width);
+        spans.push(Span::raw(" ".repeat(padding)));
+    }
+    if let Some(active_subagents) = active_subagents {
+        spans.extend([
+            Span::raw(" "),
+            Span::styled(
+                active_subagents,
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ),
+        ]);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), card.rect);
 }
@@ -2966,6 +3066,13 @@ fn render_agent_card(
             " ".repeat(indent + 3)
         };
         let prefix_width = display_width_u16(&prefix);
+        let active_subagents = (row_index == 0)
+            .then(|| active_subagent_label(detail))
+            .flatten();
+        let active_subagents_width = active_subagents
+            .as_deref()
+            .map(|label| 1 + display_width(label))
+            .unwrap_or_default();
         let mut spans = vec![Span::raw(prefix)];
         let mut blocker_dot_width = 0u16;
         if row_index == 0 && entry_is_blocked(detail) && detail.state != AgentState::Blocked {
@@ -2978,7 +3085,9 @@ fn render_agent_card(
         let content_width = rect
             .width
             .saturating_sub(prefix_width)
-            .saturating_sub(blocker_dot_width) as usize;
+            .saturating_sub(blocker_dot_width)
+            .saturating_sub(active_subagents_width.min(usize::from(u16::MAX)) as u16)
+            as usize;
         let resolve_tokens = |max_width| {
             resolved_token_spans(
                 resolved,
@@ -2993,7 +3102,9 @@ fn render_agent_card(
         };
         let baseline_token_spans = resolve_tokens(content_width);
         let mut activity_field = None;
-        let token_spans = if row_index == 0 && agent_activity_age_fits(app, detail, rect, depth) {
+        let token_spans = if row_index == 0
+            && agent_activity_age_fits(app, detail, rect, depth, active_subagents_width)
+        {
             let label = status_report_age_compact_label(detail.reported_at, app.view_observed_at)
                 .unwrap_or_else(|| {
                     crate::activity_age::coarse_label(detail.activity_at, app.view_observed_at)
@@ -3016,7 +3127,8 @@ fn render_agent_card(
             let padding = rect
                 .width
                 .saturating_sub(used_width.min(usize::from(u16::MAX)) as u16)
-                .saturating_sub(activity_width.min(usize::from(u16::MAX)) as u16);
+                .saturating_sub(activity_width.min(usize::from(u16::MAX)) as u16)
+                .saturating_sub(active_subagents_width.min(usize::from(u16::MAX)) as u16);
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(usize::from(padding))));
             }
@@ -3026,6 +3138,23 @@ fn render_agent_card(
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
             };
             spans.push(Span::styled(activity_field, activity_style));
+        }
+        if let Some(active_subagents) = active_subagents {
+            let used_width = spans
+                .iter()
+                .map(|span| display_width(span.content.as_ref()))
+                .sum::<usize>();
+            let padding = usize::from(rect.width)
+                .saturating_sub(used_width)
+                .saturating_sub(active_subagents_width);
+            spans.push(Span::raw(" ".repeat(padding)));
+            spans.extend([
+                Span::raw(" "),
+                Span::styled(
+                    active_subagents,
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ]);
         }
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(row_style),
@@ -3044,6 +3173,7 @@ fn agent_activity_age_fits(
     detail: &AgentPanelEntry,
     rect: Rect,
     depth: u16,
+    active_subagents_width: usize,
 ) -> bool {
     // Measured against the row this depth actually paints: a worklist row is the
     // one-line shape, and measuring the tree template instead would size the age
@@ -3055,7 +3185,9 @@ fn agent_activity_age_fits(
         return false;
     };
     let prefix_width = usize::from(depth.max(1)) * 3 + usize::from(depth > 0);
-    let content_width = usize::from(rect.width).saturating_sub(prefix_width);
+    let content_width = usize::from(rect.width)
+        .saturating_sub(prefix_width)
+        .saturating_sub(active_subagents_width);
     if content_width < AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH {
         return false;
     }
@@ -3274,6 +3406,175 @@ mod tests {
         app
     }
 
+    fn set_closing_agents_token(app: &mut AppState, ws_idx: usize, value: Option<&str>) {
+        let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .metadata_tokens
+            .patch(
+                std::collections::HashMap::from([(
+                    "closing_agents".into(),
+                    value.map(str::to_string),
+                )]),
+                None,
+                std::time::Instant::now(),
+            );
+    }
+
+    fn render_first_tab_row(app: &AppState, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 20);
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let card = compute_tab_card_areas(app, area)
+            .into_iter()
+            .next()
+            .expect("tab card");
+        row_text(terminal.backend().buffer(), card.rect.y, card.rect.width)
+    }
+
+    #[test]
+    fn sidebar_entry_parses_only_positive_closing_agent_counts() {
+        for (value, expected) in [
+            (None, None),
+            (Some(""), None),
+            (Some("0"), None),
+            (Some("invalid"), None),
+            (Some("4294967296"), None),
+            (Some("3"), Some(3)),
+        ] {
+            let mut app = app_with_agents(&["one"]);
+            if value.is_some() {
+                set_closing_agents_token(&mut app, 0, value);
+            }
+            let entry = all_agent_panel_entries(&app).remove(0);
+            assert_eq!(entry.active_subagents, expected, "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn active_subagent_count_is_dimmed_and_right_aligned() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("render sidebar count".into());
+        set_closing_agents_token(&mut app, 0, Some("3"));
+        let area = Rect::new(0, 0, 40, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let buffer = terminal.backend().buffer();
+        let gear_x = card.rect.x + card.rect.width - 2;
+        assert_eq!(display_width(ACTIVE_SUBAGENT_GLYPH), 1);
+        assert_eq!(
+            buffer[(gear_x, card.rect.y)].symbol(),
+            ACTIVE_SUBAGENT_GLYPH
+        );
+        assert_eq!(buffer[(gear_x + 1, card.rect.y)].symbol(), "3");
+        let count_style = buffer[(gear_x, card.rect.y)].style();
+        assert_eq!(count_style.fg, Some(app.palette.overlay0));
+        assert!(count_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn zero_and_missing_subagent_counts_render_identically() {
+        let mut missing = app_with_agents(&["one"]);
+        missing.workspaces[0].tabs[0].custom_name = Some("quiet row".into());
+        let mut zero = app_with_agents(&["one"]);
+        zero.workspaces[0].tabs[0].custom_name = Some("quiet row".into());
+        set_closing_agents_token(&mut zero, 0, Some("0"));
+
+        let missing_row = render_first_tab_row(&missing, 40);
+        let zero_row = render_first_tab_row(&zero, 40);
+        assert_eq!(zero_row, missing_row);
+        assert!(!zero_row.contains(ACTIVE_SUBAGENT_GLYPH));
+    }
+
+    #[test]
+    fn narrow_subagent_count_preserves_title_and_column_alignment() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("narrow sidebar title".into());
+        set_closing_agents_token(&mut app, 0, Some("3"));
+        let area = Rect::new(0, 0, 18, 20);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let card = compute_tab_card_areas(&app, area)[0].clone();
+        let buffer = terminal.backend().buffer();
+        let rendered = row_text(buffer, card.rect.y, card.rect.width);
+        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(rendered.contains("· pi"), "{rendered:?}");
+        assert!(rendered.ends_with("⚙3"), "{rendered:?}");
+        assert!(display_width(&rendered) <= usize::from(card.rect.width));
+        assert_eq!(
+            buffer[(card.rect.x + card.rect.width - 2, card.rect.y)].symbol(),
+            ACTIVE_SUBAGENT_GLYPH
+        );
+    }
+
+    #[test]
+    fn red_gate_dot_and_dimmed_subagent_count_share_the_row() {
+        let mut app = app_with_agents(&["one"]);
+        app.workspaces[0].tabs[0].custom_name = Some("blocked review".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal_state.state = AgentState::Idle;
+        terminal_state.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the PR".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        set_closing_agents_token(&mut app, 0, Some("3"));
+        app.reconcile_sidebar_presentation();
+
+        for width in [18, 40] {
+            let area = Rect::new(0, 0, width, 20);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let card = compute_tab_card_areas(&app, area)[0].clone();
+            let buffer = terminal.backend().buffer();
+            let gate_x = (card.rect.x..card.rect.x + card.rect.width)
+                .find(|x| {
+                    let cell = &buffer[(*x, card.rect.y)];
+                    cell.symbol() == "●" && cell.fg == app.palette.red
+                })
+                .unwrap_or_else(|| panic!("width {width} omitted red gate dot"));
+            let gear_x = card.rect.x + card.rect.width - 2;
+            let gate_style = buffer[(gate_x, card.rect.y)].style();
+            let count_style = buffer[(gear_x, card.rect.y)].style();
+
+            assert_eq!(
+                buffer[(gear_x, card.rect.y)].symbol(),
+                ACTIVE_SUBAGENT_GLYPH,
+                "width {width}"
+            );
+            assert_eq!(buffer[(gear_x + 1, card.rect.y)].symbol(), "3");
+            assert!(!gate_style.add_modifier.contains(Modifier::DIM));
+            assert!(count_style.add_modifier.contains(Modifier::DIM));
+            assert_eq!(count_style.fg, Some(app.palette.overlay0));
+        }
+    }
+
     fn configure_real_sidebar_agent(
         app: &mut AppState,
         ws_idx: usize,
@@ -3391,6 +3692,7 @@ mod tests {
             prio: true,
             state,
             open_blockers: false,
+            active_subagents: None,
             background_job_count: None,
             seen,
             stale: false,
