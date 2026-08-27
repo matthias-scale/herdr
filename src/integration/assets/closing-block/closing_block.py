@@ -44,9 +44,18 @@ _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 # A label is bold in the authored form; a plain `Gate — ...` prefix counts too,
 # but only with a following separator so an item that merely *starts* with the
 # word (`Verify the deploy...`) stays unlabeled instead of being half-eaten.
-_ITEM_START = r"^\d+[.)][ \t]"
+# The item opener and the body terminator must accept exactly the same shapes.
+# When the terminator was stricter, a real item it failed to recognise was
+# swallowed into the previous item's body instead: `2)**Gate**` and an indented
+# `  2. **Gate**` both vanished into an `Answer` above them, taking a declared
+# gate with them and leaving nothing discarded for the count to notice.
+#
+# The trailing lookahead keeps a decimal at the start of a body line (`1.5x
+# faster`) from reading as an item marker, which the old `[ \t]` requirement
+# had been doing incidentally.
+_ITEM_START = r"^[ \t]*\d+[.)](?=[ \t]|\*\*|$)"
 _ITEM_RE = re.compile(
-    rf"^(?P<idx>\d+)[.)]\s*"
+    rf"^[ \t]*(?P<idx>\d+)[.)]\s*"
     rf"(?:\*\*(?P<label>Gate|Answer|Verify)\*\*"
     rf"|(?P<plain_label>Gate|Answer|Verify)(?=[ \t]*(?:[—–:]|-[ \t])))?"
     rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\*\*What to test\b|"
@@ -164,6 +173,11 @@ class ClosingBlock:
     agents: list[str] = field(default_factory=list)
     declared_agents: int | None = None
     done_here: bool = False
+    # Whether the author labeled anything themselves, and whether any parsed
+    # line was discarded for carrying no label. Both are needed to tell a
+    # miscounted header apart from an incomplete parse.
+    authored_labels: bool = False
+    discarded_items: int = 0
 
     @property
     def gates(self) -> list[Item]:
@@ -175,9 +189,25 @@ class ClosingBlock:
 
     @property
     def blocking(self) -> int:
-        # Labeled gates are authoritative for detail, but a header that
-        # declares more blocking items than could be parsed still blocks:
-        # under-reporting a gate is the failure mode this exists to prevent.
+        # Labels are the authority on what blocks: Gate means authority is
+        # owed before the agent may execute, while Answer and Verify are
+        # non-blocking by definition and the agent proceeds past them. So
+        # once *any* item parsed with a label, the labeled gates are the
+        # count -- a header that says "(1 blocking)" above a lone Answer is
+        # a miscounted header, not a hidden gate, and latching it would
+        # block a pane whose agent is not actually waiting on anything.
+        #
+        # The header still wins when nothing labeled parsed at all: there
+        # under-reporting a gate is the real failure mode, and a declared
+        # count is the only evidence left.
+        # Both conditions matter. `authored_labels` excludes gates this parser
+        # promoted itself: a block with no labels at all and fewer parsed lines
+        # than it declared has lost a gate somewhere, and the header is the only
+        # evidence left. `discarded_items` excludes a parse that dropped an
+        # unlabeled or malformed line beside real labels -- a mistyped `Gate`
+        # next to an `Answer` must not silently retire the human decision.
+        if self.authored_labels and self.discarded_items == 0:
+            return len(self.gates)
         return max(len(self.gates), self.declared_blocking or 0)
 
     @property
@@ -485,13 +515,20 @@ def parse(text: str) -> ClosingBlock:
             # Promote them to gates, oldest first, until the declared blocking
             # count is met; the rest are dropped exactly as the strict parser
             # always dropped them, so labeled authoring is unchanged.
+            # Only for a block that carries no labels at all. Mixing an
+            # unlabeled line in beside real labels means the author did label
+            # their gates, so the unlabeled line is prose, not a silent gate.
             labeled_gates = len(block.gates)
             declared = block.declared_blocking or 0
-            for item in block.items:
-                if item.label == "" and labeled_gates < declared:
-                    item.label = "Gate"
-                    labeled_gates += 1
-            block.items = [item for item in block.items if item.label]
+            block.authored_labels = any(item.label for item in block.items)
+            if not block.authored_labels:
+                for item in block.items:
+                    if item.label == "" and labeled_gates < declared:
+                        item.label = "Gate"
+                        labeled_gates += 1
+            kept = [item for item in block.items if item.label]
+            block.discarded_items = len(block.items) - len(kept)
+            block.items = kept
             block.items.extend(
                 _parse_what_to_test(
                     text, start, selected.end, block.items, fences
