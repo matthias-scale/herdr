@@ -1320,14 +1320,22 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path.clone(),
+        );
+        let claude_transcript_path = crate::app::claude_subagents::validated_transcript_path(
+            &params.source,
+            &agent_label,
+            session_ref.as_ref(),
+            params.agent_session_path.as_deref(),
+        );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+            session_ref,
+            claude_transcript_path,
             source: params.source,
             agent_label,
             seq: params.seq,
@@ -5679,6 +5687,120 @@ mod tests {
         );
 
         assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
+    #[test]
+    fn claude_session_report_retains_only_validated_runtime_transcript_path() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        let session_id = "6be5e8e1-cce2-4c1e-b04c-62e3e38eb75a";
+        let transcript = format!("/profiles/team-a/projects/-tmp-repro/{session_id}.jsonl");
+        let response = app.handle_pane_report_agent_session(
+            "claude-session".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(10),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: Some(transcript.clone()),
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .claude_transcript_path
+                .as_deref(),
+            Some(std::path::Path::new(&transcript))
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .claude_transcript_session_id
+                .as_deref(),
+            Some(session_id)
+        );
+
+        let pathless = app.handle_pane_report_agent_session(
+            "pathless".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(11),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: None,
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&pathless).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .claude_transcript_path
+                .as_deref(),
+            Some(std::path::Path::new(&transcript)),
+            "pathless reports for the same session must retain the exact hook path"
+        );
+
+        let spoofed = app.handle_pane_report_agent_session(
+            "spoofed".into(),
+            PaneReportAgentSessionParams {
+                pane_id,
+                source: "custom:claude".into(),
+                agent: "claude".into(),
+                seq: Some(12),
+                agent_session_id: Some("other-session".into()),
+                agent_session_path: Some(
+                    "/profiles/team-a/projects/-tmp-repro/other-session.jsonl".into(),
+                ),
+                session_start_source: Some("new".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&spoofed).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .claude_transcript_path
+                .as_deref(),
+            Some(std::path::Path::new(&transcript)),
+            "an untrusted source cannot replace the accepted transcript target"
+        );
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_active_subagents(Some(2));
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_visible_blocker(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Unknown,
+                false,
+                false,
+                true,
+            );
+        assert!(app.state.terminals[&terminal_id]
+            .claude_transcript_path
+            .is_none());
+        assert!(app.state.terminals[&terminal_id]
+            .claude_transcript_session_id
+            .is_none());
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, None);
     }
 
     #[tokio::test]

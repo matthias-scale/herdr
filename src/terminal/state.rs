@@ -408,6 +408,10 @@ pub struct TerminalState {
     pub closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     pub closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    /// Runtime-only Claude JSONL source. Never persisted or exposed through the
+    /// API; the accepted session id remains the resume identity.
+    pub(crate) claude_transcript_session_id: Option<String>,
+    pub(crate) claude_transcript_path: Option<PathBuf>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
@@ -423,6 +427,9 @@ pub struct TerminalState {
     /// Provider-reported background jobs owned by this agent thread. `None`
     /// means the provider does not expose a supported count.
     pub background_job_count: Option<u16>,
+    /// Live direct sub-agents reported by a provider-owned runtime source.
+    /// `None` means unavailable or not yet reconstructed.
+    pub active_subagents: Option<u32>,
     /// Last background observation of the pane's distinct foreground process.
     pub(crate) foreground_process_name: Option<String>,
     foreground_process_active: bool,
@@ -481,6 +488,8 @@ impl TerminalState {
             closing_items: Vec::new(),
             closing_decisions: Vec::new(),
             persisted_agent_session: None,
+            claude_transcript_session_id: None,
+            claude_transcript_path: None,
             terminal_title: None,
             manual_label: None,
             agent_name: None,
@@ -494,6 +503,7 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             background_job_count: None,
+            active_subagents: None,
             foreground_process_name: None,
             foreground_process_active: false,
             last_agent_state_change_seq: None,
@@ -606,6 +616,24 @@ impl TerminalState {
         self.background_job_count = count;
         self.revision = self.revision.wrapping_add(1);
         true
+    }
+
+    pub(crate) fn set_active_subagents(&mut self, count: Option<u32>) -> bool {
+        if self.active_subagents == count {
+            return false;
+        }
+        self.active_subagents = count;
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn set_claude_transcript_target(
+        &mut self,
+        session_id: Option<String>,
+        path: Option<PathBuf>,
+    ) {
+        self.claude_transcript_session_id = session_id;
+        self.claude_transcript_path = path;
     }
 
     pub(crate) fn set_foreground_process(
@@ -880,6 +908,9 @@ impl TerminalState {
             self.recent_agent_process_exit = None;
         }
         if process_exited {
+            self.claude_transcript_session_id = None;
+            self.claude_transcript_path = None;
+            self.set_active_subagents(None);
             let mut reset_sources = Vec::new();
             let mut stale_sessions = Vec::new();
             for (source, suppressed) in &mut self.suppressed_full_lifecycle_hook_reports {
@@ -3045,6 +3076,9 @@ impl TerminalState {
         self.fallback_observed_at = None;
         self.replace_hook_authority(None);
         self.persisted_agent_session = None;
+        self.claude_transcript_session_id = None;
+        self.claude_transcript_path = None;
+        self.set_active_subagents(None);
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
@@ -7901,6 +7935,37 @@ mod tests {
         assert!(terminal.agent_name.is_none());
         assert!(terminal.persisted_agent_session.is_none());
         assert!(!terminal.respawn_shell_on_exit);
+    }
+
+    #[test]
+    fn closing_block_status_retains_live_claude_subagent_source() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+        });
+        let transcript =
+            std::path::PathBuf::from("/profiles/team-a/projects/-tmp-repro/claude-session.jsonl");
+        terminal
+            .set_claude_transcript_target(Some("claude-session".into()), Some(transcript.clone()));
+        terminal.set_active_subagents(Some(2));
+
+        terminal.set_hook_authority(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some(1),
+        );
+
+        assert_eq!(terminal.claude_transcript_path, Some(transcript));
+        assert_eq!(
+            terminal.claude_transcript_session_id.as_deref(),
+            Some("claude-session")
+        );
+        assert_eq!(terminal.active_subagents, Some(2));
     }
 
     #[test]

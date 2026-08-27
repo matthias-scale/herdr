@@ -388,6 +388,7 @@ impl App {
 
         self.start_git_work_context_refresh_if_due(now);
         self.start_foreground_process_refresh_if_due(now);
+        self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
 
         if self
@@ -773,6 +774,7 @@ impl App {
             include_client_refresh
                 .then(|| self.foreground_process_refresh_deadline())
                 .flatten(),
+            self.claude_subagent_refresh_deadline(),
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,

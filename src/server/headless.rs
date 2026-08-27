@@ -4711,6 +4711,7 @@ impl HeadlessServer {
             self.app
                 .start_headless_foreground_process_refresh_if_due(now);
         }
+        self.app.start_claude_subagent_refresh_if_due(now);
 
         if self
             .app

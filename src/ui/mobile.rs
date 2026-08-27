@@ -1919,11 +1919,7 @@ mod tests {
             let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
             terminal_state.detected_agent = Some(crate::detect::Agent::Pi);
             terminal_state.state = AgentState::Working;
-            terminal_state.metadata_tokens.patch(
-                std::collections::HashMap::from([("closing_agents".into(), Some("3".into()))]),
-                None,
-                std::time::Instant::now(),
-            );
+            terminal_state.set_active_subagents(Some(3));
             app.active = Some(0);
             app.selected = 0;
             app.mode = crate::app::Mode::Navigate;

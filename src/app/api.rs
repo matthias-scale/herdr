@@ -90,6 +90,11 @@ impl App {
                 generation,
                 observations,
             } => self.handle_foreground_processes_refreshed(generation, observations),
+            AppEvent::ClaudeSubagentsRefreshed {
+                generation,
+                observations,
+                stats,
+            } => self.handle_claude_subagents_refreshed(generation, observations, stats),
             ev => {
                 self.handle_internal_event(ev);
                 true
@@ -231,6 +236,16 @@ impl App {
         } = ev
         {
             self.handle_foreground_processes_refreshed(generation, observations);
+            return None;
+        }
+
+        if let AppEvent::ClaudeSubagentsRefreshed {
+            generation,
+            observations,
+            stats,
+        } = ev
+        {
+            self.handle_claude_subagents_refreshed(generation, observations, stats);
             return None;
         }
 

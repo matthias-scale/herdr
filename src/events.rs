@@ -99,6 +99,7 @@ pub enum AppEvent {
         agent_label: String,
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        claude_transcript_path: Option<std::path::PathBuf>,
         session_start_source: Option<String>,
     },
     /// Display-only agent metadata was reported for a pane.
@@ -178,6 +179,12 @@ pub enum AppEvent {
     ForegroundProcessesRefreshed {
         generation: u64,
         observations: Vec<crate::app::foreground_process::ForegroundProcessObservation>,
+    },
+    /// Bounded incremental observations from Claude session transcripts.
+    ClaudeSubagentsRefreshed {
+        generation: u64,
+        observations: Vec<crate::app::claude_subagents::RefreshObservation>,
+        stats: crate::app::claude_subagents::BatchStats,
     },
     /// A plugin action or event command finished.
     PluginCommandFinished {

@@ -10,6 +10,7 @@ pub(crate) mod agent_view;
 mod agents;
 mod api;
 mod api_helpers;
+pub(crate) mod claude_subagents;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
@@ -160,6 +161,14 @@ pub struct App {
     pub(crate) last_foreground_process_refresh_generation: u64,
     pub(crate) last_applied_foreground_process_refresh_generation: u64,
     pub(crate) next_foreground_process_refresh: Instant,
+    pub(crate) claude_subagent_refresh_in_flight: Option<claude_subagents::RefreshInFlight>,
+    pub(crate) last_claude_subagent_refresh_generation: u64,
+    pub(crate) last_applied_claude_subagent_refresh_generation: u64,
+    pub(crate) next_claude_subagent_refresh: Instant,
+    pub(crate) next_claude_subagent_target_generation: u64,
+    pub(crate) claude_subagent_refresh_rotation: usize,
+    pub(crate) claude_subagent_trackers:
+        HashMap<crate::terminal::TerminalId, claude_subagents::TranscriptTracker>,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
@@ -900,6 +909,13 @@ impl App {
             last_foreground_process_refresh_generation: 0,
             last_applied_foreground_process_refresh_generation: 0,
             next_foreground_process_refresh: Instant::now(),
+            claude_subagent_refresh_in_flight: None,
+            last_claude_subagent_refresh_generation: 0,
+            last_applied_claude_subagent_refresh_generation: 0,
+            next_claude_subagent_refresh: Instant::now(),
+            next_claude_subagent_target_generation: 0,
+            claude_subagent_refresh_rotation: 0,
+            claude_subagent_trackers: HashMap::new(),
             #[cfg(test)]
             git_program_override: None,
             pending_api_worktree_creates: HashMap::new(),

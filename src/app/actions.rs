@@ -3157,19 +3157,45 @@ impl AppState {
                 agent_label,
                 seq,
                 session_ref,
+                claude_transcript_path,
                 session_start_source,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref_for_session_start(
+            } => {
+                let claude_transcript_session_id = claude_transcript_path
+                    .as_ref()
+                    .and_then(|_| session_ref.as_ref().map(|session| session.value.clone()));
+                self.update_terminal_state(pane_id, |terminal| {
+                    let mutation = terminal.set_agent_session_ref_for_session_start(
                         source,
                         agent_label,
                         session_ref,
                         seq,
                         session_start_source,
-                    )
+                    );
+                    if mutation.is_some() {
+                        let session_replaced = mutation
+                            .as_ref()
+                            .is_some_and(|mutation| mutation.session_replaced);
+                        if session_replaced
+                            || claude_transcript_path.as_ref().is_some_and(|path| {
+                                terminal.claude_transcript_path.as_ref() != Some(path)
+                                    || terminal.claude_transcript_session_id
+                                        != claude_transcript_session_id
+                            })
+                        {
+                            terminal.set_active_subagents(None);
+                        }
+                        if claude_transcript_path.is_some() || session_replaced {
+                            terminal.set_claude_transcript_target(
+                                claude_transcript_session_id,
+                                claude_transcript_path,
+                            );
+                        }
+                    }
+                    mutation
                 })
                 .into_iter()
-                .collect(),
+                .collect()
+            }
             AppEvent::HookMetadataReported {
                 pane_id,
                 source,
@@ -3272,6 +3298,7 @@ impl AppState {
             }
             AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
             AppEvent::ForegroundProcessesRefreshed { .. } => Vec::new(),
+            AppEvent::ClaudeSubagentsRefreshed { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
@@ -5601,6 +5628,7 @@ mod tests {
             agent_label: "claude".into(),
             seq: Some(1),
             session_ref: crate::agent_resume::AgentSessionRef::id("first-session"),
+            claude_transcript_path: None,
             session_start_source: Some("startup".into()),
         });
 

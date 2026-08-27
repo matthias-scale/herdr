@@ -29,6 +29,7 @@ pub struct PaneDetail {
     /// is exhausted. Live screen state, never latched.
     pub usage_limited: bool,
     pub background_job_count: Option<u16>,
+    pub active_subagents: Option<u32>,
     pub foreground_process_name: Option<String>,
     pub seen: bool,
     pub stale: bool,
@@ -116,6 +117,7 @@ impl Tab {
                     open_blockers: !terminal.closing_gates.is_empty(),
                     usage_limited: terminal.usage_limited,
                     background_job_count: terminal.background_job_count,
+                    active_subagents: terminal.active_subagents,
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen: pane.seen,
                     stale: terminal.supervisor_stale,
