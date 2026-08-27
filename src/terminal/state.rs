@@ -15,6 +15,20 @@ use crate::terminal::TerminalId;
 pub(crate) const AGENT_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
 pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
 
+/// One blocking rule for the sidebar worklist and inbox.
+///
+/// A latched human gate does not block while the agent is still working. The
+/// action already in flight may resolve or refine that gate. Once work stops,
+/// the unanswered gate becomes blocking. A usage limit stays blocking because
+/// the pane cannot proceed until its reset window.
+pub(crate) fn counts_as_blocked(
+    state: AgentState,
+    open_blockers: bool,
+    usage_limited: bool,
+) -> bool {
+    state == AgentState::Blocked || usage_limited || (open_blockers && state != AgentState::Working)
+}
+
 #[path = "metadata.rs"]
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
@@ -1174,24 +1188,6 @@ impl TerminalState {
         self.hook_authority
             .as_ref()
             .map(|authority| authority.reported_at)
-    }
-
-    /// Whether this pane is waiting on a human, for every worklist that asks.
-    ///
-    /// The lifecycle `state` alone is not the answer. A latched closing-block
-    /// gate deliberately outlives `AgentState::Blocked`: output retirement and
-    /// screen arbitration move the lifecycle on while the gate stays latched,
-    /// because the human decision it names has not been made yet. A usage limit
-    /// is the same shape of fact from a different source.
-    ///
-    /// Every consumer that ranks or counts "needs me" panes must ask this, so
-    /// that a pane cannot be blocked for one surface and idle for another. The
-    /// sidebar asks it through the aggregated projection
-    /// (`ui::sidebar::entry_is_blocked`), which must stay equivalent to this;
-    /// `app::inbox::tests::the_inbox_queue_and_the_sidebar_agree_on_every_combination`
-    /// pins the two together.
-    pub fn is_blocked_or_gated(&self) -> bool {
-        self.state == AgentState::Blocked || !self.closing_gates.is_empty() || self.usage_limited
     }
 
     /// True while the pane only reads as working because sub-process evidence

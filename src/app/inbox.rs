@@ -104,10 +104,11 @@ impl crate::app::AppState {
                     let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
                         continue;
                     };
-                    // Not `state != Blocked`: a pane holding a latched gate
-                    // whose lifecycle has already moved on is still waiting on
-                    // the human, and the queue is the surface for answering it.
-                    if !terminal.is_blocked_or_gated() {
+                    if !crate::terminal::counts_as_blocked(
+                        terminal.state,
+                        !terminal.closing_gates.is_empty(),
+                        terminal.usage_limited,
+                    ) {
                         continue;
                     }
                     queue.push(BlockedAgent {
@@ -189,15 +190,11 @@ mod tests {
         assert_eq!(queue[0].blocked_since, Some(stamped));
     }
 
-    /// The defect #77 fixed in the sidebar, at the inbox call site.
-    ///
-    /// A gate latched by the closing-block report deliberately outlives the
-    /// blocked lifecycle state. Filtering the queue on `state != Blocked` meant
-    /// the sidebar header counted the pane while the inbox -- the surface built
-    /// to answer it -- silently skipped it, so the only gate still waiting on a
-    /// human was unreachable from the queue.
+    /// Owner correction to #77: a latched gate becomes blocking only when the
+    /// pane stops working. The same gate must then enter the inbox without a
+    /// fresh closing-block report.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_latched_gate_reaches_the_queue_after_the_lifecycle_moves_on() {
+    async fn a_latched_gate_reaches_the_queue_only_after_work_stops() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("inbox")];
         app.active = Some(0);
@@ -210,8 +207,6 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            // Latch a gate, then move the lifecycle away from Blocked, exactly
-            // as output retirement and screen arbitration do at runtime.
             terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
                 n: 1,
                 label: "Gate".to_string(),
@@ -225,12 +220,18 @@ mod tests {
             terminal.state = AgentState::Working;
         }
 
-        let queue = app.blocked_agents();
-        assert_eq!(
-            queue.len(),
-            1,
-            "a latched gate must reach the inbox even while the lifecycle reads Working: {queue:?}"
+        assert!(
+            app.blocked_agents().is_empty(),
+            "work already in flight means the human gate is not blocking yet"
         );
+
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .state = AgentState::Idle;
+
+        let queue = app.blocked_agents();
+        assert_eq!(queue.len(), 1, "the unchanged gate blocks after work stops");
         assert_eq!(queue[0].pane_id, pane_id);
     }
 
@@ -281,15 +282,16 @@ mod tests {
         assert_eq!(queue[0].pane_id, pane_id);
     }
 
-    /// The two surfaces must never disagree about one pane.
-    ///
-    /// The sidebar answers through the aggregated projection and the inbox
-    /// answers through `TerminalState::is_blocked_or_gated`. This walks every
-    /// combination of the three inputs and asserts the two agree, so a later
-    /// edit to either side cannot reintroduce the split this commit closed.
+    /// The two surfaces use one predicate. Walk all lifecycle states so
+    /// "working" cannot drift into a broader "not idle" test later.
     #[tokio::test(flavor = "current_thread")]
     async fn the_inbox_queue_and_the_sidebar_agree_on_every_combination() {
-        for blocked_state in [false, true] {
+        for state in [
+            AgentState::Working,
+            AgentState::Blocked,
+            AgentState::Idle,
+            AgentState::Unknown,
+        ] {
             for latched_gate in [false, true] {
                 for usage_limited in [false, true] {
                     let mut app = crate::app::state::AppState::test_new();
@@ -304,11 +306,7 @@ mod tests {
 
                     {
                         let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-                        terminal.state = if blocked_state {
-                            AgentState::Blocked
-                        } else {
-                            AgentState::Working
-                        };
+                        terminal.state = state;
                         if latched_gate {
                             terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
                                 n: 1,
@@ -335,12 +333,14 @@ mod tests {
 
                     assert_eq!(
                         in_queue, in_sidebar_blocked,
-                        "disagreement for blocked_state={blocked_state} latched_gate={latched_gate} usage_limited={usage_limited}"
+                        "disagreement for state={state:?} latched_gate={latched_gate} usage_limited={usage_limited}"
                     );
                     assert_eq!(
                         in_queue,
-                        blocked_state || latched_gate || usage_limited,
-                        "wrong answer for blocked_state={blocked_state} latched_gate={latched_gate} usage_limited={usage_limited}"
+                        state == AgentState::Blocked
+                            || usage_limited
+                            || (latched_gate && state != AgentState::Working),
+                        "wrong answer for state={state:?} latched_gate={latched_gate} usage_limited={usage_limited}"
                     );
                 }
             }
