@@ -271,6 +271,46 @@ from the build host. Building, testing, and staging an artifact on those hosts
 is fine; swapping the running server is not. Approval covers the one change it
 was given for and does not carry to the next version.
 
+### Identifying the active fork
+
+`fork/pr-base` on `matthias-scale/herdr` is the only base for fork work. It is the
+repository default branch. `fork/focused-sidebar-pr-base` is subsumed by it (zero
+commits ahead) and is kept for history, not for branching.
+
+The fork left upstream at `73d92004` (2026-07-29), which is *before* upstream
+`v0.8.0`. It therefore contains no upstream 0.8.x release and never will until a
+sync lands. Any binary, release note, or changelog describing itself as 0.8.1 or
+0.8.2 is stock upstream and does not have the fork sidebar.
+
+`--version` cannot tell the two apart. `Cargo.toml` still reads `0.8.0`, so the
+fork and a stock upstream 0.8.0 both print `herdr 0.8.0`. There is also no string
+that marks every fork build: `herdr-claude-subagents` was only introduced in #82 and
+is absent from older fork builds as well as from upstream, so a zero result proves
+nothing about lineage.
+
+Until the fork version is stamped, `sha256sum` against the artifact you built is the
+only reliable identification. Record the artifact hash with the deploy and compare
+it on the host:
+
+```
+sha256sum target/release/herdr ~/.local/bin/herdr   # must match
+```
+
+Stamping the fork version (for example `0.8.0+fork.N`, or a build-time git SHA in
+`--version`) removes the need for this and is the preferred fix.
+
+Never run `herdr update` and never accept the in-app "update available" prompt on a
+fork host. It fetches `https://herdr.dev/latest.json` and overwrites
+`~/.local/bin/herdr` in place with the current upstream release, silently replacing
+the fork build. Keep the binary immutable (`chflags uchg` on macOS, `chattr +i` on
+Linux) so the updater fails loudly instead.
+
+A named session pins the binary it was started with, and installing a new build does
+not reach a server that is already running. Before judging any UI behaviour, check
+the build behind the *server* (`lsof -p <server-pid> | awk '$4=="txt"{print $NF}'`),
+not the file in `~/.local/bin`. A stale preview session looks identical to a current
+one from the outside.
+
 ### Deploying a fork build
 
 Use `herdr-session-rescue upgrade --binary <artifact>` (from `matthias-scale/dotfiles`,
