@@ -1537,11 +1537,8 @@ mod tests {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("whats-new-saved-release-notes");
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
-        crate::release_notes::save_pending(
-            crate::build_info::version().as_str(),
-            "### Changed\n- Menu",
-        )
-        .unwrap();
+        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- Menu")
+            .unwrap();
 
         let mut state = state_with_workspaces(&["test"]);
         state.latest_release_notes_available = true;
