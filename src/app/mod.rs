@@ -3339,8 +3339,11 @@ mod tests {
         let path = temp_config_path("startup-pending-release-notes-no-auto-open");
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
-        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- One")
-            .unwrap();
+        crate::release_notes::save_pending(
+            crate::build_info::version().as_str(),
+            "### Changed\n- One",
+        )
+        .unwrap();
         let config = Config {
             onboarding: Some(false),
             ..Default::default()
@@ -3366,10 +3369,13 @@ mod tests {
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
         std::env::set_var("XDG_STATE_HOME", &state_home);
 
-        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- One")
-            .unwrap();
+        crate::release_notes::save_pending(
+            crate::build_info::version().as_str(),
+            "### Changed\n- One",
+        )
+        .unwrap();
         crate::product_announcements::save_manifest_announcement(
-            env!("CARGO_PKG_VERSION"),
+            crate::build_info::version().as_str(),
             Some(&crate::product_announcements::ManifestAnnouncement {
                 id: "startup-announcement".into(),
                 title: Some("Startup announcement".into()),
