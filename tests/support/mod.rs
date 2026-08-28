@@ -17,6 +17,16 @@ const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".herdr-test-owner-pid";
 pub const CURRENT_PROTOCOL: u32 = 19;
 
+// Reuse the binary's own version logic so tests follow a stamped fork build
+// instead of hardcoding the bare cargo version. build.rs `rustc-env` settings
+// apply to test targets too, so `option_env!` resolves identically here.
+#[path = "../../src/build_info.rs"]
+pub mod build_info;
+
+pub fn expected_version() -> String {
+    build_info::version()
+}
+
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
