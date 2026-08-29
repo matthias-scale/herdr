@@ -113,6 +113,8 @@ def main() -> int:
         items=block.wire_items(),
         decisions=block.wire_decisions(),
         agent_names=block.agents,
+        contract=block.contract,
+        contract_met=block.contract_met,
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
     )

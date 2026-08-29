@@ -36,6 +36,10 @@ _AGENTS_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _DONE_RE = re.compile(r"^Done here\.[ \t]*\r?$", re.MULTILINE)
+_CONTRACT_RE = re.compile(
+    r"^CONTRACT:[ \t]+(?P<text>.+?)[ \t]+—[ \t]+(?P<state>met|unmet)[ \t]*\r?$",
+    re.MULTILINE | re.IGNORECASE,
+)
 _FENCE_OPEN_RE = re.compile(
     r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$"
 )
@@ -173,6 +177,8 @@ class ClosingBlock:
     agents: list[str] = field(default_factory=list)
     declared_agents: int | None = None
     done_here: bool = False
+    contract: str | None = None
+    contract_met: bool | None = None
     # Whether the author labeled anything themselves, and whether any parsed
     # line was discarded for carrying no label. Both are needed to tell a
     # miscounted header apart from an incomplete parse.
@@ -577,5 +583,15 @@ def parse(text: str) -> ClosingBlock:
         block.done_here = True
         block.declared_agents = 0
         block.present = True
+
+    if block.present:
+        contract = None
+        for candidate in _visible_matches(
+            _CONTRACT_RE, text, 0, len(text), fences
+        ):
+            contract = candidate
+        if contract:
+            block.contract = contract.group("text").strip()
+            block.contract_met = contract.group("state").lower() == "met"
 
     return block
