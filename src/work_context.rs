@@ -41,6 +41,11 @@ pub struct PaneWorkContext {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_title: Option<String>,
+    /// Name the agent gave this session (Claude's `ai-title`). It is an
+    /// explicit identity for the work, not a derivation from the prompt or the
+    /// checkout path, so display surfaces rank it above every derived title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
 }
 
 /// Build the canonical, stable-order links shared by the picker and info panel.
@@ -130,6 +135,7 @@ impl PaneWorkContext {
             missive_urls: normalize_missive_urls(self.missive_urls)?,
             branch: normalize_optional_text("branch", self.branch)?,
             work_title: normalize_optional_text("work title", self.work_title)?,
+            session_name: normalize_optional_text("session name", self.session_name)?,
         })
     }
 
@@ -340,6 +346,22 @@ impl PaneWorkContextState {
         Ok(true)
     }
 
+    /// Apply only the agent-reported session name to the hook tier.
+    ///
+    /// A rename arrives outside a turn, so it carries no prompt and therefore
+    /// no ticket or link evidence. Replacing the whole hook tier would drop the
+    /// context the last turn established, so the name is patched in place.
+    pub fn set_hook_session_name(&mut self, session_name: Option<String>) -> Result<bool, String> {
+        let session_name = normalize_optional_text("session name", session_name)?;
+        if self.hook_turn.session_name == session_name {
+            return Ok(false);
+        }
+        self.hook_turn.session_name = session_name;
+        self.clear_restored_fallback();
+        self.recompute();
+        Ok(true)
+    }
+
     /// Drops the hook tier when the agent session that authorized it ends or
     /// is replaced; manual, git, and restored-fallback tiers are preserved.
     pub fn clear_hook_turn(&mut self) -> bool {
@@ -414,6 +436,12 @@ impl PaneWorkContextState {
                 self.hook_turn.work_title.as_ref(),
                 self.git_observation.work_title.as_ref(),
                 self.restored_fallback.work_title.as_ref(),
+            ]),
+            session_name: first_present([
+                self.manual.session_name.as_ref(),
+                self.hook_turn.session_name.as_ref(),
+                self.git_observation.session_name.as_ref(),
+                self.restored_fallback.session_name.as_ref(),
             ]),
         };
     }
@@ -664,6 +692,7 @@ pub(crate) fn hook_turn_context(
         missive_urls: prompt_context.missive_urls,
         branch: None,
         work_title,
+        session_name: prompt_context.session_name,
     })
 }
 
@@ -1337,6 +1366,7 @@ mod tests {
                     missive_urls: Vec::new(),
                     branch: Some("main".into()),
                     work_title: Some("Initial".into()),
+                    session_name: None,
                 },
                 ..PaneWorkContextTiers::default()
             }),
@@ -1475,6 +1505,7 @@ mod tests {
             missive_urls: Vec::new(),
             branch: Some("old-branch".into()),
             work_title: Some("Old title".into()),
+            session_name: None,
         })
         .unwrap();
         assert_eq!(restored.effective().ticket_ids, vec!["MAT-1"]);

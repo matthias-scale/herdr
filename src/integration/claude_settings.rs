@@ -42,7 +42,7 @@ const HOOK_REMOVALS: &[HookRemoval] = &[
     },
     HookRemoval {
         event: "UserPromptSubmit",
-        actions: &["working", "title"],
+        actions: &["working", "title", "session-name"],
     },
     HookRemoval {
         event: "PreToolUse",
@@ -50,7 +50,7 @@ const HOOK_REMOVALS: &[HookRemoval] = &[
     },
     HookRemoval {
         event: "Stop",
-        actions: &["idle"],
+        actions: &["idle", "session-name"],
     },
     HookRemoval {
         event: "SessionEnd",
@@ -102,6 +102,17 @@ fn install_inner(
             10,
             Some("*"),
         )?;
+        // Claude names and renames a session between turns, so the name is
+        // republished at turn start and at turn end rather than once.
+        for event in ["UserPromptSubmit", "Stop"] {
+            ensure_command_hook(
+                hooks,
+                event,
+                hook_command(hook_path, Some("session-name")),
+                10,
+                Some("*"),
+            )?;
+        }
     }
 
     if desired == original {
@@ -306,22 +317,15 @@ fn rewrite(
     }
 
     if kind == EditKind::Install && include_title_hook {
-        match hooks.get("UserPromptSubmit") {
-            Some(property) => {
-                let user_prompt_submit = property.array_value().ok_or_else(|| {
-                    io::Error::other("hook entries for UserPromptSubmit must be an array")
-                })?;
-                user_prompt_submit.append(title_hook_input(hook_path));
-            }
-            None => {
-                let user_prompt_submit = hooks
-                    .append("UserPromptSubmit", CstInputValue::Array(Vec::new()))
-                    .array_value()
-                    .ok_or_else(|| {
-                        io::Error::other("failed to create UserPromptSubmit hook array")
-                    })?;
-                user_prompt_submit.append(title_hook_input(hook_path));
-            }
+        append_event_hook(
+            &hooks,
+            "UserPromptSubmit",
+            || title_hook_input(hook_path),
+        )?;
+        // Mirrors the desired document built in `install_inner`: the session
+        // name is republished at turn start and at turn end.
+        for event in ["UserPromptSubmit", "Stop"] {
+            append_event_hook(&hooks, event, || session_name_hook_input(hook_path))?;
         }
     }
 
@@ -407,6 +411,43 @@ fn canonical_hook_value(hook_path: &Path) -> Value {
 
 fn canonical_hook_input(hook_path: &Path) -> CstInputValue {
     let command = hook_command(hook_path, Some("session"));
+    json!({
+        matcher: "*",
+        hooks: [{
+            "type": "command",
+            command: command,
+            timeout: 10u64,
+        }],
+    })
+}
+
+fn append_event_hook(
+    hooks: &CstObject,
+    event: &str,
+    entry: impl Fn() -> CstInputValue,
+) -> io::Result<()> {
+    match hooks.get(event) {
+        Some(property) => {
+            let entries = property.array_value().ok_or_else(|| {
+                io::Error::other(format!("hook entries for {event} must be an array"))
+            })?;
+            entries.append(entry());
+        }
+        None => {
+            let entries = hooks
+                .append(event, CstInputValue::Array(Vec::new()))
+                .array_value()
+                .ok_or_else(|| {
+                    io::Error::other(format!("failed to create {event} hook array"))
+                })?;
+            entries.append(entry());
+        }
+    }
+    Ok(())
+}
+
+fn session_name_hook_input(hook_path: &Path) -> CstInputValue {
+    let command = hook_command(hook_path, Some("session-name"));
     json!({
         matcher: "*",
         hooks: [{

@@ -881,6 +881,20 @@ fn install_pi_errors_when_extension_dir_missing() {
     let _ = fs::remove_dir_all(base);
 }
 
+
+fn claude_event_has_action(settings: &Value, event: &str, action: &str) -> bool {
+    settings["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.ends_with(action) || command.contains(&format!("{action} ")))
+        })
+}
+
 #[test]
 fn install_claude_writes_hook_and_updates_settings() {
     let _lock = integration_env_lock();
@@ -907,6 +921,7 @@ fn install_claude_writes_hook_and_updates_settings() {
     assert_eq!(hook_content, CLAUDE_HOOK_ASSET);
     assert!(hook_content.contains("herdr_bin=\"${HERDR_BIN_PATH:-herdr}\""));
     assert!(hook_content.contains("agent turn-title --provider claude"));
+    assert!(hook_content.contains("agent session-name --provider claude"));
     assert!(settings["permissions"]["allow"].is_array());
     assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "*");
     assert!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -932,8 +947,15 @@ fn install_claude_writes_hook_and_updates_settings() {
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
+    // A rename lands outside turn boundaries, so the name is republished at
+    // turn start and at turn end.
+    assert!(claude_event_has_action(
+        &settings,
+        "UserPromptSubmit",
+        "session-name"
+    ));
+    assert!(claude_event_has_action(&settings, "Stop", "session-name"));
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -983,14 +1005,14 @@ fn install_claude_is_idempotent_for_hook_entries() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
+    assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
     std::env::remove_var("HOME");
@@ -1074,7 +1096,7 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
             .as_str()
             .is_some_and(|command| command.contains(" title"))));
     assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
+    assert!(claude_event_has_action(&settings, "Stop", "session-name"));
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -2851,7 +2873,7 @@ fn ac1_ac7_title_hooks_forward_the_full_fixture_to_the_owning_binary() {
         let stale_record = base.join("stale-record");
         fs::write(
             &exact_bin,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HERDR_TEST_EXACT_RECORD\"\ncat >> \"$HERDR_TEST_EXACT_RECORD\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERDR_TEST_EXACT_RECORD\"\ncat >> \"$HERDR_TEST_EXACT_RECORD\"\n",
         )
         .unwrap();
         fs::write(
@@ -2907,6 +2929,14 @@ fn ac1_ac7_title_hooks_forward_the_full_fixture_to_the_owning_binary() {
         let exact = fs::read_to_string(&exact_record).unwrap();
         assert!(exact.starts_with(&format!("agent turn-title --provider {provider}\n")));
         assert!(exact.contains(fixture));
+        // Claude also forwards the same payload to the session-name reporter,
+        // and it must reach the owning binary rather than whatever `herdr` is
+        // first on PATH.
+        assert_eq!(
+            exact.contains(&format!("agent session-name --provider {provider}")),
+            provider == "claude",
+            "{exact}"
+        );
         assert!(!stale_record.exists());
 
         let _ = fs::remove_dir_all(base);

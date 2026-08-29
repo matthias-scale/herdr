@@ -26,6 +26,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "start" => agent_start(&args[1..]),
         "explain" => agent_explain(&args[1..]),
         "turn-title" => agent_turn_title(&args[1..]),
+        "session-name" => agent_session_name(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
             Ok(0)
@@ -35,6 +36,95 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn parse_provider_flag(args: &[String]) -> Option<crate::work_title::WorkTitleProvider> {
+    let mut provider = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--provider" => {
+                provider = crate::work_title::WorkTitleProvider::parse(args.get(index + 1)?);
+                index += 2;
+            }
+            _ => return None,
+        }
+    }
+    provider
+}
+
+/// Publish the agent's own session name for this pane.
+///
+/// Claude renames a session whenever its understanding of the work changes, so
+/// this runs on every supported hook event rather than only at turn start.
+fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
+    let Some(provider) = parse_provider_flag(args) else {
+        return Ok(0);
+    };
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Ok(0);
+    }
+    let pane_id = std::env::var("HERDR_PANE_ID").ok();
+    let seq = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0);
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return Ok(0);
+    }
+    let Some(transcript_path) = crate::work_title::transcript_path_from_hook_input(&input) else {
+        return Ok(0);
+    };
+    let Ok(transcript) = std::fs::read_to_string(&transcript_path) else {
+        return Ok(0);
+    };
+    let Some(metadata) = crate::work_title::request_from_session_name(
+        provider,
+        pane_id.as_deref(),
+        &input,
+        &transcript,
+        seq,
+    ) else {
+        return Ok(0);
+    };
+    let (Some(session_id), Some(agent), Some(lifecycle_source)) = (
+        metadata.agent_session_id.clone(),
+        metadata.agent.clone(),
+        metadata.applies_to_source.clone(),
+    ) else {
+        return Ok(0);
+    };
+    let session_request = Request {
+        id: format!("cli:agent:session-name:session:{seq}"),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
+            pane_id: metadata.pane_id.clone(),
+            source: lifecycle_source,
+            agent,
+            seq: Some(seq),
+            agent_session_id: Some(session_id),
+            agent_session_path: Some(transcript_path),
+            session_start_source: None,
+        }),
+    };
+    let Ok(response) = super::send_request(&session_request) else {
+        tracing::debug!(?provider, "could not reach Herdr to guard the session name");
+        return Ok(0);
+    };
+    if response.get("error").is_some() {
+        tracing::debug!(?provider, "Herdr rejected the guarded session name session");
+        return Ok(0);
+    }
+    if super::send_request_unchecked(&Request {
+        id: format!("cli:agent:session-name:metadata:{seq}"),
+        method: Method::PaneReportMetadata(metadata),
+    })
+    .is_err()
+    {
+        tracing::debug!(?provider, "could not deliver the guarded session name");
+    }
+    Ok(0)
 }
 
 fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {

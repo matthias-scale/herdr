@@ -1406,17 +1406,39 @@ impl App {
             && agent_label.is_some()
             && applies_to_source.is_some()
             && agent_session_id.is_some();
+        // A session rename carries the agent's own name for the session and
+        // nothing else. It is guarded exactly like a work title, but it patches
+        // the session name instead of replacing the hook work context.
+        let session_name_request = source == crate::work_title::SESSION_NAME_SOURCE
+            && agent_label.is_some()
+            && applies_to_source.is_some()
+            && agent_session_id.is_some();
         if let Some(context) = requested_hook_context.as_ref() {
-            if !work_title_request
-                || context.branch.is_some()
-                || context.work_title != requested_work_title
-            {
+            let valid_work_title_context = work_title_request
+                && context.branch.is_none()
+                && context.session_name.is_none()
+                && context.work_title == requested_work_title;
+            let valid_session_name_context = session_name_request
+                && context.session_name.is_some()
+                && context.work_title.is_none()
+                && context.branch.is_none()
+                && context.ticket_ids.is_empty()
+                && context.pr_urls.is_empty()
+                && context.preview_urls.is_empty()
+                && context.missive_urls.is_empty();
+            if !valid_work_title_context && !valid_session_name_context {
                 return encode_error(
                     id,
                     "invalid_work_context",
                     "derived work context requires matching guarded work-title metadata",
                 );
             }
+        } else if session_name_request {
+            return encode_error(
+                id,
+                "invalid_work_context",
+                "session rename requires a session name",
+            );
         }
         if agent_session_id.is_some() && (agent_label.is_none() || applies_to_source.is_none()) {
             return encode_error(
@@ -1453,6 +1475,7 @@ impl App {
             && !params.clear_display_agent
             && !params.clear_state_labels
             && !work_title_request
+            && !session_name_request
         {
             return encode_error(
                 id,
@@ -1551,6 +1574,17 @@ impl App {
                 ),
             _ => None,
         };
+        let session_name_changed = if session_name_request {
+            let session_name = requested_hook_context
+                .as_ref()
+                .and_then(|context| context.session_name.clone());
+            match terminal.set_hook_session_name(session_name) {
+                Ok(changed) => changed,
+                Err(message) => return encode_error(id, "invalid_work_context", message),
+            }
+        } else {
+            false
+        };
         let hook_context_changed = if work_title_request {
             let branch = terminal.effective_work_context().branch.clone();
             let context = match crate::work_context::hook_turn_context(
@@ -1584,7 +1618,8 @@ impl App {
             && !params.clear_display_agent
             && !params.clear_state_labels
             && ttl.is_none()
-            && !hook_context_changed;
+            && !hook_context_changed
+            && !session_name_changed;
         if unchanged_title_only {
             return encode_success(id, ResponseResult::Ok {});
         }
@@ -1617,10 +1652,10 @@ impl App {
         if token_changed {
             self.sync_agent_metadata_deadline();
         }
-        if hook_context_changed {
+        if hook_context_changed || session_name_changed {
             self.schedule_session_save();
         }
-        if token_changed || hook_context_changed {
+        if token_changed || hook_context_changed || session_name_changed {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
@@ -4820,6 +4855,126 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    fn guarded_session_name_params(
+        pane_id: String,
+        agent: &str,
+        lifecycle_source: &str,
+        session_id: &str,
+        session_name: &str,
+        seq: u64,
+    ) -> PaneReportMetadataParams {
+        let mut params = metadata_params(pane_id);
+        params.source = crate::work_title::SESSION_NAME_SOURCE.into();
+        params.agent = Some(agent.into());
+        params.applies_to_source = Some(lifecycle_source.into());
+        params.agent_session_id = Some(session_id.into());
+        params.title = None;
+        params.seq = Some(seq);
+        params.work_context = Some(crate::work_context::PaneWorkContext {
+            session_name: Some(session_name.into()),
+            ..Default::default()
+        });
+        params
+    }
+
+    #[test]
+    fn guarded_session_names_land_rename_after_rename_and_keep_turn_context() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
+
+        // A normal turn first establishes prompt-derived work context.
+        let mut turn = guarded_work_title_params(
+            pane_id.clone(),
+            "claude",
+            "herdr:claude",
+            "session-1",
+            "Fix MAT-12 billing",
+            1,
+        );
+        turn.work_context = Some(crate::work_context::PaneWorkContext {
+            ticket_ids: vec!["MAT-12".into()],
+            work_title: Some("Fix MAT-12 billing".into()),
+            ..Default::default()
+        });
+        let response = app.handle_pane_report_metadata("turn".into(), turn);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+
+        for (seq, name) in [(2, "First session name"), (3, "Renamed session")] {
+            let params = guarded_session_name_params(
+                pane_id.clone(),
+                "claude",
+                "herdr:claude",
+                "session-1",
+                name,
+                seq,
+            );
+            let response = app.handle_pane_report_metadata(format!("name{seq}"), params);
+            assert!(
+                serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+                "{response}"
+            );
+            let context = app.state.terminals[&terminal_id].effective_work_context();
+            assert_eq!(context.session_name.as_deref(), Some(name));
+            // The rename must not erase what the last turn established.
+            assert_eq!(context.ticket_ids, vec!["MAT-12"]);
+            assert_eq!(context.work_title.as_deref(), Some("Fix MAT-12 billing"));
+        }
+    }
+
+    #[test]
+    fn guarded_session_names_reject_unguarded_and_overreaching_reports() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
+
+        // A session name with no session guard is not a rename anyone may make.
+        let mut unguarded = guarded_session_name_params(
+            pane_id.clone(),
+            "claude",
+            "herdr:claude",
+            "session-1",
+            "Sneaky",
+            1,
+        );
+        unguarded.agent_session_id = None;
+        unguarded.agent = None;
+        unguarded.applies_to_source = None;
+        let response = app.handle_pane_report_metadata("unguarded".into(), unguarded);
+        assert_eq!(metadata_error_code(&response), "invalid_work_context");
+
+        // A rename may carry the name and nothing else.
+        let mut overreaching = guarded_session_name_params(
+            pane_id.clone(),
+            "claude",
+            "herdr:claude",
+            "session-1",
+            "Sneaky",
+            2,
+        );
+        overreaching.work_context = Some(crate::work_context::PaneWorkContext {
+            session_name: Some("Sneaky".into()),
+            ticket_ids: vec!["MAT-99".into()],
+            ..Default::default()
+        });
+        let response = app.handle_pane_report_metadata("overreaching".into(), overreaching);
+        assert_eq!(metadata_error_code(&response), "invalid_work_context");
+
+        // A rename aimed at a session this pane is not running is rejected.
+        let stale = guarded_session_name_params(
+            pane_id,
+            "claude",
+            "herdr:claude",
+            "session-other",
+            "Sneaky",
+            3,
+        );
+        let response = app.handle_pane_report_metadata("stale".into(), stale);
+        assert_eq!(metadata_error_code(&response), "agent_session_mismatch");
     }
 
     #[test]
