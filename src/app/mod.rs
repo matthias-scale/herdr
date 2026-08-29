@@ -16,6 +16,7 @@ mod config_io;
 mod creation;
 pub(crate) mod foreground_process;
 mod git_refresh;
+pub(crate) mod home;
 mod ids;
 pub(crate) mod inbox;
 mod input;
@@ -618,6 +619,7 @@ impl App {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             inbox: None,
+            home: None,
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,

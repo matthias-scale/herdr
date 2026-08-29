@@ -16,6 +16,7 @@ mod dock_context;
 mod dock_scratchpad;
 #[path = "ui/dock/shortcuts.rs"]
 mod dock_shortcuts;
+mod home;
 mod inbox;
 mod info_panel;
 mod keybind_help;
