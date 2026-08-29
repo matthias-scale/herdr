@@ -2,19 +2,27 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 param([string]$Action = "")
 
-if ($Action -ne "session" -and $Action -ne "title") { exit 0 }
+if ($Action -ne "session" -and $Action -ne "title" -and $Action -ne "session-name") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
 $inputText = [Console]::In.ReadToEnd()
-if ($Action -eq "title") {
+if ($Action -eq "title" -or $Action -eq "session-name") {
+    $herdrBin = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+    if ($Action -eq "title") {
+        try {
+            $inputText | & $herdrBin agent turn-title --provider claude 2>$null | Out-Null
+        } catch {
+        }
+    }
+    # Claude renames a session outside turn boundaries, so publish the current
+    # name on every event this hook receives, not only at turn start.
     try {
-        $herdrBin = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
-        $inputText | & $herdrBin agent turn-title --provider claude 2>$null | Out-Null
+        $inputText | & $herdrBin agent session-name --provider claude 2>$null | Out-Null
     } catch {
     }
     exit 0

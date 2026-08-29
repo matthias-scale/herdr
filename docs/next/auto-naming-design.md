@@ -181,3 +181,32 @@ an arbitrary prefix.
    secrets, subagents, and session replacement, and document mirror migration.
    This is larger and should not be half-shipped with the invariant patch.
 
+
+## Delivered: the agent's own session name
+
+The design above assumed the derived work title was the strongest automatic
+signal. It is not. Claude records the name it gives a session as an `ai-title`
+entry in the session transcript and appends a fresh entry on every rename, so
+the current name is the last such entry for the reported session id.
+
+That fact is now carried end to end:
+
+- `PaneWorkContext.session_name` is the wire field. It is additive and
+  optional, so the protocol version is unchanged.
+- `herdr agent session-name --provider claude` reads the transcript the hook
+  payload points at, takes the last `ai-title`, and reports it under
+  `herdr:session-name` with the same agent/session guards the work title uses.
+- The Claude hook runs that command on `UserPromptSubmit` **and** `Stop`. A
+  rename lands between turns, so binding it to turn start alone is what made
+  the name go stale.
+- The server treats a session-name report as a patch of the hook tier, not a
+  replacement, so a rename cannot erase the ticket and link evidence the last
+  turn established.
+- `Tab::work_context_display_projection` ranks the session name above the
+  terminal title and the derived work title, and below a human pane label or
+  `Tab.custom_name`. The terminal title is whatever the agent last painted —
+  frequently the checkout directory before a session has been named — so it
+  must never outrank an explicit name.
+
+Codex has no equivalent channel today; `request_from_session_name` rejects it
+rather than inventing one.
