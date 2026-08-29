@@ -2005,6 +2005,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn clicking_the_home_status_button_toggles_home_on_and_off() {
+        let mut app = app_for_mouse_test();
+        app.state.mobile_width_threshold = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 20));
+        let home_button = app.state.view.status_buttons[0].clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            home_button.rect.x + 1,
+            home_button.rect.y,
+        ));
+        assert!(app.state.home.is_some());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            home_button.rect.x + 1,
+            home_button.rect.y,
+        ));
+        assert!(app.state.home.is_none());
+    }
+
     fn add_test_work_link(app: &mut crate::app::App, ws_idx: usize) {
         let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[ws_idx].tabs[0]

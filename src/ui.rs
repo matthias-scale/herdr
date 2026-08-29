@@ -700,6 +700,10 @@ fn render_with_runtime_registry_inner(
             detail.observed_at,
             frame,
         );
+    } else if app.home.is_some() {
+        let queue = app.blocked_agents();
+        let counts = app.home_counts(&queue);
+        home::render_home(app, &queue, counts, terminal_area, frame);
     } else if let Some(inbox) = app.inbox.as_ref() {
         let queue = app.blocked_agents();
         inbox::render_inbox(
@@ -979,6 +983,28 @@ mod tests {
 
         assert!(screen.contains("new workspace"), "{screen}");
         assert!(screen.contains("project"), "{screen}");
+    }
+
+    #[test]
+    fn home_render_dispatch_wins_over_an_inbox_that_is_also_open() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        app.inbox = Some(crate::app::inbox::InboxState::default());
+
+        let area = Rect::new(0, 0, 80, 20);
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(screen.contains("nothing is waiting on you"), "{screen}");
+        assert!(!screen.contains("nothing is blocked"), "{screen}");
     }
 
     #[test]

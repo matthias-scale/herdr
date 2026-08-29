@@ -216,6 +216,7 @@ impl App {
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
         use crate::app::state::StatusButtonAction;
         match action {
+            StatusButtonAction::Home => self.state.toggle_home(),
             StatusButtonAction::Inbox => self.state.toggle_inbox(),
             StatusButtonAction::Scratchpad => self.state.show_scratchpad_tab(),
             StatusButtonAction::Dock => {

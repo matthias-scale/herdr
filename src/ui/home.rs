@@ -151,3 +151,125 @@ pub(super) fn render_home(
     let hidden_below = queue.len().saturating_sub(scroll + visible);
     frame.render_widget(Paragraph::new(hint_line(app, scroll, hidden_below)), hint);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::PaneId;
+    use crate::terminal::TerminalId;
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn blocked(index: usize) -> BlockedAgent {
+        BlockedAgent {
+            ws_idx: 0,
+            pane_id: PaneId::alloc(),
+            terminal_id: TerminalId::alloc(),
+            workspace_label: format!("ws{index}"),
+            agent_label: format!("agent{index}"),
+            blocked_since: None,
+            seq: None,
+        }
+    }
+
+    fn draw_home(app: &AppState, queue: &[BlockedAgent], area: Rect) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).expect("term");
+        terminal
+            .draw(|frame| {
+                render_home(
+                    app,
+                    queue,
+                    HomeCounts {
+                        blocked: queue.len(),
+                        agents: queue.len(),
+                        spaces: 1,
+                    },
+                    area,
+                    frame,
+                );
+            })
+            .expect("render home");
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &Buffer, area: Rect, row: u16) -> String {
+        (area.x..area.x + area.width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn home_renders_blocked_rows_and_marks_the_selected_row_with_bold_text() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        let queue = vec![blocked(0), blocked(1)];
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+
+        assert!(row_text(&buffer, area, 2).contains("agent0"));
+        assert!(row_text(&buffer, area, 3).contains("agent1"));
+        assert_eq!(buffer[(1, 2)].symbol(), "▸");
+        assert_eq!(buffer[(1, 3)].symbol(), "·");
+        assert_eq!(
+            buffer[(1, 2)].style().add_modifier(Modifier::BOLD),
+            buffer[(1, 2)].style()
+        );
+        assert_ne!(
+            buffer[(1, 3)].style().add_modifier(Modifier::BOLD),
+            buffer[(1, 3)].style()
+        );
+    }
+
+    #[test]
+    fn an_empty_home_queue_renders_the_waiting_message_instead_of_a_blank_body() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &[], area);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("nothing is waiting on you"), "{text:?}");
+    }
+
+    #[test]
+    fn a_scrolled_home_queue_renders_only_the_rows_in_the_body_from_the_scroll_offset() {
+        let mut app = AppState::test_new();
+        let queue: Vec<_> = (0..8).map(blocked).collect();
+        let mut home = crate::app::home::HomeState::default();
+        for _ in 0..6 {
+            home.select_next(&queue);
+        }
+        app.home = Some(home);
+        let area = Rect::new(0, 0, 60, 7);
+
+        let buffer = draw_home(&app, &queue, area);
+        let body_rows: Vec<String> = (2..6).map(|row| row_text(&buffer, area, row)).collect();
+
+        assert!(body_rows[0].contains("agent3"), "{body_rows:?}");
+        assert!(body_rows[1].contains("agent4"), "{body_rows:?}");
+        assert!(body_rows[2].contains("agent5"), "{body_rows:?}");
+        assert!(body_rows[3].contains("agent6"), "{body_rows:?}");
+        assert!(body_rows.iter().all(|row| !row.contains("agent2")));
+        assert!(body_rows.iter().all(|row| !row.contains("agent7")));
+    }
+
+    #[test]
+    fn a_one_cell_home_area_does_not_panic_or_write_outside_its_width() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 1, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+
+        assert_eq!(*buffer.area(), area);
+        for row in 0..area.height {
+            assert_eq!(row_text(&buffer, area, row).chars().count(), 1);
+        }
+    }
+}
