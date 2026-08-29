@@ -341,8 +341,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Open the home view on launch. Esc dismisses it.
 # show_home_on_start = true
 
-# Desktop tab row placement: "top" or "bottom".
-# tab_bar_position = "top"
+# Desktop tab row placement: "hidden", "top" or "bottom". Hidden is the default
+# because the sidebar already lists every tab in every space.
+# tab_bar_position = "hidden"
 
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".

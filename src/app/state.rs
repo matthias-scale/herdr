@@ -2469,6 +2469,8 @@ impl AppState {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             show_subscription_usage: true,
+            // Deliberately not the shipped default (`Hidden`): the UI tests that
+            // exercise tab-row geometry need a tab row to measure.
             tab_bar_position: TabBarPositionConfig::Top,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,

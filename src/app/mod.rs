@@ -6162,6 +6162,9 @@ last_pane = "prefix+tab"
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        // This test clicks the new-tab button, so it needs a tab row rather
+        // than the shipped `Hidden` default.
+        app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
         app.state.prompt_new_tab_name = false;
         app.state.ensure_test_terminals();
         let previous_pane = app.state.workspaces[0].tabs[0].root_pane;

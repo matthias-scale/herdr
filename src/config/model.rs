@@ -1000,9 +1000,12 @@ pub struct WorktreesConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabBarPositionConfig {
-    #[default]
     Top,
     Bottom,
+    /// No tab row at all. The sidebar already lists every tab in every space, so
+    /// the row repeats it while costing a terminal line on every workspace.
+    #[default]
+    Hidden,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1329,7 +1332,7 @@ impl Default for UiConfig {
             hide_tab_bar_when_single_tab: false,
             show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
-            tab_bar_position: TabBarPositionConfig::Top,
+            tab_bar_position: TabBarPositionConfig::Hidden,
             show_home_on_start: true,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
@@ -1606,7 +1609,7 @@ status_indicators = "symbols"
         assert!(default_config.ui.show_subscription_usage);
         assert_eq!(
             default_config.ui.tab_bar_position,
-            TabBarPositionConfig::Top
+            TabBarPositionConfig::Hidden
         );
 
         let toml = r#"
@@ -1627,6 +1630,11 @@ tab_bar_position = "bottom"
         assert!(config.ui.hide_tab_bar_when_single_tab);
         assert!(!config.ui.show_subscription_usage);
         assert_eq!(config.ui.tab_bar_position, TabBarPositionConfig::Bottom);
+
+        // The default is also nameable, so a config that opted into a row can
+        // be moved back to hidden without deleting the key.
+        let config: Config = toml::from_str("[ui]\ntab_bar_position = \"hidden\"\n").unwrap();
+        assert_eq!(config.ui.tab_bar_position, TabBarPositionConfig::Hidden);
     }
 
     #[test]
