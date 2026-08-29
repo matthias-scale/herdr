@@ -31,6 +31,7 @@ fn env_bool(name: &str) -> Option<bool> {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    stamp_fork_build();
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig.zon");
@@ -92,5 +93,64 @@ fn main() {
         println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     } else {
         println!("cargo:rustc-link-lib=static=ghostty-vt");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fork-local (matthias-scale). Keep last so upstream syncs conflict on one
+// trailing block rather than throughout the file.
+//
+// Upstream ships every build as bare `0.8.0`, which makes a fork build and a
+// stock build indistinguishable from `--version`, from `herdr status`, and from
+// the version the socket API reports for a running server. Stamping the channel
+// closes that gap without touching update logic: `update.rs` compares
+// `BASE_VERSION`, which is unchanged, and `is_preview()` stays false.
+// ---------------------------------------------------------------------------
+
+fn stamp_fork_build() {
+    println!("cargo:rerun-if-env-changed=HERDR_FORK_STAMP");
+
+    if env_bool("HERDR_FORK_STAMP") == Some(false) {
+        return;
+    }
+    // An explicit channel wins; release builds set it deliberately.
+    if env::var_os("HERDR_BUILD_CHANNEL").is_some() {
+        return;
+    }
+    let Some(build_id) = git_build_id() else {
+        return;
+    };
+
+    println!("cargo:rustc-env=HERDR_BUILD_CHANNEL=fork");
+    if env::var_os("HERDR_BUILD_ID").is_none() {
+        println!("cargo:rustc-env=HERDR_BUILD_ID={build_id}");
+    }
+}
+
+/// Short HEAD sha, suffixed `.dirty` when tracked files are modified, so a
+/// hand-built binary cannot claim to be a clean commit.
+fn git_build_id() -> Option<String> {
+    let head_path = git_output(&["rev-parse", "--git-path", "HEAD"])?;
+    println!("cargo:rerun-if-changed={head_path}");
+
+    let sha = git_output(&["rev-parse", "--short=8", "HEAD"])?;
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .is_ok_and(|out| out.status.success() && !out.stdout.is_empty());
+
+    Some(if dirty { format!("{sha}.dirty") } else { sha })
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
     }
 }

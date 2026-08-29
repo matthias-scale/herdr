@@ -97,9 +97,10 @@ pub fn save_manifest_announcement(
     Ok(Some(product_announcement))
 }
 
+// Announcements are keyed by manifest release version, not by build stamp.
 pub fn load_unseen_for_current_version() -> Option<ProductAnnouncement> {
     load_fake_for_current_version()
-        .or_else(|| load_unseen_from_path(&store_path(), &crate::build_info::version()))
+        .or_else(|| load_unseen_from_path(&store_path(), crate::build_info::BASE_VERSION))
 }
 
 pub fn mark_seen(version: &str, id: &str) -> io::Result<()> {
