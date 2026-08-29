@@ -294,6 +294,7 @@ impl App {
             self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
         }
         changed |= self.schedule_status_metrics_after_resize_poll(now, resized);
+        self.schedule_status_side_signals(now);
 
         if self
             .config_diagnostic_deadline
@@ -502,6 +503,70 @@ impl App {
             self.state.status_metrics = None;
         }
         stale
+    }
+
+    /// Refreshes account quota and reachability on their own slow cadences.
+    ///
+    /// Both read the world, so both run on background threads and reach the UI
+    /// as events. Neither blocks a frame, and a failure leaves the previous
+    /// snapshot standing rather than blanking the row.
+    pub(crate) fn schedule_status_side_signals(&mut self, now: Instant) {
+        // The same switch that silences native metric sampling silences these:
+        // a test process must not spawn `kimi-usage` or open a socket to the
+        // internet just because a frame was rendered.
+        if !self.status_metric_refresh_enabled || !self.state.status_bar_enabled {
+            return;
+        }
+        self.schedule_provider_usage(now);
+        self.schedule_connectivity_probe(now);
+    }
+
+    fn schedule_provider_usage(&mut self, now: Instant) {
+        if self.provider_usage_in_flight
+            || !crate::provider_usage::snapshot_is_due(self.provider_usage_refreshed_at, now)
+        {
+            return;
+        }
+        let tx = self.event_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("herdr-provider-usage".into())
+            .spawn(move || {
+                let snapshot = crate::provider_usage::collect(
+                    crate::provider_usage::now_unix(),
+                    Instant::now(),
+                );
+                let _ = tx.blocking_send(crate::events::AppEvent::ProviderUsageRefreshed {
+                    snapshot: Box::new(snapshot),
+                });
+            })
+            .is_ok();
+        self.provider_usage_in_flight = spawned;
+        if spawned {
+            self.provider_usage_refreshed_at = Some(now);
+        }
+    }
+
+    fn schedule_connectivity_probe(&mut self, now: Instant) {
+        if self.connectivity_probe_in_flight
+            || self.connectivity_probed_at.is_some_and(|last| {
+                now.checked_duration_since(last)
+                    .is_some_and(|elapsed| elapsed < crate::connectivity::PROBE_INTERVAL)
+            })
+        {
+            return;
+        }
+        let tx = self.event_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("herdr-connectivity".into())
+            .spawn(move || {
+                let reachable = crate::connectivity::probe();
+                let _ = tx.blocking_send(crate::events::AppEvent::ConnectivityProbed { reachable });
+            })
+            .is_ok();
+        self.connectivity_probe_in_flight = spawned;
+        if spawned {
+            self.connectivity_probed_at = Some(now);
+        }
     }
 
     pub(crate) fn schedule_status_metrics(&mut self, now: Instant) -> bool {

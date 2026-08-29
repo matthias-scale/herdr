@@ -30,7 +30,7 @@ pub(crate) const INFO_PANEL_MIN_WIDTH: u16 = 26;
 const INFO_PANEL_WIDTH: u16 = 36;
 const INFO_PANEL_MIN_MAIN_WIDTH: u16 = 44;
 const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_USAGE_FILES: usize = 64;
+pub(crate) const MAX_USAGE_FILES: usize = 64;
 const MAX_USAGE_DIRECTORIES: usize = 256;
 const MAX_USAGE_ENTRIES: usize = 4096;
 const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
@@ -216,16 +216,16 @@ struct UsageSnapshot {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-struct ProviderUsage {
-    windows: Vec<UsageWindow>,
+pub(crate) struct ProviderUsage {
+    pub(crate) windows: Vec<UsageWindow>,
     credits: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct UsageWindow {
-    used_percent: f64,
-    window_minutes: u64,
-    resets_at: i64,
+pub(crate) struct UsageWindow {
+    pub(crate) used_percent: f64,
+    pub(crate) window_minutes: u64,
+    pub(crate) resets_at: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -281,7 +281,7 @@ struct RawCcusageProjection {
     remaining_minutes: u64,
 }
 
-fn parse_codex_record(line: &str) -> Option<ProviderUsage> {
+pub(crate) fn parse_codex_record(line: &str) -> Option<ProviderUsage> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let rate_limits = value
         .get("payload")
@@ -342,7 +342,7 @@ fn parse_ccusage_output(output: &str, now: i64) -> Result<Option<ClaudeUsage>, (
     }))
 }
 
-fn parse_utc_timestamp(value: &str) -> Option<i64> {
+pub(crate) fn parse_utc_timestamp(value: &str) -> Option<i64> {
     let value = value.strip_suffix('Z')?;
     let (date, time) = value.split_once('T')?;
     let mut date_parts = date.split('-');
@@ -416,14 +416,14 @@ fn parse_usage_window(raw: RawUsageWindow) -> Option<UsageWindow> {
     })
 }
 
-fn usage_window(usage: &ProviderUsage, minutes: u64) -> Option<&UsageWindow> {
+pub(crate) fn usage_window(usage: &ProviderUsage, minutes: u64) -> Option<&UsageWindow> {
     usage
         .windows
         .iter()
         .find(|window| window.window_minutes == minutes)
 }
 
-fn recent_jsonl_files(root: &Path, max_files: usize) -> Result<Vec<PathBuf>, ()> {
+pub(crate) fn recent_jsonl_files(root: &Path, max_files: usize) -> Result<Vec<PathBuf>, ()> {
     if max_files == 0 {
         return Ok(Vec::new());
     }
@@ -475,7 +475,7 @@ fn recent_jsonl_files(root: &Path, max_files: usize) -> Result<Vec<PathBuf>, ()>
     Ok(files.into_iter().map(|(_, path)| path).collect())
 }
 
-fn read_file_tail(path: &Path) -> Option<String> {
+pub(crate) fn read_file_tail(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(MAX_USAGE_FILE_BYTES);
@@ -497,7 +497,7 @@ fn latest_codex_usage(path: &Path) -> Result<Option<ProviderUsage>, ()> {
     Ok(contents.lines().filter_map(parse_codex_record).next_back())
 }
 
-fn home_path(directory: &str) -> Option<PathBuf> {
+pub(crate) fn home_path(directory: &str) -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -689,7 +689,7 @@ fn merge_usage_refresh(
     }
 }
 
-fn current_unix_timestamp() -> Option<i64> {
+pub(crate) fn current_unix_timestamp() -> Option<i64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

@@ -114,6 +114,10 @@ pub struct App {
         Arc<std::sync::Mutex<crate::platform::status_metrics::StatusMetricSampler>>,
     pub(crate) status_metric_refresh_enabled: bool,
     pub(crate) status_metrics_visible: bool,
+    pub(crate) provider_usage_refreshed_at: Option<Instant>,
+    pub(crate) provider_usage_in_flight: bool,
+    pub(crate) connectivity_probed_at: Option<Instant>,
+    pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
@@ -782,6 +786,11 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             show_subscription_usage: config.ui.show_subscription_usage,
+            status_bar_expanded: config.ui.status_bar_expanded,
+            status_now_unix: crate::provider_usage::now_unix(),
+            provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
+            connectivity: crate::connectivity::Connectivity::default(),
+            status_disk_visible: false,
             tab_bar_position: config.ui.tab_bar_position,
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
@@ -882,6 +891,10 @@ impl App {
             )),
             status_metric_refresh_enabled: !cfg!(test),
             status_metrics_visible: false,
+            provider_usage_refreshed_at: cfg!(test).then(Instant::now),
+            provider_usage_in_flight: false,
+            connectivity_probed_at: cfg!(test).then(Instant::now),
+            connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
             event_rx,
@@ -1707,6 +1720,7 @@ impl App {
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.show_subscription_usage = config.ui.show_subscription_usage;
+                self.state.status_bar_expanded = config.ui.status_bar_expanded;
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 if self.state.status_bar_enabled && !status_bar_was_enabled {

@@ -18,7 +18,7 @@ mod dock_scratchpad;
 mod dock_shortcuts;
 mod home;
 mod inbox;
-mod info_panel;
+pub(crate) mod info_panel;
 mod keybind_help;
 mod loop_runs;
 mod menus;
@@ -86,6 +86,7 @@ pub(crate) use self::sidebar::BLOCKED_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+#[cfg(test)]
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
@@ -1590,9 +1591,11 @@ mod tests {
             row0.contains("testhost"),
             "status bar missing hostname: {row0:?}"
         );
-        assert!(row0.contains("feature/native-stat"), "{row0:?}");
+        // The branch is gone from the row by design; the device and the
+        // resource columns are what the contract now guarantees.
+        assert!(!row0.contains("feature/native-stat"), "{row0:?}");
         assert!(
-            row0.contains("8.0") || row0.contains("12") || row0.contains("88"),
+            row0.contains("CPU \u{2581}") && row0.contains("MEM \u{2584}"),
             "status bar missing resource metrics: {row0:?}"
         );
         assert!(!row0.contains("/repo"), "{row0:?}");
@@ -1632,8 +1635,8 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
-        assert!(row0.contains("CPU  12%"), "{row0:?}");
+        assert!(row0.contains("MEM \u{2584}"), "{row0:?}");
+        assert!(row0.contains("CPU \u{2581}"), "{row0:?}");
         assert!(!row0.contains("Herdr v"), "{row0:?}");
     }
 
@@ -1660,8 +1663,8 @@ mod tests {
                 app.view.status_bar_rect,
                 app.view.status_bar_rect.y,
             );
-            assert!(row0.contains("MEM    8.0/  16.0 GiB"), "{row0:?}");
-            assert!(row0.contains("CPU  12%"), "{row0:?}");
+            assert!(row0.contains("MEM \u{2584}"), "{row0:?}");
+            assert!(row0.contains("CPU \u{2581}"), "{row0:?}");
             assert!(!row0.contains("Herdr v"), "{row0:?}");
             rendered.push((
                 "sampled metrics",
@@ -1683,8 +1686,8 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM     --/    -- GiB"), "{row0:?}");
-        assert!(row0.contains("CPU  --%"), "{row0:?}");
+        assert!(row0.contains("MEM -"), "{row0:?}");
+        assert!(row0.contains("CPU -"), "{row0:?}");
         assert!(!row0.contains("Herdr v"), "{row0:?}");
         rendered.push((
             "unavailable fallback",

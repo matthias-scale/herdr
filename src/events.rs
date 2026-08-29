@@ -64,6 +64,12 @@ pub enum AppEvent {
     StatusMetricsRefreshed {
         snapshot: Option<Box<crate::platform::status_metrics::StatusMetricsSnapshot>>,
     },
+    /// A bounded background provider-quota read completed.
+    ProviderUsageRefreshed {
+        snapshot: Box<crate::provider_usage::ProviderUsageSnapshot>,
+    },
+    /// A bounded background reachability probe completed.
+    ConnectivityProbed { reachable: bool },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.

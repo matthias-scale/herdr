@@ -436,6 +436,10 @@ impl App {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::ToggleStatusDetail => {
+                self.state.status_bar_expanded = !self.state.status_bar_expanded;
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::ToggleDock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
                 leave_navigate_mode(&mut self.state);
@@ -1716,6 +1720,7 @@ pub(crate) enum NavigateAction {
     TogglePinTab,
     EnterResizeMode,
     ToggleSidebar,
+    ToggleStatusDetail,
     ToggleDock,
     PreviousDockTab,
     NextDockTab,
@@ -1888,6 +1893,7 @@ fn non_indexed_action_for_key(
         (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
         (&kb.next_dock_tab, NavigateAction::NextDockTab),
@@ -2197,6 +2203,10 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleStatusDetail => {
+            state.status_bar_expanded = !state.status_bar_expanded;
             leave_navigate_mode(state);
         }
         NavigateAction::ToggleDock => {

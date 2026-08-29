@@ -96,6 +96,38 @@ impl crate::app::AppState {
     /// pane that was already blocked before the field existed, or whose
     /// transition was never observed, and guessing it is the oldest would put
     /// the least trustworthy row at the top of the queue.
+    /// Agents on this machine, split into the two numbers the status dot shows.
+    ///
+    /// Working and blocked are counted from the same pass over the same panes
+    /// the inbox uses, so the dot and the inbox can never disagree about how
+    /// many agents are waiting on the human.
+    pub(crate) fn agent_dot_counts(&self) -> (usize, usize) {
+        let mut working = 0usize;
+        let mut blocked = 0usize;
+        for workspace in &self.workspaces {
+            for tab in &workspace.tabs {
+                for pane in tab.panes.values() {
+                    let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
+                        continue;
+                    };
+                    if terminal.detected_agent.is_none() {
+                        continue;
+                    }
+                    if crate::terminal::counts_as_blocked(
+                        terminal.state,
+                        !terminal.closing_gates.is_empty(),
+                        terminal.usage_limited,
+                    ) {
+                        blocked = blocked.saturating_add(1);
+                    } else if terminal.state == crate::detect::AgentState::Working {
+                        working = working.saturating_add(1);
+                    }
+                }
+            }
+        }
+        (working.saturating_add(blocked), blocked)
+    }
+
     pub(crate) fn blocked_agents(&self) -> Vec<BlockedAgent> {
         let mut queue: Vec<BlockedAgent> = Vec::new();
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {

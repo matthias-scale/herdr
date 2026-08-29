@@ -72,9 +72,26 @@ impl App {
                     .status_metric_refresh
                     .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
                 if let Some(snapshot) = snapshot {
+                    self.state.status_disk_visible =
+                        crate::platform::status_metrics::disk_segment_visible(
+                            snapshot.metrics.disk_percent,
+                            self.state.status_disk_visible,
+                        );
                     self.state.status_metrics = Some(*snapshot);
                 }
+                self.state.status_now_unix = crate::provider_usage::now_unix();
                 should_repaint && self.status_metrics_visible
+            }
+            AppEvent::ProviderUsageRefreshed { snapshot } => {
+                self.provider_usage_in_flight = false;
+                self.state.status_now_unix = crate::provider_usage::now_unix();
+                let changed = self.state.provider_usage != *snapshot;
+                self.state.provider_usage = *snapshot;
+                changed && self.state.status_bar_enabled
+            }
+            AppEvent::ConnectivityProbed { reachable } => {
+                self.connectivity_probe_in_flight = false;
+                self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
             }
             AppEvent::GitStatusRefreshed {
                 generation,
@@ -182,6 +199,18 @@ impl App {
             if let Some(snapshot) = snapshot {
                 self.state.status_metrics = Some(*snapshot);
             }
+            return None;
+        }
+
+        if let AppEvent::ProviderUsageRefreshed { snapshot } = ev {
+            self.provider_usage_in_flight = false;
+            self.state.provider_usage = *snapshot;
+            return None;
+        }
+
+        if let AppEvent::ConnectivityProbed { reachable } = ev {
+            self.connectivity_probe_in_flight = false;
+            self.state.connectivity.observe(reachable);
             return None;
         }
 
