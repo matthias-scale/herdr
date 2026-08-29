@@ -15,7 +15,25 @@ pub(crate) struct StatusMetrics {
     pub cpu_percent: Option<u8>,
     pub mem_used_gib: Option<f32>,
     pub mem_total_gib: Option<f32>,
+    /// Percentage of the volume that actually fills up: the data volume on
+    /// macOS, the root filesystem elsewhere. `None` when it cannot be read.
+    pub disk_percent: Option<u8>,
     pub hostname: String,
+}
+
+/// Disk is the one metric that stays hidden until it matters, so it needs its
+/// own show/hide boundary. The gap is deliberate: a volume hovering at the
+/// threshold would otherwise flicker the segment in and out every sample.
+pub(crate) const DISK_SHOW_AT_PERCENT: u8 = 80;
+pub(crate) const DISK_HIDE_BELOW_PERCENT: u8 = 78;
+
+/// Whether the disk segment is visible, given whether it was visible before.
+pub(crate) fn disk_segment_visible(disk_percent: Option<u8>, was_visible: bool) -> bool {
+    match disk_percent {
+        Some(percent) if was_visible => percent >= DISK_HIDE_BELOW_PERCENT,
+        Some(percent) => percent >= DISK_SHOW_AT_PERCENT,
+        None => false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +142,7 @@ pub(crate) fn status_metrics_fixture() -> StatusMetrics {
         cpu_percent: Some(12),
         mem_used_gib: Some(8.0),
         mem_total_gib: Some(16.0),
+        disk_percent: Some(41),
         hostname: "testhost".into(),
     }
 }

@@ -119,6 +119,31 @@ fn fits_unix_socket_path(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() <= 103
 }
 
+/// Used percentage of the filesystem holding `path`, from `statvfs`.
+///
+/// Capacity is measured against blocks available to an unprivileged user, the
+/// same basis `df` reports, so the number matches what the human sees when they
+/// go looking for the missing space.
+pub(crate) fn volume_used_percent(path: &std::ffi::CStr) -> Option<u8> {
+    // SAFETY: `stats` is fully initialised by a successful `statvfs`, and the
+    // path is a valid NUL-terminated C string for the duration of the call.
+    let stats = unsafe {
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+        if libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stats.assume_init()
+    };
+
+    let total = u64::from(stats.f_blocks);
+    let available = u64::from(stats.f_bavail);
+    if total == 0 || available > total {
+        return None;
+    }
+    let used = total - available;
+    u8::try_from((used as u128 * 100).div_ceil(total as u128)).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

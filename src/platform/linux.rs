@@ -68,6 +68,7 @@ pub(crate) fn sample_status_metrics(
         cpu_percent,
         mem_used_gib: (mem_total_gib > 0.0).then_some(mem_used_gib),
         mem_total_gib: (mem_total_gib > 0.0).then_some(mem_total_gib),
+        disk_percent: super::unix_common::volume_used_percent(c"/"),
         hostname,
     }
 }
