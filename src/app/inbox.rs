@@ -135,7 +135,10 @@ impl crate::app::AppState {
     pub(crate) fn toggle_inbox(&mut self) {
         self.inbox = match self.inbox.take() {
             Some(_) => None,
-            None => Some(InboxState::default()),
+            None => {
+                self.home = None;
+                Some(InboxState::default())
+            }
         };
     }
 

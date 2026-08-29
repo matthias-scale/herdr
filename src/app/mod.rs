@@ -1866,10 +1866,12 @@ impl App {
 
 impl App {
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
-        // The inbox forwards keys to a pane that is not the focused one, so the
-        // ordinary pane context would name the wrong terminal; it sends directly
-        // instead and takes itself out of the lease path, as Symphony does.
-        if self.state.symphony_detail.is_some() || self.state.inbox.is_some() {
+        // Full-frame overlays bypass ordinary pane context. The inbox routes keys
+        // to a selected pane, while Symphony and home consume them themselves.
+        if self.state.symphony_detail.is_some()
+            || self.state.inbox.is_some()
+            || self.state.home.is_some()
+        {
             None
         } else if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
@@ -2097,6 +2099,9 @@ impl App {
             return;
         }
         if self.handle_loop_run_history_key(key_event) {
+            return;
+        }
+        if self.handle_home_key_headless(key_event) {
             return;
         }
         if self.handle_inbox_key_headless(key_event) {

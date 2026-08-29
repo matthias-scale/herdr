@@ -507,6 +507,10 @@ impl App {
                 self.state.toggle_inbox();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenHome => {
+                self.state.toggle_home();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::Detach => {
                 super::modal::request_detach(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -1716,6 +1720,7 @@ pub(crate) enum NavigateAction {
     PreviousDockTab,
     NextDockTab,
     OpenInbox,
+    OpenHome,
     EditScratchpad,
     ShowScratchpad,
     CyclePaneNext,
@@ -1891,6 +1896,7 @@ fn non_indexed_action_for_key(
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.inbox, NavigateAction::OpenInbox),
+        (&kb.home, NavigateAction::OpenHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -2260,6 +2266,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::OpenInbox => {
             state.toggle_inbox();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenHome => {
+            state.toggle_home();
             leave_navigate_mode(state);
         }
         NavigateAction::Detach => {

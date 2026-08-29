@@ -548,6 +548,8 @@ pub struct KeysConfig {
     pub symphony: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
+    /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
+    pub home: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -708,6 +710,7 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     symphony: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
+    home: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
@@ -807,6 +810,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(inbox);
+        apply_field!(home);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -928,6 +932,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(inbox, keybinds.inbox);
+        copy_effective_action_field!(home, keybinds.home);
         copy_user_field!(indexed);
 
         profile
@@ -1281,6 +1286,7 @@ impl Default for KeysConfig {
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
+            home: BindingConfig::Many(vec!["prefix+shift+o".into(), "ctrl+alt+o".into()]),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),
