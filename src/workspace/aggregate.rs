@@ -25,10 +25,11 @@ pub struct PaneDetail {
     /// the blocked lifecycle state: output retirement may flip the pane back
     /// to working while the human decision is still open.
     pub open_blockers: bool,
+    pub gate_count: usize,
     /// The pane's agent is refusing to work because its plan usage/rate limit
     /// is exhausted. Live screen state, never latched.
     pub usage_limited: bool,
-    pub background_job_count: Option<u16>,
+    pub holds_shell: bool,
     pub active_subagents: Option<u32>,
     pub foreground_process_name: Option<String>,
     pub seen: bool,
@@ -78,8 +79,9 @@ impl Tab {
                 let agent_label = display_agent
                     .clone()
                     .or(fallback_agent_label)
-                    .unwrap_or_else(|| "Terminal".to_string());
+                    .unwrap_or_else(|| ">_".to_string());
                 let presentation = terminal.effective_presentation();
+                let (state, seen) = terminal.sidebar_projection(pane.seen);
                 let (pane_label, pane_label_is_agent_identity) = if let Some(label) =
                     terminal.manual_label.clone()
                 {
@@ -113,13 +115,14 @@ impl Tab {
                     agent: terminal.effective_known_agent(),
                     agent_context: terminal.agent_lifecycle_context(),
                     has_agent: terminal.agent_lifecycle_context().is_some(),
-                    state: terminal.state,
+                    state,
                     open_blockers: !terminal.closing_gates.is_empty(),
+                    gate_count: terminal.closing_gates.len(),
                     usage_limited: terminal.usage_limited,
-                    background_job_count: terminal.background_job_count,
+                    holds_shell: terminal.holds_shell,
                     active_subagents: terminal.active_subagents,
                     foreground_process_name: terminal.foreground_process_name.clone(),
-                    seen: pane.seen,
+                    seen,
                     stale: terminal.supervisor_stale,
                     reported_at: terminal.status_reported_at(),
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,

@@ -333,6 +333,17 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::ToggleBlockedFilter => {
+                self.state.blocked_filter = !self.state.blocked_filter;
+                self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                    &self.state,
+                    self.state.view.sidebar_rect,
+                    self.state.workspace_scroll,
+                );
+                if context == ActionContext::Navigate {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::PreviousTab => {
                 if let Some(tab_idx) = self.relative_tab(-1) {
                     self.focus_tab_idx_via_api(tab_idx);
@@ -1694,6 +1705,7 @@ pub(crate) enum NavigateAction {
     RenameTab,
     ToggleTabPrio,
     TogglePrioPanel,
+    ToggleBlockedFilter,
     PreviousTab,
     NextTab,
     PreviousWindow,
@@ -1864,6 +1876,10 @@ fn non_indexed_action_for_key(
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.toggle_tab_prio, NavigateAction::ToggleTabPrio),
         (&kb.toggle_prio_panel, NavigateAction::TogglePrioPanel),
+        (
+            &kb.toggle_blocked_filter,
+            NavigateAction::ToggleBlockedFilter,
+        ),
         (&kb.previous_tab, NavigateAction::PreviousTab),
         (&kb.next_tab, NavigateAction::NextTab),
         (&kb.previous_window, NavigateAction::PreviousWindow),
@@ -2089,6 +2105,17 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::TogglePrioPanel => {
             state.toggle_prio_panel();
             state.mark_session_dirty();
+            if context == ActionContext::Navigate {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::ToggleBlockedFilter => {
+            state.blocked_filter = !state.blocked_filter;
+            state.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                state,
+                state.view.sidebar_rect,
+                state.workspace_scroll,
+            );
             if context == ActionContext::Navigate {
                 leave_navigate_mode(state);
             }
@@ -4094,10 +4121,7 @@ navigate_pane_right = "ctrl+l"
         );
 
         assert_eq!(state.selected, 1);
-        // The always-present Blocked and Spaces headers now eat two rows of
-        // the short 8-row viewport, so keeping row 1 visible requires a
-        // one-row scroll where it previously needed none.
-        assert_eq!(state.mobile_switcher_scroll, 1);
+        assert_eq!(state.mobile_switcher_scroll, 0);
     }
 
     #[test]

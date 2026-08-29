@@ -229,6 +229,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+shift+b"
+# toggle_blocked_filter = "prefix+f"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
 

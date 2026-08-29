@@ -1,3 +1,4 @@
+#[cfg(test)]
 mod tokens;
 
 use ratatui::{
@@ -8,12 +9,11 @@ use ratatui::{
     Frame,
 };
 
+#[cfg(test)]
 use self::tokens::{ResolvedToken, ResolvedTokenKind};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
-use super::status::{
-    state_icon_with_stale, state_label, state_label_color_with_stale,
-    status_report_age_compact_label, status_report_age_label,
-};
+use super::status::state_label_color;
+use super::status::status_report_age_compact_label;
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
@@ -22,14 +22,12 @@ use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
-const PRIO_PANEL_HEADER_ROWS: u16 = 1;
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
-const AGENT_ACTIVITY_AGE_FIELD_WIDTH: usize = 5;
-const AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH: usize = 8;
+#[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
-pub(crate) const TAB_PRIO_FIELD_WIDTH: usize = 2;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
-const ACTIVE_SUBAGENT_GLYPH: &str = "⚙";
+#[cfg(test)]
+const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 
 pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
@@ -40,16 +38,19 @@ pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
         Some(Agent::Codex) => Some("cx"),
         Some(Agent::Claude) => Some("cc"),
         Some(Agent::Pi) => Some("pi"),
+        Some(Agent::Kimi) => Some("ki"),
         _ => None,
     }
 }
 
+#[cfg(test)]
 pub(super) fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
     let title = title.trim().to_ascii_lowercase();
     let provider = match entry.agent {
         Some(Agent::Codex) => Some("codex"),
         Some(Agent::Claude) => Some("claude"),
         Some(Agent::Pi) => Some("pi"),
+        Some(Agent::Kimi) => Some("kimi"),
         _ => None,
     };
     entry
@@ -62,6 +63,7 @@ pub(super) fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str)
         .any(|identity| identity.trim().eq_ignore_ascii_case(&title))
 }
 
+#[cfg(test)]
 pub(super) fn canonical_sidebar_agent_identity(entry: &AgentPanelEntry) -> Option<&str> {
     tab_agent_suffix(entry.agent)
         .or(entry.agent_kind_label.as_deref())
@@ -74,6 +76,7 @@ pub(super) fn canonical_sidebar_agent_identity(entry: &AgentPanelEntry) -> Optio
         })
 }
 
+#[cfg(test)]
 pub(super) fn compact_agent_identity<'a>(
     entry: &'a AgentPanelEntry,
     title: &str,
@@ -84,6 +87,7 @@ pub(super) fn compact_agent_identity<'a>(
     canonical_sidebar_agent_identity(entry)
 }
 
+#[cfg(test)]
 pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
     entry.has_agent
         && (entry.open_blockers
@@ -98,17 +102,19 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 /// The terminal predicate is the single rule for this section and the inbox.
 /// A human gate blocks only after the pane stops working. Usage limits remain
 /// blocked because the pane cannot proceed until the reset window.
+#[cfg(test)]
 pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
     crate::terminal::counts_as_blocked(entry.state, entry.open_blockers, entry.usage_limited)
 }
 
-pub(super) fn tab_blocker_dot_visible(entry: &AgentPanelEntry) -> bool {
-    entry_is_blocked(entry) && entry.state != AgentState::Blocked
+pub(crate) fn entry_has_red_dot(entry: &AgentPanelEntry) -> bool {
+    entry.state == AgentState::Blocked || entry.usage_limited || entry_has_gate(entry)
 }
 
 /// A working pane keeps its blue lifecycle label while a human gate is latched.
 /// Once work stops, the gate becomes blocking and supplies the blocked label.
 /// Usage limits still override every lifecycle label.
+#[cfg(test)]
 pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
     entry.usage_limited
         || (entry.open_blockers
@@ -119,10 +125,12 @@ pub(super) fn gate_overrides_label(entry: &AgentPanelEntry) -> bool {
 
 /// A usage limit outranks every other label: the pane is not working, and no
 /// answer from the human releases it — only the reset window does.
+#[cfg(test)]
 pub(super) fn usage_limit_label() -> &'static str {
     "usage"
 }
 
+#[cfg(test)]
 pub(super) fn gate_override_label(entry: &AgentPanelEntry) -> String {
     if entry.usage_limited {
         return entry
@@ -138,6 +146,7 @@ pub(super) fn gate_override_label(entry: &AgentPanelEntry) -> String {
         .unwrap_or_else(|| "blocked".to_string())
 }
 
+#[cfg(test)]
 pub(super) fn agent_panel_label_color(
     entry: &AgentPanelEntry,
     p: &Palette,
@@ -145,33 +154,335 @@ pub(super) fn agent_panel_label_color(
     if gate_overrides_label(entry) {
         return p.red;
     }
-    state_label_color_with_stale(entry.state, entry.seen, entry.stale, p)
+    state_label_color(entry.state, entry.seen, p)
 }
 
 pub(super) struct TabRowLayout {
-    pub state: Option<String>,
-    pub show_state_label: bool,
+    pub dot: String,
     pub title: String,
-    pub agent_suffix: Option<String>,
-    pub foreground_process: Option<String>,
-    pub background_jobs: Option<String>,
+    pub provider: String,
     pub activity_age: Option<String>,
     pub activity_instant: Option<std::time::Instant>,
-    pub active_subagents: Option<String>,
 }
 
-fn active_subagent_label(entry: &AgentPanelEntry) -> Option<String> {
-    entry
-        .active_subagents
-        .filter(|count| *count > 0)
-        .map(|count| format!("{ACTIVE_SUBAGENT_GLYPH}{count}"))
+const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
+const SIDEBAR_PROVIDER_FIELD_WIDTH: usize = 8;
+const SIDEBAR_AGE_FIELD_WIDTH: usize = 4;
+
+fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
+    entry.gate_count > 0 || entry.open_blockers
 }
 
-fn active_subagent_field_width(entry: &AgentPanelEntry) -> usize {
-    active_subagent_label(entry)
+fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
+    compact_dot_for_state(
+        entry.state,
+        entry.seen,
+        entry.has_agent,
+        entry.state == AgentState::Working && entry_has_gate(entry),
+        entry.usage_limited,
+    )
+}
+
+fn compact_row_dot_text(entry: &AgentPanelEntry) -> String {
+    // Red already says the row owes you an answer; how many gates are open does
+    // not change what you do next, so the count is not rendered.
+    compact_row_dot(entry).to_string()
+}
+
+fn compact_dot_for_state(
+    state: AgentState,
+    // Seen no longer selects a shape: done-unread and idle-seen are both `○`,
+    // separated by colour via state_label_color.
+    _seen: bool,
+    has_agent: bool,
+    _gate: bool,
+    _usage_limited: bool,
+) -> &'static str {
+    if !has_agent {
+        return "·";
+    }
+    match state {
+        AgentState::Working => "●",
+        AgentState::Blocked => "○",
+        AgentState::Idle if has_agent => "○",
+        _ => "·",
+    }
+}
+
+fn compact_provider(entry: &AgentPanelEntry) -> String {
+    if !entry.has_agent {
+        return ">_".to_string();
+    }
+    let Some(agent) = entry.agent.or(entry.agent_context) else {
+        return ">_".to_string();
+    };
+    let Some(suffix) = tab_agent_suffix(Some(agent)) else {
+        return if entry.holds_shell {
+            ">_".to_string()
+        } else {
+            String::new()
+        };
+    };
+    let mut provider = suffix.to_string();
+    if !entry.stale {
+        if let Some(count) = entry.active_subagents.filter(|count| *count > 0) {
+            provider.push_str(&format!("+{count}"));
+        }
+    }
+    if entry.holds_shell {
+        provider.push_str(" >_");
+    }
+    provider
+}
+
+fn compact_age(
+    entry: &AgentPanelEntry,
+    now: std::time::Instant,
+) -> (String, Option<std::time::Instant>) {
+    let instant = entry.reported_at.or(entry.activity_at);
+    let age = instant
+        .and_then(|instant| status_report_age_compact_label(Some(instant), now))
+        .unwrap_or_else(|| "—".to_string());
+    (age, instant)
+}
+
+fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
+    let candidate = if tab {
+        entry.primary_tab_label.as_deref()
+    } else if entry.pane_label_is_agent_identity {
+        entry
+            .primary_tab_label
+            .as_deref()
+            .or(entry.terminal_title_stripped.as_deref())
+    } else {
+        entry
+            .pane_label
+            .as_deref()
+            .or(entry.terminal_title_stripped.as_deref())
+    };
+    let candidate = if (entry.tab_label_leads_with_agent && !entry.tab_has_custom_name) || !tab {
+        compact_title_candidate(candidate)
+    } else {
+        candidate.map(str::trim).filter(|title| {
+            !title.is_empty()
+                && !title.eq_ignore_ascii_case(DEFAULT_THREAD_TITLE)
+                && !title.eq_ignore_ascii_case("Terminal")
+        })
+    };
+    candidate.unwrap_or(DEFAULT_THREAD_TITLE)
+}
+
+fn compact_title_candidate(title: Option<&str>) -> Option<&str> {
+    let title = title?.trim();
+    if title.is_empty()
+        || title.eq_ignore_ascii_case(DEFAULT_THREAD_TITLE)
+        || title.eq_ignore_ascii_case("Terminal")
+        || (title.contains('.')
+            && title
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.'))
+    {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+fn compact_row_layout(
+    entry: &AgentPanelEntry,
+    now: std::time::Instant,
+    width: usize,
+    prefix_width: usize,
+    tab: bool,
+) -> TabRowLayout {
+    let (age, activity_instant) = compact_age(entry, now);
+    let fixed_width = prefix_width
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + SIDEBAR_PROVIDER_FIELD_WIDTH
+        + SIDEBAR_AGE_FIELD_WIDTH;
+    let age_visible = width >= fixed_width;
+    TabRowLayout {
+        dot: compact_row_dot_text(entry),
+        title: truncate_end(
+            compact_row_title(entry, tab),
+            width.saturating_sub(fixed_width),
+        ),
+        provider: compact_provider(entry),
+        activity_age: age_visible.then_some(age),
+        activity_instant: age_visible.then_some(activity_instant).flatten(),
+    }
+}
+
+fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
+    if entry_has_gate(entry) || entry.usage_limited {
+        p.red
+    } else {
+        state_label_color(entry.state, entry.seen, p)
+    }
+}
+
+fn provider_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
+    match entry.agent.or(entry.agent_context) {
+        Some(Agent::Claude) => p.peach,
+        Some(Agent::Codex) => p.green,
+        Some(Agent::Pi) => p.mauve,
+        Some(Agent::Kimi) => p.yellow,
+        _ => p.overlay0,
+    }
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    format!(
+        "{text}{}",
+        " ".repeat(width.saturating_sub(display_width(text)))
+    )
+}
+
+fn pad_left(text: &str, width: usize) -> String {
+    format!(
+        "{}{}",
+        " ".repeat(width.saturating_sub(display_width(text))),
+        text
+    )
+}
+
+fn compact_row_style(style: Style, bg: Option<Color>) -> Style {
+    bg.map_or(style, |bg| style.bg(bg))
+}
+
+fn superscript(index: usize) -> String {
+    index
+        .to_string()
+        .chars()
+        .map(|digit| match digit {
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            _ => digit,
+        })
+        .collect()
+}
+
+pub(super) fn sidebar_workspace_labels(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> std::collections::HashMap<usize, (String, bool)> {
+    let entries = sidebar_thread_entries_from(app, terminal_runtimes);
+    let mut labels = std::collections::HashMap::new();
+    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
+        let members = sidebar_space_member_indices(app, ws_idx);
+        let manual = members
+            .iter()
+            .filter_map(|member| app.workspaces.get(*member))
+            .find_map(|member| member.custom_name.clone());
+        let agent_title = members.iter().find_map(|member| {
+            entries
+                .iter()
+                .filter(|entry| entry.ws_idx == *member && entry.has_agent)
+                .find_map(|entry| {
+                    compact_title_candidate(entry.primary_tab_label.as_deref()).map(str::to_string)
+                })
+        });
+        let label = manual
+            .map(|label| (label, false))
+            .or_else(|| agent_title.map(|label| (label, true)))
+            .unwrap_or_else(|| {
+                (
+                    ws.display_name_from(&app.terminals, terminal_runtimes),
+                    true,
+                )
+            });
+        labels.insert(ws_idx, label);
+    }
+    let mut duplicate_positions = std::collections::HashMap::<String, usize>::new();
+    let mut duplicate_counts = std::collections::HashMap::<String, usize>::new();
+    for (label, _) in labels.values() {
+        *duplicate_counts.entry(label.clone()).or_default() += 1;
+    }
+    for ws_idx in 0..app.workspaces.len() {
+        let Some((label, _derived)) = labels.get_mut(&ws_idx) else {
+            continue;
+        };
+        if duplicate_counts.get(label).copied().unwrap_or_default() > 1 {
+            let position = duplicate_positions.entry(label.clone()).or_default();
+            *position += 1;
+            label.push_str(&superscript(*position));
+        }
+    }
+    labels
+}
+
+pub(super) fn render_compact_agent_row(
+    app: &AppState,
+    frame: &mut Frame,
+    entry: &AgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+    tab: bool,
+    bg: Option<Color>,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let prefix = " ".repeat(usize::from(depth) * 3 + 1);
+    let layout = compact_row_layout(
+        entry,
+        app.view_observed_at,
+        usize::from(rect.width),
+        display_width(&prefix),
+        tab,
+    );
+    let fixed_width = display_width(&prefix)
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + SIDEBAR_PROVIDER_FIELD_WIDTH
+        + SIDEBAR_AGE_FIELD_WIDTH;
+    let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let title = pad_right(&layout.title, title_width);
+    let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
+    let provider = pad_left(&layout.provider, SIDEBAR_PROVIDER_FIELD_WIDTH);
+    let age = layout
+        .activity_age
         .as_deref()
-        .map(|label| 1 + display_width(label))
-        .unwrap_or_default()
+        .map_or_else(String::new, |age| pad_left(age, SIDEBAR_AGE_FIELD_WIDTH));
+    let is_active = tab
+        && app.active == Some(entry.ws_idx)
+        && app
+            .workspaces
+            .get(entry.ws_idx)
+            .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
+    let title_style = if is_active || app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
+    {
+        Style::default()
+            .fg(active_sidebar_title_color(p))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0)
+    };
+    let dot_style = Style::default().fg(compact_row_color(entry, p));
+    let provider_style = Style::default()
+        .fg(provider_color(entry, p))
+        .add_modifier(Modifier::DIM);
+    let age_style = Style::default().fg(if entry.state == AgentState::Working {
+        p.blue
+    } else {
+        p.overlay0
+    });
+    let spans = vec![
+        Span::styled(prefix, compact_row_style(Style::default(), bg)),
+        Span::styled(dot, compact_row_style(dot_style, bg)),
+        Span::styled(title, compact_row_style(title_style, bg)),
+        Span::styled(provider, compact_row_style(provider_style, bg)),
+        Span::styled(age, compact_row_style(age_style, bg)),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 pub(super) fn tab_row_layout(
@@ -182,15 +493,8 @@ pub(super) fn tab_row_layout(
     palette: &Palette,
     indicator_style: StatusIndicatorStyle,
 ) -> TabRowLayout {
-    tab_row_layout_with_density(
-        entry,
-        now,
-        width,
-        prefix_width,
-        palette,
-        indicator_style,
-        true,
-    )
+    let _ = (palette, indicator_style);
+    compact_row_layout(entry, now, width, prefix_width, true)
 }
 
 pub(super) fn mobile_tab_row_layout(
@@ -201,232 +505,10 @@ pub(super) fn mobile_tab_row_layout(
     palette: &Palette,
     indicator_style: StatusIndicatorStyle,
 ) -> TabRowLayout {
-    tab_row_layout_with_density(
-        entry,
-        now,
-        width,
-        prefix_width,
-        palette,
-        indicator_style,
-        false,
-    )
+    let _ = (palette, indicator_style);
+    compact_row_layout(entry, now, width, prefix_width, true)
 }
 
-fn tab_row_layout_with_density(
-    entry: &AgentPanelEntry,
-    now: std::time::Instant,
-    width: usize,
-    prefix_width: usize,
-    palette: &Palette,
-    indicator_style: StatusIndicatorStyle,
-    preserve_activity_age: bool,
-) -> TabRowLayout {
-    let state = tab_lifecycle_visible(entry).then(|| {
-        if gate_overrides_label(entry) {
-            return gate_override_label(entry);
-        }
-        entry
-            .state_labels
-            .get(agent_panel_status_key_with_stale(
-                entry.state,
-                entry.seen,
-                entry.stale,
-            ))
-            .cloned()
-            .unwrap_or_else(|| match entry.state {
-                _ if entry.stale => "stale".to_string(),
-                AgentState::Idle if !entry.seen => "done".to_string(),
-                _ => state_label(entry.state, entry.seen).to_string(),
-            })
-    });
-    let dot_width = state
-        .as_ref()
-        .map(|_| {
-            display_width(
-                state_icon_with_stale(
-                    entry.state,
-                    entry.seen,
-                    entry.stale,
-                    indicator_style,
-                    palette,
-                )
-                .0,
-            )
-        })
-        .unwrap_or_default();
-    let full_status_width = state
-        .as_deref()
-        .map(|label| dot_width + 1 + display_width(label) + display_width(" · "))
-        .unwrap_or_default();
-    let dot_status_width = state.as_ref().map(|_| dot_width + 1).unwrap_or_default();
-    // The prio cell is reserved on every row so its click target never moves. Overview rows carry
-    // no work-context marker: links live in the session's work-context panel, and on a narrow
-    // sidebar a second gutter cell would push the activity age off the row entirely.
-    let blocker_dot_width =
-        usize::from(tab_blocker_dot_visible(entry)) * (display_width("●") + display_width(" "));
-    let tab_gutter_width = TAB_PRIO_FIELD_WIDTH + blocker_dot_width;
-    let raw_tab_title = entry
-        .primary_tab_label
-        .as_deref()
-        .unwrap_or(DEFAULT_THREAD_TITLE);
-    let tab_title = if entry.tab_label_leads_with_agent {
-        DEFAULT_THREAD_TITLE
-    } else {
-        raw_tab_title
-    };
-    let mut agent_suffix =
-        compact_agent_identity(entry, tab_title).map(|suffix| format!(" · {suffix}"));
-    let mut agent_suffix_width = agent_suffix
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
-    let active_subagents = active_subagent_label(entry);
-    let active_subagents_width = active_subagent_field_width(entry);
-    if width
-        < prefix_width
-            + tab_gutter_width
-            + dot_status_width
-            + agent_suffix_width
-            + active_subagents_width
-            + 1
-    {
-        agent_suffix = None;
-        agent_suffix_width = 0;
-    }
-    let mut background_jobs = entry
-        .background_job_count
-        .filter(|count| *count > 0)
-        .map(|count| format!("  {count} >_"));
-    let (mut activity_age, mut activity_instant) =
-        if let Some(label) = status_report_age_label(entry.reported_at, now) {
-            (Some(label), entry.reported_at)
-        } else if let Some(activity_at) = entry.activity_at {
-            (
-                Some(format!(
-                    "{} ago",
-                    crate::activity_age::coarse_label(Some(activity_at), now)
-                )),
-                Some(activity_at),
-            )
-        } else {
-            (None, None)
-        };
-
-    let background_width = background_jobs
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
-    let activity_width = activity_age
-        .as_deref()
-        .map(|label| 1 + display_width(label))
-        .unwrap_or_default();
-    let mut foreground_process = entry
-        .foreground_process_name
-        .as_deref()
-        .filter(|name| !title_repeats_agent_identity(entry, name))
-        .map(|name| format!(" · {name}"));
-    if let Some(process) = foreground_process.as_mut() {
-        let process_budget = width.saturating_sub(
-            prefix_width
-                + tab_gutter_width
-                + full_status_width
-                + agent_suffix_width
-                + background_width
-                + activity_width
-                + active_subagents_width
-                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH,
-        );
-        if process_budget < display_width(" · ") + 1 {
-            foreground_process = None;
-        } else {
-            *process = truncate_end(process, process_budget.min(display_width(process)));
-        }
-    }
-    let foreground_process_width = foreground_process
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
-    let activity_status_width = if preserve_activity_age {
-        dot_status_width
-    } else {
-        full_status_width
-    };
-    if activity_age.as_deref().is_some_and(|label| {
-        width
-            < prefix_width
-                + tab_gutter_width
-                + activity_status_width
-                + agent_suffix_width
-                + foreground_process_width
-                + background_width
-                + TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH
-                + 1
-                + display_width(label)
-                + active_subagents_width
-    }) {
-        activity_age = None;
-        activity_instant = None;
-    }
-    let activity_width = activity_age
-        .as_deref()
-        .map(|label| 1 + display_width(label))
-        .unwrap_or_default();
-    if width
-        < prefix_width
-            + tab_gutter_width
-            + full_status_width
-            + agent_suffix_width
-            + foreground_process_width
-            + background_width
-            + activity_width
-            + active_subagents_width
-            + 1
-    {
-        background_jobs = None;
-    }
-    let background_width = background_jobs
-        .as_deref()
-        .map(display_width)
-        .unwrap_or_default();
-    let show_state_label = width
-        > prefix_width
-            + tab_gutter_width
-            + full_status_width
-            + agent_suffix_width
-            + background_width
-            + activity_width
-            + active_subagents_width;
-    let status_width = if show_state_label {
-        full_status_width
-    } else {
-        dot_status_width
-    };
-    let fixed_width = prefix_width
-        + tab_gutter_width
-        + status_width
-        + agent_suffix_width
-        + foreground_process_width
-        + background_width
-        + activity_width
-        + active_subagents_width;
-    let title = truncate_end(tab_title, width.saturating_sub(fixed_width));
-
-    TabRowLayout {
-        state,
-        show_state_label,
-        title,
-        agent_suffix,
-        foreground_process,
-        background_jobs,
-        activity_age,
-        activity_instant,
-        active_subagents,
-    }
-}
-
-/// Selected sidebar titles need stronger foreground contrast without restoring
-/// the old filled-row treatment. Darken RGB text tokens by one third and pair
-/// them with bold weight; terminal/reset themes keep their authored foreground.
 pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
     if palette.panel_bg == Color::Reset {
         return palette.text;
@@ -442,12 +524,14 @@ pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
     pub primary_label: String,
     pub primary_tab_label: Option<String>,
+    pub tab_has_custom_name: bool,
     pub tab_label_leads_with_agent: bool,
     pub pane_label: Option<String>,
     pub pane_label_is_agent_identity: bool,
@@ -478,7 +562,8 @@ pub(crate) struct AgentPanelEntry {
     /// Positive count from the current sub-agent source. Rendering depends on
     /// this field only so the source can change without changing row layout.
     pub active_subagents: Option<u32>,
-    pub background_job_count: Option<u16>,
+    pub holds_shell: bool,
+    pub gate_count: usize,
     pub seen: bool,
     pub stale: bool,
     pub reported_at: Option<std::time::Instant>,
@@ -523,42 +608,6 @@ fn expanded_sidebar_content(area: Rect) -> Rect {
     Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
 }
 
-fn prio_panel_height_in_body(
-    app: &AppState,
-    entry_count: usize,
-    collapsed: bool,
-    body_height: u16,
-) -> u16 {
-    if body_height == 0 {
-        return 0;
-    }
-    let entry_rows = entry_count.min(usize::from(u16::MAX)) as u16;
-    let minimum = if collapsed {
-        PRIO_PANEL_HEADER_ROWS
-    } else {
-        PRIO_PANEL_HEADER_ROWS.saturating_add(1)
-    };
-    let content_height = if collapsed {
-        PRIO_PANEL_HEADER_ROWS
-    } else {
-        PRIO_PANEL_HEADER_ROWS.saturating_add(entry_rows)
-    };
-    let split_height = if collapsed {
-        PRIO_PANEL_HEADER_ROWS
-    } else {
-        let content_height = body_height.saturating_add(WORKSPACE_SECTION_HEADER_ROWS);
-        (f32::from(content_height) * app.sidebar_section_split.clamp(0.0, 1.0)).floor() as u16
-    };
-    let maximum = body_height
-        .saturating_sub(MIN_WORKSPACE_LIST_ROWS)
-        .max(minimum)
-        .min(body_height);
-    content_height
-        .min(split_height.max(minimum))
-        .max(minimum)
-        .min(maximum)
-}
-
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -569,26 +618,6 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
 
 pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_sidebar_thread_entries_with_runtimes(app, None)
-}
-
-pub(crate) fn prio_panel_entries(
-    app: &AppState,
-    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
-) -> Vec<AgentPanelEntry> {
-    let entries = match terminal_runtimes {
-        Some(terminal_runtimes) => sidebar_thread_entries_from(app, terminal_runtimes),
-        None => sidebar_thread_entries(app),
-    };
-    prio_panel_entries_from_entries(entries)
-}
-
-fn prio_panel_entries_from_entries(entries: Vec<AgentPanelEntry>) -> Vec<AgentPanelEntry> {
-    let tab_entries = aggregate_tab_entries(&entries);
-    entries
-        .into_iter()
-        .filter(|entry| entry.prio && entry.tab_first_pane)
-        .filter_map(|entry| tab_entries.get(&(entry.ws_idx, entry.tab_idx)).cloned())
-        .collect()
 }
 
 pub(crate) fn sidebar_thread_entries_from(
@@ -628,6 +657,7 @@ pub(crate) fn relative_agent_navigation_entry(
         .map(|entry| (next_idx, entry))
 }
 
+#[cfg(test)]
 pub(crate) fn agent_panel_entries_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -666,6 +696,10 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let prio = ws.tabs.get(detail.tab_idx).is_some_and(|tab| tab.prio);
+                    let tab_has_custom_name = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .is_some_and(|tab| tab.custom_name.is_some());
                     let projection = ws.tab_display_projection(&app.terminals, detail.tab_idx);
                     let tab_label_leads_with_agent = projection
                         .as_ref()
@@ -679,6 +713,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         primary_tab_label: thread_title,
+                        tab_has_custom_name,
                         tab_label_leads_with_agent,
                         pane_label: detail.pane_label,
                         pane_label_is_agent_identity: detail.pane_label_is_agent_identity,
@@ -705,7 +740,6 @@ fn collect_agent_panel_entries_with_runtimes(
                                     .and_then(|value| value.parse::<u32>().ok())
                             })
                             .filter(|count| *count > 0),
-                        background_job_count: detail.background_job_count,
                         seen: detail.seen,
                         stale: detail.stale,
                         reported_at: detail.reported_at,
@@ -713,6 +747,8 @@ fn collect_agent_panel_entries_with_runtimes(
                         activity_at: detail.activity_at,
                         state_labels: detail.state_labels,
                         tokens: detail.tokens,
+                        holds_shell: detail.holds_shell,
+                        gate_count: detail.gate_count,
                         tab_first_pane: false,
                     }
                 })
@@ -744,18 +780,6 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
         (AgentState::Working, _) => "working",
         (AgentState::Blocked, _) => "blocked",
         (AgentState::Unknown, _) => "unknown",
-    }
-}
-
-pub(super) fn agent_panel_status_key_with_stale(
-    state: AgentState,
-    seen: bool,
-    stale: bool,
-) -> &'static str {
-    if stale {
-        "stale"
-    } else {
-        agent_panel_status_key(state, seen)
     }
 }
 
@@ -828,10 +852,8 @@ fn aggregate_tab_entries(
                     if tab_entry.foreground_process_name.is_none() {
                         tab_entry.foreground_process_name = first_foreground_process_name.clone();
                     }
-                    if !tab_entry.stale
-                        && (entry.stale
-                            || tab_lifecycle_priority(candidate.0, candidate.1)
-                                > tab_lifecycle_priority(tab_entry.state, tab_entry.seen))
+                    if tab_lifecycle_priority(candidate.0, candidate.1)
+                        > tab_lifecycle_priority(tab_entry.state, tab_entry.seen)
                     {
                         tab_entry.state = candidate.0;
                         tab_entry.seen = candidate.1;
@@ -846,13 +868,8 @@ fn aggregate_tab_entries(
                         (Some(current), Some(candidate)) => Some(current.max(candidate)),
                         (current, candidate) => current.or(candidate),
                     };
-                    tab_entry.background_job_count =
-                        match (tab_entry.background_job_count, entry.background_job_count) {
-                            (Some(current), Some(candidate)) => {
-                                Some(current.saturating_add(candidate))
-                            }
-                            (current, candidate) => current.or(candidate),
-                        };
+                    tab_entry.holds_shell |= entry.holds_shell;
+                    tab_entry.gate_count = tab_entry.gate_count.saturating_add(entry.gate_count);
                     tab_entry.active_subagents =
                         match (tab_entry.active_subagents, entry.active_subagents) {
                             (Some(current), Some(candidate)) => {
@@ -962,13 +979,6 @@ pub(crate) enum SidebarRow {
         count: usize,
         collapsed: bool,
     },
-    /// The priority projection keeps its own disclosure state and row style,
-    /// but participates in the unified sidebar geometry so it can sit between
-    /// Blocked and the remaining groups.
-    PrioPanel {
-        entry_count: usize,
-        collapsed: bool,
-    },
 }
 
 /// Agents waiting on a human are the only ones whose wait you can end, so they
@@ -976,6 +986,7 @@ pub(crate) enum SidebarRow {
 /// omitted entirely when empty, which is the common case.
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
 pub(crate) const AGENTS_SECTION_TITLE: &str = "Agents";
+#[cfg(test)]
 pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
 
@@ -989,9 +1000,6 @@ fn section_header_color(title: &str, p: &Palette) -> ratatui::style::Color {
     }
 }
 
-/// A pin is per tab, while a sidebar row is per agent pane, so every pane of a
-/// pinned tab is pinned. Out-of-range indices simply are not pinned -- a stale
-/// entry must never panic the whole sidebar.
 /// Groups collapse by title rather than by index: the set of groups changes
 /// every time an agent blocks or unblocks, and a collapse the user asked for
 /// must survive that churn.
@@ -999,168 +1007,94 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
     app.collapsed_sidebar_groups.contains(title)
 }
 
-fn tab_is_pinned(app: &AppState, ws_idx: usize, tab_idx: usize) -> bool {
-    app.workspaces
-        .get(ws_idx)
-        .and_then(|ws| ws.tabs.get(tab_idx))
-        .is_some_and(|tab| tab.pinned)
-}
-
 pub(crate) fn sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
-    sidebar_rows_inner(app, None, false, !app.sidebar_collapsed)
+    sidebar_rows_inner(app, None, false)
 }
 
 fn sidebar_rows_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<SidebarRow> {
-    sidebar_rows_inner(app, Some(terminal_runtimes), false, !app.sidebar_collapsed)
+    sidebar_rows_inner(app, Some(terminal_runtimes), false)
 }
 
 pub(crate) fn mobile_sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
-    sidebar_rows_inner(app, None, true, false)
+    sidebar_rows_inner(app, None, true)
 }
 
 pub(crate) fn mobile_sidebar_rows_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<SidebarRow> {
-    sidebar_rows_inner(app, Some(terminal_runtimes), true, false)
+    sidebar_rows_inner(app, Some(terminal_runtimes), true)
 }
 
 fn sidebar_rows_inner(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
     expand_worktrees: bool,
-    include_prio_panel: bool,
 ) -> Vec<SidebarRow> {
-    let prio_entry_count = if include_prio_panel {
-        prio_panel_entries(app, terminal_runtimes).len()
-    } else {
-        0
+    compact_sidebar_rows_inner(app, terminal_runtimes, expand_worktrees)
+}
+
+fn compact_sidebar_rows_inner(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+    expand_worktrees: bool,
+) -> Vec<SidebarRow> {
+    let entries = match terminal_runtimes {
+        Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
+        None => sidebar_thread_entries(app),
     };
-    let push_prio_panel = |rows: &mut Vec<SidebarRow>| {
-        if include_prio_panel {
-            rows.push(SidebarRow::PrioPanel {
-                entry_count: prio_entry_count,
-                collapsed: app.prio_panel_collapsed || prio_entry_count == 0,
-            });
-        }
+    let visible_entries = if app.blocked_filter {
+        entries
+            .iter()
+            .filter(|entry| entry_has_red_dot(entry))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        entries.clone()
     };
     if !app.sidebar_shows_spaces_tree() {
-        let entries = match terminal_runtimes {
-            Some(runtimes) => agent_panel_entries_from(app, runtimes),
-            None => agent_panel_entries(app),
-        };
-        // Partition rather than sort: an entry belongs to exactly one group, so
-        // the row count still equals the agent count. The Blocked header stays
-        // visible at zero so the section reads as an always-present worklist
-        // rather than appearing and disappearing.
-        let (blocked, rest): (Vec<_>, Vec<_>) = entries.into_iter().partition(entry_is_blocked);
-        let agent_row = |entry: AgentPanelEntry| SidebarRow::Agent {
-            entry: Box::new(entry),
-            depth: 0,
-        };
-        let mut rows = Vec::with_capacity(blocked.len() + rest.len() + 2);
-        rows.push(SidebarRow::SectionHeader {
-            title: BLOCKED_SECTION_TITLE,
-            count: blocked.len(),
-            collapsed: section_is_collapsed(app, BLOCKED_SECTION_TITLE),
-        });
-        if !section_is_collapsed(app, BLOCKED_SECTION_TITLE) {
-            rows.extend(blocked.into_iter().map(agent_row));
-        }
-        push_prio_panel(&mut rows);
-        if !rest.is_empty() {
+        let mut rows = Vec::with_capacity(visible_entries.len() + 1);
+        if !visible_entries.is_empty() {
             rows.push(SidebarRow::SectionHeader {
                 title: AGENTS_SECTION_TITLE,
-                count: rest.len(),
+                count: visible_entries.len(),
                 collapsed: section_is_collapsed(app, AGENTS_SECTION_TITLE),
             });
             if !section_is_collapsed(app, AGENTS_SECTION_TITLE) {
-                rows.extend(rest.into_iter().map(agent_row));
+                rows.extend(visible_entries.into_iter().map(|entry| SidebarRow::Agent {
+                    entry: Box::new(entry),
+                    depth: 0,
+                }));
             }
         }
         return rows;
     }
 
-    let agents = match terminal_runtimes {
-        Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
-        None => sidebar_thread_entries(app),
-    };
-    // The blocked group is a worklist, not an ownership claim, so unlike the
-    // priority projection it does *not* remove the agent from its workspace
-    // subtree below -- the tree stays a complete picture of what runs where,
-    // and the group above is the shortcut to what is waiting on you.
     let mut rows = Vec::new();
-    let blocked: Vec<AgentPanelEntry> = agents
-        .iter()
-        .filter(|entry| entry_is_blocked(entry))
-        .cloned()
-        .collect();
-    // A pinned tab that is also blocked appears once, under Blocked: the gate
-    // is the more urgent fact, and listing a row twice above the tree would
-    // make the groups read as a queue you have to de-duplicate by eye.
-    let pinned: Vec<AgentPanelEntry> = agents
-        .iter()
-        .filter(|entry| !entry_is_blocked(entry) && tab_is_pinned(app, entry.ws_idx, entry.tab_idx))
-        .cloned()
-        .collect();
-    let push_group = |rows: &mut Vec<SidebarRow>,
-                      title: &'static str,
-                      group: Vec<AgentPanelEntry>,
-                      show_when_empty: bool| {
-        if group.is_empty() && !show_when_empty {
-            return;
-        }
-        let collapsed = section_is_collapsed(app, title);
-        rows.push(SidebarRow::SectionHeader {
-            title,
-            count: group.len(),
-            collapsed,
-        });
-        if collapsed {
-            return;
-        }
-        rows.extend(group.into_iter().map(|entry| SidebarRow::Agent {
-            entry: Box::new(entry),
-            depth: 0,
-        }));
-    };
-    // Blocked is the always-present worklist; an empty header is the signal
-    // that nothing waits on a human. Pinned only exists while it has rows.
-    push_group(&mut rows, BLOCKED_SECTION_TITLE, blocked, true);
-    push_prio_panel(&mut rows);
-    push_group(&mut rows, PINNED_SECTION_TITLE, pinned, false);
-
-    let mut agents_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
-    for entry in agents {
-        agents_by_workspace
+    let mut entries_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
+    for entry in visible_entries {
+        entries_by_workspace
             .entry(entry.ws_idx)
             .or_default()
             .push(entry);
     }
-
     let workspaces = if expand_worktrees {
         workspace_list_entries_expanded(app)
     } else {
         workspace_list_entries(app)
     };
-    // The Blocked header above is always present, so the tree always needs its
-    // own label: without one, the workspace rows directly under "Blocked (0)"
-    // read as members of that section rather than as the tree.
-    let spaces_collapsed = !rows.is_empty() && section_is_collapsed(app, SPACES_SECTION_TITLE);
-    if !rows.is_empty() {
-        rows.push(SidebarRow::SectionHeader {
-            title: SPACES_SECTION_TITLE,
-            count: workspaces
-                .iter()
-                .filter(|WorkspaceListEntry::Workspace { indented, .. }| !indented)
-                .count(),
-            collapsed: spaces_collapsed,
-        });
-    }
-    if spaces_collapsed {
+    rows.push(SidebarRow::SectionHeader {
+        title: SPACES_SECTION_TITLE,
+        count: workspaces
+            .iter()
+            .filter(|WorkspaceListEntry::Workspace { indented, .. }| !indented)
+            .count(),
+        collapsed: section_is_collapsed(app, SPACES_SECTION_TITLE),
+    });
+    if section_is_collapsed(app, SPACES_SECTION_TITLE) {
         return rows;
     }
     for workspace in workspaces {
@@ -1169,25 +1103,25 @@ fn sidebar_rows_inner(
             continue;
         }
         rows.push(SidebarRow::Workspace { ws_idx, indented });
-        if app.workspace_agents_expanded(ws_idx) {
-            let depth = 1;
-            for member_idx in sidebar_space_member_indices(app, ws_idx) {
-                let Some(entries) = agents_by_workspace.remove(&member_idx) else {
-                    continue;
-                };
-                let tab_entries = aggregate_tab_entries(&entries);
-                let mut current_tab = None;
-                for entry in entries {
-                    let tab = (entry.ws_idx, entry.tab_idx);
-                    if current_tab != Some(tab) {
-                        if let Some(tab_entry) = tab_entries.get(&tab).cloned() {
-                            rows.push(SidebarRow::Tab {
-                                entry: Box::new(tab_entry),
-                                depth,
-                            });
-                        }
-                        current_tab = Some(tab);
+        if !app.workspace_agents_expanded(ws_idx) {
+            continue;
+        }
+        for member_idx in sidebar_space_member_indices(app, ws_idx) {
+            let Some(member_entries) = entries_by_workspace.remove(&member_idx) else {
+                continue;
+            };
+            let tab_entries = aggregate_tab_entries(&member_entries);
+            let mut current_tab = None;
+            for entry in member_entries {
+                let tab = (entry.ws_idx, entry.tab_idx);
+                if current_tab != Some(tab) {
+                    if let Some(tab_entry) = tab_entries.get(&tab).cloned() {
+                        rows.push(SidebarRow::Tab {
+                            entry: Box::new(tab_entry),
+                            depth: 1,
+                        });
                     }
+                    current_tab = Some(tab);
                 }
             }
         }
@@ -1357,6 +1291,15 @@ pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect 
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
+fn agent_entry_height_in_body_at(
+    _app: &AppState,
+    _entry: &AgentPanelEntry,
+    body_height: u16,
+    _depth: u16,
+) -> u16 {
+    u16::from(body_height > 0)
+}
+
 fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16 {
     match row {
         SidebarRow::Workspace { ws_idx, indented } => app
@@ -1368,10 +1311,6 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
             agent_entry_height_in_body_at(app, entry, body_height, *depth)
         }
         SidebarRow::Tab { .. } | SidebarRow::SectionHeader { .. } => 1,
-        SidebarRow::PrioPanel {
-            entry_count,
-            collapsed,
-        } => prio_panel_height_in_body(app, *entry_count, *collapsed, body_height),
     }
 }
 
@@ -1408,8 +1347,6 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::Tab { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Tab { .. }) => 0,
-        (SidebarRow::PrioPanel { .. }, _) => 0,
-        (_, SidebarRow::PrioPanel { .. }) => app.sidebar_agents.row_gap,
         // A header hugs the group it names, and earns the agent gap above it so
         // the two groups read as separate lists rather than one long one.
         (SidebarRow::SectionHeader { .. }, _) => 0,
@@ -1472,7 +1409,7 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         SidebarRow::Tab { entry, .. } => entry.ws_idx == ws_idx,
         // Headers belong to a state, not a workspace, so scrolling to a
         // workspace must never land on one.
-        SidebarRow::SectionHeader { .. } | SidebarRow::PrioPanel { .. } => false,
+        SidebarRow::SectionHeader { .. } => false,
     }
 }
 
@@ -1526,66 +1463,6 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
         1,
         body.height,
     ))
-}
-
-/// Depth 0 means the row sits in a worklist group rather than in the tree, and
-/// those two want different shapes: the tree keeps the configured template, the
-/// worklist collapses to one line.
-fn resolved_agent_rows_at(
-    app: &AppState,
-    entry: &AgentPanelEntry,
-    depth: u16,
-) -> Vec<Vec<ResolvedToken>> {
-    if depth == 0 {
-        return tokens::worklist_row(entry);
-    }
-    resolved_agent_rows(app, entry)
-}
-
-fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
-    let label = if gate_overrides_label(entry) {
-        gate_override_label(entry)
-    } else {
-        entry
-            .state_labels
-            .get(agent_panel_status_key_with_stale(
-                entry.state,
-                entry.seen,
-                entry.stale,
-            ))
-            .cloned()
-            .unwrap_or_else(|| match entry.state {
-                _ if entry.stale => "stale".to_string(),
-                AgentState::Idle => "done".to_string(),
-                _ => state_label(entry.state, entry.seen).to_string(),
-            })
-    };
-    tokens::agent_rows(&app.sidebar_agents, entry, &label)
-}
-
-#[cfg(test)]
-pub(crate) fn agent_entry_height_in_body(
-    app: &AppState,
-    entry: &AgentPanelEntry,
-    body_height: u16,
-) -> u16 {
-    agent_entry_height_in_body_at(app, entry, body_height, 1)
-}
-
-/// A worklist row is one line and owns no tab header -- it is a pointer into
-/// the tree, not a copy of the tree's structure.
-fn agent_entry_height_in_body_at(
-    app: &AppState,
-    entry: &AgentPanelEntry,
-    body_height: u16,
-    depth: u16,
-) -> u16 {
-    (resolved_agent_rows_at(app, entry, depth)
-        .len()
-        .max(1)
-        .saturating_add(usize::from(entry.tab_first_pane && depth > 0))
-        .min(u16::MAX as usize) as u16)
-        .min(body_height)
 }
 
 pub(crate) fn compute_workspace_list_areas(
@@ -1649,9 +1526,7 @@ pub(crate) fn compute_sidebar_row_areas(
                     row_idx: entry_idx,
                 });
             }
-            SidebarRow::Tab { .. }
-            | SidebarRow::SectionHeader { .. }
-            | SidebarRow::PrioPanel { .. } => {}
+            SidebarRow::Tab { .. } | SidebarRow::SectionHeader { .. } => {}
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
@@ -1778,105 +1653,6 @@ pub(crate) fn workspace_agent_chevron_rect(
     Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
 }
 
-/// A gutter cell is `TAB_*_FIELD_WIDTH` columns wide — the marker plus its trailing spacer — and the
-/// whole cell is the hitbox. Returning only the marker column would leave the spacer falling through
-/// to the row's focus target, so half of every visible cell would do the wrong thing.
-fn tab_gutter_rect(card: &crate::app::state::TabCardArea, offset: u16, width: u16) -> Rect {
-    let prefix_width = card.depth.saturating_mul(3).saturating_add(1);
-    let x = card
-        .rect
-        .x
-        .saturating_add(prefix_width)
-        .saturating_add(offset);
-    let card_end = card.rect.x.saturating_add(card.rect.width);
-    if card.rect.height == 0 || x < card.rect.x || x >= card_end {
-        return Rect::default();
-    }
-    Rect::new(x, card.rect.y, width.min(card_end.saturating_sub(x)), 1)
-}
-
-pub(crate) fn tab_prio_rect(card: &crate::app::state::TabCardArea) -> Rect {
-    tab_gutter_rect(card, 0, TAB_PRIO_FIELD_WIDTH as u16)
-}
-
-pub(crate) fn prio_panel_chevron_rect(panel: Rect) -> Rect {
-    if panel.width < 2 || panel.height == 0 {
-        return Rect::default();
-    }
-    Rect::new(panel.x.saturating_add(1), panel.y, 1, 1)
-}
-
-fn prio_panel_body(panel: Rect) -> Rect {
-    Rect::new(
-        panel.x,
-        panel.y.saturating_add(PRIO_PANEL_HEADER_ROWS),
-        panel.width,
-        panel.height.saturating_sub(PRIO_PANEL_HEADER_ROWS),
-    )
-}
-
-fn prio_panel_entry_row_count(entry_count: usize, body_height: u16) -> usize {
-    let available_rows = usize::from(body_height);
-    if entry_count > available_rows {
-        available_rows.saturating_sub(1)
-    } else {
-        entry_count
-    }
-}
-
-pub(crate) fn compute_prio_panel_row_areas(
-    app: &AppState,
-    area: Rect,
-) -> Vec<crate::app::state::PrioPanelRowArea> {
-    let panel = prio_panel_rect(app, area);
-    let body = prio_panel_body(panel);
-    if body.width == 0 || body.height == 0 {
-        return Vec::new();
-    }
-
-    let entries = prio_panel_entries(app, None);
-    let row_count = prio_panel_entry_row_count(entries.len(), body.height);
-    entries
-        .into_iter()
-        .take(row_count)
-        .enumerate()
-        .map(|(row, entry)| crate::app::state::PrioPanelRowArea {
-            ws_idx: entry.ws_idx,
-            tab_idx: entry.tab_idx,
-            rect: Rect::new(body.x, body.y + row as u16, body.width, 1),
-        })
-        .collect()
-}
-
-pub(crate) fn prio_panel_rect(app: &AppState, area: Rect) -> Rect {
-    let ws_area = workspace_list_rect_for_app(app, area);
-    if ws_area == Rect::default() {
-        return Rect::default();
-    }
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
-    let mut y = body.y;
-    let bottom = body.y.saturating_add(body.height);
-    for (idx, row) in rows
-        .iter()
-        .enumerate()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
-    {
-        let height = sidebar_row_height(app, row, body.height);
-        if y.saturating_add(height) > bottom {
-            break;
-        }
-        if matches!(row, SidebarRow::PrioPanel { .. }) {
-            return Rect::new(body.x, y, body.width, height);
-        }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
-    }
-    Rect::default()
-}
-
 #[cfg(test)]
 pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCardArea) -> Rect {
     if card.rect.width == 0 || card.rect.height == 0 {
@@ -1982,15 +1758,19 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     continue;
                 };
                 let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-                let stale = ws.tabs.iter().any(|tab| {
+                let has_agent = ws.tabs.iter().any(|tab| {
                     tab.panes.values().any(|pane| {
                         app.terminals
                             .get(&pane.attached_terminal_id)
-                            .is_some_and(|terminal| terminal.supervisor_stale)
+                            .is_some_and(|terminal| terminal.agent_lifecycle_context().is_some())
                     })
                 });
-                let (icon, icon_style) =
-                    state_icon_with_stale(agg_state, agg_seen, stale, app.status_indicators, p);
+                let icon = compact_dot_for_state(agg_state, agg_seen, has_agent, false, false);
+                let icon_style = Style::default().fg(if has_agent {
+                    state_label_color(agg_state, agg_seen, p)
+                } else {
+                    p.overlay0
+                });
                 let is_selected = *ws_idx == app.selected && is_navigating;
                 let is_active = Some(*ws_idx) == app.active;
                 let row_style = Style::default();
@@ -2019,13 +1799,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 );
             }
             SidebarRow::Agent { entry, depth } => {
-                let (icon, icon_style) = state_icon_with_stale(
-                    entry.state,
-                    entry.seen,
-                    entry.stale,
-                    app.status_indicators,
-                    p,
-                );
+                let icon = compact_row_dot(entry);
+                let icon_style = Style::default().fg(compact_row_color(entry, p));
                 let row_style = Style::default();
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -2047,13 +1822,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 );
             }
             SidebarRow::Tab { entry, .. } => {
-                let (icon, icon_style) = state_icon_with_stale(
-                    entry.state,
-                    entry.seen,
-                    entry.stale,
-                    app.status_indicators,
-                    p,
-                );
+                let icon = compact_row_dot(entry);
+                let icon_style = Style::default().fg(compact_row_color(entry, p));
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::raw("  "),
@@ -2073,7 +1843,6 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
-            SidebarRow::PrioPanel { .. } => {}
         }
     }
 
@@ -2200,206 +1969,8 @@ pub(super) fn render_sidebar(
     }
 
     let ws_area = workspace_list_rect_for_app(app, area);
-    let panel_area = prio_panel_rect(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_prio_panel(app, terminal_runtimes, frame, panel_area, area);
     render_sidebar_header(app, frame, area, p);
-}
-
-fn render_prio_panel(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    panel: Rect,
-    sidebar_area: Rect,
-) {
-    if panel.width == 0 || panel.height == 0 {
-        return;
-    }
-
-    let p = &app.palette;
-    let entries = prio_panel_entries(app, Some(terminal_runtimes));
-    let expanded = !app.prio_panel_collapsed && !entries.is_empty();
-    let chevron = if expanded { "▾" } else { "▸" };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(chevron, Style::default().fg(p.accent)),
-            Span::raw(" "),
-            Span::styled(
-                "PRIO",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        Rect::new(panel.x, panel.y, panel.width, PRIO_PANEL_HEADER_ROWS),
-    );
-
-    if !expanded {
-        return;
-    }
-
-    let body = prio_panel_body(panel);
-    let rows = compute_prio_panel_row_areas(app, sidebar_area);
-    for row in &rows {
-        let Some(entry) = entries
-            .iter()
-            .find(|entry| entry.ws_idx == row.ws_idx && entry.tab_idx == row.tab_idx)
-        else {
-            continue;
-        };
-        render_prio_panel_row(app, frame, entry, row.rect);
-    }
-    if rows.len() < entries.len() && body.width > 0 && body.height > 0 {
-        let indicator = Rect::new(
-            body.x,
-            body.y.saturating_add(rows.len() as u16),
-            body.width,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(format!("  +{} more", entries.len() - rows.len()))
-                .style(Style::default().fg(p.overlay0)),
-            indicator,
-        );
-    }
-}
-
-fn render_prio_panel_row(app: &AppState, frame: &mut Frame, entry: &AgentPanelEntry, rect: Rect) {
-    let p = &app.palette;
-    let width = usize::from(rect.width);
-    let active_subagents = active_subagent_label(entry);
-    let active_subagents_width = active_subagent_field_width(entry);
-    let main_width = width.saturating_sub(active_subagents_width);
-    let prefix = "  ";
-    let state_icon = state_icon_with_stale(
-        entry.state,
-        entry.seen,
-        entry.stale,
-        app.status_indicators,
-        p,
-    );
-    let workspace = entry.primary_label.as_str();
-    // A derived or manually named tab can already carry the agent identity, so
-    // appending the provider here would repeat it in the same row.
-    let raw_tab_title = entry
-        .primary_tab_label
-        .as_deref()
-        .unwrap_or(DEFAULT_THREAD_TITLE);
-    let tab_title = if entry.tab_label_leads_with_agent {
-        DEFAULT_THREAD_TITLE
-    } else {
-        raw_tab_title
-    };
-    let agent = compact_agent_identity(entry, tab_title).map(|label| format!(" · {label}"));
-
-    let mut spans = Vec::new();
-    let mut used = 0usize;
-    push_prio_panel_span(&mut spans, &mut used, main_width, prefix, Style::default());
-    push_prio_panel_span(
-        &mut spans,
-        &mut used,
-        main_width,
-        "●",
-        Style::default().fg(p.peach),
-    );
-    push_prio_panel_span(&mut spans, &mut used, main_width, " ", Style::default());
-    push_prio_panel_span(
-        &mut spans,
-        &mut used,
-        main_width,
-        state_icon.0,
-        state_icon.1,
-    );
-    push_prio_panel_span(&mut spans, &mut used, main_width, " ", Style::default());
-
-    let remaining = main_width.saturating_sub(used);
-    let agent_width = agent.as_deref().map(display_width).unwrap_or_default();
-    let include_agent = agent.as_ref().is_some_and(|_| {
-        remaining >= 1 + display_width(" · ") + display_width(workspace) + agent_width
-    });
-    let agent_width = if include_agent { agent_width } else { 0 };
-    if remaining > display_width(" · ") {
-        let workspace_width = display_width(workspace)
-            .min(remaining.saturating_sub(display_width(" · ") + agent_width + 1));
-        let title_width =
-            remaining.saturating_sub(display_width(" · ") + workspace_width + agent_width);
-        let title = truncate_end(tab_title, title_width);
-        push_prio_panel_span(
-            &mut spans,
-            &mut used,
-            main_width,
-            &title,
-            Style::default().fg(p.subtext0),
-        );
-        push_prio_panel_span(
-            &mut spans,
-            &mut used,
-            main_width,
-            " · ",
-            Style::default().fg(p.overlay0),
-        );
-        push_prio_panel_span(
-            &mut spans,
-            &mut used,
-            main_width,
-            &truncate_end(workspace, workspace_width),
-            Style::default().fg(p.overlay1),
-        );
-        if include_agent {
-            if let Some(agent) = agent {
-                push_prio_panel_span(
-                    &mut spans,
-                    &mut used,
-                    main_width,
-                    &agent,
-                    Style::default().fg(p.overlay0),
-                );
-            }
-        }
-    } else {
-        let title = truncate_end(
-            entry
-                .primary_tab_label
-                .as_deref()
-                .unwrap_or(DEFAULT_THREAD_TITLE),
-            remaining,
-        );
-        push_prio_panel_span(
-            &mut spans,
-            &mut used,
-            main_width,
-            &title,
-            Style::default().fg(p.subtext0),
-        );
-    }
-    if let Some(active_subagents) = active_subagents {
-        let padding = width.saturating_sub(used + active_subagents_width);
-        spans.push(Span::raw(" ".repeat(padding)));
-        spans.extend([
-            Span::raw(" "),
-            Span::styled(
-                active_subagents,
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-            ),
-        ]);
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
-}
-
-fn push_prio_panel_span(
-    spans: &mut Vec<Span<'static>>,
-    used: &mut usize,
-    width: usize,
-    text: &str,
-    style: Style,
-) {
-    let clipped = truncate_end(text, width.saturating_sub(*used));
-    let clipped_width = display_width(&clipped);
-    if clipped_width == 0 {
-        return;
-    }
-    spans.push(Span::styled(clipped, style));
-    *used += clipped_width;
 }
 
 fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Palette) {
@@ -2441,6 +2012,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     frame.render_widget(Paragraph::new(Span::styled("…", overflow_style)), overflow);
 }
 
+#[cfg(test)]
 fn resolved_token_spans(
     resolved: &[ResolvedToken],
     state_icon: (&str, Style),
@@ -2673,6 +2245,7 @@ fn resolved_token_spans(
     spans
 }
 
+#[cfg(test)]
 fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) -> Style {
     if let Some(fg) = patch.fg {
         style = style.fg(fg.ratatui());
@@ -2759,17 +2332,13 @@ fn render_workspace_list(
     };
 
     let list_bottom = area.y + area.height;
+    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
 
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
-    let computed_cards;
-    let cards = if app.view.workspace_card_areas.is_empty() {
-        computed_cards = compute_workspace_card_areas(app, sidebar_area);
-        &computed_cards
-    } else {
-        &app.view.workspace_card_areas
-    };
+    let computed_cards = compute_workspace_card_areas(app, sidebar_area);
+    let cards = &computed_cards;
     for card in cards {
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
@@ -2794,23 +2363,32 @@ fn render_workspace_list(
             }
         }
 
+        let (display_label, is_derived) = workspace_labels.get(&i).cloned().unwrap_or_else(|| {
+            (
+                ws.display_name_from(&app.terminals, terminal_runtimes),
+                true,
+            )
+        });
         let name_style = if selected || is_active || is_dragged {
             Style::default()
                 .fg(active_sidebar_title_color(p))
                 .add_modifier(Modifier::BOLD)
+        } else if is_derived {
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(p.subtext0)
         };
 
-        let display_label = workspace_parent_group_state(app, i)
-            .and_then(|_| ws.worktree_space().map(|space| space.label.clone()))
-            .unwrap_or_else(|| ws.display_name_from(&app.terminals, terminal_runtimes));
         let window_count = member_indices
             .iter()
             .filter_map(|member| app.workspaces.get(*member))
             .map(|workspace| workspace.tabs.len())
             .sum::<usize>();
-        let count_label = format!(" ({window_count})");
+        let agent_count = sidebar_thread_entries_from(app, terminal_runtimes)
+            .into_iter()
+            .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
+            .count();
+        let count_label = format!(" ({agent_count}/{window_count})");
         let fixed_width = display_width(" ▾ ") + display_width(&count_label);
         let title = truncate_end(
             &display_label,
@@ -2897,12 +2475,6 @@ fn render_workspace_list(
 }
 
 fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::TabCardArea) {
-    let p = &app.palette;
-    let active = app.active == Some(card.ws_idx)
-        && app
-            .workspaces
-            .get(card.ws_idx)
-            .is_some_and(|ws| ws.active_tab_index() == card.tab_idx);
     let entry = sidebar_rows(app).into_iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
             if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
@@ -2912,114 +2484,7 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
         _ => None,
     });
     let Some((entry, depth)) = entry else { return };
-    let style = if active {
-        Style::default()
-            .fg(active_sidebar_title_color(p))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(p.subtext0)
-    };
-    let prefix = " ".repeat(usize::from(depth) * 3 + 1);
-    let layout = tab_row_layout(
-        &entry,
-        app.view_observed_at,
-        usize::from(card.rect.width),
-        display_width(&prefix),
-        p,
-        app.status_indicators,
-    );
-    let mut spans = vec![Span::raw(prefix)];
-    let prio_marker = if entry.prio { "●" } else { "·" };
-    let prio_style = if entry.prio {
-        Style::default().fg(p.peach)
-    } else {
-        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
-    };
-    spans.extend([Span::styled(prio_marker, prio_style), Span::raw(" ")]);
-    if tab_blocker_dot_visible(&entry) {
-        spans.extend([
-            Span::styled("●", Style::default().fg(p.red)),
-            Span::raw(" "),
-        ]);
-    }
-    if let Some(state) = layout.state.as_deref() {
-        let state_icon = state_icon_with_stale(
-            entry.state,
-            entry.seen,
-            entry.stale,
-            app.status_indicators,
-            p,
-        );
-        spans.push(Span::styled(state_icon.0.to_string(), state_icon.1));
-        if layout.show_state_label {
-            spans.extend([
-                Span::styled(
-                    format!(" {state}"),
-                    Style::default().fg(agent_panel_label_color(&entry, p)),
-                ),
-                Span::styled(" · ", Style::default().fg(p.overlay0)),
-            ]);
-        } else {
-            spans.push(Span::raw(" "));
-        }
-    }
-    spans.push(Span::styled(layout.title, style));
-    if let Some(agent_suffix) = layout.agent_suffix {
-        spans.push(Span::styled(agent_suffix, Style::default().fg(p.overlay1)));
-    }
-    if let Some(foreground_process) = layout.foreground_process {
-        spans.push(Span::styled(
-            foreground_process,
-            Style::default().fg(p.overlay0),
-        ));
-    }
-    if let Some(background_jobs) = layout.background_jobs {
-        spans.push(Span::styled(
-            background_jobs,
-            Style::default().fg(p.overlay0),
-        ));
-    }
-    let active_subagents = layout.active_subagents;
-    let active_subagents_width = active_subagents
-        .as_deref()
-        .map(|label| 1 + display_width(label))
-        .unwrap_or_default();
-    if let Some(activity_age) = layout.activity_age {
-        let used_width = spans
-            .iter()
-            .map(|span| display_width(span.content.as_ref()))
-            .sum::<usize>();
-        let padding = usize::from(card.rect.width)
-            .saturating_sub(used_width)
-            .saturating_sub(display_width(&activity_age))
-            .saturating_sub(active_subagents_width);
-        spans.push(Span::raw(" ".repeat(padding)));
-        let activity_style = if entry.state == AgentState::Working && !entry.stale {
-            Style::default().fg(p.blue)
-        } else {
-            Style::default().fg(p.green).add_modifier(Modifier::DIM)
-        };
-        spans.push(Span::styled(activity_age, activity_style));
-    } else if active_subagents.is_some() {
-        let used_width = spans
-            .iter()
-            .map(|span| display_width(span.content.as_ref()))
-            .sum::<usize>();
-        let padding = usize::from(card.rect.width)
-            .saturating_sub(used_width)
-            .saturating_sub(active_subagents_width);
-        spans.push(Span::raw(" ".repeat(padding)));
-    }
-    if let Some(active_subagents) = active_subagents {
-        spans.extend([
-            Span::raw(" "),
-            Span::styled(
-                active_subagents,
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-            ),
-        ]);
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), card.rect);
+    render_compact_agent_row(app, frame, &entry, card.rect, depth, true, None);
 }
 
 fn render_agent_card(
@@ -3029,219 +2494,7 @@ fn render_agent_card(
     rect: Rect,
     depth: u16,
 ) {
-    let p = &app.palette;
-    let label_color = agent_panel_label_color(detail, p);
-    let rows = resolved_agent_rows_at(app, detail, depth);
-    let header_height = 0;
-    let height = (rows.len().max(1) as u16)
-        .saturating_add(header_height)
-        .min(rect.height);
-    let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-    let row_style = Style::default();
-    let name_style = if is_active {
-        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-    };
-    let status_style = Style::default().fg(label_color).add_modifier(if is_active {
-        Modifier::empty()
-    } else {
-        Modifier::DIM
-    });
-    let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    let state_icon = state_icon_with_stale(
-        detail.state,
-        detail.seen,
-        detail.stale,
-        app.status_indicators,
-        p,
-    );
-    // Grouped rows are pointers under a section header, so they share the
-    // child indentation of the tree even though their semantic depth is zero.
-    let indent_depth = depth.max(1);
-    let indent = usize::from(indent_depth) * 3;
-
-    for (row_index, resolved) in rows
-        .iter()
-        .take(height.saturating_sub(header_height) as usize)
-        .enumerate()
-    {
-        let prefix = if row_index == 0 {
-            " ".repeat(indent + usize::from(depth > 0))
-        } else {
-            " ".repeat(indent + 3)
-        };
-        let prefix_width = display_width_u16(&prefix);
-        let active_subagents = (row_index == 0)
-            .then(|| active_subagent_label(detail))
-            .flatten();
-        let active_subagents_width = active_subagents
-            .as_deref()
-            .map(|label| 1 + display_width(label))
-            .unwrap_or_default();
-        let mut spans = vec![Span::raw(prefix)];
-        let mut blocker_dot_width = 0u16;
-        if row_index == 0 && entry_is_blocked(detail) && detail.state != AgentState::Blocked {
-            spans.extend([
-                Span::styled("●", Style::default().fg(p.red)),
-                Span::raw(" "),
-            ]);
-            blocker_dot_width = 2;
-        }
-        let content_width = rect
-            .width
-            .saturating_sub(prefix_width)
-            .saturating_sub(blocker_dot_width)
-            .saturating_sub(active_subagents_width.min(usize::from(u16::MAX)) as u16)
-            as usize;
-        let resolve_tokens = |max_width| {
-            resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                max_width,
-            )
-        };
-        let baseline_token_spans = resolve_tokens(content_width);
-        let mut activity_field = None;
-        let token_spans = if row_index == 0
-            && agent_activity_age_fits(app, detail, rect, depth, active_subagents_width)
-        {
-            let label = status_report_age_compact_label(detail.reported_at, app.view_observed_at)
-                .unwrap_or_else(|| {
-                    crate::activity_age::coarse_label(detail.activity_at, app.view_observed_at)
-                });
-            activity_field = Some(format!(" {label:>4}"));
-            resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH))
-        } else {
-            baseline_token_spans
-        };
-        let activity_width = activity_field
-            .as_deref()
-            .map(display_width)
-            .unwrap_or_default();
-        spans.extend(token_spans);
-        if let Some(activity_field) = activity_field {
-            let used_width = spans
-                .iter()
-                .map(|span| display_width(span.content.as_ref()))
-                .sum::<usize>();
-            let padding = rect
-                .width
-                .saturating_sub(used_width.min(usize::from(u16::MAX)) as u16)
-                .saturating_sub(activity_width.min(usize::from(u16::MAX)) as u16)
-                .saturating_sub(active_subagents_width.min(usize::from(u16::MAX)) as u16);
-            if padding > 0 {
-                spans.push(Span::raw(" ".repeat(usize::from(padding))));
-            }
-            let activity_style = if detail.state == AgentState::Working && !detail.stale {
-                Style::default().fg(p.blue)
-            } else {
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
-            };
-            spans.push(Span::styled(activity_field, activity_style));
-        }
-        if let Some(active_subagents) = active_subagents {
-            let used_width = spans
-                .iter()
-                .map(|span| display_width(span.content.as_ref()))
-                .sum::<usize>();
-            let padding = usize::from(rect.width)
-                .saturating_sub(used_width)
-                .saturating_sub(active_subagents_width);
-            spans.push(Span::raw(" ".repeat(padding)));
-            spans.extend([
-                Span::raw(" "),
-                Span::styled(
-                    active_subagents,
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                ),
-            ]);
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(row_style),
-            Rect::new(
-                rect.x,
-                rect.y + header_height + row_index as u16,
-                rect.width,
-                1,
-            ),
-        );
-    }
-}
-
-fn agent_activity_age_fits(
-    app: &AppState,
-    detail: &AgentPanelEntry,
-    rect: Rect,
-    depth: u16,
-    active_subagents_width: usize,
-) -> bool {
-    // Measured against the row this depth actually paints: a worklist row is the
-    // one-line shape, and measuring the tree template instead would size the age
-    // field against text that never appears.
-    let Some(resolved) = resolved_agent_rows_at(app, detail, depth)
-        .into_iter()
-        .next()
-    else {
-        return false;
-    };
-    let prefix_width = usize::from(depth.max(1)) * 3 + usize::from(depth > 0);
-    let content_width = usize::from(rect.width)
-        .saturating_sub(prefix_width)
-        .saturating_sub(active_subagents_width);
-    if content_width < AGENT_ACTIVITY_AGE_MIN_CONTENT_WIDTH + AGENT_ACTIVITY_AGE_FIELD_WIDTH {
-        return false;
-    }
-    let p = &app.palette;
-    let label_color = agent_panel_label_color(detail, p);
-    let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-    let name_style = if is_active {
-        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-    };
-    let status_style = Style::default().fg(label_color).add_modifier(if is_active {
-        Modifier::empty()
-    } else {
-        Modifier::DIM
-    });
-    let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    let state_icon = state_icon_with_stale(
-        detail.state,
-        detail.seen,
-        detail.stale,
-        app.status_indicators,
-        p,
-    );
-    let resolve_tokens = |max_width| {
-        resolved_token_spans(
-            &resolved,
-            state_icon,
-            status_style,
-            name_style,
-            agent_style,
-            agent_style,
-            p,
-            max_width,
-        )
-    };
-    let baseline = resolve_tokens(content_width);
-    let candidate = resolve_tokens(content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH));
-    let candidate_width = candidate
-        .iter()
-        .map(|span| display_width(span.content.as_ref()))
-        .sum::<usize>();
-    candidate.len() == baseline.len()
-        && candidate
-            .iter()
-            .zip(&baseline)
-            .all(|(candidate, baseline)| candidate.content == baseline.content)
-        && candidate_width <= content_width.saturating_sub(AGENT_ACTIVITY_AGE_FIELD_WIDTH)
+    render_compact_agent_row(app, frame, detail, rect, depth, false, None);
 }
 
 pub(crate) fn visible_tab_activity_instants_from(
@@ -3393,6 +2646,179 @@ mod tests {
         assert_eq!(active_sidebar_title_color(&custom_reset), custom_reset.text);
     }
 
+    #[test]
+    fn compact_row_grammar_uses_one_dot_and_the_provider_column_contract() {
+        let app = AppState::test_new();
+        let mut cases = Vec::new();
+
+        let mut working = compact_test_entry("working", Some(Agent::Claude));
+        working.state = AgentState::Working;
+        cases.push(working);
+
+        let mut gated = compact_test_entry("gated", Some(Agent::Claude));
+        gated.state = AgentState::Working;
+        gated.gate_count = 2;
+        gated.open_blockers = true;
+        cases.push(gated);
+
+        let mut blocked = compact_test_entry("blocked", Some(Agent::Claude));
+        blocked.state = AgentState::Blocked;
+        cases.push(blocked);
+
+        let mut unread = compact_test_entry("unread", Some(Agent::Claude));
+        unread.seen = false;
+        cases.push(unread);
+
+        cases.push(compact_test_entry("idle", Some(Agent::Claude)));
+        cases.push(compact_test_entry("shell", None));
+
+        for entry in cases {
+            let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row(
+                        &app,
+                        frame,
+                        &entry,
+                        Rect::new(0, 0, 40, 1),
+                        0,
+                        true,
+                        None,
+                    )
+                })
+                .unwrap();
+            let rendered = row_text(terminal.backend().buffer(), 0, 40);
+            let dot_count = rendered
+                .chars()
+                .filter(|character| matches!(character, '●' | '○' | '◆' | '·'))
+                .count();
+            assert_eq!(
+                dot_count, 1,
+                "compact row emitted multiple dots: {rendered:?}"
+            );
+        }
+
+        let mut two = compact_test_entry("two", Some(Agent::Claude));
+        two.active_subagents = Some(2);
+        assert_eq!(compact_provider(&two), "cc+2");
+        two.holds_shell = true;
+        assert_eq!(compact_provider(&two), "cc+2 >_");
+
+        let mut stale = two;
+        stale.stale = true;
+        assert_eq!(compact_provider(&stale), "cc >_");
+    }
+
+    #[test]
+    fn compact_provider_marks_plain_shells_and_kimi() {
+        let plain = compact_test_entry("terminal", None);
+        assert_eq!(compact_provider(&plain), ">_");
+        assert_eq!(tab_agent_suffix(Some(Agent::Kimi)), Some("ki"));
+
+        let kimi = compact_test_entry("task", Some(Agent::Kimi));
+        assert_eq!(compact_provider(&kimi), "ki");
+    }
+
+    #[test]
+    fn blocked_filter_keeps_spaces_and_only_red_rows() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("working"),
+            Workspace::test_new("blocked"),
+            Workspace::test_new("idle"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        for (ws_idx, state) in [
+            (0, AgentState::Working),
+            (1, AgentState::Blocked),
+            (2, AgentState::Idle),
+        ] {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        }
+        for pane in app.workspaces[2].tabs[0].panes.values_mut() {
+            pane.seen = true;
+        }
+        app.reconcile_sidebar_presentation();
+        app.blocked_filter = true;
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SPACES_SECTION_TITLE,
+                count: 3,
+                ..
+            }
+        )));
+        let tab_entries = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tab_entries.len(), 1);
+        assert_eq!(tab_entries[0].ws_idx, 1);
+        assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
+    }
+
+    #[test]
+    fn space_names_use_manual_then_agent_title_then_git_label() {
+        let mut app = AppState::test_new();
+        let mut agent_space = Workspace::test_new("ignored");
+        agent_space.custom_name = None;
+        agent_space.tabs[0].custom_name = Some("agent title".into());
+        let mut manual_space = Workspace::test_new("manual");
+        manual_space.custom_name = Some("manual label".into());
+        manual_space.tabs[0].custom_name = Some("ignored agent title".into());
+        let mut shell_one = Workspace::test_new("ignored");
+        shell_one.custom_name = None;
+        shell_one.cached_auto_label = "terminal space".into();
+        let mut shell_two = Workspace::test_new("ignored");
+        shell_two.custom_name = None;
+        shell_two.cached_auto_label = "terminal space".into();
+        app.workspaces = vec![agent_space, manual_space, shell_one, shell_two];
+        app.ensure_test_terminals();
+        let agent_pane = app.workspaces[0].tabs[0].root_pane;
+        let agent_terminal = app.workspaces[0].tabs[0].panes[&agent_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&agent_terminal)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+
+        let labels = sidebar_workspace_labels(&app, &TerminalRuntimeRegistry::new());
+        assert_eq!(labels[&0], ("agent title".into(), true));
+        assert_eq!(labels[&1], ("manual label".into(), false));
+        assert_eq!(labels[&2], ("terminal space¹".into(), true));
+        assert_eq!(labels[&3], ("terminal space²".into(), true));
+    }
+
+    fn compact_test_entry(title: &str, agent: Option<Agent>) -> AgentPanelEntry {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        workspace.tabs[0].custom_name = Some(title.into());
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = agent;
+        sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("compact test entry")
+    }
+
     fn app_with_agents(names: &[&str]) -> AppState {
         let mut app = AppState::test_new();
         app.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
@@ -3461,16 +2887,12 @@ mod tests {
 
         let card = compute_tab_card_areas(&app, area)[0].clone();
         let buffer = terminal.backend().buffer();
-        let gear_x = card.rect.x + card.rect.width - 2;
-        assert_eq!(display_width(ACTIVE_SUBAGENT_GLYPH), 1);
-        assert_eq!(
-            buffer[(gear_x, card.rect.y)].symbol(),
-            ACTIVE_SUBAGENT_GLYPH
-        );
-        assert_eq!(buffer[(gear_x + 1, card.rect.y)].symbol(), "3");
-        let count_style = buffer[(gear_x, card.rect.y)].style();
-        assert_eq!(count_style.fg, Some(app.palette.overlay0));
-        assert!(count_style.add_modifier.contains(Modifier::DIM));
+        let rendered = row_text(buffer, card.rect.y, card.rect.width);
+        assert!(rendered.contains("pi+3"), "{rendered:?}");
+        let provider_x = rendered.find("pi+3").expect("provider mark") as u16;
+        let provider_style = buffer[(provider_x, card.rect.y)].style();
+        assert_eq!(provider_style.fg, Some(app.palette.mauve));
+        assert!(provider_style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -3501,14 +2923,9 @@ mod tests {
         let card = compute_tab_card_areas(&app, area)[0].clone();
         let buffer = terminal.backend().buffer();
         let rendered = row_text(buffer, card.rect.y, card.rect.width);
-        assert!(rendered.contains('…'), "{rendered:?}");
-        assert!(rendered.contains("· pi"), "{rendered:?}");
-        assert!(rendered.ends_with("⚙3"), "{rendered:?}");
+        assert!(rendered.contains("pi+3"), "{rendered:?}");
+        assert!(!rendered.contains("⚙"), "{rendered:?}");
         assert!(display_width(&rendered) <= usize::from(card.rect.width));
-        assert_eq!(
-            buffer[(card.rect.x + card.rect.width - 2, card.rect.y)].symbol(),
-            ACTIVE_SUBAGENT_GLYPH
-        );
     }
 
     #[test]
@@ -3547,22 +2964,13 @@ mod tests {
             let gate_x = (card.rect.x..card.rect.x + card.rect.width)
                 .find(|x| {
                     let cell = &buffer[(*x, card.rect.y)];
-                    cell.symbol() == "●" && cell.fg == app.palette.red
+                    cell.symbol() == "○" && cell.fg == app.palette.red
                 })
                 .unwrap_or_else(|| panic!("width {width} omitted red gate dot"));
-            let gear_x = card.rect.x + card.rect.width - 2;
             let gate_style = buffer[(gate_x, card.rect.y)].style();
-            let count_style = buffer[(gear_x, card.rect.y)].style();
-
-            assert_eq!(
-                buffer[(gear_x, card.rect.y)].symbol(),
-                ACTIVE_SUBAGENT_GLYPH,
-                "width {width}"
-            );
-            assert_eq!(buffer[(gear_x + 1, card.rect.y)].symbol(), "3");
+            let rendered = row_text(buffer, card.rect.y, card.rect.width);
+            assert!(rendered.contains("pi+3"), "width {width}: {rendered:?}");
             assert!(!gate_style.add_modifier.contains(Modifier::DIM));
-            assert!(count_style.add_modifier.contains(Modifier::DIM));
-            assert_eq!(count_style.fg, Some(app.palette.overlay0));
         }
     }
 
@@ -3706,6 +3114,7 @@ mod tests {
             pane_id: crate::layout::PaneId::alloc(),
             primary_label: "workspace".into(),
             primary_tab_label: Some("tab".into()),
+            tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
             pane_label: None,
             pane_label_is_agent_identity: false,
@@ -3721,7 +3130,8 @@ mod tests {
             state,
             open_blockers: false,
             active_subagents: None,
-            background_job_count: None,
+            holds_shell: false,
+            gate_count: 0,
             seen,
             stale: false,
             reported_at: None,
@@ -3741,7 +3151,6 @@ mod tests {
                 SidebarRow::Tab { entry, .. } => ('t', entry.ws_idx),
                 SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                 SidebarRow::SectionHeader { .. } => ('h', 0),
-                SidebarRow::PrioPanel { .. } => ('p', 0),
             })
             .collect()
     }
@@ -3763,15 +3172,7 @@ mod tests {
         let app = app_with_agents(&["one", "two"]);
         assert_eq!(
             row_kinds(&app),
-            vec![
-                ('h', 0),
-                ('p', 0),
-                ('h', 0),
-                ('w', 0),
-                ('t', 0),
-                ('w', 1),
-                ('t', 1)
-            ]
+            vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
 
         let area = Rect::new(0, 0, 28, 20);
@@ -3782,9 +3183,7 @@ mod tests {
         let text = (0..20)
             .map(|row| row_text(terminal.backend().buffer(), row, 27))
             .collect::<Vec<_>>();
-        // "Spaces" now appears twice: once in the top nav title, once in the
-        // tree's own section header (always shown alongside the always-present
-        // Blocked header).
+        // "Spaces" appears once in the top nav title and once in the tree header.
         assert_eq!(
             text.iter().filter(|line| line.contains("Spaces")).count(),
             2,
@@ -3794,7 +3193,7 @@ mod tests {
             .iter()
             .any(|line| line.trim_start().starts_with("agents")));
         assert!(text.iter().any(|line| line.contains("one")));
-        assert!(text.iter().any(|line| line.contains("· pi")), "{text:?}");
+        assert!(text.iter().any(|line| line.contains("pi")), "{text:?}");
     }
 
     #[test]
@@ -3809,11 +3208,11 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let prio_cell = buffer
+        let dot = buffer
             .cell((card.rect.x + 4, card.rect.y))
-            .expect("flagged tab should have a PRIO cell");
-        assert_eq!(prio_cell.symbol(), "●");
-        assert_eq!(prio_cell.fg, app.palette.peach);
+            .expect("tab row dot");
+        assert_eq!(dot.symbol(), "●");
+        assert_ne!(dot.fg, app.palette.peach);
         assert!(row_text(buffer, card.rect.y, 39).contains("●"));
     }
 
@@ -3823,20 +3222,14 @@ mod tests {
         app.workspaces[1].tabs[0].custom_name = Some("review auth".into());
         app.workspaces[1].tabs[0].set_prio(true);
         let area = Rect::new(0, 0, 40, 16);
-        let panel = prio_panel_rect(&app, area);
-        let rows = compute_prio_panel_row_areas(&app, area);
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].rect.y > panel.y);
-        assert!(rows[0].rect.y < panel.y + panel.height);
-
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width - 1);
-        assert!(rendered.contains("review auth"), "{rendered:?}");
-        assert!(rendered.contains("two"), "{rendered:?}");
-        assert!(rendered.contains("●"), "{rendered:?}");
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>();
+        assert!(!rendered.iter().any(|line| line.contains("PRIO")));
     }
 
     #[cfg(unix)]
@@ -3901,21 +3294,15 @@ mod tests {
             .into_iter()
             .next()
             .expect("sidebar entry");
-        let prio_entry = prio_panel_entries(&app, Some(&runtimes))
-            .into_iter()
-            .next()
-            .expect("PRIO entry");
-
-        assert_eq!(prio_entry.primary_label, sidebar_entry.primary_label);
         assert_eq!(
-            prio_entry.primary_label,
+            sidebar_entry.primary_label,
             runtime_cwd
                 .file_name()
                 .expect("live cwd filename")
                 .to_string_lossy()
         );
         assert_ne!(
-            prio_entry.primary_label,
+            sidebar_entry.primary_label,
             sidebar_thread_entries(&app)[0].primary_label
         );
 
@@ -3973,26 +3360,16 @@ mod tests {
     }
 
     #[test]
-    fn prio_panel_height_matches_content_until_split_cap() {
+    fn removing_priority_sections_keeps_the_sidebar_single_projection() {
+        let app = app_with_agents(&["one", "two", "three"]);
         let area = Rect::new(0, 0, 40, 16);
-
-        let mut one_entry = app_with_agents(&["one"]);
-        one_entry.workspaces[0].tabs[0].set_prio(true);
-        assert_eq!(prio_panel_rect(&one_entry, area).height, 2);
-
-        let mut two_entries = app_with_agents(&["one", "two"]);
-        for workspace in &mut two_entries.workspaces {
-            workspace.tabs[0].set_prio(true);
-        }
-        assert_eq!(prio_panel_rect(&two_entries, area).height, 3);
-
-        let mut many_entries = app_with_agents(&[
-            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        ]);
-        for workspace in &mut many_entries.workspaces {
-            workspace.tabs[0].set_prio(true);
-        }
-        assert_eq!(prio_panel_rect(&many_entries, area).height, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        assert!(!(0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .any(|line| line.contains("PRIO") || line.contains("Blocked")));
     }
 
     #[test]
@@ -4004,47 +3381,28 @@ mod tests {
             workspace.tabs[0].set_prio(true);
         }
         let area = Rect::new(0, 0, 40, 16);
-        let entries = prio_panel_entries(&app, None);
-        let rows = compute_prio_panel_row_areas(&app, area);
-        let panel = prio_panel_rect(&app, area);
-        let body = Rect::new(
-            panel.x,
-            panel.y + PRIO_PANEL_HEADER_ROWS,
-            panel.width,
-            panel.height - PRIO_PANEL_HEADER_ROWS,
-        );
-        assert_eq!(entries.len(), 10);
-        assert_eq!(rows.len(), usize::from(body.height) - 1);
-
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let indicator_row = body.y + body.height - 1;
-        assert!(
-            row_text(buffer, indicator_row, body.width).contains("+4 more"),
-            "{buffer:?}"
-        );
-        let rendered_entry_rows = (body.y..indicator_row)
-            .filter(|row| !row_text(buffer, *row, body.width).is_empty())
-            .count();
-        assert_eq!(rendered_entry_rows, rows.len());
+        let rendered = (0..area.height)
+            .map(|row| row_text(buffer, row, area.width - 1))
+            .collect::<Vec<_>>();
+        assert!(!rendered.iter().any(|line| line.contains("PRIO")));
     }
 
     #[test]
     fn empty_prio_panel_has_header_only_without_empty_body() {
         let app = app_with_agents(&["one"]);
         let area = Rect::new(0, 0, 40, 16);
-        let panel = prio_panel_rect(&app, area);
-        assert_eq!(panel.height, PRIO_PANEL_HEADER_ROWS);
-        assert!(compute_prio_panel_row_areas(&app, area).is_empty());
-
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        assert!(row_text(terminal.backend().buffer(), panel.y, area.width - 1).contains("PRIO"));
+        assert!(!(0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
+            .any(|line| line.contains("PRIO")));
     }
 
     #[test]
@@ -4055,7 +3413,6 @@ mod tests {
         }
         let area = Rect::new(0, 0, 40, 12);
         app.view.sidebar_rect = area;
-        let expanded_panel_height = prio_panel_rect(&app, area).height;
         let expanded_visible_rows = workspace_list_visible_count(&app, area, 0);
         app.workspace_scroll = usize::MAX;
 
@@ -4063,9 +3420,10 @@ mod tests {
         app.toggle_prio_panel();
 
         assert!(app.prio_panel_collapsed);
-        assert!(prio_panel_rect(&app, area).height < expanded_panel_height);
-        assert!(workspace_list_visible_count(&app, area, 0) > expanded_visible_rows);
-        assert!(compute_prio_panel_row_areas(&app, area).is_empty());
+        assert_eq!(
+            workspace_list_visible_count(&app, area, 0),
+            expanded_visible_rows
+        );
         assert_eq!(
             app.workspace_scroll,
             normalized_workspace_scroll(&app, area, requested)
@@ -4141,16 +3499,12 @@ mod tests {
             })
             .expect("flagged title should be visible");
         assert_eq!(flagged_title_start, title_start,);
-        assert_ne!(
-            buffer.cell((card.rect.x + 4, card.rect.y)).unwrap().fg,
-            app.palette.peach
-        );
         assert_eq!(
             buffer
                 .cell((card.rect.x + 4, card.rect.y))
-                .expect("unflagged PRIO cell")
+                .expect("unflagged dot cell")
                 .symbol(),
-            "·"
+            "●"
         );
         assert!(row_text(buffer, card.rect.y, 39).contains(title));
     }
@@ -4161,26 +3515,12 @@ mod tests {
         add_work_link(&mut app, 0);
         app.view.terminal_area = Rect::new(40, 0, 80, 20);
         let area = Rect::new(0, 0, 40, 20);
-        let cards = compute_tab_card_areas(&app, area);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let first_prio = crate::ui::tab_prio_rect(&cards[0]);
-        let second_prio = crate::ui::tab_prio_rect(&cards[1]);
-        assert_eq!(
-            buffer.cell((first_prio.x, first_prio.y)).unwrap().symbol(),
-            "·"
-        );
-        assert_eq!(
-            buffer
-                .cell((second_prio.x, second_prio.y))
-                .unwrap()
-                .symbol(),
-            "·"
-        );
         // The overview never advertises work-context links; the session's work-context panel owns
         // them, so no row may carry the marker even when the pane is linked.
         for row in 0..area.height {
@@ -4225,7 +3565,7 @@ mod tests {
             app.status_indicators,
         );
 
-        assert!(display_width(&linked_layout.title) <= 18 - 4 - TAB_PRIO_FIELD_WIDTH);
+        assert_eq!(display_width(&linked_layout.title), 0);
         assert_eq!(
             display_width(&unlinked_layout.title),
             display_width(&linked_layout.title),
@@ -4246,7 +3586,8 @@ mod tests {
 
         let card = compute_tab_card_areas(&app, area)[0].clone();
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, 17);
-        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(rendered.contains('●'), "{rendered:?}");
+        assert!(rendered.contains("pi"), "{rendered:?}");
         assert!(
             !rendered.contains("deliberately long tab title"),
             "{rendered:?}"
@@ -4286,8 +3627,26 @@ mod tests {
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>();
 
-        assert!(text.iter().any(|line| line.contains('×')), "{text:?}");
-        assert!(text.iter().any(|line| line.contains('✓')), "{text:?}");
+        // Two shapes only: blocked and done-unread are both `○`, and the palette
+        // separates them. Asserting the glyph alone would no longer distinguish them.
+        assert!(text.iter().any(|line| line.contains('○')), "{text:?}");
+        assert!(
+            !text.iter().any(|line| line.contains('◆')),
+            "done-unread must not reintroduce a third dot shape: {text:?}"
+        );
+
+        let buffer = terminal.backend().buffer();
+        let dot_colors = (0..area.height)
+            .filter_map(|row| {
+                (0..area.width - 1)
+                    .find(|x| buffer[(*x, row)].symbol() == "○")
+                    .map(|x| buffer[(x, row)].style().fg)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            dot_colors.len() >= 2,
+            "blocked and done-unread share a shape, so they must differ by colour: {dot_colors:?}"
+        );
     }
 
     #[test]
@@ -4330,7 +3689,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.dot, "●");
         assert_eq!(
             agent_panel_label_color(&entry, &app.palette),
             app.palette.blue
@@ -4352,8 +3711,8 @@ mod tests {
                     })
                     .count()
             };
-            assert_eq!(colored_dots(app.palette.red), 0, "width {width}");
-            assert_eq!(colored_dots(app.palette.blue), 1, "width {width}");
+            assert_eq!(colored_dots(app.palette.red), 1, "width {width}");
+            assert_eq!(colored_dots(app.palette.blue), 0, "width {width}");
         }
 
         // Clearing the gate does not change the already-correct working row.
@@ -4402,24 +3761,22 @@ mod tests {
         assert!(!gate_overrides_label(&entry));
 
         let blocked_summary = |rows: &[SidebarRow]| {
-            let count = rows
+            let red_rows = rows
                 .iter()
-                .find_map(|row| match row {
-                    SidebarRow::SectionHeader { title, count, .. }
-                        if *title == BLOCKED_SECTION_TITLE =>
-                    {
-                        Some(*count)
+                .filter_map(|row| match row {
+                    SidebarRow::Agent { entry, .. } | SidebarRow::Tab { entry, .. } => {
+                        Some(entry_has_red_dot(entry))
                     }
                     _ => None,
                 })
-                .expect("blocked header");
-            let visible_rows = rows
-                .iter()
-                .filter(|row| matches!(row, SidebarRow::Agent { depth: 0, .. }))
+                .filter(|red| *red)
                 .count();
-            (count, visible_rows)
+            let has_blocked_header = rows.iter().any(|row| {
+                matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
+            });
+            (has_blocked_header, red_rows)
         };
-        assert_eq!(blocked_summary(&sidebar_rows(&app)), (0, 0));
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
 
         app.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
         app.reconcile_sidebar_presentation();
@@ -4431,7 +3788,7 @@ mod tests {
         assert_eq!(entry.state, AgentState::Idle);
         assert!(entry_is_blocked(&entry));
         assert!(gate_overrides_label(&entry));
-        assert_eq!(blocked_summary(&sidebar_rows(&app)), (1, 1));
+        assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 1));
     }
 
     #[test]
@@ -4472,7 +3829,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.dot, "●");
         let mobile_layout = mobile_tab_row_layout(
             &entry,
             app.view_observed_at,
@@ -4481,7 +3838,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(mobile_layout.state.as_deref(), Some("working"));
+        assert_eq!(mobile_layout.dot, "●");
 
         // A configured blocked label cannot hide the blue working state.
         entry.state_labels.insert("blocked".into(), "gate".into());
@@ -4496,7 +3853,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.dot, "●");
 
         // Once the pane stops, the unchanged gate supplies that label.
         entry.state = AgentState::Idle;
@@ -4508,7 +3865,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("gate"));
+        assert_eq!(layout.dot, "○");
         let mobile_layout = mobile_tab_row_layout(
             &entry,
             app.view_observed_at,
@@ -4517,7 +3874,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(mobile_layout.state.as_deref(), Some("gate"));
+        assert_eq!(mobile_layout.dot, "○");
     }
 
     #[test]
@@ -4540,7 +3897,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("usage"));
+        assert_eq!(layout.dot, "○");
         assert_eq!(
             agent_panel_label_color(&entry, &app.palette),
             app.palette.red
@@ -4556,7 +3913,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("limit"));
+        assert_eq!(layout.dot, "○");
 
         // Live screen only: the moment the agent works again the row is working.
         entry.usage_limited = false;
@@ -4569,7 +3926,7 @@ mod tests {
             &app.palette,
             app.status_indicators,
         );
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.dot, "●");
         assert_eq!(
             agent_panel_label_color(&entry, &app.palette),
             app.palette.blue
@@ -4613,16 +3970,16 @@ mod tests {
                 .collect::<Vec<_>>();
             let usage_row = rows
                 .iter()
-                .find(|row| row.contains("limit"))
+                .find(|row| row.contains('○') && row.contains("pi"))
                 .unwrap_or_else(|| panic!("width {width} omitted usage cue: {rows:?}"));
-            assert!(
-                usage_row.contains('×') || usage_row.contains('●'),
-                "{usage_row:?}"
-            );
-            assert!(
-                usage_row.contains("Wai") || usage_row.contains("plan"),
-                "width {width} dropped the title before the agent suffix: {usage_row:?}"
-            );
+            assert!(usage_row.contains('○'), "{usage_row:?}");
+            assert!(!usage_row.contains("limit"), "{usage_row:?}");
+            if width >= 24 {
+                assert!(
+                    usage_row.contains("Wai") || usage_row.contains("plan"),
+                    "width {width} dropped the title before the provider mark: {usage_row:?}"
+                );
+            }
         }
     }
 
@@ -4632,22 +3989,19 @@ mod tests {
         assert!(app.toggle_workspace_agent_disclosure(1));
         assert_eq!(
             row_kinds(&app),
-            vec![('h', 0), ('p', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1)]
+            vec![('h', 0), ('w', 0), ('t', 0), ('w', 1)]
         );
         let collapsed_worktrees = app.collapsed_space_keys.clone();
 
         assert!(app.toggle_workspace_agent_disclosure(0));
-        assert_eq!(
-            row_kinds(&app),
-            vec![('h', 0), ('p', 0), ('h', 0), ('w', 0), ('w', 1)]
-        );
+        assert_eq!(row_kinds(&app), vec![('h', 0), ('w', 0), ('w', 1)]);
         assert!(!app.workspace_agents_expanded(1));
         assert_eq!(app.collapsed_space_keys, collapsed_worktrees);
 
         assert!(app.toggle_workspace_agent_disclosure(0));
         assert_eq!(
             row_kinds(&app),
-            vec![('h', 0), ('p', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1)]
+            vec![('h', 0), ('w', 0), ('t', 0), ('w', 1)]
         );
     }
 
@@ -4817,11 +4171,8 @@ mod tests {
             entries[0].primary_tab_label.as_deref(),
             Some("Review Auth Migration")
         );
-        assert_eq!(entries[0].agent_label.as_deref(), Some("Terminal"));
-        assert_eq!(
-            row_kinds(&app),
-            vec![('h', 0), ('p', 0), ('h', 0), ('w', 0), ('t', 0)]
-        );
+        assert_eq!(entries[0].agent_label.as_deref(), Some(">_"));
+        assert_eq!(row_kinds(&app), vec![('h', 0), ('w', 0), ('t', 0)]);
     }
 
     #[test]
@@ -4921,15 +4272,7 @@ mod tests {
         app.begin_workspace_picker_presentation();
         assert_eq!(
             row_kinds(&app),
-            vec![
-                ('h', 0),
-                ('p', 0),
-                ('h', 0),
-                ('w', 0),
-                ('t', 0),
-                ('w', 1),
-                ('t', 1)
-            ]
+            vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
         app.end_workspace_picker_presentation();
         assert!(sidebar_rows(&app)
@@ -5034,10 +4377,9 @@ mod tests {
                     SidebarRow::Tab { entry, .. } => ('t', entry.ws_idx),
                     SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
                     SidebarRow::SectionHeader { .. } => ('h', 0),
-                    SidebarRow::PrioPanel { .. } => ('p', 0),
                 })
                 .collect::<Vec<_>>(),
-            vec![('h', 0), ('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
+            vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
     }
 
@@ -5068,8 +4410,7 @@ mod tests {
                 SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 SidebarRow::Workspace { .. }
                 | SidebarRow::Agent { .. }
-                | SidebarRow::SectionHeader { .. }
-                | SidebarRow::PrioPanel { .. } => None,
+                | SidebarRow::SectionHeader { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(tabs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
@@ -5109,7 +4450,6 @@ mod tests {
                         Some(entry.pane_id),
                     ),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
-                    SidebarRow::PrioPanel { .. } => ("prio", 0, None, None),
                 })
                 .collect::<Vec<_>>()
         };
@@ -5337,7 +4677,6 @@ row_gap = 1
         let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
         terminal_state.detected_agent = Some(Agent::Codex);
         terminal_state.state = AgentState::Working;
-        terminal_state.background_job_count = Some(2);
         app.reconcile_sidebar_presentation();
 
         let width = 60;
@@ -5353,7 +4692,7 @@ row_gap = 1
             .collect::<Vec<_>>();
         assert!(rows
             .iter()
-            .any(|row| row.contains("working") && row.contains("Polish sidebar selection")));
+            .any(|row| row.contains("Polish sidebar selection") && row.contains("cx")));
         assert!(rows
             .iter()
             .any(|row| row.contains("Review lifecycle assertions")));
@@ -5374,8 +4713,8 @@ row_gap = 1
              p{max-width:760px}.terminal{display:grid;width:max-content;font-size:14px;\
              line-height:20px;box-shadow:0 0 0 1px #bcc0cc;background:#eff1f5}.cell{width:1ch;\
              height:20px;white-space:pre;overflow:visible}</style><h1>Herdr sidebar release layout</h1>\
-             <p>Actual Ratatui test buffer: selected titles, blue Working status, provider suffix,\
-             background-terminal count, one row per tab, multi-pane roll-up, and compact spacing\
+             <p>Actual Ratatui test buffer: selected titles, lifecycle dots, provider suffix,\
+             live-shell marks, one row per tab, multi-pane roll-up, and compact spacing\
              between complete Space groups.</p>\
              <div class=\"terminal\" style=\"grid-template-columns:repeat(60,1ch)\">",
         );
@@ -5423,11 +4762,10 @@ row_gap = 1
         }
         app.reconcile_sidebar_presentation();
 
-        // ac1 + ac2: one Spaces projection and exactly one row per tab/window,
-        // below the always-present Blocked and Spaces headers.
+        // One Spaces projection and exactly one row per tab/window.
         assert_eq!(
             row_kinds(&app),
-            vec![('h', 0), ('p', 0), ('h', 0), ('w', 0), ('t', 0), ('t', 0),]
+            vec![('h', 0), ('w', 0), ('t', 0), ('t', 0),]
         );
         assert!(sidebar_rows(&app)
             .iter()
@@ -5444,8 +4782,8 @@ row_gap = 1
         let working = row_text(buffer, tab_cards[0].rect.y, 59);
         let agentless = row_text(buffer, tab_cards[1].rect.y, 59);
 
-        // ac3: lifecycle status is left of the single title, with no model subtitle.
-        let status_at = working.find("working").unwrap();
+        // ac3: the lifecycle dot is left of the single title, with no model subtitle.
+        let status_at = working.find('●').unwrap();
         let title_at = working.find("Summarize recent commits").unwrap();
         assert!(status_at < title_at, "{working:?}");
         assert!(!working.contains("codex"), "{working:?}");
@@ -5492,12 +4830,10 @@ row_gap = 1
         assert!(first.contains("repo-folder"));
         assert!(tab_window.contains("Fix Billing Retry"), "{tab_window:?}");
         assert_eq!(tab_window.matches("Fix Billing Retry").count(), 1);
-        assert!(
-            tab_window.contains("Fix Billing Retry · pi"),
-            "{tab_window:?}"
-        );
+        assert!(tab_window.contains("Fix Billing Retry"), "{tab_window:?}");
+        assert!(tab_window.contains("pi"), "{tab_window:?}");
         assert!(!first.contains("working"));
-        assert!(tab_window.contains("working"));
+        assert!(tab_window.contains("●"));
         assert!(agent_cards.is_empty());
 
         let workspace_x = find_symbol_x(buffer, workspace_row, 59, "o");
@@ -5516,7 +4852,7 @@ row_gap = 1
     }
 
     #[test]
-    fn tab_rows_show_working_then_done_lifecycle_text() {
+    fn tab_rows_show_working_then_done_lifecycle_dots() {
         let started = std::time::Instant::now();
         let mut app = AppState::test_new();
         let workspace = Workspace::test_new("one");
@@ -5547,11 +4883,11 @@ row_gap = 1
             .unwrap();
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
-        assert!(busy_text.contains("working"), "{busy_text:?}");
-        assert!(busy_text.ends_with("<1m ago"), "{busy_text:?}");
-        // ac7: both the Working label and its live age use activity blue.
-        for token in ["working", "<1m ago"] {
-            let token_x = busy_text.find(token).expect("rendered token") as u16;
+        assert!(busy_text.contains("●"), "{busy_text:?}");
+        assert!(busy_text.ends_with('—'), "{busy_text:?}");
+        // ac7: the working dot and its age field use activity blue.
+        for token in ["●", "—"] {
+            let token_x = find_symbol_x(busy.backend().buffer(), tab_row, 49, token);
             assert_eq!(
                 busy.backend().buffer()[(token_x, tab_row)].style().fg,
                 Some(app.palette.blue)
@@ -5582,8 +4918,8 @@ row_gap = 1
         idle.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
-        assert!(idle_text.contains("done"), "{idle_text:?}");
-        assert!(idle_text.ends_with("5m ago"), "{idle_text:?}");
+        assert!(idle_text.contains("○"), "{idle_text:?}");
+        assert!(idle_text.ends_with("5m"), "{idle_text:?}");
     }
 
     #[test]
@@ -5643,15 +4979,10 @@ row_gap = 1
         let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
 
         assert!(rendered.contains("Review release"), "{rendered:?}");
-        assert!(rendered.ends_with("1m ago"), "{rendered:?}");
+        assert!(rendered.ends_with("1m"), "{rendered:?}");
         assert!(!rendered.contains("idle"), "{rendered:?}");
         assert!(!rendered.contains("done"), "{rendered:?}");
-        // The gutter's own prio marker is the only thing allowed before the title; nothing may be
-        // interposed between it and the title.
-        assert!(
-            rendered.trim_start().starts_with("· Review release"),
-            "{rendered:?}"
-        );
+        assert!(rendered.contains("○  Review release"), "{rendered:?}");
     }
 
     #[test]
@@ -5701,7 +5032,7 @@ row_gap = 1
         let card = &compute_tab_card_areas(&app, area)[0];
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
 
-        assert!(rendered.ends_with("5m ago"), "{rendered:?}");
+        assert!(rendered.ends_with("5m"), "{rendered:?}");
         assert_eq!(compute_tab_card_areas(&app, area).len(), 1);
     }
 
@@ -5721,8 +5052,8 @@ row_gap = 1
             rendered.contains('●') || rendered.contains('w'),
             "{rendered:?}"
         );
-        assert!(rendered.contains("· pi"), "{rendered:?}");
-        assert!(!rendered.contains("--"), "{rendered:?}");
+        assert!(rendered.contains("pi"), "{rendered:?}");
+        assert!(!rendered.contains("reported"), "{rendered:?}");
     }
 
     #[test]
@@ -5746,7 +5077,7 @@ row_gap = 1
         let card = &compute_tab_card_areas(&app, area)[0];
         let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
 
-        assert!(rendered.contains("cargo"), "{rendered:?}");
+        assert!(!rendered.contains("cargo"), "{rendered:?}");
         assert!(rendered.contains("release ticket"), "{rendered:?}");
     }
 
@@ -5788,8 +5119,7 @@ row_gap = 1
             app.status_indicators,
         );
 
-        assert!(layout.foreground_process.is_none());
-        assert!(layout.agent_suffix.is_some());
+        assert_eq!(layout.provider, "pi");
         assert!(display_width(&layout.title) >= TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH);
     }
 
@@ -5806,7 +5136,6 @@ row_gap = 1
             .unwrap()
             .foreground_process_name = Some("node".into());
         let mut entry = sidebar_thread_entries(&app).remove(0);
-        entry.background_job_count = Some(1);
         entry.activity_at = Some(
             app.view_observed_at
                 .checked_sub(std::time::Duration::from_secs(12 * 60))
@@ -5824,9 +5153,8 @@ row_gap = 1
             app.status_indicators,
         );
 
-        assert!(layout.foreground_process.is_none());
+        assert_eq!(layout.provider, "pi");
         assert!(layout.activity_age.is_some());
-        assert!(layout.background_jobs.is_none());
     }
 
     #[test]
@@ -5891,25 +5219,9 @@ row_gap = 1
             &app.palette,
             app.status_indicators,
         );
-        let process = layout
-            .foreground_process
-            .expect("process should fit partially");
-
-        assert_ne!(process, " · foreground-process-name");
-        let used_width = 1
-            + layout
-                .state
-                .as_deref()
-                .map(|state| display_width(state) + 2 + display_width("●") + 3)
-                .unwrap_or_default()
-            + display_width(&layout.title)
-            + layout
-                .agent_suffix
-                .as_deref()
-                .map(display_width)
-                .unwrap_or_default()
-            + display_width(&process);
-        assert!(used_width <= 32, "used width: {used_width}");
+        assert_eq!(layout.provider, "pi");
+        assert_eq!(layout.dot, "●");
+        assert!(display_width(&layout.title) <= 32);
     }
 
     #[test]
@@ -6185,7 +5497,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert!(rendered.contains(&tab_bar_label), "{rendered:?}");
         // The label no longer names the agent, so the sidebar appends the
         // provider chip exactly once and never leads with it.
-        assert!(rendered.contains("Fix billing · pi"), "{rendered:?}");
+        assert!(rendered.contains("Fix billing"), "{rendered:?}");
+        assert!(rendered.contains("pi"), "{rendered:?}");
         assert!(
             !rendered.contains("pi · Fix billing"),
             "sidebar led with the agent identity: {rendered:?}"
@@ -6287,23 +5600,16 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         focused.set_terminal_title(Some("Fix billing".into()));
         app.reconcile_sidebar_presentation();
 
-        let entry = prio_panel_entries(&app, None)
+        let entry = sidebar_thread_entries(&app)
             .into_iter()
             .next()
-            .expect("prio entry");
+            .expect("sidebar entry");
         assert!(!entry.tab_label_leads_with_agent);
 
-        let area = Rect::new(0, 0, 60, 16);
-        let rows = compute_prio_panel_row_areas(&app, area);
-        assert_eq!(rows.len(), 1);
+        let rendered = render_first_tab_row(&app, 60);
 
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
-            .unwrap();
-        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
-
-        assert!(rendered.contains("Fix billing · one · pi"), "{rendered:?}");
+        assert!(rendered.contains("Fix billing"), "{rendered:?}");
+        assert!(rendered.contains("pi"), "{rendered:?}");
         assert!(!rendered.contains("Reviewer"), "{rendered:?}");
     }
 
@@ -6327,13 +5633,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
             .detected_agent = Some(Agent::Codex);
         app.reconcile_sidebar_presentation();
 
-        let area = Rect::new(0, 0, 60, 16);
-        let rows = compute_prio_panel_row_areas(&app, area);
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
-            .unwrap();
-        let rendered = row_text(terminal.backend().buffer(), rows[0].rect.y, area.width);
+        let rendered = render_first_tab_row(&app, 60);
 
         assert_eq!(
             rendered.to_ascii_lowercase().matches("codex").count(),
@@ -6402,7 +5702,7 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), row, 25);
-        assert!(rendered.contains("one (1)"), "{rendered:?}");
+        assert!(rendered.contains("one (0/1)"), "{rendered:?}");
         assert!(!rendered.contains("HI"), "{rendered:?}");
     }
 
@@ -6507,20 +5807,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .find(|card| card.tab_idx == tab_idx)
             .unwrap();
-        let first = (card.rect.y..card.rect.y + card.rect.height)
-            .map(|row| row_text(buffer, row, 17))
-            .find(|line| line.contains("logs"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing tab context in {:?}",
-                    (card.rect.y..card.rect.y + card.rect.height)
-                        .map(|row| row_text(buffer, row, 17))
-                        .collect::<Vec<_>>()
-                )
-            });
-
-        assert!(first.contains("logs"), "rendered row: {first:?}");
-        assert!(first.contains("· pi"), "{first:?}");
+        let first = row_text(buffer, card.rect.y, 17);
+        assert!(first.contains("pi"), "rendered row: {first:?}");
         assert!(!first.contains("very-long-workspace-name"), "{first:?}");
     }
 
@@ -6630,9 +5918,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
         let (cards, _) = compute_workspace_list_areas(&app, area);
 
-        // The unified list counts Blocked, Prio, and Spaces alongside the
-        // workspace cards that fit beneath them.
-        assert_eq!(metrics.viewport_rows, 4);
+        // The unified list counts the Spaces header alongside the workspace
+        // cards that fit beneath it.
+        assert_eq!(metrics.viewport_rows, 3);
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].ws_idx, 0);
         assert_eq!(cards[0].rect.height, 1);
@@ -6654,23 +5942,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![vec![crate::config::AgentSidebarToken::Agent]; 6],
         );
         app.agent_panel_sort = AgentPanelSort::Priority;
+        app.active = Some(0);
         let panel = Rect::new(0, 0, 20, 5);
-        let ws_area = workspace_list_rect(panel, app.sidebar_section_split);
-        let body = workspace_list_body_rect(ws_area, false);
-
-        let metrics = workspace_list_scroll_metrics(&app, ws_area);
-
-        // The always-present Blocked header now takes one of the visible
-        // rows alongside the single oversized agent entry, which pushes the
-        // Spaces header (and the single workspace row it fronts) out of the
-        // viewport, making it scrollable.
-        assert_eq!(metrics.viewport_rows, 2);
-        assert_eq!(metrics.max_offset_from_bottom, 2);
-        let entry = agent_panel_entries(&app).pop().unwrap();
-        assert_eq!(
-            agent_entry_height_in_body(&app, &entry, body.height),
-            body.height
-        );
+        let cards = compute_tab_card_areas(&app, panel);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].rect.height, 1);
     }
 
     #[test]
@@ -6685,26 +5961,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let blocked = rows
             .iter()
             .find_map(|row| match row {
-                SidebarRow::Agent { entry, depth } if *depth == 0 => Some(entry),
+                SidebarRow::Tab { entry, depth } if *depth == 1 => Some(entry),
                 _ => None,
             })
-            .expect("blocked worklist should contain an agent row");
+            .expect("blocked space row should contain a tab row");
 
         assert_eq!(
-            resolved_agent_rows_at(&app, blocked, 0).len(),
+            sidebar_row_height(
+                &app,
+                &SidebarRow::Tab {
+                    entry: blocked.clone(),
+                    depth: 1,
+                },
+                8
+            ),
             1,
-            "worklist rows ignore the configured multi-row tree template"
+            "compact tab rows always occupy one painted line"
         );
-        assert_eq!(
-            agent_entry_height_in_body_at(&app, blocked, 8, 0),
-            1,
-            "layout height must match the single painted worklist row"
-        );
-        let cards = compute_agent_card_areas(&app, area);
-        let card = cards
-            .iter()
+        let card = compute_tab_card_areas(&app, area)
+            .into_iter()
             .find(|card| card.ws_idx == blocked.ws_idx && card.pane_id == blocked.pane_id)
-            .expect("blocked worklist card should have geometry");
+            .expect("blocked space row should have geometry");
         assert_eq!(card.rect.height, 1);
     }
 
@@ -6718,10 +5995,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap()
             .set_terminal_title(Some("Review blocked thread".into()));
         let area = Rect::new(0, 0, 50, 12);
-        let card = compute_agent_card_areas(&app, area)
+        let card = compute_tab_card_areas(&app, area)
             .into_iter()
             .find(|card| card.pane_id == blocked_pane)
-            .expect("blocked worklist card should render");
+            .expect("blocked compact row should render");
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test terminal should initialize");
         terminal
@@ -6882,7 +6159,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::Agent { entry, .. } => ("agent", entry.primary_label.clone()),
                 SidebarRow::Workspace { .. } => ("workspace", String::new()),
                 SidebarRow::Tab { .. } => ("tab", String::new()),
-                SidebarRow::PrioPanel { .. } => ("prio", String::new()),
             })
             .collect()
     }
@@ -6920,28 +6196,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ]);
 
         let shape = priority_row_shape(&app);
+        assert_eq!(shape[0], ("section", SPACES_SECTION_TITLE.to_string()));
         assert_eq!(
-            shape[..5],
-            [
-                ("section", BLOCKED_SECTION_TITLE.to_string()),
-                ("agent", "ws1".to_string()),
-                ("agent", "ws3".to_string()),
-                ("prio", String::new()),
-                ("section", SPACES_SECTION_TITLE.to_string()),
-            ]
+            shape.iter().filter(|(kind, _)| *kind == "section").count(),
+            1
         );
-
-        // Below Spaces the ownership tree resumes untouched: the
-        // blocked group is a worklist layered on top, not a reordering of it.
-        assert!(
-            shape[5..].iter().all(|(kind, _)| *kind != "section"),
-            "the tree below must not grow further headers: {shape:?}"
-        );
-        assert!(shape[5..].iter().any(|(kind, _)| *kind == "workspace"));
+        assert!(!shape
+            .iter()
+            .any(|(_, title)| title == BLOCKED_SECTION_TITLE));
+        assert!(!shape.iter().any(|(_, title)| title == PINNED_SECTION_TITLE));
     }
 
     #[test]
-    fn pinned_tabs_group_below_blocked_and_above_the_tree() {
+    fn pinned_tabs_do_not_create_a_sidebar_section() {
         let mut app =
             priority_app_with_states(&[AgentState::Working, AgentState::Blocked, AgentState::Idle]);
         // ws0 is merely pinned; ws1 is pinned *and* blocked.
@@ -6949,22 +6216,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces[1].tabs[0].pinned = true;
 
         let shape = priority_row_shape(&app);
+        assert_eq!(shape[0], ("section", SPACES_SECTION_TITLE.to_string()));
         assert_eq!(
-            shape[..6],
-            [
-                ("section", BLOCKED_SECTION_TITLE.to_string()),
-                ("agent", "ws1".to_string()),
-                ("prio", String::new()),
-                ("section", PINNED_SECTION_TITLE.to_string()),
-                ("agent", "ws0".to_string()),
-                ("section", SPACES_SECTION_TITLE.to_string()),
-            ],
-            "a pinned-and-blocked tab is listed once, under Blocked: {shape:?}"
+            shape.iter().filter(|(kind, _)| *kind == "section").count(),
+            1
         );
+        assert!(!shape.iter().any(|(_, title)| title == PINNED_SECTION_TITLE));
     }
 
     #[test]
-    fn unpinning_the_only_pin_drops_back_to_blocked_and_spaces_headers() {
+    fn pin_changes_do_not_change_sidebar_sections() {
         let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
         app.workspaces[0].tabs[0].pinned = true;
         assert_eq!(
@@ -6972,13 +6233,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .iter()
                 .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
                 .count(),
-            3,
-            "a pin alone must be enough to open its own group, on top of the always-present \
-             Blocked and Spaces headers"
+            1,
+            "a pin does not open a separate sidebar group"
         );
         app.workspaces[0].tabs[0].pinned = false;
-        // Blocked and Spaces are always present -- unpinning drops only the
-        // Pinned header, leaving exactly those two.
+        // Unpinning leaves the single Spaces header unchanged.
         assert_eq!(
             sidebar_rows(&app)
                 .iter()
@@ -6987,8 +6246,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            vec![BLOCKED_SECTION_TITLE, SPACES_SECTION_TITLE],
-            "with nothing pinned or blocked only the always-present headers remain"
+            vec![SPACES_SECTION_TITLE],
+            "with nothing pinned only the Spaces header remains"
         );
     }
 
@@ -7000,29 +6259,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             AgentState::Blocked,
         ]);
         let open = priority_row_shape(&app);
-        assert_eq!(open[0], ("section", BLOCKED_SECTION_TITLE.to_string()));
-        assert_eq!(open[1].0, "agent");
+        assert_eq!(open[0], ("section", SPACES_SECTION_TITLE.to_string()));
 
         app.collapsed_sidebar_groups
-            .insert(BLOCKED_SECTION_TITLE.to_string());
+            .insert(SPACES_SECTION_TITLE.to_string());
         let folded = priority_row_shape(&app);
-        assert_eq!(folded[0], ("section", BLOCKED_SECTION_TITLE.to_string()));
-        assert_eq!(
-            folded[1],
-            ("prio", String::new()),
-            "a folded group leaves its header and nothing else"
-        );
-        assert_eq!(folded[2], ("section", SPACES_SECTION_TITLE.to_string()));
-        // The count survives the fold: it is the only thing left saying how much
-        // is hidden behind the header.
-        assert!(sidebar_rows(&app).iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader { title, count: 2, collapsed: true } if *title == BLOCKED_SECTION_TITLE
-        )));
-        assert!(
-            folded.iter().any(|(kind, _)| *kind == "workspace"),
-            "folding one group must not fold the tree"
-        );
+        assert_eq!(folded, vec![("section", SPACES_SECTION_TITLE.to_string())]);
+        assert!(folded.len() < open.len());
     }
 
     #[test]
@@ -7031,55 +6274,34 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.collapsed_sidebar_groups
             .insert(SPACES_SECTION_TITLE.to_string());
         let shape = priority_row_shape(&app);
-        assert_eq!(
-            shape,
-            vec![
-                ("section", BLOCKED_SECTION_TITLE.to_string()),
-                ("agent", shape[1].1.clone()),
-                ("prio", String::new()),
-                ("section", SPACES_SECTION_TITLE.to_string()),
-            ]
-        );
+        assert_eq!(shape[0], ("section", SPACES_SECTION_TITLE.to_string()));
+        assert!(!shape.iter().any(|(kind, _)| *kind == "workspace"));
     }
 
     #[test]
     fn a_spaces_fold_hides_the_tree_even_with_nothing_blocked_or_pinned() {
-        // The Blocked header is always present, so the tree always has its own
-        // Spaces header to fold -- there is no longer a "tree stands alone"
-        // state where a stale Spaces fold has nothing to act on.
+        // The Spaces header remains the only tree control.
         let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
         app.collapsed_sidebar_groups
             .insert(SPACES_SECTION_TITLE.to_string());
         let shape = priority_row_shape(&app);
         assert!(!shape.iter().any(|(kind, _)| *kind == "workspace"));
-        assert_eq!(
-            shape,
-            vec![
-                ("section", BLOCKED_SECTION_TITLE.to_string()),
-                ("prio", String::new()),
-                ("section", SPACES_SECTION_TITLE.to_string()),
-            ]
-        );
+        assert_eq!(shape, vec![("section", SPACES_SECTION_TITLE.to_string())]);
     }
 
     #[test]
-    fn nothing_blocked_leaves_only_the_always_present_headers() {
+    fn nothing_blocked_leaves_only_the_spaces_header() {
         let app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
         let rows = sidebar_rows(&app);
         assert_eq!(
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
                 .count(),
-            2,
-            "an empty blocked group still costs its own header row, plus the tree's Spaces header"
+            1,
+            "the removed Blocked group does not cost a row"
         );
         assert!(matches!(
             rows[0],
-            SidebarRow::SectionHeader { title, count: 0, .. } if title == BLOCKED_SECTION_TITLE
-        ));
-        assert!(matches!(rows[1], SidebarRow::PrioPanel { .. }));
-        assert!(matches!(
-            rows[2],
             SidebarRow::SectionHeader { title, .. } if title == SPACES_SECTION_TITLE
         ));
     }
@@ -7097,7 +6319,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|(_, row)| matches!(row, SidebarRow::Agent { .. }))
             .map(|(ordinal, _)| ordinal)
             .collect();
-        assert_eq!(ordinals, [1, 2]);
+        assert!(ordinals.is_empty());
 
         // And a header belongs to no workspace, so workspace scrolling can
         // never target one.
@@ -7408,7 +6630,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(cards[0].ws_idx, 0);
         assert_eq!(cards[1].ws_idx, 3);
         let grouped = row_text(buffer, cards[0].rect.y, cards[0].rect.width);
-        assert!(grouped.contains("herdr (3)"), "{grouped:?}");
+        assert!(grouped.contains("main (0/3)"), "{grouped:?}");
         assert!(!grouped.contains("issue"), "{grouped:?}");
         assert!(!grouped.contains("review"), "{grouped:?}");
     }
@@ -7432,7 +6654,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let title = buffer[(find_symbol_x(buffer, row, area.width, "h"), row)].style();
+        let title = buffer[(find_symbol_x(buffer, row, area.width, "m"), row)].style();
 
         assert_eq!(title.fg, Some(active_sidebar_title_color(&app.palette)));
         assert!(title.add_modifier.contains(Modifier::BOLD));
@@ -7460,12 +6682,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     }
                     SidebarRow::Agent { .. } => "agent".to_string(),
                     SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
-                    SidebarRow::PrioPanel { .. } => "section:Prio".to_string(),
                 })
                 .collect::<Vec<_>>(),
             vec![
-                "section:Blocked",
-                "section:Prio",
                 "section:Spaces",
                 "space:0",
                 "window:0:0",
@@ -7478,8 +6697,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(matches!(
             sidebar_rows(&app).as_slice(),
             [
-                SidebarRow::SectionHeader { .. },
-                SidebarRow::PrioPanel { .. },
                 SidebarRow::SectionHeader { .. },
                 SidebarRow::Workspace { ws_idx: 0, .. }
             ]
@@ -7495,19 +6712,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn tab_background_jobs_sum_across_panes_without_adding_rows() {
+    fn tab_shell_state_sums_across_panes_without_adding_rows() {
         let mut app = app_with_agents(&["one"]);
         let second = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         app.ensure_test_terminals();
         let first = app.workspaces[0].tabs[0].root_pane;
-        for (pane, count) in [(first, 1), (second, 2)] {
+        for pane in [first, second] {
             let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
                 .attached_terminal_id
                 .clone();
-            app.terminals
-                .get_mut(&terminal_id)
-                .unwrap()
-                .background_job_count = Some(count);
+            app.terminals.get_mut(&terminal_id).unwrap().holds_shell = true;
         }
 
         let tabs = sidebar_rows(&app)
@@ -7518,7 +6732,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .collect::<Vec<_>>();
         assert_eq!(tabs.len(), 1);
-        assert_eq!(tabs[0].background_job_count, Some(3));
+        assert!(tabs[0].holds_shell);
     }
 
     #[test]
@@ -7563,10 +6777,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 false,
                 started + std::time::Duration::from_secs(1),
             );
-        app.terminals
-            .get_mut(&first_terminal)
-            .unwrap()
-            .background_job_count = Some(1);
+        app.terminals.get_mut(&first_terminal).unwrap();
         app.workspaces[0].tabs[0]
             .panes
             .get_mut(&first_pane)
@@ -7589,10 +6800,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 false,
                 blocked_at,
             );
-        app.terminals
-            .get_mut(&second_terminal)
-            .unwrap()
-            .background_job_count = Some(2);
+        app.terminals.get_mut(&second_terminal).unwrap();
         app.view_observed_at = blocked_at + std::time::Duration::from_secs(60);
         app.reconcile_sidebar_presentation();
 
@@ -7603,21 +6811,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .expect("sidebar tab row");
-        let prio_tab = prio_panel_entries(&app, None)
-            .into_iter()
-            .find(|entry| entry.ws_idx == 0 && entry.tab_idx == 0)
-            .expect("PRIO tab row");
-
-        assert_eq!(prio_tab.state, AgentState::Blocked);
-        assert_eq!(prio_tab.activity_at, sidebar_tab.activity_at);
-        assert_eq!(
-            prio_tab.background_job_count,
-            sidebar_tab.background_job_count
-        );
-        assert_eq!(prio_tab.background_job_count, Some(3));
+        assert_eq!(sidebar_tab.state, AgentState::Blocked);
         assert_eq!(
             tab_row_layout(
-                &prio_tab,
+                &sidebar_tab,
                 app.view_observed_at,
                 80,
                 1,
@@ -7638,18 +6835,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn tab_background_job_badge_renders_immediately_after_title() {
+    fn tab_shell_marker_renders_in_the_provider_column() {
         let mut app = app_with_agents(&["one"]);
         app.workspaces[0].tabs[0].custom_name = Some("Use Repository Instructions".into());
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
             .attached_terminal_id
             .clone();
-        app.terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .background_job_count = Some(2);
-        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Codex);
+        app.terminals.get_mut(&terminal_id).unwrap().holds_shell = true;
         app.reconcile_sidebar_presentation();
 
         let area = Rect::new(0, 0, 60, 10);
@@ -7661,9 +6854,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
 
         assert!(
-            rendered.contains("Use Repository Instructions · cx  2 >_"),
+            rendered.contains("Use Repository Instructions"),
             "{rendered:?}"
         );
+        assert!(rendered.contains("pi >_"), "{rendered:?}");
+        assert!(!rendered.contains("  2 >_"), "{rendered:?}");
     }
 
     #[test]
@@ -7700,11 +6895,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
 
         assert!(
-            rendered.iter().any(|row| row.contains("Codex task · cx")),
+            rendered
+                .iter()
+                .any(|row| row.contains("Codex task") && row.contains("cx")),
             "{rendered:?}"
         );
         assert!(
-            rendered.iter().any(|row| row.contains("Claude task · cc")),
+            rendered
+                .iter()
+                .any(|row| row.contains("Claude task") && row.contains("cc")),
             "{rendered:?}"
         );
     }
@@ -7758,7 +6957,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             false,
             started,
         );
-        terminal_state.background_job_count = Some(2);
         app.view_observed_at = started + std::time::Duration::from_secs(65);
         app.reconcile_sidebar_presentation();
 
@@ -7772,20 +6970,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
 
             assert!(rendered.contains("●"), "{width}: {rendered:?}");
-            assert!(rendered.contains(" · cx"), "{width}: {rendered:?}");
+            assert!(rendered.contains("cx"), "{width}: {rendered:?}");
             let dot = rendered.find('●').unwrap();
-            let suffix = rendered.find(" · cx").unwrap();
+            let suffix = rendered.find("cx").unwrap();
             assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
             if width == 18 {
                 assert!(!rendered.contains("working"), "{rendered:?}");
                 assert!(!rendered.contains(">_"), "{rendered:?}");
                 assert!(!rendered.contains("ago"), "{rendered:?}");
             } else {
-                assert!(rendered.contains("working"), "{rendered:?}");
-                assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
-                // At 38 columns the title yields before compact identity and
-                // recency.
-                assert!(rendered.contains("ago"), "{rendered:?}");
+                assert!(rendered.contains("1m"), "{rendered:?}");
             }
         }
     }
@@ -8004,11 +7198,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             spacious[0].rect.y + spacious[0].rect.height + 2
         );
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        // The unified list also counts the Prio row in this budget.
-        assert_eq!(spacious_metrics.viewport_rows, 4);
-        // With the row gap in play the headers plus workspace rows overflow
-        // the 5-row viewport, making it scrollable too.
-        assert_eq!(spacious_metrics.max_offset_from_bottom, 3);
+        assert_eq!(spacious_metrics.viewport_rows, 2);
+        assert_eq!(spacious_metrics.max_offset_from_bottom, 1);
 
         app.sidebar_spaces.row_gap = 0;
         let (packed, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
@@ -8016,10 +7207,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 5));
-        // With no row gap all 5 entries (2 headers, Prio, and 2 workspace
-        // rows) fit the 5-row viewport, unlike the spacious case above.
-        assert_eq!(packed_metrics.viewport_rows, 4);
-        assert_eq!(packed_metrics.max_offset_from_bottom, 1);
+        assert_eq!(packed_metrics.viewport_rows, 3);
+        assert_eq!(packed_metrics.max_offset_from_bottom, 0);
     }
 
     #[test]
@@ -8155,11 +7344,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let ws_area = Rect::new(0, 0, 30, 5);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
-        // Blocked, Prio, and Spaces count alongside the two workspace rows.
-        assert_eq!(metrics.viewport_rows, 4);
-        // The five body rows overflow the four-row body by one.
-        assert_eq!(metrics.max_offset_from_bottom, 2);
-        assert_eq!(metrics.offset_from_bottom, 2);
+        assert_eq!(metrics.viewport_rows, 3);
+        assert_eq!(metrics.max_offset_from_bottom, 0);
+        assert_eq!(metrics.offset_from_bottom, 0);
     }
 
     #[test]
@@ -8397,9 +7584,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.status_indicators,
         );
         assert_eq!(layout.title, "Codex");
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.dot, "●");
         // The derived projection already leads with the agent, so no provider chip.
-        assert_eq!(layout.agent_suffix.as_deref(), None);
+        assert_eq!(layout.provider, "cx");
 
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal
@@ -8419,9 +7606,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.status_indicators,
         );
         assert_eq!(layout.title, "manual pane");
-        assert_eq!(layout.state.as_deref(), Some("working"));
+        assert_eq!(layout.dot, "●");
         // The label no longer names the agent, so the provider chip returns.
-        assert_eq!(layout.agent_suffix.as_deref(), Some(" · cx"));
+        assert_eq!(layout.provider, "cx");
     }
 
     #[test]
@@ -8456,23 +7643,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let area = Rect::new(0, 0, 48, 24);
         let headers = compute_sidebar_section_header_areas(&app, area);
-        let header_y = |title| {
-            headers
-                .iter()
-                .find(|header| header.title == title)
-                .map(|header| header.rect.y)
-                .expect("section header")
-        };
-        let prio = prio_panel_rect(&app, area);
-        assert!(
-            header_y(BLOCKED_SECTION_TITLE) < prio.y
-                && prio.y < header_y(PINNED_SECTION_TITLE)
-                && header_y(PINNED_SECTION_TITLE) < header_y(SPACES_SECTION_TITLE),
-            "section order was Blocked={:?}, Prio={prio:?}, Pinned={:?}, Spaces={:?}",
-            header_y(BLOCKED_SECTION_TITLE),
-            header_y(PINNED_SECTION_TITLE),
-            header_y(SPACES_SECTION_TITLE),
-        );
+        assert!(!headers
+            .iter()
+            .any(|header| header.title == PINNED_SECTION_TITLE));
+        assert!(headers
+            .iter()
+            .any(|header| header.title == SPACES_SECTION_TITLE));
         assert!(section_is_collapsed(&app, PINNED_SECTION_TITLE));
         assert!(app.collapsed_space_keys.contains("repo-key"));
 
@@ -8669,7 +7845,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .find(|row| row.contains("Approve Bash command"))
             .expect("Claude row");
-        assert!(claude.contains(" · cc"), "{claude:?}");
+        assert!(claude.contains("cc"), "{claude:?}");
         assert!(
             !claude.to_ascii_lowercase().contains("claude"),
             "{claude:?}"
@@ -8678,7 +7854,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .find(|row| row.contains("Review release notes"))
             .expect("Gemini row");
-        assert!(gemini.contains(" · gemini"), "{gemini:?}");
+        assert!(!gemini.contains("gemini"), "{gemini:?}");
     }
 
     #[test]
@@ -8715,7 +7891,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .unwrap();
             for card in compute_tab_card_areas(&app, area) {
                 let row = row_text(terminal.backend().buffer(), card.rect.y, width - 1);
-                let suffix = if card.ws_idx == 0 { " · cc" } else { " · cx" };
+                let suffix = if card.ws_idx == 0 { "cc" } else { "cx" };
                 let title = if card.ws_idx == 0 {
                     "Native permission fixture"
                 } else {
@@ -8727,7 +7903,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .unwrap();
                 let suffix_start = row.find(suffix).expect("agent suffix");
                 let age_start = row
-                    .rfind("ago")
+                    .rfind('—')
+                    .or_else(|| row.rfind("1m"))
                     .unwrap_or_else(|| panic!("activity age at width {width}: {row:?}"));
                 assert!(
                     title_start < suffix_start && suffix_start < age_start,
@@ -8739,6 +7916,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 );
                 assert!(!row.to_ascii_lowercase().contains(" · claude"), "{row:?}");
                 assert!(!row.to_ascii_lowercase().contains(" · codex"), "{row:?}");
+                assert!(
+                    !row.contains("reported") && !row.contains(" ago"),
+                    "{row:?}"
+                );
             }
         }
     }

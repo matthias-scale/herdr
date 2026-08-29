@@ -356,9 +356,8 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            // One-line mobile Space → direct tab/window projection, now under
-            // the always-present Blocked header plus the tree's Spaces header.
-            "34bd10b681cab77f53e796620c07e63d66cd41b9b40e058ca5905195757f4e6c"
+            // One-line mobile Space → direct tab/window projection.
+            "983de3aa8afbad44e73f904d6b1dbcdc4254020471ca8f125e2e07dfdb28fe68"
         );
     }
 }

@@ -424,9 +424,10 @@ pub struct TerminalState {
     metadata_report_agents: HashMap<String, Agent>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
-    /// Provider-reported background jobs owned by this agent thread. `None`
-    /// means the provider does not expose a supported count.
-    pub background_job_count: Option<u16>,
+    /// A live child process remains below the pane shell or agent process.
+    pub holds_shell: bool,
+    /// Process evidence used to project stale hook state in the sidebar.
+    pub(crate) stale_resolution: Option<(AgentState, bool)>,
     /// Live direct sub-agents reported by a provider-owned runtime source.
     /// `None` means unavailable or not yet reconstructed.
     pub active_subagents: Option<u32>,
@@ -502,7 +503,8 @@ impl TerminalState {
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
-            background_job_count: None,
+            holds_shell: false,
+            stale_resolution: None,
             active_subagents: None,
             foreground_process_name: None,
             foreground_process_active: false,
@@ -622,13 +624,26 @@ impl TerminalState {
         Ok(())
     }
 
-    pub(crate) fn set_background_job_count(&mut self, count: Option<u16>) -> bool {
-        if self.background_job_count == count {
+    pub(crate) fn set_process_state(
+        &mut self,
+        holds_shell: bool,
+        stale_resolution: Option<(AgentState, bool)>,
+    ) -> bool {
+        if self.holds_shell == holds_shell && self.stale_resolution == stale_resolution {
             return false;
         }
-        self.background_job_count = count;
+        self.holds_shell = holds_shell;
+        self.stale_resolution = stale_resolution;
         self.revision = self.revision.wrapping_add(1);
         true
+    }
+
+    pub(crate) fn sidebar_projection(&self, seen: bool) -> (AgentState, bool) {
+        if self.supervisor_stale {
+            self.stale_resolution.unwrap_or((self.state, seen))
+        } else {
+            (self.state, seen)
+        }
     }
 
     pub(crate) fn set_active_subagents(&mut self, count: Option<u32>) -> bool {
@@ -1118,6 +1133,7 @@ impl TerminalState {
     fn replace_hook_authority(&mut self, authority: Option<HookAuthority>) {
         self.hook_authority = authority;
         self.supervisor_stale = false;
+        self.stale_resolution = None;
     }
 
     #[cfg(test)]

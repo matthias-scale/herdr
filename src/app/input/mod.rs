@@ -263,9 +263,14 @@ impl App {
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
         use crate::app::state::StatusButtonAction;
         match action {
-            StatusButtonAction::Home => self.state.toggle_home(),
-            StatusButtonAction::Inbox => self.state.toggle_inbox(),
-            StatusButtonAction::Scratchpad => self.state.show_scratchpad_tab(),
+            StatusButtonAction::BlockedFilter => {
+                self.state.blocked_filter = !self.state.blocked_filter;
+                self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                    &self.state,
+                    self.state.view.sidebar_rect,
+                    self.state.workspace_scroll,
+                );
+            }
             StatusButtonAction::Dock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
             }
@@ -794,20 +799,6 @@ impl App {
                     MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
                     MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
                         self.focus_workspace_tab_via_api(ws_idx, tab_idx)
-                    }
-                    MouseAction::ToggleSidebarTabPrio { ws_idx, tab_idx } => {
-                        if let Some(changed) = self.state.apply_tab_prio(
-                            ws_idx,
-                            tab_idx,
-                            crate::workspace::TabPrioAction::Toggle,
-                        ) {
-                            if changed {
-                                self.schedule_session_save();
-                                if self.no_session {
-                                    self.state.mark_session_dirty();
-                                }
-                            }
-                        }
                     }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)

@@ -8,14 +8,14 @@ use ratatui::{
 
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
+#[cfg(test)]
+use super::sidebar::AgentPanelEntry;
 use super::sidebar::{
-    mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, tab_blocker_dot_visible,
-    AgentPanelEntry, SidebarRow,
+    mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout, render_compact_agent_row,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
+    sidebar_workspace_labels, SidebarRow,
 };
-use super::status::{
-    state_icon, state_icon_symbol, state_icon_with_stale, state_label_color_with_stale,
-};
+use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -45,10 +45,6 @@ pub(crate) enum MobileSwitcherTarget {
     NewTab,
     Tab(usize),
     SidebarTab {
-        ws_idx: usize,
-        tab_idx: usize,
-    },
-    SidebarTabPrio {
         ws_idx: usize,
         tab_idx: usize,
     },
@@ -143,27 +139,11 @@ fn mobile_switcher_target_for_row(
             tab_idx: entry.tab_idx,
             pane_id: entry.pane_id,
         },
-        SidebarRow::Tab { entry, depth } => {
-            let indent_width = 2usize.saturating_add(usize::from(*depth) * 3);
-            let prio_col = content.x.saturating_add(indent_width as u16);
-            // The cell is two columns wide (marker plus spacer); both must toggle, or the
-            // spacer silently focuses the tab and closes the switcher instead.
-            let prio_end = prio_col
-                .saturating_add(crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16)
-                .min(content.x.saturating_add(content.width));
-            if on_title_line && (prio_col..prio_end).contains(&col) {
-                MobileSwitcherTarget::SidebarTabPrio {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                }
-            } else {
-                MobileSwitcherTarget::SidebarTab {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                }
-            }
-        }
-        SidebarRow::SectionHeader { .. } | SidebarRow::PrioPanel { .. } => return None,
+        SidebarRow::Tab { entry, .. } => MobileSwitcherTarget::SidebarTab {
+            ws_idx: entry.ws_idx,
+            tab_idx: entry.tab_idx,
+        },
+        SidebarRow::SectionHeader { .. } => return None,
     })
 }
 
@@ -182,9 +162,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
     match row {
         SidebarRow::Workspace { .. }
         | SidebarRow::Tab { .. }
-        | SidebarRow::SectionHeader { .. }
-        | SidebarRow::PrioPanel { .. } => 1,
-        SidebarRow::Agent { .. } => 2,
+        | SidebarRow::SectionHeader { .. } => 1,
+        SidebarRow::Agent { .. } => 1,
     }
 }
 
@@ -436,14 +415,7 @@ fn render_header_status(
     };
 
     let (state, seen) = ws.aggregate_state(&app.terminals);
-    let stale = ws.tabs.iter().any(|tab| {
-        tab.panes.values().any(|pane| {
-            app.terminals
-                .get(&pane.attached_terminal_id)
-                .is_some_and(|terminal| terminal.supervisor_stale)
-        })
-    });
-    let (dot, dot_style) = state_icon_with_stale(state, seen, stale, app.status_indicators, p);
+    let (dot, dot_style) = state_icon(state, seen, app.status_indicators, p);
     let tab_label = mobile_tab_status(ws, &app.terminals, area.width.saturating_sub(6) as usize);
     let row1 = Rect::new(area.x, area.y, area.width, 1);
     let tab_w = display_width_u16(&tab_label)
@@ -687,24 +659,39 @@ fn render_mobile_switcher_content(
                     Style::default().fg(p.accent).bg(bg),
                 ));
                 title_spans.push(Span::styled(" ", Style::default().bg(bg)));
-                let name = if crate::ui::workspace_parent_group_state(app, *ws_idx).is_some() {
-                    ws.worktree_space()
-                        .map(|space| space.label.clone())
-                        .unwrap_or_else(|| ws.display_name_from(&app.terminals, terminal_runtimes))
-                } else {
-                    ws.display_name_from(&app.terminals, terminal_runtimes)
-                };
+                let (name, is_derived) = sidebar_workspace_labels(app, terminal_runtimes)
+                    .get(ws_idx)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        (
+                            ws.display_name_from(&app.terminals, terminal_runtimes),
+                            true,
+                        )
+                    });
                 let window_count = member_indices
                     .iter()
                     .filter_map(|member| app.workspaces.get(*member))
                     .map(|workspace| workspace.tabs.len())
                     .sum::<usize>();
-                let count_label = format!(" ({window_count})");
+                let agent_count = sidebar_thread_entries_from(app, terminal_runtimes)
+                    .into_iter()
+                    .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
+                    .count();
+                let count_label = format!(" ({agent_count}/{window_count})");
                 let fixed_width = 4u16.saturating_add(display_width_u16(&count_label));
                 let name_width = content.width.saturating_sub(fixed_width);
                 title_spans.push(Span::styled(
                     truncate_end(&name, name_width as usize),
-                    mobile_item_title_style(selected, active, p).bg(bg),
+                    if selected || active {
+                        mobile_item_title_style(selected, active, p).bg(bg)
+                    } else if is_derived {
+                        Style::default()
+                            .fg(p.overlay0)
+                            .add_modifier(Modifier::DIM)
+                            .bg(bg)
+                    } else {
+                        mobile_item_title_style(false, false, p).bg(bg)
+                    },
                 ));
                 title_spans.push(Span::styled(
                     count_label,
@@ -724,41 +711,26 @@ fn render_mobile_switcher_content(
                 );
             }
             SidebarRow::Agent { entry, depth } => {
-                let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
-                    entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
-                });
-                let bg = mobile_item_bg(false, active, p);
-                let (icon, icon_style) = state_icon_with_stale(
-                    entry.state,
-                    entry.seen,
-                    entry.stale,
-                    app.status_indicators,
+                let bg = mobile_item_bg(
+                    false,
+                    focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
+                        entry.ws_idx == ws_idx
+                            && entry.tab_idx == tab_idx
+                            && entry.pane_id == pane_id
+                    }),
                     p,
                 );
-                let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let title = Line::from(vec![
-                    Span::styled(indent, Style::default().bg(bg)),
-                    Span::styled(icon, icon_style.bg(bg)),
-                    Span::styled(" ", Style::default().bg(bg)),
-                    Span::styled(
-                        truncate_end(
-                            entry.pane_label.as_deref().unwrap_or("Pane"),
-                            content.width.saturating_sub(5) as usize,
-                        ),
-                        mobile_item_title_style(false, active, p).bg(bg),
-                    ),
-                ]);
-                render_two_line_item(
-                    frame,
-                    viewport,
-                    content,
-                    doc_y,
-                    app.mobile_switcher_scroll,
-                    bg,
-                    title,
-                    truncate_end(&mobile_agent_detail(entry), content.width as usize),
-                    p.overlay0,
-                );
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    render_compact_agent_row(
+                        app,
+                        frame,
+                        entry,
+                        Rect::new(content.x, y, content.width, 1),
+                        *depth,
+                        false,
+                        Some(bg),
+                    );
+                }
             }
             SidebarRow::SectionHeader { title, .. } => {
                 render_one_line_item(
@@ -774,7 +746,6 @@ fn render_mobile_switcher_content(
                     )),
                 );
             }
-            SidebarRow::PrioPanel { .. } => {}
             SidebarRow::Tab { entry, depth } => {
                 let active = app.active == Some(entry.ws_idx)
                     && app
@@ -782,138 +753,17 @@ fn render_mobile_switcher_content(
                         .get(entry.ws_idx)
                         .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
                 let bg = mobile_item_bg(false, active, p);
-                let indent = " ".repeat(2 + usize::from(*depth) * 3);
-                let layout = mobile_tab_row_layout(
-                    entry,
-                    app.view_observed_at,
-                    usize::from(content.width),
-                    display_width(&indent),
-                    p,
-                    app.status_indicators,
-                );
-                let mut spans = vec![Span::styled(indent, Style::default().bg(bg))];
-                let prio_marker = if entry.prio { "●" } else { "·" };
-                let prio_style = if entry.prio {
-                    Style::default().fg(p.peach)
-                } else {
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
-                };
-                spans.extend([
-                    Span::styled(prio_marker, prio_style.bg(bg)),
-                    Span::styled(" ", Style::default().bg(bg)),
-                ]);
-                if tab_blocker_dot_visible(entry) {
-                    spans.extend([
-                        Span::styled("●", Style::default().fg(p.red).bg(bg)),
-                        Span::styled(" ", Style::default().bg(bg)),
-                    ]);
-                }
-                if let Some(state) = layout.state.as_deref() {
-                    let (icon, icon_style) = state_icon_with_stale(
-                        entry.state,
-                        entry.seen,
-                        entry.stale,
-                        app.status_indicators,
-                        p,
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    render_compact_agent_row(
+                        app,
+                        frame,
+                        entry,
+                        Rect::new(content.x, y, content.width, 1),
+                        *depth,
+                        true,
+                        Some(bg),
                     );
-                    spans.push(Span::styled(icon, icon_style.bg(bg)));
-                    if layout.show_state_label {
-                        spans.extend([
-                            Span::styled(
-                                format!(" {state}"),
-                                Style::default()
-                                    .fg(state_label_color_with_stale(
-                                        entry.state,
-                                        entry.seen,
-                                        entry.stale,
-                                        p,
-                                    ))
-                                    .bg(bg),
-                            ),
-                            Span::styled(" · ", Style::default().fg(p.overlay0).bg(bg)),
-                        ]);
-                    } else {
-                        spans.push(Span::styled(" ", Style::default().bg(bg)));
-                    }
                 }
-                spans.push(Span::styled(
-                    layout.title,
-                    mobile_item_title_style(false, active, p).bg(bg),
-                ));
-                if let Some(agent_suffix) = layout.agent_suffix {
-                    spans.push(Span::styled(
-                        agent_suffix,
-                        Style::default().fg(p.overlay1).bg(bg),
-                    ));
-                }
-                if let Some(foreground_process) = layout.foreground_process {
-                    spans.push(Span::styled(
-                        foreground_process,
-                        Style::default().fg(p.overlay0).bg(bg),
-                    ));
-                }
-                if let Some(background_jobs) = layout.background_jobs {
-                    spans.push(Span::styled(
-                        background_jobs,
-                        Style::default().fg(p.overlay0).bg(bg),
-                    ));
-                }
-                let active_subagents = layout.active_subagents;
-                let active_subagents_width = active_subagents
-                    .as_deref()
-                    .map(|label| 1 + display_width(label))
-                    .unwrap_or_default();
-                if let Some(activity_age) = layout.activity_age {
-                    let used_width = spans
-                        .iter()
-                        .map(|span| display_width(span.content.as_ref()))
-                        .sum::<usize>();
-                    let padding = usize::from(content.width)
-                        .saturating_sub(used_width)
-                        .saturating_sub(display_width(&activity_age))
-                        .saturating_sub(active_subagents_width);
-                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
-                    let activity_color = if entry.state == AgentState::Working && !entry.stale {
-                        p.blue
-                    } else {
-                        p.green
-                    };
-                    spans.push(Span::styled(
-                        activity_age,
-                        Style::default().fg(activity_color).bg(bg),
-                    ));
-                } else if active_subagents.is_some() {
-                    let used_width = spans
-                        .iter()
-                        .map(|span| display_width(span.content.as_ref()))
-                        .sum::<usize>();
-                    let padding = usize::from(content.width)
-                        .saturating_sub(used_width)
-                        .saturating_sub(active_subagents_width);
-                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
-                }
-                if let Some(active_subagents) = active_subagents {
-                    spans.extend([
-                        Span::styled(" ", Style::default().bg(bg)),
-                        Span::styled(
-                            active_subagents,
-                            Style::default()
-                                .fg(p.overlay0)
-                                .bg(bg)
-                                .add_modifier(Modifier::DIM),
-                        ),
-                    ]);
-                }
-                let title = Line::from(spans);
-                render_one_line_item(
-                    frame,
-                    viewport,
-                    content,
-                    doc_y,
-                    app.mobile_switcher_scroll,
-                    bg,
-                    title,
-                );
             }
         }
         doc_y += mobile_sidebar_row_height(row);
@@ -1000,6 +850,7 @@ fn render_mobile_switcher_content(
     }
 }
 
+#[cfg(test)]
 fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
     let status = if super::sidebar::gate_overrides_label(entry) {
@@ -1007,14 +858,12 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     } else {
         entry
             .state_labels
-            .get(super::sidebar::agent_panel_status_key_with_stale(
+            .get(super::sidebar::agent_panel_status_key(
                 entry.state,
                 entry.seen,
-                entry.stale,
             ))
             .cloned()
             .unwrap_or_else(|| match entry.state {
-                _ if entry.stale => "stale".to_string(),
                 AgentState::Idle => "done".to_string(),
                 _ => super::status::state_label(entry.state, entry.seen).to_string(),
             })
@@ -1082,40 +931,6 @@ fn render_one_line_item(
     if let Some(y) = visible_y(viewport, scroll, doc_y) {
         frame.render_widget(
             Paragraph::new(title),
-            Rect::new(content.x, y, content.width, 1),
-        );
-    }
-}
-
-fn render_two_line_item(
-    frame: &mut Frame,
-    viewport: Rect,
-    content: Rect,
-    doc_y: usize,
-    scroll: usize,
-    bg: ratatui::style::Color,
-    title: Line<'_>,
-    detail: String,
-    detail_fg: ratatui::style::Color,
-) {
-    fill_visible_doc_rect(
-        frame,
-        viewport,
-        content,
-        doc_y,
-        2,
-        Style::default().bg(bg),
-        scroll,
-    );
-    if let Some(y) = visible_y(viewport, scroll, doc_y) {
-        frame.render_widget(
-            Paragraph::new(title),
-            Rect::new(content.x, y, content.width, 1),
-        );
-    }
-    if let Some(y) = visible_y(viewport, scroll, doc_y + 1) {
-        frame.render_widget(
-            Paragraph::new(detail).style(Style::default().fg(detail_fg).bg(bg)),
             Rect::new(content.x, y, content.width, 1),
         );
     }
@@ -1250,32 +1065,26 @@ struct GlobalAgentCounts {
     done: usize,
     working: usize,
     idle: usize,
-    stale: usize,
 }
 
 impl GlobalAgentCounts {
     fn total(&self) -> usize {
-        self.blocked + self.done + self.working + self.idle + self.stale
+        self.blocked + self.done + self.working + self.idle
     }
 
     fn any_pending(&self) -> bool {
-        self.blocked > 0 || self.done > 0 || self.working > 0 || self.stale > 0
+        self.blocked > 0 || self.done > 0 || self.working > 0
     }
 }
 
 fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
     let mut counts = GlobalAgentCounts::default();
     for entry in crate::ui::all_agent_panel_entries(app) {
-        match super::sidebar::agent_panel_status_key_with_stale(
-            entry.state,
-            entry.seen,
-            entry.stale,
-        ) {
+        match super::sidebar::agent_panel_status_key(entry.state, entry.seen) {
             "blocked" => counts.blocked += 1,
             "done" => counts.done += 1,
             "working" => counts.working += 1,
             "idle" => counts.idle += 1,
-            "stale" => counts.stale += 1,
             _ => {}
         }
     }
@@ -1288,7 +1097,6 @@ enum SummaryTone {
     Done,
     Working,
     Idle,
-    Stale,
     Muted,
 }
 
@@ -1305,9 +1113,6 @@ fn agent_summary_segments(
         return vec![("all idle".to_string(), SummaryTone::Muted)];
     }
     let mut segments = Vec::new();
-    if counts.stale > 0 {
-        segments.push((format!("! {} stale", counts.stale), SummaryTone::Stale));
-    }
     if counts.blocked > 0 {
         segments.push((
             agent_summary_text(
@@ -1437,13 +1242,12 @@ fn summary_tone_color(tone: SummaryTone, p: &Palette) -> Color {
     match tone {
         SummaryTone::Blocked => p.red,
         SummaryTone::Done | SummaryTone::Working => p.blue,
-        SummaryTone::Stale => p.peach,
         SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
     }
 }
 
 fn summary_tone_style(tone: SummaryTone, p: &Palette, leading: bool) -> Style {
-    let color = if leading || matches!(tone, SummaryTone::Stale | SummaryTone::Working) {
+    let color = if leading || matches!(tone, SummaryTone::Working) {
         summary_tone_color(tone, p)
     } else {
         p.overlay1
@@ -1509,6 +1313,7 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
             primary_tab_label: primary_tab_label.map(str::to_string),
+            tab_has_custom_name: false,
             tab_label_leads_with_agent: false,
             pane_label: None,
             pane_label_is_agent_identity: false,
@@ -1524,7 +1329,8 @@ mod tests {
             state: AgentState::Idle,
             open_blockers: false,
             active_subagents: None,
-            background_job_count: None,
+            holds_shell: false,
+            gate_count: 0,
             seen: true,
             stale: false,
             reported_at: None,
@@ -1571,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn global_agent_counts_exclude_supervisor_stale_working_agents() {
+    fn global_agent_counts_do_not_create_a_stale_category() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("stale")];
         app.ensure_test_terminals();
@@ -1585,8 +1391,7 @@ mod tests {
         terminal.supervisor_stale = true;
 
         let counts = global_agent_counts(&app);
-        assert_eq!(counts.working, 0);
-        assert_eq!(counts.stale, 1);
+        assert_eq!(counts.working, 1);
         assert_eq!(counts.total(), 1);
     }
 
@@ -1597,7 +1402,6 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
-            ..Default::default()
         };
         let segments = agent_summary_segments(counts, StatusIndicatorStyle::Dots);
         let labels: Vec<&str> = segments.iter().map(|(text, _)| text.as_str()).collect();
@@ -1615,7 +1419,6 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
-            stale: 1,
         };
         let labels: Vec<String> = agent_summary_segments(counts, StatusIndicatorStyle::Symbols)
             .into_iter()
@@ -1623,13 +1426,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            [
-                "! 1 stale",
-                "× 2 blocked",
-                "✓ 1 done",
-                "◐ 2 working",
-                "○ 1 idle"
-            ]
+            ["× 2 blocked", "✓ 1 done", "◐ 2 working", "○ 1 idle"]
         );
     }
 
@@ -1662,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_mobile_agent_detail_uses_the_stale_bucket() {
+    fn stale_mobile_agent_detail_uses_the_resolved_lifecycle_bucket() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("stale")];
         app.ensure_test_terminals();
@@ -1676,7 +1473,7 @@ mod tests {
         terminal.supervisor_stale = true;
 
         let entry = agent_panel_entries(&app).remove(0);
-        assert_eq!(mobile_agent_detail(&entry), "  stale · claude");
+        assert_eq!(mobile_agent_detail(&entry), "  working · claude");
     }
 
     #[test]
@@ -1733,7 +1530,6 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
-            ..Default::default()
         };
         let (shown, truncated) = fit_summary_segments(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
@@ -1751,7 +1547,6 @@ mod tests {
             done: 1,
             working: 2,
             idle: 1,
-            ..Default::default()
         };
         let (shown, truncated) = fit_summary_segments(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
@@ -1770,15 +1565,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_summary_renders_stale_as_a_distinct_segment() {
+    fn agent_summary_ignores_stale_as_a_distinct_category() {
         let counts = GlobalAgentCounts {
-            stale: 1,
             ..Default::default()
         };
 
         assert_eq!(
             agent_summary_segments(counts, StatusIndicatorStyle::Dots),
-            vec![("! 1 stale".to_string(), SummaryTone::Stale)]
+            vec![("no agents".to_string(), SummaryTone::Muted)]
         );
     }
 
@@ -1799,28 +1593,27 @@ mod tests {
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
 
         assert_eq!(agent_panel_entries(&app).len(), 2);
-        // Spaces title + new-workspace action, then the always-present
-        // Blocked and Spaces section headers, precede the workspace, followed
-        // immediately by its two disclosed single-line tab rows.
+        // The Spaces title and new-workspace action precede the workspace,
+        // followed immediately by its two disclosed single-line tab rows.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 0)
                 .expect("workspace row")
                 .start,
-            4
+            3
         );
 
         let viewport = mobile_switcher_areas(&app).viewport;
-        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
+        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 3);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
         assert_eq!(
-            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5),
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 0
             })
         );
         assert_eq!(
-            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 6),
+            mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 1
@@ -1829,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_tab_gutter_matches_desktop_cell_order_and_hits_prio_only() {
+    fn mobile_tab_row_focuses_the_whole_compact_row() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-gutters")];
         app.ensure_test_terminals();
@@ -1861,49 +1654,24 @@ mod tests {
                 .expect("workspace row")
                 .start as u16
             + 1;
-        let prio_col = content.x + 5;
-        let after_prio_col = prio_col + crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16;
-        assert_eq!(
-            terminal.backend().buffer()[(prio_col, tab_row)].symbol(),
-            "·"
-        );
-        assert_eq!(
-            terminal.backend().buffer()[(prio_col + 1, tab_row)].symbol(),
-            " "
-        );
-        // Mobile mirrors the desktop cell order: prio is the only gutter cell, so the row content
-        // resumes immediately after it.
+        let row_col = content.x + 4;
         assert_ne!(
-            terminal.backend().buffer()[(after_prio_col, tab_row)].symbol(),
+            terminal.backend().buffer()[(row_col, tab_row)].symbol(),
             " "
         );
         assert_eq!(
-            mobile_switcher_target_at(&app, prio_col, tab_row),
-            Some(MobileSwitcherTarget::SidebarTabPrio {
-                ws_idx: 0,
-                tab_idx: 0
-            })
-        );
-        // The spacer belongs to the cell: clicking it must toggle prio, not focus the tab and
-        // dismiss the switcher.
-        assert_eq!(
-            mobile_switcher_target_at(&app, prio_col + 1, tab_row),
-            Some(MobileSwitcherTarget::SidebarTabPrio {
-                ws_idx: 0,
-                tab_idx: 0
-            })
-        );
-        assert_eq!(
-            mobile_switcher_target_at(
-                &app,
-                prio_col + crate::ui::sidebar::TAB_PRIO_FIELD_WIDTH as u16,
-                tab_row
-            ),
+            mobile_switcher_target_at(&app, row_col, tab_row),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
                 tab_idx: 0
-            }),
-            "the column after the cell must still focus the tab"
+            })
+        );
+        assert_eq!(
+            mobile_switcher_target_at(&app, row_col + 1, tab_row),
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 0,
+                tab_idx: 0
+            })
         );
     }
 
@@ -1943,17 +1711,22 @@ mod tests {
 
             let viewport = mobile_switcher_areas(&app).viewport;
             let content = inset_for_left_scrollbar(viewport);
-            let gear = (viewport.y..viewport.y + viewport.height)
-                .flat_map(|y| (content.x..content.x + content.width).map(move |x| (x, y)))
-                .find(|(x, y)| terminal.backend().buffer()[(*x, *y)].symbol() == "⚙")
-                .unwrap_or_else(|| panic!("width {width} omitted sub-agent count"));
-            assert_eq!(gear.0, content.x + content.width - 2, "width {width}");
-            assert_eq!(
-                terminal.backend().buffer()[(gear.0 + 1, gear.1)].symbol(),
-                "3"
-            );
-            let style = terminal.backend().buffer()[gear].style();
-            assert_eq!(style.fg, Some(app.palette.overlay0));
+            let (provider_y, _row) = (viewport.y..viewport.y + viewport.height)
+                .map(|y| {
+                    (
+                        y,
+                        (content.x..content.x + content.width)
+                            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                            .collect::<String>(),
+                    )
+                })
+                .find(|(_, row)| row.contains("pi+3"))
+                .unwrap_or_else(|| panic!("width {width} omitted provider count"));
+            let provider_x = (content.x..content.x + content.width)
+                .find(|x| terminal.backend().buffer()[(*x, provider_y)].symbol() == "p")
+                .expect("provider start");
+            let style = terminal.backend().buffer()[(provider_x, provider_y)].style();
+            assert_eq!(style.fg, Some(app.palette.mauve));
             assert!(style.add_modifier.contains(Modifier::DIM));
         }
     }
@@ -2065,23 +1838,22 @@ mod tests {
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
 
         // Linked worktrees no longer create an intermediate Space row. Their
-        // windows remain direct children of the root Space, below the
-        // always-present Blocked and Spaces section headers.
+        // windows remain direct children of the root Space.
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 2)
                 .expect("linked worktree window row")
                 .start,
-            6
+            5
         );
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 1)
                 .expect("workspace row")
                 .start,
-            7
+            6
         );
 
         let viewport = mobile_switcher_areas(&app).viewport;
-        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 6);
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5);
         assert_eq!(
             hit,
             Some(MobileSwitcherTarget::SidebarTab {
@@ -2096,9 +1868,9 @@ mod tests {
             mobile_switcher_workspace_doc_range(&app, 2)
                 .expect("linked worktree window row")
                 .start,
-            6
+            5
         );
-        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 6);
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5);
         assert!(matches!(
             hit,
             Some(MobileSwitcherTarget::SidebarTab {
@@ -2115,14 +1887,13 @@ mod tests {
         app.active = Some(0);
         app.selected = 0;
 
-        // No attached terminals -> no agents -> no Agents header, but the
-        // Blocked and Spaces headers are always present ahead of the tree.
+        // No attached terminals means the Spaces header is the only section.
         assert_eq!(agent_panel_entries(&app).len(), 0);
         assert_eq!(
             mobile_switcher_workspace_doc_range(&app, 0)
                 .expect("workspace row")
                 .start,
-            4
+            3
         );
     }
 
@@ -2282,14 +2053,6 @@ mod tests {
                 observed_at,
             );
         }
-        let first_pane = app.workspaces[0].tabs[0].root_pane;
-        let first_terminal = app.workspaces[0].tabs[0].panes[&first_pane]
-            .attached_terminal_id
-            .clone();
-        app.terminals
-            .get_mut(&first_terminal)
-            .unwrap()
-            .background_job_count = Some(2);
         app.active = Some(0);
         app.selected = 0;
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
@@ -2318,24 +2081,16 @@ mod tests {
             .collect::<Vec<_>>();
         let first = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("First ta… · cx  2 >_"))
+            .position(|row| row.contains("First task") && row.contains('●'))
             .unwrap_or_else(|| panic!("missing status-first First task row: {rows:?}"));
         let second = rows
             .iter()
-            .position(|row| row.contains("working") && row.contains("Second… · cx <1m ago"))
+            .position(|row| row.contains("Second task") && row.contains('●'))
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
-        assert!(rows[first].find("working").unwrap() < rows[first].find("First ta…").unwrap());
-        assert!(
-            rows[first].contains("First ta… · cx  2 >_"),
-            "mobile tab row must place the provider suffix and badge after its title: {:?}",
-            rows[first]
-        );
-        assert!(
-            rows[second].contains("Second… · cx <1m ago"),
-            "mobile tab row must show the provider suffix: {:?}",
-            rows[second]
-        );
-        assert!(rows[second].find("working").unwrap() < rows[second].find("Second…").unwrap());
+        for row in [&rows[first], &rows[second]] {
+            assert!(row.find('●').unwrap() < row.find("cx").unwrap(), "{row:?}");
+            assert!(!row.contains("working") && !row.contains("ago"), "{row:?}");
+        }
         assert_eq!(
             second,
             first + 1,
@@ -2343,7 +2098,7 @@ mod tests {
         );
         assert!(!rows[first].contains("codex"));
         assert!(
-            rows.iter().any(|row| row.contains("▾ mobile-tabs (2)")),
+            rows.iter().any(|row| row.contains("▾ mobile-tabs (2/2)")),
             "mobile Space row must use disclosure, title, and window count: {rows:?}"
         );
         assert!(
@@ -2373,7 +2128,6 @@ mod tests {
             false,
             started,
         );
-        terminal_state.background_job_count = Some(2);
         app.view_observed_at = started + std::time::Duration::from_secs(65);
         app.active = Some(0);
         app.selected = 0;
@@ -2401,24 +2155,17 @@ mod tests {
                 .collect::<Vec<_>>();
             let rendered = rows
                 .iter()
-                .find(|row| row.contains(" · cx"))
+                .find(|row| row.contains("cx"))
                 .unwrap_or_else(|| panic!("missing provider row at {width}: {rows:?}"));
 
             assert!(rendered.contains('●'), "{width}: {rendered:?}");
             let dot = rendered.find('●').unwrap();
-            let suffix = rendered.find(" · cx").unwrap();
+            let suffix = rendered.find("cx").unwrap();
             assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
-            if width == 18 {
-                assert!(!rendered.contains("working"), "{rendered:?}");
-                assert!(!rendered.contains(">_"), "{rendered:?}");
-                assert!(!rendered.contains("ago"), "{rendered:?}");
-            } else {
-                assert!(rendered.contains("working"), "{rendered:?}");
-                assert!(rendered.contains("· cx  2 >_"), "{rendered:?}");
-                // The always-reserved prio cell costs two columns, so at 38 the activity age is
-                // the field that yields; the status label, title, provider and job count stay.
-                assert!(!rendered.contains("ago"), "{rendered:?}");
-            }
+            assert!(
+                !rendered.contains("working") && !rendered.contains("ago"),
+                "{rendered:?}"
+            );
         }
     }
 
@@ -2541,10 +2288,8 @@ mod tests {
 
         assert!(!row.contains("idle"), "{row:?}");
         assert!(!row.contains("done"), "{row:?}");
-        // The gutter's own prio marker is the only thing allowed before the title.
         assert!(
-            row.trim_start_matches(['▌', ' '])
-                .starts_with("· Review release"),
+            row.contains("○") && row.contains("Review release"),
             "{row:?}"
         );
     }

@@ -620,16 +620,10 @@
           "description": "Toggle sidebar collapse."
         },
         {
-          "key": "keys.home",
+          "key": "keys.toggle_blocked_filter",
           "type": "keybinding",
-          "default": "[\"prefix+shift+o\", \"ctrl+alt+o\"]",
-          "description": "Open the home view."
-        },
-        {
-          "key": "keys.toggle_status_detail",
-          "type": "keybinding",
-          "default": "\"prefix+shift+m\"",
-          "description": "Expand or collapse usage detail in the status bar."
+          "default": "\"prefix+f\"",
+          "description": "Toggle the sidebar blocked filter."
         },
         {
           "key": "keys.toggle_dock",

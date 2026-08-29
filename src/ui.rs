@@ -35,9 +35,6 @@ mod sidebar;
 /// `terminal::counts_as_blocked`.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
-/// Gutter cell widths are asserted by mouse-dispatch tests that live outside this module.
-#[cfg(test)]
-pub(crate) use sidebar::TAB_PRIO_FIELD_WIDTH;
 mod status;
 mod symphony;
 mod tab_surface;
@@ -82,7 +79,7 @@ use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
-pub(crate) use self::sidebar::BLOCKED_SECTION_TITLE;
+pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
@@ -115,13 +112,12 @@ pub(crate) use self::{
     sidebar::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
-        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_prio_panel_row_areas,
-        compute_sidebar_row_areas, compute_workspace_card_areas, expanded_sidebar_toggle_rect,
-        normalized_workspace_scroll, prio_panel_chevron_rect, prio_panel_rect,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, sidebar_header_new_space_rect,
         sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col, sidebar_thread_entries,
-        tab_prio_rect, workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
+        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
         AgentPanelEntry, SidebarRow, WorkspaceListEntry,
@@ -413,11 +409,6 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
-    let prio_panel_row_areas = if app.sidebar_collapsed {
-        Vec::new()
-    } else {
-        sidebar::compute_prio_panel_row_areas(app, sidebar_area)
-    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let (
@@ -434,7 +425,6 @@ fn compute_view_internal(
         sidebar_rect: sidebar_area,
         workspace_card_areas,
         agent_card_areas,
-        prio_panel_row_areas,
         visible_agent_activity_instants,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -604,7 +594,6 @@ fn compute_mobile_view(
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
-        prio_panel_row_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -1784,9 +1773,11 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         let (ws_area, _, _) = collapsed_sidebar_sections(app.view.sidebar_rect);
-        // Skip past the always-present Blocked and Spaces header rows to land
-        // on workspace "two" (the active one).
-        let active_row = ws_area.y + 3;
+        let active_row_index = sidebar::sidebar_rows(&app)
+            .iter()
+            .position(|row| matches!(row, sidebar::SidebarRow::Workspace { ws_idx: 1, .. }))
+            .expect("active workspace row");
+        let active_row = ws_area.y + active_row_index as u16;
         let active_style = buffer[(ws_area.x, active_row)].style();
 
         assert_eq!(active_style.fg, Some(app.palette.text));
@@ -1821,13 +1812,9 @@ mod tests {
 
         let card = app.view.workspace_card_areas[0].rect;
         let line1 = buffer_row_text(buffer, card, card.y);
-        let line2 = buffer_row_text(buffer, card, card.y + 1);
-
-        assert!(line1.starts_with(" ▾ one (1)"), "{line1:?}");
+        assert!(line1.starts_with(" ▾ one (0/1)"), "{line1:?}");
         assert!(!line1.contains("1 one"));
         assert_eq!(card.height, 1);
-        assert!(line2.contains("1"));
-        assert!(!line2.contains("main"));
         assert!(!line1.contains("main"));
 
         std::fs::remove_dir_all(repo).ok();

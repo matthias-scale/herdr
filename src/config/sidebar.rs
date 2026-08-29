@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::detect::Agent;
 
 const MAX_SIDEBAR_ROWS: usize = 16;
@@ -44,6 +45,7 @@ pub struct SidebarTokenColor {
 }
 
 impl SidebarTokenColor {
+    #[cfg(test)]
     pub(crate) fn ratatui(self) -> ratatui::style::Color {
         ratatui::style::Color::Rgb(self.r, self.g, self.b)
     }
@@ -381,6 +383,7 @@ pub struct AgentsSidebarConfig {
 }
 
 impl AgentsSidebarConfig {
+    #[cfg(test)]
     pub(crate) fn rows_for_agent(&self, agent: Option<Agent>) -> &AgentSidebarRows {
         agent
             .and_then(|agent| self.rows_by_agent.get(crate::detect::agent_label(agent)))
