@@ -90,8 +90,8 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
-        if self.state.home.is_some() {
-            return self.handle_home_key(key).await;
+        if self.state.home.is_some() && self.handle_home_key_event(key_event) {
+            return None;
         }
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
@@ -138,24 +138,18 @@ impl App {
     }
 
     /// Home owns the full key stream so navigation never leaks into a pane.
-    pub(crate) async fn handle_home_key(
-        &mut self,
-        key: crate::input::TerminalKey,
-    ) -> Option<super::TerminalInputTarget> {
-        self.handle_home_key_event(key.as_key_event());
-        None
-    }
-
-    /// Headless mirror. Home consumes every key, including keys without an action.
+    /// Headless mirror.
     pub(crate) fn handle_home_key_headless(&mut self, key: KeyEvent) -> bool {
-        if self.state.home.is_none() {
-            return false;
-        }
-        self.handle_home_key_event(key);
-        true
+        self.state.home.is_some() && self.handle_home_key_event(key)
     }
 
-    fn handle_home_key_event(&mut self, event: KeyEvent) {
+    /// Handle a key while home is open. Returns whether home consumed it.
+    ///
+    /// Home owns its own keys and nothing else. A key it has no use for closes
+    /// home and travels on to the pane, so a session that launches into home is
+    /// never input-blocked: you type, and what you typed lands where you meant
+    /// it. Only `esc` closes home without spending the keystroke.
+    fn handle_home_key_event(&mut self, event: KeyEvent) -> bool {
         let queue = self.state.blocked_agents();
         if event.modifiers.is_empty() {
             match event.code {
@@ -163,22 +157,28 @@ impl App {
                     if let Some(home) = self.state.home.as_mut() {
                         home.select_prev(&queue);
                     }
+                    return true;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if let Some(home) = self.state.home.as_mut() {
                         home.select_next(&queue);
                     }
+                    return true;
                 }
                 KeyCode::Enter => {
                     self.state.jump_to_selected_home_agent(&queue);
+                    return true;
                 }
                 KeyCode::Esc => {
                     self.state.clear_home();
                     self.state.mode = Mode::Terminal;
+                    return true;
                 }
                 _ => {}
             }
         }
+        self.state.clear_home();
+        false
     }
 
     pub(crate) fn handle_loop_run_history_key(&mut self, key: KeyEvent) -> bool {
@@ -1538,7 +1538,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn unrecognized_home_keys_are_swallowed_instead_of_forwarded_to_the_pane() {
+    async fn a_key_home_has_no_use_for_closes_home_and_reaches_the_pane() {
         let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
         app.state.toggle_home();
 
@@ -1546,14 +1546,42 @@ mod tests {
             .handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
             .await;
 
-        assert!(target.is_none());
-        assert!(rx.try_recv().is_err());
-        assert!(app.state.home.is_some());
+        // A launch-open overlay that ate keystrokes would leave a fresh session
+        // unable to type until the operator guessed at `esc`.
+        assert!(
+            app.state.home.is_none(),
+            "the key closed home on its way past"
+        );
+        assert!(target.is_some(), "and went on to the pane");
+        let _ = &mut rx;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn headless_home_keys_are_swallowed_before_the_terminal_input_path() {
-        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+    async fn home_keeps_the_keys_it_uses_and_lets_the_rest_through() {
+        let (mut app, _terminal_id, _rx) = terminal_app_with_blocked_hook();
+        app.state.toggle_home();
+
+        for code in [
+            KeyCode::Down,
+            KeyCode::Char('j'),
+            KeyCode::Up,
+            KeyCode::Char('k'),
+        ] {
+            assert!(
+                app.handle_home_key_event(KeyEvent::new(code, KeyModifiers::empty())),
+                "{code:?} browses rather than reaching the pane"
+            );
+            assert!(app.state.home.is_some());
+        }
+
+        // Esc spends itself closing home rather than travelling on.
+        assert!(app.handle_home_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.home.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_home_keys_follow_the_same_pass_through_rule() {
+        let (mut app, _terminal_id, _rx) = terminal_app_with_blocked_hook();
         app.state.toggle_home();
 
         app.route_client_events(
@@ -1564,8 +1592,7 @@ mod tests {
             false,
         );
 
-        assert!(rx.try_recv().is_err());
-        assert!(app.state.home.is_some());
+        assert!(app.state.home.is_none());
     }
 
     #[tokio::test]
