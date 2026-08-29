@@ -40,31 +40,14 @@ id = "codex"
 }
 
 fn with_manifest_dirs<T>(name: &str, f: impl FnOnce() -> T) -> T {
-    let _guard = crate::config::test_config_env_lock().lock().unwrap();
-    let old_config = std::env::var_os("XDG_CONFIG_HOME");
-    let old_state = std::env::var_os("XDG_STATE_HOME");
-    let base = std::env::temp_dir().join(format!(
-        "herdr-manifest-loader-{name}-{}",
-        std::process::id()
-    ));
-    let config_dir = base.join("config");
-    let state_dir = base.join("state");
-    let _ = std::fs::remove_dir_all(&base);
-    std::env::set_var("XDG_CONFIG_HOME", &config_dir);
-    std::env::set_var("XDG_STATE_HOME", &state_dir);
-    reload_manifests();
-    let result = f();
-    match old_config {
-        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-        None => std::env::remove_var("XDG_CONFIG_HOME"),
-    }
-    match old_state {
-        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-        None => std::env::remove_var("XDG_STATE_HOME"),
-    }
-    reload_manifests();
-    let _ = std::fs::remove_dir_all(&base);
-    result
+    with_bundled_manifests(name, f)
+}
+
+/// `explain` against the bundled manifests only. See `with_bundled_manifests`:
+/// without it these assertions read whatever manifest the developer's machine
+/// last downloaded.
+fn bundled_explain(agent: Agent, screen: &str) -> DetectionExplain {
+    with_bundled_manifests("bundled-explain", || explain(agent, screen))
 }
 
 fn write_remote_codex(content: &str) {
@@ -89,7 +72,7 @@ fn write_local_codex(content: &str) {
 
 #[test]
 fn known_agent_no_match_defaults_to_idle_fallback() {
-    let explain = explain(Agent::Codex, "ordinary prompt text");
+    let explain = bundled_explain(Agent::Codex, "ordinary prompt text");
 
     assert_eq!(explain.state, AgentState::Idle);
     assert!(!explain.visible_idle);
@@ -302,14 +285,14 @@ fn all_bundled_manifests_parse_and_validate() {
 
 #[test]
 fn devin_manifest_detects_idle_working_and_blocked_states() {
-    let idle = explain(
+    let idle = bundled_explain(
         Agent::Devin,
         "─────────────────────────────────────────────────────\n❭ Ask Devin to build features, fix bugs, or work on\n  your code\n─────────────────────────────────────────────────────\nSWE-1.6               Context: 16k / 200k tokens (7%)",
     );
     assert_eq!(idle.state, AgentState::Idle);
     assert!(idle.visible_idle);
 
-    let live_footer_idle = explain(
+    let live_footer_idle = bundled_explain(
         Agent::Devin,
         "Done.\n\n────────────────────────────────────────────────── (bypass permissions on) ─\n❭\n────────────────────────────────────────────────────────────────────────────\nClaude Opus 4.6 Thinking                                    Context: 38k / 200k tokens (18%)",
     );
@@ -323,7 +306,7 @@ fn devin_manifest_detects_idle_working_and_blocked_states() {
     );
     assert!(live_footer_idle.visible_idle);
 
-    let welcome_footer_idle = explain(
+    let welcome_footer_idle = bundled_explain(
         Agent::Devin,
         "⠀⠀⠀⠀⠀⣴⣾⣶⡄⠀⠀⠀⠀\n⠀⣴⣾⣶⡾⠛⠿⠟⠃⣴⣾⣶⡄  Devin CLI\n⠀⠛⠿⠟⠃⣴⣾⣶⡾⠛⠿⠟⠃  v2026.5.26-8\n⠀⣤⣶⣦⡄⠻⢿⠿⢷⣤⣶⣦⡄\n⠀⠻⢿⠿⢷⣤⣶⣦⡄⠻⢿⠿⠃  Hybrid\n⠀⠀⠀⠀⠀⠻⢿⠿⠃⠀⠀⠀⠀\n\n───────────────────────────\n❭ Ask Devin to build\n  features, fix bugs, or\n  work on your code\n───────────────────────────\nClaude Opus Looking for\n4.6 Thinkingplan mode? /\n            plan",
     );
@@ -337,21 +320,21 @@ fn devin_manifest_detects_idle_working_and_blocked_states() {
     );
     assert!(welcome_footer_idle.visible_idle);
 
-    let working = explain(
+    let working = bundled_explain(
         Agent::Devin,
         "◔ Reading shell 91b655\n  │ Timeout: 35s\n\n⠀⡆ Running tools · 27s (esc to interrupt)\n─────────────────────────────────────────────────────\n❭ Guide Devin while it works",
     );
     assert_eq!(working.state, AgentState::Working);
     assert!(working.visible_working);
 
-    let trust_prompt = explain(
+    let trust_prompt = bundled_explain(
         Agent::Devin,
         "Do you trust the authors of this directory?\nFor security, devin should not be run in directories\nwith untrusted content.\n❭ 1 Yes, trust /private/tmp/devin-hook-probe\n· 2 No, exit",
     );
     assert_eq!(trust_prompt.state, AgentState::Blocked);
     assert!(trust_prompt.visible_blocker);
 
-    let permission_prompt = explain(
+    let permission_prompt = bundled_explain(
         Agent::Devin,
         "⏺ Running command\n  └ $ sleep 30\n\n❭ 1 Yes  (Approve once)\n· 2 Yes, allow `sleep` commands\n· 3 Yes, always allow `sleep` commands\n· 4 No\n↑↓ select · ↵ confirm · esc cancel",
     );
@@ -601,14 +584,16 @@ fn osc_explain(
     osc_title: &str,
     osc_progress: &str,
 ) -> DetectionExplain {
-    explain_with_input(
-        agent,
-        DetectionInput {
-            screen,
-            osc_title,
-            osc_progress,
-        },
-    )
+    with_bundled_manifests("bundled-osc-explain", || {
+        explain_with_input(
+            agent,
+            DetectionInput {
+                screen,
+                osc_title,
+                osc_progress,
+            },
+        )
+    })
 }
 
 // --- Claude OSC rules ---
@@ -874,7 +859,7 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
         include_str!("../../../tests/fixtures/agent-detection/claude-model-picker-20260825.txt");
 
     for screen in [claude_idle, kimi_through_claude] {
-        let result = explain(Agent::Claude, screen);
+        let result = bundled_explain(Agent::Claude, screen);
         assert_eq!(result.state, AgentState::Idle);
         assert_eq!(
             result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
@@ -927,7 +912,7 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
     }
 
     for (label, screen) in [("quoted history", quoted), ("model picker", model_picker)] {
-        let result = explain(Agent::Claude, screen);
+        let result = bundled_explain(Agent::Claude, screen);
         assert!(!result.visible_blocker, "{label}");
         assert_ne!(result.state, AgentState::Blocked, "{label}");
     }

@@ -1519,5 +1519,49 @@ fn line_start_offset(content: &str, lines: &[&str], index: usize) -> usize {
         .min(content.len())
 }
 
+/// Run `f` with the manifest cache pinned to the manifests bundled in this
+/// checkout.
+///
+/// Manifest loading prefers a local override under `XDG_CONFIG_HOME` and a
+/// downloaded manifest under `XDG_STATE_HOME` over the bundled TOML. On a
+/// machine that has ever run herdr those directories exist and can hold a
+/// newer manifest than the checkout, so any test that asserts bundled rule
+/// behaviour would be answering questions about the developer's machine
+/// instead. Pointing both roots at an empty sandbox makes the assertion mean
+/// what it says on every machine.
+#[cfg(test)]
+pub(crate) fn with_bundled_manifests<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let old_config = std::env::var_os("XDG_CONFIG_HOME");
+    let old_state = std::env::var_os("XDG_STATE_HOME");
+    let base = std::env::temp_dir().join(format!(
+        "herdr-manifest-sandbox-{name}-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::env::set_var("XDG_CONFIG_HOME", base.join("config"));
+    std::env::set_var("XDG_STATE_HOME", base.join("state"));
+    reload_manifests();
+    let result = f();
+    match old_config {
+        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+    match old_state {
+        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+        None => std::env::remove_var("XDG_STATE_HOME"),
+    }
+    reload_manifests();
+    let _ = std::fs::remove_dir_all(&base);
+    result
+}
+
 #[cfg(test)]
 mod tests;
