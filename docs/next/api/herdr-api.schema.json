@@ -1373,6 +1373,13 @@
               },
               "type": "array"
             },
+            "session_name": {
+              "description": "Name the agent gave this session (Claude's `ai-title`). It is an\nexplicit identity for the work, not a derivation from the prompt or the\ncheckout path, so display surfaces rank it above every derived title.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "ticket_ids": {
               "default": [],
               "items": {
@@ -3725,6 +3732,13 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "session_name": {
+              "description": "Name the agent gave this session (Claude's `ai-title`). It is an\nexplicit identity for the work, not a derivation from the prompt or the\ncheckout path, so display surfaces rank it above every derived title.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "ticket_ids": {
               "default": [],
@@ -9210,6 +9224,13 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "session_name": {
+              "description": "Name the agent gave this session (Claude's `ai-title`). It is an\nexplicit identity for the work, not a derivation from the prompt or the\ncheckout path, so display surfaces rank it above every derived title.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "ticket_ids": {
               "default": [],

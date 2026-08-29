@@ -564,6 +564,19 @@ impl TerminalState {
         Ok(changed)
     }
 
+    /// Apply an agent-reported session rename without disturbing the rest of
+    /// the hook work context.
+    pub(crate) fn set_hook_session_name(
+        &mut self,
+        session_name: Option<String>,
+    ) -> Result<bool, String> {
+        let changed = self.work_context.set_hook_session_name(session_name)?;
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(changed)
+    }
+
     pub(crate) fn replace_git_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,

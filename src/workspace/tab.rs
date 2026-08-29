@@ -257,9 +257,15 @@ impl Tab {
             .or_else(|| terminal.agent_name.clone())
             .or_else(|| terminal.effective_agent_label().map(str::to_string));
         let ticket = context.primary_ticket().map(str::to_string);
+        // Precedence: a human pane label, then the name the agent gave its own
+        // session, then a novel terminal title, then the prompt-derived work
+        // title. The session name outranks the terminal title because the
+        // latter is whatever the agent last painted — often the checkout
+        // directory before a session has been named.
         let title = terminal
             .manual_label
             .clone()
+            .or_else(|| context.session_name.clone())
             .or_else(|| {
                 terminal
                     .detected_agent

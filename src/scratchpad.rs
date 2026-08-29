@@ -96,6 +96,7 @@ impl ScratchpadDoc {
             missive_urls: extract_missive_urls(&self.body),
             branch: None,
             work_title: None,
+            session_name: None,
         };
         work_link_candidates(&context)
     }

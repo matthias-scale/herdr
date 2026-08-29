@@ -6,6 +6,13 @@ use serde::Deserialize;
 use crate::api::schema::PaneReportMetadataParams;
 
 pub(crate) const WORK_TITLE_SOURCE: &str = "herdr:work-title";
+/// Metadata source for an agent-reported session rename. It is separate from
+/// `WORK_TITLE_SOURCE` because a rename patches only the session name and must
+/// not replace the work context the last turn established.
+pub(crate) const SESSION_NAME_SOURCE: &str = "herdr:session-name";
+/// Session names are authored for humans, so they are kept whole rather than
+/// reduced to the derived work title's word budget.
+pub(crate) const SESSION_NAME_MAX_CHARS: usize = 80;
 pub(crate) const WORK_TITLE_MAX_CHARS: usize = 48;
 const WORK_TITLE_MIN_WORDS: usize = 1;
 const WORK_TITLE_MAX_WORDS: usize = 7;
@@ -17,6 +24,8 @@ struct TurnStartHookInput {
     prompt: Option<String>,
     #[serde(default)]
     agent_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +92,9 @@ pub(crate) fn request_from_turn_start(
         missive_urls: crate::work_context::extract_missive_urls(prompt),
         branch: None,
         work_title: title.clone(),
+        // The turn-title path never names the session; only the guarded
+        // session-name report may.
+        session_name: None,
     };
 
     Some(PaneReportMetadataParams {
@@ -376,6 +388,129 @@ fn secret_regex() -> &'static Regex {
     })
 }
 
+/// Claude records the name it gave a session as an `ai-title` entry in the
+/// session transcript, and appends a fresh entry every time it renames. The
+/// last entry for the reported session is therefore the current name.
+pub(crate) fn latest_session_name(transcript: &str, session_id: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct AiTitleRecord {
+        #[serde(rename = "type")]
+        record_type: Option<String>,
+        #[serde(rename = "aiTitle")]
+        ai_title: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+    }
+
+    let mut latest = None;
+    for line in transcript.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.contains("ai-title") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<AiTitleRecord>(line) else {
+            continue;
+        };
+        if record.record_type.as_deref() != Some("ai-title") {
+            continue;
+        }
+        // Transcript files are per session, but a resumed session can carry
+        // entries for the session it forked from. Only the reported session
+        // may rename this pane.
+        if record
+            .session_id
+            .as_deref()
+            .is_some_and(|value| value.trim() != session_id)
+        {
+            continue;
+        }
+        if let Some(title) = record.ai_title.as_deref().map(sanitize_session_name) {
+            if !title.is_empty() {
+                latest = Some(title);
+            }
+        }
+    }
+    latest
+}
+
+fn sanitize_session_name(name: &str) -> String {
+    let sanitized = sanitize_prompt(name);
+    let mut collapsed = String::new();
+    for word in sanitized.split_whitespace() {
+        if collapsed.chars().count() + 1 + word.chars().count() > SESSION_NAME_MAX_CHARS {
+            break;
+        }
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    collapsed
+}
+
+/// Build the rename report for a hook payload and the session transcript it
+/// points at. Unlike the turn-title path this accepts every hook event: Claude
+/// names and renames a session outside prompt submission, so binding renames to
+/// `UserPromptSubmit` is exactly what made the label go stale.
+pub(crate) fn request_from_session_name(
+    provider: WorkTitleProvider,
+    pane_id: Option<&str>,
+    input: &str,
+    transcript: &str,
+    seq: u64,
+) -> Option<PaneReportMetadataParams> {
+    // Only Claude publishes a session name today.
+    if provider != WorkTitleProvider::Claude {
+        return None;
+    }
+    let pane_id = pane_id.map(str::trim).filter(|value| !value.is_empty())?;
+    let input: TurnStartHookInput = serde_json::from_str(input).ok()?;
+    input.hook_event_name.as_deref()?;
+    // A native subagent shares the parent pane and must never rename it.
+    if input
+        .agent_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return None;
+    }
+    let session_id = input
+        .session_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let session_name = latest_session_name(transcript, &session_id)?;
+
+    Some(PaneReportMetadataParams {
+        pane_id: pane_id.to_string(),
+        source: SESSION_NAME_SOURCE.to_string(),
+        agent: Some(provider.agent().to_string()),
+        applies_to_source: Some(provider.lifecycle_source().to_string()),
+        agent_session_id: Some(session_id),
+        title: None,
+        work_context: Some(crate::work_context::PaneWorkContext {
+            session_name: Some(session_name),
+            ..Default::default()
+        }),
+        display_agent: None,
+        state_labels: std::collections::HashMap::new(),
+        tokens: std::collections::HashMap::new(),
+        clear_title: false,
+        clear_display_agent: false,
+        clear_state_labels: false,
+        seq: Some(seq),
+        ttl_ms: None,
+    })
+}
+
+/// Read the transcript a hook payload points at, if any.
+pub(crate) fn transcript_path_from_hook_input(input: &str) -> Option<String> {
+    let input: TurnStartHookInput = serde_json::from_str(input).ok()?;
+    input
+        .transcript_path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +767,124 @@ mod tests {
             2
         )
         .is_none());
+    }
+
+    #[test]
+    fn latest_session_name_takes_the_most_recent_rename() {
+        let transcript = concat!(
+            r#"{"type":"user","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"First name","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"Renamed after the rename","sessionId":"s1"}"#,
+            "\n",
+        );
+        assert_eq!(
+            latest_session_name(transcript, "s1").as_deref(),
+            Some("Renamed after the rename")
+        );
+    }
+
+    #[test]
+    fn latest_session_name_ignores_other_sessions_and_blank_names() {
+        let transcript = concat!(
+            r#"{"type":"ai-title","aiTitle":"Mine","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"Someone else","sessionId":"s2"}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"   ","sessionId":"s1"}"#,
+            "\n",
+            "not json at all",
+            "\n",
+        );
+        assert_eq!(
+            latest_session_name(transcript, "s1").as_deref(),
+            Some("Mine")
+        );
+        assert_eq!(latest_session_name("", "s1"), None);
+    }
+
+    #[test]
+    fn latest_session_name_caps_and_normalizes_whitespace() {
+        let long = "word ".repeat(40);
+        let transcript = format!(r#"{{"type":"ai-title","aiTitle":"{long}","sessionId":"s1"}}"#);
+        let name = latest_session_name(&transcript, "s1").expect("session name");
+        assert!(name.chars().count() <= SESSION_NAME_MAX_CHARS, "{name:?}");
+        assert!(!name.contains("  "), "{name:?}");
+    }
+
+    #[test]
+    fn session_name_request_is_guarded_and_carries_only_the_name() {
+        let input =
+            r#"{"hook_event_name":"Stop","session_id":"s1","transcript_path":"/tmp/s1.jsonl"}"#;
+        let transcript = r#"{"type":"ai-title","aiTitle":"Live name","sessionId":"s1"}"#;
+        let request = request_from_session_name(
+            WorkTitleProvider::Claude,
+            Some("w1:pA"),
+            input,
+            transcript,
+            7,
+        )
+        .expect("session name request");
+        assert_eq!(request.source, SESSION_NAME_SOURCE);
+        assert_eq!(request.agent.as_deref(), Some("claude"));
+        assert_eq!(request.applies_to_source.as_deref(), Some("herdr:claude"));
+        assert_eq!(request.agent_session_id.as_deref(), Some("s1"));
+        assert_eq!(request.title, None);
+        let context = request.work_context.expect("work context");
+        assert_eq!(context.session_name.as_deref(), Some("Live name"));
+        assert_eq!(context.work_title, None);
+        assert!(context.ticket_ids.is_empty());
+    }
+
+    #[test]
+    fn session_name_request_rejects_subagents_and_missing_evidence() {
+        let transcript = r#"{"type":"ai-title","aiTitle":"Live name","sessionId":"s1"}"#;
+        let subagent = r#"{"hook_event_name":"Stop","session_id":"s1","agent_id":"sub"}"#;
+        assert!(request_from_session_name(
+            WorkTitleProvider::Claude,
+            Some("w1:pA"),
+            subagent,
+            transcript,
+            7
+        )
+        .is_none());
+
+        let ok = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+        // Codex has no session-name channel.
+        assert!(request_from_session_name(
+            WorkTitleProvider::Codex,
+            Some("w1:pA"),
+            ok,
+            transcript,
+            7
+        )
+        .is_none());
+        // No pane, no report.
+        assert!(
+            request_from_session_name(WorkTitleProvider::Claude, None, ok, transcript, 7).is_none()
+        );
+        // No named session yet, no report.
+        assert!(
+            request_from_session_name(WorkTitleProvider::Claude, Some("w1:pA"), ok, "", 7)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn transcript_path_is_read_from_the_hook_payload() {
+        assert_eq!(
+            transcript_path_from_hook_input(
+                r#"{"hook_event_name":"Stop","transcript_path":" /tmp/a.jsonl "}"#
+            )
+            .as_deref(),
+            Some("/tmp/a.jsonl")
+        );
+        assert_eq!(
+            transcript_path_from_hook_input(r#"{"hook_event_name":"Stop"}"#),
+            None
+        );
     }
 }
