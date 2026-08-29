@@ -90,6 +90,9 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
+        if self.state.home.is_some() {
+            return self.handle_home_key(key).await;
+        }
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
         }
@@ -132,6 +135,50 @@ impl App {
             },
         }
         None
+    }
+
+    /// Home owns the full key stream so navigation never leaks into a pane.
+    pub(crate) async fn handle_home_key(
+        &mut self,
+        key: crate::input::TerminalKey,
+    ) -> Option<super::TerminalInputTarget> {
+        self.handle_home_key_event(key.as_key_event());
+        None
+    }
+
+    /// Headless mirror. Home consumes every key, including keys without an action.
+    pub(crate) fn handle_home_key_headless(&mut self, key: KeyEvent) -> bool {
+        if self.state.home.is_none() {
+            return false;
+        }
+        self.handle_home_key_event(key);
+        true
+    }
+
+    fn handle_home_key_event(&mut self, event: KeyEvent) {
+        let queue = self.state.blocked_agents();
+        if event.modifiers.is_empty() {
+            match event.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(home) = self.state.home.as_mut() {
+                        home.select_prev(&queue);
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(home) = self.state.home.as_mut() {
+                        home.select_next(&queue);
+                    }
+                }
+                KeyCode::Enter => {
+                    self.state.jump_to_selected_home_agent(&queue);
+                }
+                KeyCode::Esc => {
+                    self.state.clear_home();
+                    self.state.mode = Mode::Terminal;
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn handle_loop_run_history_key(&mut self, key: KeyEvent) -> bool {
@@ -216,6 +263,7 @@ impl App {
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
         use crate::app::state::StatusButtonAction;
         match action {
+            StatusButtonAction::Home => self.state.toggle_home(),
             StatusButtonAction::Inbox => self.state.toggle_inbox(),
             StatusButtonAction::Scratchpad => self.state.show_scratchpad_tab(),
             StatusButtonAction::Dock => {
@@ -1316,6 +1364,143 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn app_with_blocked_home_rows(row_count: usize) -> (App, Vec<crate::layout::PaneId>) {
+        assert!(row_count > 0);
+        let mut app = test_app();
+        let mut workspace = crate::workspace::Workspace::test_new("home");
+        let mut pane_ids = vec![workspace.tabs[0].root_pane];
+        for _ in 1..row_count {
+            pane_ids.push(workspace.test_split(Direction::Horizontal));
+        }
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        for pane_id in &pane_ids {
+            let terminal_id = app.state.workspaces[0]
+                .terminal_id(*pane_id)
+                .expect("test pane terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("test terminal state")
+                .state = crate::detect::AgentState::Blocked;
+        }
+        app.state.toggle_home();
+        (app, pane_ids)
+    }
+
+    #[test]
+    fn opening_home_and_inbox_closes_the_other_overlay() {
+        let mut app = test_app();
+
+        app.state.toggle_inbox();
+        app.state.toggle_home();
+        assert!(app.state.home.is_some());
+        assert!(app.state.inbox.is_none());
+
+        app.state.toggle_inbox();
+        assert!(app.state.home.is_none());
+        assert!(app.state.inbox.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressing_enter_after_the_selected_home_pane_closes_leaves_home_open() {
+        let (mut app, pane_ids) = app_with_blocked_home_rows(1);
+        app.state.workspaces[0].tabs[0].panes.remove(&pane_ids[0]);
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.home.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressing_enter_on_an_existing_home_pane_closes_home() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.home.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressing_escape_closes_the_home_overlay() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.home.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn home_cursor_moves_with_vi_and_arrow_keys_without_wrapping() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(3);
+        let selected = |app: &App| {
+            app.state
+                .home
+                .as_ref()
+                .expect("home overlay")
+                .selected(&app.state.blocked_agents())
+        };
+
+        assert_eq!(selected(&app), 0);
+        app.handle_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()))
+            .await;
+        assert_eq!(selected(&app), 1);
+        app.handle_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()))
+            .await;
+        assert_eq!(selected(&app), 2);
+        app.handle_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()))
+            .await;
+        assert_eq!(selected(&app), 2);
+        app.handle_key(TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty()))
+            .await;
+        assert_eq!(selected(&app), 1);
+        app.handle_key(TerminalKey::new(KeyCode::Up, KeyModifiers::empty()))
+            .await;
+        assert_eq!(selected(&app), 0);
+        app.handle_key(TerminalKey::new(KeyCode::Up, KeyModifiers::empty()))
+            .await;
+        assert_eq!(selected(&app), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unrecognized_home_keys_are_swallowed_instead_of_forwarded_to_the_pane() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.state.toggle_home();
+
+        let target = app
+            .handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+
+        assert!(target.is_none());
+        assert!(rx.try_recv().is_err());
+        assert!(app.state.home.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_home_keys_are_swallowed_before_the_terminal_input_path() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.state.toggle_home();
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('x'),
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert!(app.state.home.is_some());
     }
 
     #[tokio::test]

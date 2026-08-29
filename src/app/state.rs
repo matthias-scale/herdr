@@ -948,6 +948,7 @@ pub struct ViewState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
+    Home,
     Inbox,
     Scratchpad,
     Dock,
@@ -1602,6 +1603,9 @@ pub struct AppState {
     /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
+    /// Open home view. `Some` means home owns the screen, the same way `inbox`
+    /// does; the two are mutually exclusive because each wants the whole frame.
+    pub(crate) home: Option<crate::app::home::HomeState>,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
@@ -2304,6 +2308,7 @@ impl AppState {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             inbox: None,
+            home: None,
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),

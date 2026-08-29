@@ -95,6 +95,11 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     let blocked = app.blocked_agents().len();
     let specs = [
         (
+            StatusButtonAction::Home,
+            " home ".to_string(),
+            app.home.is_some(),
+        ),
+        (
             StatusButtonAction::Inbox,
             if blocked > 0 {
                 format!(" inbox {blocked} ")
@@ -1221,6 +1226,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                StatusButtonAction::Home,
                 StatusButtonAction::Inbox,
                 StatusButtonAction::Scratchpad,
                 StatusButtonAction::Dock
@@ -1241,8 +1247,8 @@ mod tests {
         app.ensure_test_terminals();
 
         let idle = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(idle[0].label.trim(), "inbox");
-        assert!(!idle[0].active, "no blockers must not light the button");
+        assert_eq!(idle[1].label.trim(), "inbox");
+        assert!(!idle[1].active, "no blockers must not light the button");
 
         let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
         let terminal_id = app.workspaces[0]
@@ -1255,18 +1261,31 @@ mod tests {
             .state = AgentState::Blocked;
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(blocked[0].label.trim(), "inbox 1");
-        assert!(blocked[0].active);
+        assert_eq!(blocked[1].label.trim(), "inbox 1");
+        assert!(blocked[1].active);
+    }
+
+    #[test]
+    fn the_home_button_is_labelled_in_words_and_lights_up_while_home_is_showing() {
+        let mut app = AppState::test_new();
+        let closed = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert_eq!(closed[0].label.trim(), "home");
+        assert!(!closed[0].active);
+
+        app.toggle_home();
+
+        let open = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(open[0].active);
     }
 
     #[test]
     fn the_note_button_lights_up_only_while_its_tab_is_showing() {
         let mut app = AppState::test_new();
-        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[2].active);
 
         app.show_scratchpad_tab();
 
-        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[2].active);
     }
 
     #[test]

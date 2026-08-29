@@ -1,0 +1,232 @@
+//! Home: the fleet at a glance, and one keystroke to whatever is waiting.
+//!
+//! The inbox next door answers "deal with these one at a time" and deliberately
+//! shows a single agent, because clearing a queue is a loop. Home answers the
+//! question you ask *before* that loop — is there anything worth entering it
+//! for, and if so, which one — so it shows the whole queue and jumps.
+//!
+//! Like the inbox, the queue is derived on every read rather than cached, so an
+//! agent that answers its own gate simply stops appearing. The only thing held
+//! here is the cursor, which cannot be re-derived.
+
+use crate::app::inbox::BlockedAgent;
+
+/// Cursor state for an open home view.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HomeState {
+    selected: usize,
+}
+
+impl HomeState {
+    /// The row the cursor is on, or nothing when the queue is empty.
+    ///
+    /// The cursor is clamped on read rather than on every queue change: agents
+    /// block and unblock without anything telling the view, so a stored index is
+    /// only ever a hint about where the operator was looking.
+    pub(crate) fn current<'a>(&self, queue: &'a [BlockedAgent]) -> Option<&'a BlockedAgent> {
+        queue.get(self.selected.min(queue.len().saturating_sub(1)))
+    }
+
+    /// Index of the selected row, clamped to the queue.
+    pub(crate) fn selected(&self, queue: &[BlockedAgent]) -> usize {
+        self.selected.min(queue.len().saturating_sub(1))
+    }
+
+    /// Move down one row, stopping at the end.
+    ///
+    /// Deliberately does not wrap. The list is sorted by how long each agent has
+    /// been waiting, so the ends mean something — arriving at the bottom should
+    /// read as "that is all of them", not put you back on the oldest.
+    pub(crate) fn select_next(&mut self, queue: &[BlockedAgent]) {
+        if queue.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected(queue) + 1).min(queue.len() - 1);
+    }
+
+    /// Move up one row, stopping at the top.
+    pub(crate) fn select_prev(&mut self, queue: &[BlockedAgent]) {
+        self.selected = self.selected(queue).saturating_sub(1);
+    }
+
+    /// First visible row, given how many rows fit.
+    ///
+    /// Scrolling is derived from the cursor instead of stored, so a queue that
+    /// shrinks under the view cannot strand it on blank space below the list.
+    pub(crate) fn scroll(&self, queue: &[BlockedAgent], visible_rows: usize) -> usize {
+        if visible_rows == 0 || queue.len() <= visible_rows {
+            return 0;
+        }
+        let selected = self.selected(queue);
+        let max_scroll = queue.len() - visible_rows;
+        selected.saturating_sub(visible_rows - 1).min(max_scroll)
+    }
+}
+
+/// Fleet-wide counts for the header line.
+///
+/// `agents` counts panes running a recognised agent, not panes: a shell you left
+/// open is not something the fleet is doing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HomeCounts {
+    pub blocked: usize,
+    pub agents: usize,
+    pub spaces: usize,
+}
+
+impl crate::app::state::AppState {
+    pub(crate) fn toggle_home(&mut self) {
+        self.home = match self.home.take() {
+            Some(_) => None,
+            None => {
+                // Home and the inbox both want the whole frame; opening one puts
+                // the other away rather than stacking two overlays.
+                self.inbox = None;
+                Some(HomeState::default())
+            }
+        };
+    }
+
+    pub(crate) fn clear_home(&mut self) {
+        self.home = None;
+    }
+
+    pub(crate) fn home_counts(&self, queue: &[BlockedAgent]) -> HomeCounts {
+        let agents = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter(|pane| {
+                self.terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_some_and(|terminal| terminal.effective_agent_label().is_some())
+            })
+            .count();
+        HomeCounts {
+            blocked: queue.len(),
+            agents,
+            spaces: self.workspaces.len(),
+        }
+    }
+
+    /// Focus the pane the cursor is on and leave home. Returns whether it moved.
+    ///
+    /// A row can name a pane that has since closed, so this reports failure
+    /// rather than leaving home closed over nothing.
+    pub(crate) fn jump_to_selected_home_agent(&mut self, queue: &[BlockedAgent]) -> bool {
+        let Some(agent) = self.home.as_ref().and_then(|home| home.current(queue)) else {
+            return false;
+        };
+        let (ws_idx, pane_id) = (agent.ws_idx, agent.pane_id);
+        let pane_exists = self
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| ws.tabs.iter().any(|tab| tab.panes.contains_key(&pane_id)));
+        if !pane_exists {
+            return false;
+        }
+        self.focus_pane_in_workspace(ws_idx, pane_id);
+        self.clear_home();
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::PaneId;
+    use crate::terminal::TerminalId;
+
+    fn queue(n: usize) -> Vec<BlockedAgent> {
+        (0..n)
+            .map(|i| BlockedAgent {
+                ws_idx: 0,
+                pane_id: PaneId::alloc(),
+                terminal_id: TerminalId::alloc(),
+                workspace_label: format!("ws{i}"),
+                agent_label: format!("agent{i}"),
+                blocked_since: None,
+                seq: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_queue_selects_nothing() {
+        assert!(HomeState::default().current(&[]).is_none());
+    }
+
+    #[test]
+    fn the_cursor_starts_on_the_longest_wait() {
+        let q = queue(3);
+        let home = HomeState::default();
+        assert_eq!(home.current(&q).map(|a| a.pane_id), Some(q[0].pane_id));
+    }
+
+    #[test]
+    fn the_cursor_stops_at_both_ends_rather_than_wrapping() {
+        let q = queue(3);
+        let mut home = HomeState::default();
+        home.select_prev(&q);
+        assert_eq!(home.selected(&q), 0, "top must not wrap to the bottom");
+        for _ in 0..5 {
+            home.select_next(&q);
+        }
+        assert_eq!(home.selected(&q), 2, "bottom must not wrap to the top");
+    }
+
+    /// The queue shrinks whenever an agent answers its own gate, which happens
+    /// without the view being told. A stale index must never index past the end.
+    #[test]
+    fn a_cursor_left_past_the_end_of_a_shrunken_queue_lands_on_the_last_row() {
+        let mut home = HomeState::default();
+        let long = queue(5);
+        for _ in 0..4 {
+            home.select_next(&long);
+        }
+        let short = queue(2);
+
+        assert_eq!(home.selected(&short), 1);
+        assert_eq!(
+            home.current(&short).map(|a| a.pane_id),
+            Some(short[1].pane_id)
+        );
+    }
+
+    #[test]
+    fn a_queue_that_fits_never_scrolls() {
+        let q = queue(4);
+        let mut home = HomeState::default();
+        for _ in 0..4 {
+            home.select_next(&q);
+        }
+        assert_eq!(home.scroll(&q, 4), 0);
+        assert_eq!(home.scroll(&q, 9), 0);
+    }
+
+    #[test]
+    fn scrolling_keeps_the_cursor_on_screen_without_running_past_the_last_row() {
+        let q = queue(10);
+        let mut home = HomeState::default();
+        assert_eq!(home.scroll(&q, 3), 0, "the top of the list does not scroll");
+        for _ in 0..5 {
+            home.select_next(&q);
+        }
+        assert_eq!(home.scroll(&q, 3), 3, "the cursor stays on the last row");
+        for _ in 0..9 {
+            home.select_next(&q);
+        }
+        assert_eq!(
+            home.scroll(&q, 3),
+            7,
+            "the last screen is full rather than mostly blank"
+        );
+    }
+
+    #[test]
+    fn a_view_with_no_room_asks_for_no_scroll() {
+        assert_eq!(HomeState::default().scroll(&queue(5), 0), 0);
+    }
+}
