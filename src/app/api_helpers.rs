@@ -233,6 +233,7 @@ const MAX_METADATA_TOKEN_KEYS_PER_REQUEST: usize = 16;
 pub(super) const MAX_METADATA_TOKEN_KEYS_PER_RESOURCE: usize = 32;
 const MAX_METADATA_TOKEN_KEY_LEN: usize = 32;
 const MAX_METADATA_TOKEN_VALUE_LEN: usize = 80;
+const MAX_CLOSING_CONTRACT_TOKEN_VALUE_LEN: usize = 200;
 
 pub(super) fn normalize_metadata_source(value: String) -> Result<String, &'static str> {
     let value = value.trim();
@@ -291,12 +292,17 @@ pub(super) fn normalize_metadata_tokens(
             {
                 return Err(format!("invalid metadata token key: {key}"));
             }
+            let value_limit = if key == "closing_contract" {
+                MAX_CLOSING_CONTRACT_TOKEN_VALUE_LEN
+            } else {
+                MAX_METADATA_TOKEN_VALUE_LEN
+            };
             let value = value.and_then(|value| {
                 let normalized = value
                     .trim()
                     .chars()
                     .filter(|ch| !ch.is_control())
-                    .take(MAX_METADATA_TOKEN_VALUE_LEN)
+                    .take(value_limit)
                     .collect::<String>();
                 (!normalized.trim().is_empty()).then(|| normalized.trim().to_string())
             });
@@ -321,6 +327,21 @@ mod metadata_token_tests {
         assert_eq!(tokens["summary"].as_deref(), Some("reviewready"));
         assert_eq!(tokens["empty"], None);
         assert_eq!(tokens["clear"], None);
+    }
+
+    #[test]
+    fn closing_contract_token_keeps_two_hundred_characters() {
+        let value = "x".repeat(220);
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "closing_contract".into(),
+            Some(value),
+        )]))
+        .unwrap();
+
+        assert_eq!(
+            tokens["closing_contract"].as_deref(),
+            Some("x".repeat(200).as_str())
+        );
     }
 
     #[test]

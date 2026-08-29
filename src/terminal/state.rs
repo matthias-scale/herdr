@@ -15,6 +15,50 @@ use crate::terminal::TerminalId;
 pub(crate) const AGENT_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
 pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionTier {
+    ContractSatisfied,
+    DeclaredDone,
+    StoppedUndeclared,
+}
+
+pub(crate) fn derive_completion_tier(
+    state: AgentState,
+    contract: Option<&str>,
+    contract_met: Option<bool>,
+    closing_idle: Option<bool>,
+    open_blockers: bool,
+    active_subagents: Option<u32>,
+    background_job_count: Option<u16>,
+    has_closing_block_tokens: bool,
+) -> Option<CompletionTier> {
+    let quiet = state == AgentState::Idle
+        && !open_blockers
+        && active_subagents.unwrap_or_default() == 0
+        && background_job_count.unwrap_or_default() == 0;
+    if !quiet {
+        return None;
+    }
+    if contract.is_some_and(|contract| !contract.is_empty()) && contract_met == Some(true) {
+        return Some(CompletionTier::ContractSatisfied);
+    }
+    if closing_idle == Some(true) {
+        return Some(CompletionTier::DeclaredDone);
+    }
+    if !has_closing_block_tokens {
+        return Some(CompletionTier::StoppedUndeclared);
+    }
+    None
+}
+
+fn parse_binary_token(value: &str) -> Option<bool> {
+    match value {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
 /// One blocking rule for the sidebar worklist and inbox.
 ///
 /// A latched human gate does not block while the agent is still working. The
@@ -174,6 +218,14 @@ pub(crate) struct TerminalAgentHandoffState {
     closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    #[serde(default)]
+    closing_idle: Option<bool>,
+    #[serde(default)]
+    closing_contract: Option<String>,
+    #[serde(default)]
+    closing_contract_met: Option<bool>,
+    #[serde(default)]
+    closing_contract_met_elapsed: Option<Duration>,
 }
 
 #[cfg(unix)]
@@ -407,6 +459,10 @@ pub struct TerminalState {
     pub closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     pub closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     pub closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    pub closing_idle: Option<bool>,
+    pub closing_contract: Option<String>,
+    pub closing_contract_met: Option<bool>,
+    pub closing_contract_met_at: Option<Instant>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     /// Runtime-only Claude JSONL source. Never persisted or exposed through the
     /// API; the accepted session id remains the resume identity.
@@ -488,6 +544,10 @@ impl TerminalState {
             closing_gates: Vec::new(),
             closing_items: Vec::new(),
             closing_decisions: Vec::new(),
+            closing_idle: None,
+            closing_contract: None,
+            closing_contract_met: None,
+            closing_contract_met_at: None,
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             claude_transcript_path: None,
@@ -538,6 +598,44 @@ impl TerminalState {
         self.closing_decisions = decisions;
         self.revision = self.revision.saturating_add(1);
         true
+    }
+
+    pub(crate) fn apply_closing_contract_tokens(
+        &mut self,
+        tokens: &HashMap<String, Option<String>>,
+        now: Instant,
+    ) -> bool {
+        let Some(closing_idle) = tokens.get("closing_idle") else {
+            return false;
+        };
+        let closing_idle = closing_idle.as_deref().and_then(parse_binary_token);
+        let contract = tokens
+            .get("closing_contract")
+            .and_then(|value| value.as_deref())
+            .filter(|value| !value.is_empty());
+        let contract_met = tokens
+            .get("closing_contract_met")
+            .and_then(|value| value.as_deref())
+            .and_then(parse_binary_token);
+        let (closing_contract, closing_contract_met) = match (contract, contract_met) {
+            (Some(contract), Some(contract_met)) => {
+                (Some(contract.to_string()), Some(contract_met))
+            }
+            _ => (None, None),
+        };
+        let closing_contract_met_at = closing_contract_met.is_some_and(|met| met).then_some(now);
+        let changed = self.closing_idle != closing_idle
+            || self.closing_contract != closing_contract
+            || self.closing_contract_met != closing_contract_met
+            || self.closing_contract_met_at != closing_contract_met_at;
+        self.closing_idle = closing_idle;
+        self.closing_contract = closing_contract;
+        self.closing_contract_met = closing_contract_met;
+        self.closing_contract_met_at = closing_contract_met_at;
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
     }
 
     pub fn effective_work_context(&self) -> &crate::work_context::PaneWorkContext {
@@ -2659,6 +2757,9 @@ impl TerminalState {
             && self.closing_gates.is_empty()
             && self.closing_items.is_empty()
             && self.closing_decisions.is_empty()
+            && self.closing_idle.is_none()
+            && self.closing_contract.is_none()
+            && self.closing_contract_met.is_none()
         {
             return None;
         }
@@ -2683,6 +2784,12 @@ impl TerminalState {
             closing_gates: self.closing_gates.clone(),
             closing_items: self.closing_items.clone(),
             closing_decisions: self.closing_decisions.clone(),
+            closing_idle: self.closing_idle,
+            closing_contract: self.closing_contract.clone(),
+            closing_contract_met: self.closing_contract_met,
+            closing_contract_met_elapsed: self
+                .closing_contract_met_at
+                .map(|reported_at| now.saturating_duration_since(reported_at)),
         })
     }
 
@@ -2714,6 +2821,12 @@ impl TerminalState {
         self.closing_gates = handoff.closing_gates;
         self.closing_items = handoff.closing_items;
         self.closing_decisions = handoff.closing_decisions;
+        self.closing_idle = handoff.closing_idle;
+        self.closing_contract = handoff.closing_contract;
+        self.closing_contract_met = handoff.closing_contract_met;
+        self.closing_contract_met_at = handoff
+            .closing_contract_met_elapsed
+            .and_then(|elapsed| now.checked_sub(elapsed));
     }
 
     #[cfg(unix)]
@@ -3257,6 +3370,139 @@ mod tests {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
     }
 
+    fn closing_tokens(items: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
+        items
+            .iter()
+            .map(|(key, value)| ((*key).into(), value.map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn completion_tier_follows_the_three_tier_table() {
+        let cases = [
+            (
+                Some("tests pass"),
+                Some(true),
+                Some(true),
+                true,
+                CompletionTier::ContractSatisfied,
+            ),
+            (
+                Some("tests pass"),
+                Some(false),
+                Some(true),
+                true,
+                CompletionTier::DeclaredDone,
+            ),
+            (None, None, None, false, CompletionTier::StoppedUndeclared),
+        ];
+        for (contract, met, idle, has_tokens, expected) in cases {
+            assert_eq!(
+                derive_completion_tier(
+                    AgentState::Idle,
+                    contract,
+                    met,
+                    idle,
+                    false,
+                    None,
+                    None,
+                    has_tokens,
+                ),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn completion_tier_requires_a_stopped_quiet_session() {
+        let base = || {
+            derive_completion_tier(
+                AgentState::Idle,
+                Some("tests pass"),
+                Some(true),
+                Some(true),
+                false,
+                None,
+                None,
+                true,
+            )
+        };
+        assert_eq!(base(), Some(CompletionTier::ContractSatisfied));
+        assert_eq!(
+            derive_completion_tier(
+                AgentState::Working,
+                Some("tests pass"),
+                Some(true),
+                Some(true),
+                false,
+                None,
+                None,
+                true,
+            ),
+            None
+        );
+        for (gates, agents, shells) in [
+            (true, None, None),
+            (false, Some(1), None),
+            (false, None, Some(1)),
+        ] {
+            assert_eq!(
+                derive_completion_tier(
+                    AgentState::Idle,
+                    Some("tests pass"),
+                    Some(true),
+                    Some(true),
+                    gates,
+                    agents,
+                    shells,
+                    true,
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn closing_contract_tokens_replace_clear_and_reject_malformed_pairs() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        assert!(terminal.apply_closing_contract_tokens(
+            &closing_tokens(&[
+                ("closing_idle", Some("1")),
+                ("closing_contract", Some("tests pass")),
+                ("closing_contract_met", Some("1")),
+            ]),
+            now,
+        ));
+        assert_eq!(terminal.closing_idle, Some(true));
+        assert_eq!(terminal.closing_contract.as_deref(), Some("tests pass"));
+        assert_eq!(terminal.closing_contract_met, Some(true));
+        assert_eq!(terminal.closing_contract_met_at, Some(now));
+
+        let later = now + Duration::from_secs(2);
+        assert!(
+            terminal.apply_closing_contract_tokens(
+                &closing_tokens(&[("closing_idle", Some("1"))]),
+                later,
+            )
+        );
+        assert!(terminal.closing_contract.is_none());
+        assert!(terminal.closing_contract_met.is_none());
+        assert!(terminal.closing_contract_met_at.is_none());
+
+        assert!(terminal.apply_closing_contract_tokens(
+            &closing_tokens(&[
+                ("closing_idle", Some("invalid")),
+                ("closing_contract", Some("tests pass")),
+                ("closing_contract_met", Some("invalid")),
+            ]),
+            later,
+        ));
+        assert!(terminal.closing_idle.is_none());
+        assert!(terminal.closing_contract.is_none());
+        assert!(terminal.closing_contract_met.is_none());
+    }
+
     #[test]
     fn declared_wait_watchdog_uses_deadline_and_fresh_report_clears_stale() {
         let started = Instant::now();
@@ -3630,6 +3876,14 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
+        source.apply_closing_contract_tokens(
+            &closing_tokens(&[
+                ("closing_idle", Some("1")),
+                ("closing_contract", Some("tests pass")),
+                ("closing_contract_met", Some("1")),
+            ]),
+            captured_at - Duration::from_secs(4),
+        );
 
         let encoded = serde_json::to_string(
             &source
@@ -3643,6 +3897,14 @@ mod tests {
             .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
 
         assert_eq!(restored.closing_gates, source.closing_gates);
+        assert_eq!(restored.closing_contract.as_deref(), Some("tests pass"));
+        assert_eq!(restored.closing_contract_met, Some(true));
+        assert_eq!(
+            restored.closing_contract_met_at.map(|reported_at| {
+                (captured_at + Duration::from_secs(1)).saturating_duration_since(reported_at)
+            }),
+            Some(Duration::from_secs(4))
+        );
         assert_eq!(restored.state, AgentState::Unknown);
         assert!(restored.hook_authority.is_none());
     }
