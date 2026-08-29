@@ -1596,7 +1596,11 @@ mod tests {
         let actions: Vec<StatusButtonAction> = buttons.iter().map(|button| button.action).collect();
         assert_eq!(
             actions,
-            vec![StatusButtonAction::BlockedFilter, StatusButtonAction::Dock]
+            vec![
+                StatusButtonAction::BlockedFilter,
+                StatusButtonAction::Dock,
+                StatusButtonAction::StatusDetail
+            ]
         );
         assert_eq!(buttons[0].rect.x, 0);
         // Adjacent, never overlapping: a click can only ever hit one button.

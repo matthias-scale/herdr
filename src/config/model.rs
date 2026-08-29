@@ -552,6 +552,7 @@ pub struct KeysConfig {
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
     pub home: BindingConfig,
+    pub toggle_status_detail: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -817,6 +818,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(symphony);
         apply_field!(inbox);
         apply_field!(home);
+        apply_field!(toggle_status_detail);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -940,6 +942,7 @@ impl KeysConfig {
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
+        copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
         copy_user_field!(indexed);
 
         profile
@@ -1301,7 +1304,10 @@ impl Default for KeysConfig {
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
-            home: BindingConfig::Many(vec!["prefix+shift+o".into(), "ctrl+alt+o".into()]),
+            // Home is disabled for now: the overlay is unfinished and the blocked
+            // filter answers the same question in place. Restoring it is one line.
+            home: BindingConfig::empty(),
+            toggle_status_detail: BindingConfig::one("prefix+shift+m"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

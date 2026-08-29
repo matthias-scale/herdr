@@ -376,6 +376,7 @@ pub struct Keybinds {
     pub symphony: ActionKeybinds,
     pub inbox: ActionKeybinds,
     pub home: ActionKeybinds,
+    pub toggle_status_detail: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -563,6 +564,7 @@ impl Config {
             symphony: empty_action!(),
             inbox: empty_action!(),
             home: empty_action!(),
+            toggle_status_detail: empty_action!(),
             custom_commands: Vec::new(),
         };
 
@@ -733,6 +735,7 @@ impl Config {
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.inbox, inbox, source);
             apply_action!(keybinds.home, home, source);
+            apply_action!(keybinds.toggle_status_detail, toggle_status_detail, source);
 
             if source == field_source!(indexed) {
                 append_legacy_indexed_bindings(
