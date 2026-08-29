@@ -9175,9 +9175,9 @@ next_tab = ""
         );
         assert!(!mobile_surface.contains("background"));
 
-        // Full-width status bar occupies row 0; terminal chrome starts at y=1 (tab bar)
-        // and the terminal surface at y=2.
-        let foreground_terminal_area = Rect::new(26, 2, 93, 38);
+        // Full-width status bar occupies row 0. The tab row is hidden by default,
+        // so the terminal surface starts at y=1 and keeps the row for itself.
+        let foreground_terminal_area = Rect::new(26, 1, 93, 39);
         let expected_pane_size = (
             foreground_terminal_area.height,
             foreground_terminal_area.width.saturating_sub(1),
