@@ -954,6 +954,8 @@ pub(crate) enum StatusButtonAction {
     Inbox,
     Scratchpad,
     Dock,
+    /// Expand or collapse the usage detail in the status row.
+    StatusDetail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1618,6 +1620,18 @@ pub struct AppState {
     pub(crate) status_focus_projection_initialized: bool,
     /// Whether the full-width top status row is enabled by configuration.
     pub(crate) status_bar_enabled: bool,
+    /// Wall clock at the last background refresh, so reset countdowns are
+    /// computed from a server-owned instant instead of inside rendering.
+    pub(crate) status_now_unix: Option<i64>,
+    /// Account-level provider quota, refreshed off the render thread.
+    pub(crate) provider_usage: crate::provider_usage::ProviderUsageSnapshot,
+    /// Reachability of the wider internet, as folded from periodic probes.
+    pub(crate) connectivity: crate::connectivity::Connectivity,
+    /// Expanded status bar: percentages and reset times instead of bars alone.
+    pub(crate) status_bar_expanded: bool,
+    /// Whether the disk segment was visible last frame, which is what gives the
+    /// show/hide threshold its hysteresis.
+    pub(crate) status_disk_visible: bool,
     pub(crate) full_lifecycle_hook_authority_timeout: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
@@ -2320,6 +2334,11 @@ impl AppState {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             status_bar_enabled: true,
+            status_now_unix: None,
+            provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
+            connectivity: crate::connectivity::Connectivity::default(),
+            status_bar_expanded: false,
+            status_disk_visible: false,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
                 crate::config::Config::default()
                     .agent_detection

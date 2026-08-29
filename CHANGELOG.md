@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+- Added account-level subscription usage to the status row: Claude, Codex, and Kimi, each as a filled column per quota window, read from local caches with no provider API call.
+- Added an agent dot, an offline dot, and a disk column to the status row. Disk appears only at 80% and hides again below 78%.
+- Added `ui.status_bar_expanded` and `keys.toggle_status_detail` (default `prefix+shift+m`), plus a status-bar button, to expand the row to percentages and reset times.
+
+### Changed
+- Status row metrics now read as filled columns rather than numbers, and memory is a share of the installed total instead of GiB.
+- Removed the Git branch from the status row: it never changed within a workspace.
+
 ## [0.8.0] - 2026-08-03
 
 ### Added

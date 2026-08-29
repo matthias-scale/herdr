@@ -72,9 +72,26 @@ impl App {
                     .status_metric_refresh
                     .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
                 if let Some(snapshot) = snapshot {
+                    self.state.status_disk_visible =
+                        crate::platform::status_metrics::disk_segment_visible(
+                            snapshot.metrics.disk_percent,
+                            self.state.status_disk_visible,
+                        );
                     self.state.status_metrics = Some(*snapshot);
                 }
+                self.state.status_now_unix = crate::provider_usage::now_unix();
                 should_repaint && self.status_metrics_visible
+            }
+            AppEvent::ProviderUsageRefreshed { snapshot } => {
+                self.provider_usage_in_flight = false;
+                self.state.status_now_unix = crate::provider_usage::now_unix();
+                let changed = self.state.provider_usage != *snapshot;
+                self.state.provider_usage = *snapshot;
+                changed && self.state.status_bar_enabled
+            }
+            AppEvent::ConnectivityProbed { reachable } => {
+                self.connectivity_probe_in_flight = false;
+                self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
             }
             AppEvent::GitStatusRefreshed {
                 generation,
@@ -182,6 +199,18 @@ impl App {
             if let Some(snapshot) = snapshot {
                 self.state.status_metrics = Some(*snapshot);
             }
+            return None;
+        }
+
+        if let AppEvent::ProviderUsageRefreshed { snapshot } = ev {
+            self.provider_usage_in_flight = false;
+            self.state.provider_usage = *snapshot;
+            return None;
+        }
+
+        if let AppEvent::ConnectivityProbed { reachable } = ev {
+            self.connectivity_probe_in_flight = false;
+            self.state.connectivity.observe(reachable);
             return None;
         }
 
@@ -2006,50 +2035,55 @@ mod tests {
 
     #[tokio::test]
     async fn agent_explain_evaluates_with_server_manifest_cache() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-explain")];
-        app.state.ensure_test_terminals();
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .detected_agent = Some(Agent::Codex);
-        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
-            80,
-            24,
-            b"press enter to confirm or esc to cancel",
-        );
-        app.terminal_runtimes.insert(terminal_id, runtime);
-        let target = app.public_pane_id(0, pane_id).unwrap();
+        // The assertion names a rule from the bundled codex manifest, so the
+        // cache has to be pinned to the bundled manifests; otherwise a manifest
+        // downloaded into the developer's state directory answers instead.
+        crate::detect::manifest::with_bundled_manifests("agent-explain-cache", || {
+            let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(
+                &crate::config::Config::default(),
+                true,
+                None,
+                api_rx,
+                crate::api::EventHub::default(),
+            );
+            app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-explain")];
+            app.state.ensure_test_terminals();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Codex);
+            let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"press enter to confirm or esc to cancel",
+            );
+            app.terminal_runtimes.insert(terminal_id, runtime);
+            let target = app.public_pane_id(0, pane_id).unwrap();
 
-        let response = app.handle_api_request(crate::api::schema::Request {
-            id: "agent_explain".into(),
-            method: crate::api::schema::Method::AgentExplain(crate::api::schema::AgentTarget {
-                target,
-            }),
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "agent_explain".into(),
+                method: crate::api::schema::Method::AgentExplain(crate::api::schema::AgentTarget {
+                    target,
+                }),
+            });
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+            assert_eq!(response["result"]["type"], "agent_explain");
+            assert_eq!(response["result"]["explain"]["screen_state"], "blocked");
+            assert_eq!(response["result"]["explain"]["state"], "unknown");
+            assert_eq!(response["result"]["explain"]["effective_state"], "unknown");
+            assert_eq!(response["result"]["explain"]["arbitration"], "screen");
+            assert_eq!(
+                response["result"]["explain"]["matched_rule"]["id"],
+                "live_strong_blocker"
+            );
         });
-        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-
-        assert_eq!(response["result"]["type"], "agent_explain");
-        assert_eq!(response["result"]["explain"]["screen_state"], "blocked");
-        assert_eq!(response["result"]["explain"]["state"], "unknown");
-        assert_eq!(response["result"]["explain"]["effective_state"], "unknown");
-        assert_eq!(response["result"]["explain"]["arbitration"], "screen");
-        assert_eq!(
-            response["result"]["explain"]["matched_rule"]["id"],
-            "live_strong_blocker"
-        );
     }
 
     #[tokio::test]

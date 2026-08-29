@@ -63,6 +63,7 @@ mod checksum;
 mod cli;
 mod client;
 mod config;
+mod connectivity;
 mod detect;
 mod events;
 mod ghostty;
@@ -84,6 +85,7 @@ mod plugin_paths;
 mod popup_size;
 mod product_announcements;
 mod protocol;
+mod provider_usage;
 mod pty;
 mod raw_input;
 mod release_notes;
@@ -340,6 +342,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # show_subscription_usage = true
 # Open the home view on launch. Esc dismisses it.
 # show_home_on_start = true
+
+# Start the status row expanded: usage percentages and reset times beside every
+# column, instead of the columns alone. Toggle at runtime with the status-bar
+# button or keys.toggle_status_detail.
+# status_bar_expanded = false
 
 # Desktop tab row placement: "hidden", "top" or "bottom". Hidden is the default
 # because the sidebar already lists every tab in every space.

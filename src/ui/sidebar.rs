@@ -6029,6 +6029,89 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert!(rendered.contains("Add Subabe"), "{rendered:?}");
     }
 
+    /// The reported defect: a Claude pane labelled with its worktree directory
+    /// instead of the session Claude named, and a label that never moved when
+    /// Claude renamed the session mid-run.
+    #[test]
+    fn session_rename_updates_the_sidebar_and_tab_bar_without_a_restart() {
+        let mut app = app_with_agents(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            // Herdr tracks the tab's checkout while the agent runs in a
+            // worktree below it, so the cwd-noise filter cannot recognise the
+            // directory name the agent paints as its terminal title.
+            terminal.cwd = std::path::PathBuf::from("/w/personal");
+            terminal.set_terminal_title(Some("cc-personal-20260825-150216-8ada".into()));
+        }
+
+        let canonical = |app: &AppState| app.workspaces[0].tab_display_name_from(&app.terminals, 0);
+        let sidebar_label = |app: &AppState| {
+            sidebar_thread_entries(app)
+                .into_iter()
+                .next()
+                .expect("sidebar tab entry")
+                .primary_tab_label
+        };
+        let tab_bar_label = |app: &AppState| {
+            crate::ui::tabs::tab_chrome_label(&app.workspaces[0], &app.terminals, 0, usize::MAX)
+        };
+
+        // AC4: with no session name the pre-existing derivation still produces
+        // a non-empty label.
+        let fallback = canonical(&app).expect("fallback tab name");
+        assert_eq!(fallback, "cc-personal-20260825-150216-8ada");
+        assert_eq!(sidebar_label(&app).as_deref(), Some(fallback.as_str()));
+
+        // AC1: the name Claude gave the session outranks the directory label.
+        let changed = app
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_session_name(Some("Herdr fork sidebar naming".into()))
+            .expect("session name accepted");
+        assert!(changed);
+        let named = canonical(&app).expect("named tab name");
+        assert_eq!(named, "Herdr fork sidebar naming");
+        assert_ne!(named, fallback);
+        assert_eq!(sidebar_label(&app).as_deref(), Some(named.as_str()));
+        // AC3: the tab bar resolves the same canonical name.
+        assert_eq!(tab_bar_label(&app), named);
+
+        // AC2: a rename on the same live pane moves both surfaces. Nothing is
+        // rebuilt here — this is the same AppState the assertions above read.
+        let changed = app
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_session_name(Some("Session rename propagation".into()))
+            .expect("rename accepted");
+        assert!(changed);
+        let renamed = canonical(&app).expect("renamed tab name");
+        assert_eq!(renamed, "Session rename propagation");
+        assert_ne!(renamed, named);
+        assert_eq!(sidebar_label(&app).as_deref(), Some(renamed.as_str()));
+        assert_eq!(tab_bar_label(&app), renamed);
+
+        // The rendered sidebar row shows the new name, not the stale one.
+        let area = Rect::new(0, 0, 60, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let rendered = row_text(terminal.backend().buffer(), tab_row, area.width - 1);
+        assert!(rendered.contains("Session rename"), "{rendered:?}");
+        assert!(!rendered.contains("cc-personal"), "{rendered:?}");
+
+        // A human rename still wins over the agent's session name.
+        app.workspaces[0].tabs[0].set_user_custom_name("Human title".into());
+        assert_eq!(canonical(&app).as_deref(), Some("Human title"));
+    }
+
     #[test]
     fn sidebar_tab_row_title_does_not_animate_with_a_circle_spinner() {
         let area = Rect::new(0, 0, 40, 8);

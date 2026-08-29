@@ -3037,7 +3037,9 @@ impl AppState {
             AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::ScratchpadChanged => Vec::new(),
             AppEvent::LoopRunHistoryChanged => Vec::new(),
-            AppEvent::StatusMetricsRefreshed { .. } => Vec::new(),
+            AppEvent::StatusMetricsRefreshed { .. }
+            | AppEvent::ProviderUsageRefreshed { .. }
+            | AppEvent::ConnectivityProbed { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()

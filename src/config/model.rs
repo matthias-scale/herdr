@@ -532,6 +532,7 @@ pub struct KeysConfig {
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
+    pub toggle_status_detail: BindingConfig,
     /// Toggle dock collapse. Default: ["prefix+shift+e", "ctrl+alt+d"]
     pub toggle_dock: BindingConfig,
     /// Select the previous dock tab. Default: "prefix+shift+["
@@ -697,6 +698,7 @@ pub(crate) struct KeysConfigOverlay {
     resize_mode: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
+    toggle_status_detail: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_dock: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -802,6 +804,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_pin_tab);
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
+        apply_field!(toggle_status_detail);
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
@@ -924,6 +927,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_pin_tab, keybinds.toggle_pin_tab);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
@@ -1050,6 +1054,10 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
+    /// Expand the top status row from bars alone to percentages and reset
+    /// times. Toggled at runtime; this is only the starting state. Default: false.
+    #[serde(default)]
+    pub status_bar_expanded: bool,
     /// Show local Codex and Claude Code subscription usage in the info panel. Default: true.
     pub show_subscription_usage: bool,
     /// Full-width top status row.
@@ -1283,6 +1291,7 @@ impl Default for KeysConfig {
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
+            toggle_status_detail: BindingConfig::one("prefix+shift+m"),
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),
@@ -1330,6 +1339,7 @@ impl Default for UiConfig {
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            status_bar_expanded: false,
             show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
             tab_bar_position: TabBarPositionConfig::Hidden,
