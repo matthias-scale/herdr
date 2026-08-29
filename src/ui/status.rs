@@ -96,7 +96,7 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     let specs = [
         (
             StatusButtonAction::Home,
-            " ⌂ ".to_string(),
+            " home ".to_string(),
             app.home.is_some(),
         ),
         (
@@ -1266,10 +1266,10 @@ mod tests {
     }
 
     #[test]
-    fn the_home_button_uses_the_house_glyph_and_lights_up_while_home_is_showing() {
+    fn the_home_button_is_labelled_in_words_and_lights_up_while_home_is_showing() {
         let mut app = AppState::test_new();
         let closed = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(closed[0].label.trim(), "⌂");
+        assert_eq!(closed[0].label.trim(), "home");
         assert!(!closed[0].active);
 
         app.toggle_home();
