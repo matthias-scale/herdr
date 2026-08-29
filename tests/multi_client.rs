@@ -102,13 +102,39 @@ fn wait_for_file(path: &Path, timeout: Duration) {
     panic!("socket did not accept connections at {}", path.display());
 }
 
+/// Spawn a server that actually reads `config`.
+///
+/// `spawn_server` writes to `<config_home>/herdr/config.toml`, but a debug build
+/// resolves its config dir as `herdr-dev`, so that file is never read and its
+/// settings never apply. Naming the path outright is what makes a test's config
+/// real. Kept as a separate entry point so the tests that have always run under
+/// the built-in defaults keep doing so.
+fn spawn_server_with_config(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket_path: &Path,
+    config: &str,
+) -> SpawnedHerdr {
+    spawn_server_inner(config_home, runtime_dir, api_socket_path, Some(config))
+}
+
 fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) -> SpawnedHerdr {
+    spawn_server_inner(config_home, runtime_dir, api_socket_path, None)
+}
+
+fn spawn_server_inner(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket_path: &Path,
+    applied_config: Option<&str>,
+) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
+    let config_path = config_home.join("herdr/config.toml");
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        applied_config.unwrap_or("onboarding = false\n"),
     )
     .unwrap();
 
@@ -124,6 +150,9 @@ fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    if applied_config.is_some() {
+        cmd.env("HERDR_CONFIG_PATH", &config_path);
+    }
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -869,7 +898,13 @@ fn non_foreground_render_preserves_interactive_tab_scroll() {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
 
-    let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+    // The tab row is hidden by default and this test clicks it, so opt in.
+    let server = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        "onboarding = false\n[ui]\ntab_bar_position = \"top\"\n",
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
