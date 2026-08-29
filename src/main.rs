@@ -64,6 +64,7 @@ mod cli;
 mod client;
 mod config;
 mod connectivity;
+mod contract_false_positive;
 mod detect;
 mod events;
 mod ghostty;

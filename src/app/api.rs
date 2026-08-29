@@ -646,10 +646,78 @@ impl App {
         pane_id: crate::layout::PaneId,
         observed_at: Instant,
     ) {
+        self.record_contract_false_positive_for_pane(pane_id, observed_at);
         self.handle_internal_event(AppEvent::HookAuthorityRetired {
             pane_id,
             observed_at,
         });
+    }
+
+    pub(crate) fn begin_contract_false_positive_input_burst(&mut self) {
+        self.contract_false_positive_burst_panes.clear();
+    }
+
+    fn record_contract_false_positive_for_pane(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        observed_at: Instant,
+    ) {
+        let Some((ws_idx, pane)) = self.find_pane(pane_id) else {
+            return;
+        };
+        let terminal_id = pane.attached_terminal_id.clone();
+        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
+            return;
+        };
+        let tokens = terminal.metadata_tokens.values();
+        let active_subagents = terminal
+            .active_subagents
+            .or_else(|| {
+                tokens
+                    .get("closing_agents")
+                    .and_then(|value| value.parse::<u32>().ok())
+            })
+            .filter(|count| *count > 0);
+        let tier = crate::terminal::state::derive_completion_tier(
+            terminal.state,
+            terminal.closing_contract.as_deref(),
+            terminal.closing_contract_met,
+            terminal.closing_idle,
+            !terminal.closing_gates.is_empty(),
+            active_subagents,
+            terminal.background_job_count,
+            tokens.keys().any(|key| key.starts_with("closing_")),
+        );
+        if tier != Some(crate::terminal::state::CompletionTier::ContractSatisfied) {
+            return;
+        }
+        let Some(contract_met_at) = terminal.closing_contract_met_at else {
+            return;
+        };
+        let Some(contract) = terminal.closing_contract.clone() else {
+            return;
+        };
+        let session_id = terminal.current_agent_session_id().map(str::to_string);
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return;
+        };
+        if !self.contract_false_positive_burst_panes.insert(pane_id) {
+            return;
+        }
+        let record = crate::contract_false_positive::ContractFalsePositive::now(
+            &public_pane_id,
+            session_id.as_deref(),
+            &contract,
+            observed_at
+                .saturating_duration_since(contract_met_at)
+                .as_secs(),
+        );
+        if let Err(error) = crate::contract_false_positive::append(
+            &record,
+            self.contract_false_positive_log_path_override.as_deref(),
+        ) {
+            tracing::warn!(%error, pane_id = %public_pane_id, "failed to append contract false positive");
+        }
     }
 
     pub(crate) fn show_clipboard_feedback(&mut self) {
@@ -1133,6 +1201,7 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        self.begin_contract_false_positive_input_burst();
         // Session reports must adopt identity before title projection; otherwise an OSC
         // title emitted by the incoming session is indistinguishable from the old one.
         if !matches!(
@@ -1636,6 +1705,74 @@ mod tests {
             },
         );
         app
+    }
+
+    #[test]
+    fn contract_false_positive_appends_once_per_input_burst() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("contract");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+
+        let reported_at = Instant::now();
+        let tokens = std::collections::HashMap::from([
+            ("closing_idle".to_string(), Some("1".to_string())),
+            (
+                "closing_contract".to_string(),
+                Some("tests pass".to_string()),
+            ),
+            ("closing_contract_met".to_string(), Some("1".to_string())),
+        ]);
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_contract_tokens(&tokens, reported_at);
+        terminal.metadata_tokens.patch(tokens, None, reported_at);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("session-1").unwrap(),
+        });
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-contract-burst-{}-{unique}",
+            std::process::id()
+        ));
+        let path = dir.join("contract-false-positives.jsonl");
+        app.contract_false_positive_log_path_override = Some(path.clone());
+        let input_at = reported_at + Duration::from_secs(4);
+
+        app.begin_contract_false_positive_input_burst();
+        app.record_contract_false_positive_for_pane(pane_id, input_at);
+        app.record_contract_false_positive_for_pane(pane_id, input_at);
+        app.begin_contract_false_positive_input_burst();
+        app.record_contract_false_positive_for_pane(pane_id, input_at);
+
+        let records = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record["pane_id"], app.public_pane_id(0, pane_id).unwrap());
+            assert_eq!(record["session_id"], "session-1");
+            assert_eq!(record["contract"], "tests pass");
+            assert_eq!(record["age_s"], 4);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

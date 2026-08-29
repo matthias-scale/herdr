@@ -1693,6 +1693,7 @@ impl HeadlessServer {
         data: Vec<u8>,
         reset_scroll: bool,
     ) -> Option<Result<(), String>> {
+        self.app.begin_contract_false_positive_input_burst();
         let terminal_id = self.terminal_id_by_string(terminal_id)?;
         let has_bytes = !data.is_empty();
         let result = {
@@ -1853,6 +1854,7 @@ impl HeadlessServer {
         row: Option<u16>,
         modifiers: u8,
     ) -> bool {
+        self.app.begin_contract_false_positive_input_burst();
         let Some(ClientConnection {
             mode: ClientConnectionMode::TerminalAttach { terminal_id },
             ..
@@ -1860,7 +1862,11 @@ impl HeadlessServer {
         else {
             return false;
         };
-        let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) else {
+        let terminal_id = terminal_id.clone();
+        let Some(resolved_terminal_id) = self.terminal_id_by_string(&terminal_id) else {
+            return false;
+        };
+        let Some(runtime) = self.app.terminal_runtimes.get(&resolved_terminal_id) else {
             return false;
         };
 
@@ -1868,6 +1874,11 @@ impl HeadlessServer {
             apply_terminal_attach_scroll(runtime, source, direction, lines, column, row, modifiers)
         {
             warn!(client_id, terminal_id = %terminal_id, err = %err, "terminal attach scroll failed");
+        } else {
+            self.app.retire_blocked_hook_authority_for_terminal(
+                &resolved_terminal_id,
+                std::time::Instant::now(),
+            );
         }
         true
     }

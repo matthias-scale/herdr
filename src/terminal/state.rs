@@ -2035,6 +2035,23 @@ impl TerminalState {
         })
     }
 
+    pub(crate) fn current_agent_session_id(&self) -> Option<&str> {
+        self.hook_authority
+            .as_ref()
+            .and_then(|authority| authority.session_ref.as_ref())
+            .filter(|session_ref| session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id)
+            .map(|session_ref| session_ref.value.as_str())
+            .or_else(|| {
+                self.persisted_agent_session
+                    .as_ref()
+                    .map(|session| &session.session_ref)
+                    .filter(|session_ref| {
+                        session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+                    })
+                    .map(|session_ref| session_ref.value.as_str())
+            })
+    }
+
     fn current_agent_activity_owner(&self) -> Option<AgentActivityOwner> {
         self.current_session_identity_for_persistence()
             .map(

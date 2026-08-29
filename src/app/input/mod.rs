@@ -772,7 +772,11 @@ impl App {
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
-            if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
+            let action = self.state.handle_mouse(&mut self.terminal_runtimes, mouse);
+            if let Some(pane_id) = self.state.take_forwarded_pane_input() {
+                self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+            }
+            if let Some(action) = action {
                 match action {
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")

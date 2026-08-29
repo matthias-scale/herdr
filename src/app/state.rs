@@ -1608,6 +1608,8 @@ pub struct AppState {
     /// source the Git refresh uses so rendering never re-derives a weaker one.
     pub(crate) status_focused_cwd: Option<std::path::PathBuf>,
     pub(crate) status_focus_projection_initialized: bool,
+    /// Pane whose most recent mouse event was forwarded to its terminal.
+    pub(crate) forwarded_pane_input: Option<PaneId>,
     /// Whether the full-width top status row is enabled by configuration.
     pub(crate) status_bar_enabled: bool,
     /// Wall clock at the last background refresh, so reset countdowns are
@@ -2325,6 +2327,7 @@ impl AppState {
             status_git_branch: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
+            forwarded_pane_input: None,
             status_bar_enabled: true,
             status_now_unix: None,
             provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
