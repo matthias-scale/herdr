@@ -366,7 +366,7 @@ pub struct Keybinds {
     pub toggle_pin_tab: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
-    pub toggle_status_detail: ActionKeybinds,
+    pub toggle_blocked_filter: ActionKeybinds,
     pub toggle_dock: ActionKeybinds,
     pub previous_dock_tab: ActionKeybinds,
     pub next_dock_tab: ActionKeybinds,
@@ -553,7 +553,7 @@ impl Config {
             toggle_pin_tab: empty_action!(),
             resize_mode: empty_action!(),
             toggle_sidebar: empty_action!(),
-            toggle_status_detail: empty_action!(),
+            toggle_blocked_filter: empty_action!(),
             toggle_dock: empty_action!(),
             previous_dock_tab: empty_action!(),
             next_dock_tab: empty_action!(),
@@ -719,7 +719,11 @@ impl Config {
             apply_action!(keybinds.toggle_pin_tab, toggle_pin_tab, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
-            apply_action!(keybinds.toggle_status_detail, toggle_status_detail, source);
+            apply_action!(
+                keybinds.toggle_blocked_filter,
+                toggle_blocked_filter,
+                source
+            );
             apply_action!(keybinds.toggle_dock, toggle_dock, source);
             apply_action!(keybinds.previous_dock_tab, previous_dock_tab, source);
             apply_action!(keybinds.next_dock_tab, next_dock_tab, source);
@@ -765,6 +769,20 @@ impl Config {
                     &mut diagnostics,
                 );
             }
+        }
+
+        if keybinds.toggle_blocked_filter.bindings.is_empty()
+            && !self
+                .keys
+                .key_field_is_user_configured("toggle_blocked_filter")
+        {
+            keybinds.toggle_blocked_filter = parse_action_bindings(
+                "keys.toggle_blocked_filter",
+                &BindingConfig::one("prefix+m"),
+                &mut registry,
+                &mut diagnostics,
+                BindingSource::Default,
+            );
         }
 
         // Keep the pre-picker field names usable for existing configurations;
@@ -2355,6 +2373,26 @@ switch_tab = "prefix+?"
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('b'),
                 KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    #[test]
+    fn blocked_filter_falls_back_when_preferred_prefix_binding_is_taken() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+new_workspace = "prefix+f"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(
+            binding_triggers(&kb.toggle_blocked_filter),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('m'),
+                KeyModifiers::empty()
             ))]
         );
     }

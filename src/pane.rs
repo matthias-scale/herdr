@@ -60,7 +60,6 @@ pub use self::{
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
-const BACKGROUND_JOB_DETECTION_ROWS: usize = 512;
 const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
 
@@ -215,43 +214,6 @@ async fn publish_state_changed_event(
             "failed to deliver StateChanged event"
         );
     }
-}
-
-async fn publish_background_jobs_if_changed(
-    state_events: &mpsc::Sender<AppEvent>,
-    pane_id: PaneId,
-    agent: Option<Agent>,
-    content: &str,
-    last_count: &mut Option<Option<u16>>,
-) {
-    let count = crate::detect::background_job_count(agent, content);
-    if *last_count == Some(count) {
-        return;
-    }
-    *last_count = Some(count);
-    if let Err(error) = state_events
-        .send(AppEvent::BackgroundJobsChanged { pane_id, count })
-        .await
-    {
-        warn!(pane = pane_id.raw(), %error, "failed to deliver background job count");
-    }
-}
-
-fn background_detection_text_if_supported(
-    agent: Option<Agent>,
-    read: impl FnOnce() -> String,
-) -> Option<String> {
-    (agent == Some(Agent::Codex)).then(read)
-}
-
-fn background_scan_needed(
-    agent_changed: bool,
-    scan_seq: u64,
-    last_scan_seq: Option<u64>,
-    process_exited: bool,
-    last_process_exited: Option<bool>,
-) -> bool {
-    agent_changed || last_scan_seq != Some(scan_seq) || last_process_exited != Some(process_exited)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -554,12 +516,36 @@ struct ProcessProbeResult {
     process_group_id: Option<u32>,
     foreground_is_pane_shell: bool,
     agent: Option<Agent>,
+    agent_process_pid: Option<u32>,
     process_name: Option<String>,
+}
+
+fn agent_process_pid_in_job(job: &crate::platform::ForegroundJob, agent: Agent) -> Option<u32> {
+    job.processes.iter().find_map(|process| {
+        let single = crate::platform::ForegroundJob {
+            process_group_id: process.pid,
+            processes: vec![process.clone()],
+        };
+        (crate::detect::identify_agent_in_job(&single)
+            .is_some_and(|(identified, _)| identified == agent))
+        .then_some(process.pid)
+    })
+}
+
+fn agent_process_pid_in_job_with_hint(
+    job: &crate::platform::ForegroundJob,
+    agent: Agent,
+    read_hint: impl Fn(u32) -> Option<Agent>,
+) -> Option<u32> {
+    job.processes
+        .iter()
+        .find_map(|process| (read_hint(process.pid) == Some(agent)).then_some(process.pid))
+        .or_else(|| agent_process_pid_in_job(job, agent))
 }
 
 fn agent_hint_for_foreground_job_members(
     job: &crate::platform::ForegroundJob,
-    read_hint: impl Fn(u32) -> Option<Agent>,
+    read_hint: impl Fn(u32) -> Option<Agent> + Copy,
 ) -> Option<Agent> {
     read_hint(job.process_group_id)
         .or_else(|| agent_hint_for_non_leader_foreground_job_members(job, read_hint))
@@ -567,7 +553,7 @@ fn agent_hint_for_foreground_job_members(
 
 fn agent_hint_for_non_leader_foreground_job_members(
     job: &crate::platform::ForegroundJob,
-    read_hint: impl Fn(u32) -> Option<Agent>,
+    read_hint: impl Fn(u32) -> Option<Agent> + Copy,
 ) -> Option<Agent> {
     job.processes
         .iter()
@@ -599,6 +585,7 @@ fn process_probe_result(
         process_group_id: Some(job.process_group_id),
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
+        agent_process_pid: agent_process_pid_in_job(job, agent),
         process_name: Some(process_name),
     }
 }
@@ -606,15 +593,17 @@ fn process_probe_result(
 fn hinted_process_probe_result(
     job: &crate::platform::ForegroundJob,
     pid: u32,
-    read_hint: impl Fn(u32) -> Option<Agent>,
+    read_hint: impl Fn(u32) -> Option<Agent> + Copy,
 ) -> Option<ProcessProbeResult> {
     let agent = agent_hint_for_foreground_job_members(job, read_hint)?;
-    Some(process_probe_result(
+    let mut result = process_probe_result(
         job,
         pid,
         agent,
         crate::detect::agent_label(agent).to_string(),
-    ))
+    );
+    result.agent_process_pid = agent_process_pid_in_job_with_hint(job, agent, read_hint);
+    Some(result)
 }
 
 fn probe_foreground_process_from_jobs(
@@ -629,36 +618,47 @@ fn probe_foreground_process_from_jobs(
             return hinted;
         }
         if let Some((agent, process_name)) = crate::detect::identify_agent_in_job(job) {
-            return process_probe_result(job, pid, agent, process_name);
+            let mut result = process_probe_result(job, pid, agent, process_name);
+            result.agent_process_pid = agent_process_pid_in_job_with_hint(job, agent, read_hint);
+            return result;
         }
     }
 
     let foreground_job = foreground_job();
     if let Some(job) = foreground_job.as_ref() {
         if let Some(agent) = read_hint(job.process_group_id) {
-            return process_probe_result(
+            let mut result = process_probe_result(
                 job,
                 pid,
                 agent,
                 crate::detect::agent_label(agent).to_string(),
             );
+            result.agent_process_pid = agent_process_pid_in_job_with_hint(job, agent, read_hint);
+            return result;
         }
         if let Some((agent, process_name)) = identify_process_group_leader_in_job(job) {
-            return process_probe_result(job, pid, agent, process_name);
+            let mut result = process_probe_result(job, pid, agent, process_name);
+            result.agent_process_pid = agent_process_pid_in_job_with_hint(job, agent, read_hint);
+            return result;
         }
         if let Some(agent) = agent_hint_for_non_leader_foreground_job_members(job, read_hint) {
-            return process_probe_result(
+            let mut result = process_probe_result(
                 job,
                 pid,
                 agent,
                 crate::detect::agent_label(agent).to_string(),
             );
+            result.agent_process_pid = agent_process_pid_in_job_with_hint(job, agent, read_hint);
+            return result;
         }
 
         let identified = crate::detect::identify_agent_in_job(job);
         return ProcessProbeResult {
             process_group_id: Some(job.process_group_id),
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
+            agent_process_pid: identified
+                .as_ref()
+                .and_then(|(agent, _)| agent_process_pid_in_job_with_hint(job, *agent, read_hint)),
             agent: identified.as_ref().map(|(agent, _)| *agent),
             process_name: identified.map(|(_, process_name)| process_name),
         };
@@ -668,8 +668,27 @@ fn probe_foreground_process_from_jobs(
         process_group_id: foreground_pgid,
         foreground_is_pane_shell: false,
         agent: None,
+        agent_process_pid: None,
         process_name: None,
     }
+}
+
+fn process_sidebar_observation(
+    pane_pid: u32,
+    agent_process_pid: Option<u32>,
+) -> (bool, Option<(AgentState, bool)>) {
+    let session_pids = crate::platform::session_processes(pane_pid);
+    let holds_shell = session_pids
+        .iter()
+        .any(|candidate| *candidate != pane_pid && Some(*candidate) != agent_process_pid);
+    let stale_resolution = Some(match agent_process_pid {
+        None => (AgentState::Idle, false),
+        Some(agent_pid) if crate::platform::session_processes(agent_pid).len() > 1 => {
+            (AgentState::Working, true)
+        }
+        Some(_) => (AgentState::Idle, true),
+    });
+    (holds_shell, stale_resolution)
 }
 
 fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessProbeResult {
@@ -778,9 +797,6 @@ fn spawn_basic_detection_task(
         let mut last_output_at = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
-        let mut last_background_job_count = None;
-        let mut last_background_scan_seq = None;
-        let mut last_background_process_exited = None;
         let mut force_screen_rescan = false;
 
         loop {
@@ -813,9 +829,6 @@ fn spawn_basic_detection_task(
                     last_output_at = None;
                     agent_startup_grace_until = None;
                     pending_idle.clear();
-                    last_background_job_count = None;
-                    last_background_scan_seq = None;
-                    last_background_process_exited = None;
                 }
                 _ = detect_screen_rescan.notified() => {
                     last_screen_scan_detection_content_seq = None;
@@ -865,6 +878,18 @@ fn spawn_basic_detection_task(
                 let had_process_probe = has_process_probe;
                 has_process_probe = true;
                 let probe = probe_foreground_process(pid, foreground_pgid);
+                let (holds_shell, stale_resolution) =
+                    process_sidebar_observation(pid, probe.agent_process_pid);
+                if let Err(error) = state_events
+                    .send(AppEvent::PaneProcessStateChanged {
+                        pane_id,
+                        holds_shell,
+                        stale_resolution,
+                    })
+                    .await
+                {
+                    warn!(pane = pane_id.raw(), %error, "failed to deliver process state");
+                }
                 let process_group_id = probe.process_group_id;
                 let tracked_process_group_id =
                     process_group_for_change_tracking(foreground_pgid, process_group_id);
@@ -969,31 +994,6 @@ fn spawn_basic_detection_task(
                 &mut last_output_at,
                 now,
             );
-
-            let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
-            if background_scan_needed(
-                agent_changed,
-                background_scan_seq,
-                last_background_scan_seq,
-                process_exited,
-                last_background_process_exited,
-            ) {
-                let background_agent = (!process_exited).then_some(agent).flatten();
-                let background_content =
-                    background_detection_text_if_supported(background_agent, || {
-                        terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS)
-                    });
-                publish_background_jobs_if_changed(
-                    &state_events,
-                    pane_id,
-                    background_agent,
-                    background_content.as_deref().unwrap_or_default(),
-                    &mut last_background_job_count,
-                )
-                .await;
-                last_background_scan_seq = Some(background_scan_seq);
-                last_background_process_exited = Some(process_exited);
-            }
 
             if should_skip_screen_detection_for_lifecycle_authority(
                 lifecycle_authority_active,
@@ -2370,9 +2370,6 @@ impl PaneRuntime {
                 let mut last_output_at = None;
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
-                let mut last_background_job_count = None;
-                let mut last_background_scan_seq = None;
-                let mut last_background_process_exited = None;
                 let mut force_screen_rescan = false;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2415,9 +2412,6 @@ impl PaneRuntime {
                             last_output_at = None;
                             agent_startup_grace_until = None;
                             pending_idle.clear();
-                            last_background_job_count = None;
-                            last_background_scan_seq = None;
-                            last_background_process_exited = None;
                         }
                         _ = detect_screen_rescan.notified() => {
                             last_screen_scan_detection_content_seq = None;
@@ -2468,6 +2462,18 @@ impl PaneRuntime {
                         has_process_probe = true;
                         if pid > 0 {
                             let probe = probe_foreground_process(pid, foreground_pgid);
+                            let (holds_shell, stale_resolution) =
+                                process_sidebar_observation(pid, probe.agent_process_pid);
+                            if let Err(error) = state_events
+                                .send(AppEvent::PaneProcessStateChanged {
+                                    pane_id,
+                                    holds_shell,
+                                    stale_resolution,
+                                })
+                                .await
+                            {
+                                warn!(pane = pane_id.raw(), %error, "failed to deliver process state");
+                            }
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
@@ -2611,31 +2617,6 @@ impl PaneRuntime {
                         &mut last_output_at,
                         now,
                     );
-
-                    let background_scan_seq = detection_content_seq.load(Ordering::Relaxed);
-                    if background_scan_needed(
-                        agent_changed,
-                        background_scan_seq,
-                        last_background_scan_seq,
-                        process_exited,
-                        last_background_process_exited,
-                    ) {
-                        let background_agent = (!process_exited).then_some(agent).flatten();
-                        let background_content =
-                            background_detection_text_if_supported(background_agent, || {
-                                terminal.background_detection_text(BACKGROUND_JOB_DETECTION_ROWS)
-                            });
-                        publish_background_jobs_if_changed(
-                            &state_events,
-                            pane_id,
-                            background_agent,
-                            background_content.as_deref().unwrap_or_default(),
-                            &mut last_background_job_count,
-                        )
-                        .await;
-                        last_background_scan_seq = Some(background_scan_seq);
-                        last_background_process_exited = Some(process_exited);
-                    }
 
                     if should_skip_screen_detection_for_lifecycle_authority(
                         lifecycle_authority_active,
@@ -4988,64 +4969,5 @@ mod tests {
                 observed_at: _,
             } if delivered_pane == pane_id
         ));
-    }
-
-    #[tokio::test]
-    async fn background_job_publisher_clears_a_stale_supported_count() {
-        let (tx, mut rx) = mpsc::channel(2);
-        let pane_id = PaneId::from_raw(43);
-        let mut last_count = None;
-
-        publish_background_jobs_if_changed(
-            &tx,
-            pane_id,
-            Some(Agent::Codex),
-            "2 background terminals running · /ps to view · /stop to close",
-            &mut last_count,
-        )
-        .await;
-        publish_background_jobs_if_changed(
-            &tx,
-            pane_id,
-            None,
-            "2 background terminals running · /ps to view · /stop to close",
-            &mut last_count,
-        )
-        .await;
-
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppEvent::BackgroundJobsChanged {
-                pane_id: event_pane,
-                count: Some(2),
-            }) if event_pane == pane_id
-        ));
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppEvent::BackgroundJobsChanged {
-                pane_id: event_pane,
-                count: None,
-            }) if event_pane == pane_id
-        ));
-    }
-
-    #[test]
-    fn background_detection_text_is_not_read_for_unsupported_agents() {
-        assert_eq!(
-            background_detection_text_if_supported(Some(Agent::Claude), || {
-                panic!("unsupported agent snapshot was read")
-            }),
-            None
-        );
-        assert_eq!(
-            background_detection_text_if_supported(Some(Agent::Codex), || "footer".to_owned()),
-            Some("footer".to_owned())
-        );
-    }
-
-    #[test]
-    fn background_scan_runs_when_the_agent_process_exits_without_new_content() {
-        assert!(background_scan_needed(false, 7, Some(7), true, Some(false)));
-        assert!(!background_scan_needed(false, 7, Some(7), true, Some(true)));
     }
 }

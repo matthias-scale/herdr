@@ -166,6 +166,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.toggle_pin_tab), "pin tab in sidebar"),
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
+        help_entry(
+            keybind_label(&kb.toggle_blocked_filter),
+            "toggle blocked filter",
+        ),
         help_entry(keybind_label(&kb.toggle_dock), "toggle dock"),
         help_entry(keybind_label(&kb.previous_dock_tab), "previous dock tab"),
         help_entry(keybind_label(&kb.next_dock_tab), "next dock tab"),

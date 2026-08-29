@@ -92,32 +92,25 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 /// Left-aligned quick-access buttons. The status bar's own segments are
 /// right-aligned, so the left half is otherwise pure padding.
 ///
-/// The inbox button carries its count so the number is readable without opening
-/// anything, which is the whole reason the count exists.
+/// The blocked button carries its count so the filter state is readable without
+/// opening another surface.
 pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
-    let blocked = app.blocked_agents().len();
+    let blocked = crate::ui::sidebar::all_agent_panel_entries(app)
+        .into_iter()
+        .filter(crate::ui::sidebar::entry_has_red_dot)
+        .count();
     let specs = [
         (
-            StatusButtonAction::Home,
-            " home ".to_string(),
-            app.home.is_some(),
-        ),
-        (
-            StatusButtonAction::Inbox,
+            StatusButtonAction::BlockedFilter,
             if blocked > 0 {
-                format!(" inbox {blocked} ")
+                format!(" blocked {blocked} ")
             } else {
-                " inbox ".to_string()
+                " blocked ".to_string()
             },
-            blocked > 0,
-        ),
-        (
-            StatusButtonAction::Scratchpad,
-            " note ".to_string(),
-            !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Scratchpad,
+            app.blocked_filter,
         ),
         (
             StatusButtonAction::Dock,
@@ -649,11 +642,8 @@ pub(super) fn state_icon_with_stale(
     indicator_style: StatusIndicatorStyle,
     p: &Palette,
 ) -> (&'static str, Style) {
-    if stale {
-        ("!", Style::default().fg(p.peach))
-    } else {
-        state_icon(state, seen, indicator_style, p)
-    }
+    let _ = stale;
+    state_icon(state, seen, indicator_style, p)
 }
 
 pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
@@ -682,13 +672,11 @@ pub(super) fn state_label_color_with_stale(
     stale: bool,
     p: &Palette,
 ) -> Color {
-    if stale {
-        p.peach
-    } else {
-        state_label_color(state, seen, p)
-    }
+    let _ = stale;
+    state_label_color(state, seen, p)
 }
 
+#[cfg(test)]
 pub(super) fn status_report_age_label(
     reported_at: Option<std::time::Instant>,
     now: std::time::Instant,
@@ -801,17 +789,15 @@ mod tests {
             status_report_age_compact_label(Some(reported_at), old).as_deref(),
             Some("1h")
         );
-        assert_eq!(
-            state_icon_with_stale(
-                AgentState::Working,
-                true,
-                true,
-                StatusIndicatorStyle::Dots,
-                &Palette::catppuccin(),
-            )
-            .0,
-            "!"
+        let (stale_symbol, stale_style) = state_icon_with_stale(
+            AgentState::Working,
+            true,
+            true,
+            StatusIndicatorStyle::Dots,
+            &Palette::catppuccin(),
         );
+        assert_eq!(stale_symbol, "●");
+        assert_eq!(stale_style.fg, Some(Palette::catppuccin().blue));
     }
 
     #[test]
@@ -1610,13 +1596,7 @@ mod tests {
         let actions: Vec<StatusButtonAction> = buttons.iter().map(|button| button.action).collect();
         assert_eq!(
             actions,
-            vec![
-                StatusButtonAction::Home,
-                StatusButtonAction::Inbox,
-                StatusButtonAction::Scratchpad,
-                StatusButtonAction::Dock,
-                StatusButtonAction::StatusDetail
-            ]
+            vec![StatusButtonAction::BlockedFilter, StatusButtonAction::Dock]
         );
         assert_eq!(buttons[0].rect.x, 0);
         // Adjacent, never overlapping: a click can only ever hit one button.
@@ -1626,15 +1606,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn the_inbox_button_carries_the_blocked_count_and_lights_up() {
+    async fn the_blocked_button_carries_the_blocked_count_and_lights_up_when_filtered() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("quick")];
         app.active = Some(0);
         app.ensure_test_terminals();
 
         let idle = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(idle[1].label.trim(), "inbox");
-        assert!(!idle[1].active, "no blockers must not light the button");
+        assert_eq!(idle[0].label.trim(), "blocked");
+        assert!(!idle[0].active, "the filter starts disabled");
 
         let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
         let terminal_id = app.workspaces[0]
@@ -1647,31 +1627,19 @@ mod tests {
             .state = AgentState::Blocked;
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(blocked[1].label.trim(), "inbox 1");
-        assert!(blocked[1].active);
+        assert_eq!(blocked[0].label.trim(), "blocked 1");
+        assert!(!blocked[0].active);
+        app.blocked_filter = true;
+        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[0].active);
     }
 
     #[test]
-    fn the_home_button_is_labelled_in_words_and_lights_up_while_home_is_showing() {
+    fn the_dock_button_lights_up_only_while_the_dock_is_showing() {
         let mut app = AppState::test_new();
-        let closed = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(closed[0].label.trim(), "home");
-        assert!(!closed[0].active);
-
-        app.toggle_home();
-
-        let open = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert!(open[0].active);
-    }
-
-    #[test]
-    fn the_note_button_lights_up_only_while_its_tab_is_showing() {
-        let mut app = AppState::test_new();
-        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[2].active);
-
-        app.show_scratchpad_tab();
-
-        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[2].active);
+        app.dock_collapsed = true;
+        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        app.dock_collapsed = false;
+        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
     }
 
     #[test]
@@ -1682,7 +1650,7 @@ mod tests {
         let buttons = status_buttons(&app, narrow);
 
         // Whole buttons drop; none is truncated into an unreadable stub.
-        assert!(buttons.len() < 3, "buttons: {buttons:?}");
+        assert!(buttons.len() < 2, "buttons: {buttons:?}");
         for button in &buttons {
             assert!(button.rect.width as usize == display_width(&button.label));
         }

@@ -45,10 +45,6 @@ pub(super) enum MouseAction {
         ws_idx: usize,
         tab_idx: usize,
     },
-    ToggleSidebarTabPrio {
-        ws_idx: usize,
-        tab_idx: usize,
-    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -602,17 +598,6 @@ impl AppState {
                         return None;
                     }
 
-                    let panel = crate::ui::prio_panel_rect(self, self.view.sidebar_rect);
-                    let panel_chevron = crate::ui::prio_panel_chevron_rect(panel);
-                    if mouse.row == panel_chevron.y
-                        && mouse.column == panel_chevron.x
-                        && panel_chevron.width > 0
-                    {
-                        self.toggle_prio_panel();
-                        self.mark_session_dirty();
-                        return None;
-                    }
-
                     let (cards, _) =
                         crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
                     let agent_counts = crate::ui::agent_counts_by_workspace(
@@ -644,21 +629,7 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, tab_idx)) =
-                        self.tab_prio_target_at(mouse.column, mouse.row)
-                    {
-                        return Some(MouseAction::ToggleSidebarTabPrio { ws_idx, tab_idx });
-                    }
-
                     if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
-                        self.selected = ws_idx;
-                        self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
-                    }
-
-                    if let Some((ws_idx, tab_idx)) =
-                        self.prio_panel_target_at(mouse.column, mouse.row)
-                    {
                         self.selected = ws_idx;
                         self.mode = Mode::Terminal;
                         return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
@@ -1226,12 +1197,6 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::SidebarTab { ws_idx, tab_idx }) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
-            }
-            Some(crate::ui::MobileSwitcherTarget::SidebarTabPrio { ws_idx, tab_idx }) => {
-                return MobileMouseResult::Action(MouseAction::ToggleSidebarTabPrio {
-                    ws_idx,
-                    tab_idx,
-                });
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
@@ -1974,24 +1939,26 @@ mod tests {
     }
 
     #[test]
-    fn clicking_prio_panel_row_produces_sidebar_tab_focus_action() {
+    fn clicking_a_compact_sidebar_tab_row_focuses_the_tab() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
-        app.state.workspaces[1].tabs[0].set_prio(true);
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.toggle_workspace_agent_disclosure(1);
         let sidebar = Rect::new(0, 0, 40, 16);
         app.state.view.sidebar_rect = sidebar;
-        let target = crate::ui::compute_prio_panel_row_areas(&app.state, sidebar)[0];
-        app.state.view.prio_panel_row_areas = vec![target];
+        let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("second workspace tab row");
 
         let action = app.state.handle_mouse(
             &mut app.terminal_runtimes,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                target.rect.x,
+                target.rect.x + 2,
                 target.rect.y,
             ),
         );
@@ -2045,7 +2012,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_prio_gutter_toggles_target_tab_without_focusing_it() {
+    fn sidebar_tab_row_has_no_priority_gutter() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.state.ensure_test_terminals();
@@ -2053,18 +2020,16 @@ mod tests {
         app.state.selected = 0;
         app.state.reconcile_sidebar_presentation();
         let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
-        let target = crate::ui::tab_prio_rect(&cards[1]);
+        let target = cards[1].clone();
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            target.x,
-            target.y,
+            target.rect.x + 1,
+            target.rect.y,
         ));
 
-        assert!(app.state.workspaces[1].tabs[0].prio);
-        assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.selected, 0);
-        assert!(app.state.session_dirty);
+        assert!(!app.state.workspaces[1].tabs[0].prio);
+        assert_eq!(app.state.active, Some(1));
     }
 
     #[test]
@@ -2099,14 +2064,11 @@ mod tests {
         app.state.selected = 0;
         app.state.reconcile_sidebar_presentation();
         let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
-        let prio = crate::ui::tab_prio_rect(&cards[1]);
-
-        // The overview shows no work-link marker, so the columns right after the prio cell belong
-        // to the row itself: clicking them focuses the tab and leaves the panel closed.
+        // The overview shows no work-link marker, so the compact row focuses the tab directly.
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            prio.x + prio.width,
-            prio.y,
+            cards[1].rect.x + 5,
+            cards[1].rect.y,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -2118,30 +2080,23 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_prio_cell_acts_on_its_trailing_spacer_column_too() {
-        for offset in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
-            let mut app = app_for_mouse_test();
-            app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
-            app.state.ensure_test_terminals();
-            add_test_work_link(&mut app, 1);
-            app.state.active = Some(0);
-            app.state.selected = 0;
-            app.state.reconcile_sidebar_presentation();
-            let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
-            let prio = crate::ui::tab_prio_rect(&cards[1]);
-            assert_eq!(prio.width, crate::ui::TAB_PRIO_FIELD_WIDTH as u16);
+    fn sidebar_tab_row_focuses_from_any_column() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        add_test_work_link(&mut app, 1);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.reconcile_sidebar_presentation();
+        let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
 
-            app.handle_mouse(mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                prio.x + offset,
-                prio.y,
-            ));
-            assert!(
-                app.state.workspaces[1].tabs[0].prio,
-                "prio column {offset} of the cell must toggle, not focus"
-            );
-            assert_eq!(app.state.active, Some(0), "prio must not focus the tab");
-        }
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            cards[1].rect.x + 1,
+            cards[1].rect.y,
+        ));
+        assert_eq!(app.state.active, Some(1));
+        assert!(!app.state.workspaces[1].tabs[0].prio);
     }
 
     #[test]
@@ -4195,10 +4150,18 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Navigate);
 
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let workspace_row = (viewport.y..viewport.y + viewport.height)
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, viewport.x + 4, *row),
+                    Some(crate::ui::MobileSwitcherTarget::Workspace(1))
+                )
+            })
+            .expect("second workspace row");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 4,
-            viewport.y + 5,
+            workspace_row,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -4206,7 +4169,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_prio_gutter_click_toggles_through_dispatch_and_keeps_the_switcher_open() {
+    fn mobile_compact_tab_click_focuses_through_dispatch() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.ensure_test_terminals();
@@ -4227,41 +4190,29 @@ mod tests {
             "the switcher should be open for this test"
         );
 
-        // Locate the cell through the same projection the renderer uses, then drive the real
-        // dispatch path: both of its columns must toggle prio and leave the switcher open.
+        // Locate the row through the same projection the renderer uses, then drive the real
+        // dispatch path through its compact grid.
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
         let tab_row = viewport.y
             + crate::ui::mobile_switcher_workspace_doc_range(&app.state, 0)
                 .expect("workspace row")
                 .start as u16
             + 1;
-        let prio_col = (viewport.x..viewport.x + viewport.width)
+        let row_col = (viewport.x..viewport.x + viewport.width)
             .find(|col| {
                 matches!(
                     crate::ui::mobile_switcher_target_at(&app.state, *col, tab_row),
-                    Some(crate::ui::MobileSwitcherTarget::SidebarTabPrio { .. })
+                    Some(crate::ui::MobileSwitcherTarget::SidebarTab { .. })
                 )
             })
-            .expect("a prio cell on the tab row");
-        let switcher_mode = app.state.mode;
-
-        for column in 0..crate::ui::TAB_PRIO_FIELD_WIDTH as u16 {
-            let before = app.state.workspaces[0].tabs[0].prio;
-            app.handle_mouse(mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                prio_col + column,
-                tab_row,
-            ));
-            assert_eq!(
-                app.state.workspaces[0].tabs[0].prio, !before,
-                "column {column} must toggle prio through handle_mouse"
-            );
-            assert!(app.state.session_dirty, "the toggle must be persisted");
-            assert_eq!(
-                app.state.mode, switcher_mode,
-                "column {column} must not dismiss the switcher"
-            );
-        }
+            .expect("a compact tab row");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row_col,
+            tab_row,
+        ));
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
@@ -4287,10 +4238,21 @@ mod tests {
             switch.y + 1,
         ));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let tab_row = (viewport.y..viewport.y + viewport.height)
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, viewport.x + 2, *row),
+                    Some(crate::ui::MobileSwitcherTarget::SidebarTab {
+                        tab_idx,
+                        ..
+                    }) if tab_idx == target_tab
+                )
+            })
+            .expect("multi-pane tab row");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 6,
+            tab_row,
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, target_tab);
@@ -4329,10 +4291,18 @@ mod tests {
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         assert_eq!(app.state.mobile_switcher_scroll, 2);
 
+        let workspace_row = (viewport.y..viewport.y + viewport.height)
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, viewport.x + 4, *row),
+                    Some(crate::ui::MobileSwitcherTarget::Workspace(1))
+                )
+            })
+            .expect("second workspace row");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 4,
-            viewport.y + 3,
+            workspace_row,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -4372,10 +4342,18 @@ mod tests {
             viewport.y,
         ));
         assert_eq!(app.state.mobile_switcher_scroll, 4);
+        let tab_row = (viewport.y..viewport.y + viewport.height)
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, viewport.x + 2, *row),
+                    Some(crate::ui::MobileSwitcherTarget::Tab(2))
+                )
+            })
+            .expect("third tab row");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 5,
+            tab_row,
         ));
         assert_eq!(app.state.workspaces[0].active_tab, 2);
     }
@@ -4473,10 +4451,18 @@ mod tests {
             switch.y + 1,
         ));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let new_tab_row = (viewport.y..viewport.y + viewport.height)
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, viewport.x + 2, *row),
+                    Some(crate::ui::MobileSwitcherTarget::NewTab)
+                )
+            })
+            .expect("new tab row");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 6,
+            new_tab_row,
         ));
 
         assert_eq!(app.state.mode, Mode::RenameTab);
@@ -4503,10 +4489,18 @@ mod tests {
         ));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
 
+        let new_tab_row = (viewport.y..viewport.y + viewport.height)
+            .find(|row| {
+                matches!(
+                    crate::ui::mobile_switcher_target_at(&app.state, viewport.x + 2, *row),
+                    Some(crate::ui::MobileSwitcherTarget::NewTab)
+                )
+            })
+            .expect("new tab row");
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             viewport.x + 2,
-            viewport.y + 6,
+            new_tab_row,
         ));
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(!app.state.creating_new_tab);

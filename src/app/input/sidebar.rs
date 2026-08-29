@@ -267,8 +267,7 @@ impl AppState {
                 crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
                 crate::ui::SidebarRow::Agent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
-                | crate::ui::SidebarRow::SectionHeader { .. }
-                | crate::ui::SidebarRow::PrioPanel { .. } => None,
+                | crate::ui::SidebarRow::SectionHeader { .. } => None,
             })
     }
 
@@ -288,8 +287,7 @@ impl AppState {
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. }
-                | crate::ui::SidebarRow::SectionHeader { .. }
-                | crate::ui::SidebarRow::PrioPanel { .. } => None,
+                | crate::ui::SidebarRow::SectionHeader { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -423,42 +421,6 @@ impl AppState {
             .into_iter()
             .find(|card| row >= card.rect.y && row < card.rect.y + card.rect.height)
             .map(|card| (card.ws_idx, card.tab_idx))
-    }
-
-    pub(super) fn tab_prio_target_at(&self, column: u16, row: u16) -> Option<(usize, usize)> {
-        if self.sidebar_collapsed {
-            return None;
-        }
-        crate::ui::compute_tab_card_areas(self, self.view.sidebar_rect)
-            .into_iter()
-            .find(|card| {
-                let target = crate::ui::tab_prio_rect(card);
-                column >= target.x
-                    && column < target.x.saturating_add(target.width)
-                    && row >= target.y
-                    && row < target.y.saturating_add(target.height)
-            })
-            .map(|card| (card.ws_idx, card.tab_idx))
-    }
-
-    pub(super) fn prio_panel_target_at(&self, column: u16, row: u16) -> Option<(usize, usize)> {
-        if self.sidebar_collapsed {
-            return None;
-        }
-        let row_areas = if self.view.prio_panel_row_areas.is_empty() {
-            crate::ui::compute_prio_panel_row_areas(self, self.view.sidebar_rect)
-        } else {
-            self.view.prio_panel_row_areas.clone()
-        };
-        row_areas
-            .into_iter()
-            .find(|target| {
-                column >= target.rect.x
-                    && column < target.rect.x + target.rect.width
-                    && row >= target.rect.y
-                    && row < target.rect.y + target.rect.height
-            })
-            .map(|target| (target.ws_idx, target.tab_idx))
     }
 }
 
@@ -1223,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_group_header_folds_and_unfolds_that_group() {
+    fn clicking_the_spaces_header_folds_and_unfolds_the_tree() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
         app.state.ensure_test_terminals();
@@ -1243,8 +1205,8 @@ mod tests {
             app.state.view.sidebar_rect,
         )
         .into_iter()
-        .find(|header| header.title == crate::ui::BLOCKED_SECTION_TITLE)
-        .expect("a blocked agent opens the group");
+        .find(|header| header.title == crate::ui::SPACES_SECTION_TITLE)
+        .expect("the Spaces header is always present");
         let rows_open = crate::ui::sidebar_rows(&app.state).len();
 
         app.handle_mouse(mouse(
@@ -1255,7 +1217,7 @@ mod tests {
         assert!(app
             .state
             .collapsed_sidebar_groups
-            .contains(crate::ui::BLOCKED_SECTION_TITLE));
+            .contains(crate::ui::SPACES_SECTION_TITLE));
         assert!(crate::ui::sidebar_rows(&app.state).len() < rows_open);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
@@ -1293,7 +1255,7 @@ mod tests {
         let screen = Rect::new(0, 0, 106, 40);
         crate::ui::compute_view(&mut app.state, screen);
         let area = app.state.view.sidebar_rect;
-        let card = crate::ui::compute_agent_card_areas(&app.state, area)
+        let card = crate::ui::compute_tab_card_areas(&app.state, area)
             .into_iter()
             .find(|card| card.pane_id == blocked_pane)
             .expect("blocked worklist row should be clickable");

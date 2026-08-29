@@ -436,10 +436,6 @@ impl PaneTerminal {
         self.ghostty.recent_unwrapped_text_snapshot(lines)
     }
 
-    pub(crate) fn background_detection_text(&self, lines: usize) -> String {
-        self.ghostty.background_detection_text(lines)
-    }
-
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
         self.ghostty.recent_unwrapped_ansi(lines)
     }
@@ -1961,14 +1957,6 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
-    pub(crate) fn background_detection_text(&self, lines: usize) -> String {
-        self.core
-            .lock()
-            .ok()
-            .and_then(|core| ghostty_background_detection_text(&core, lines).ok())
-            .unwrap_or_default()
-    }
-
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
         self.recent_unwrapped_ansi_snapshot(lines).text
     }
@@ -2628,38 +2616,6 @@ fn ghostty_recent_text_unwrapped_for_terminal(
         (cols.saturating_sub(1), end as u32),
         false,
     )
-}
-
-fn ghostty_background_detection_text(
-    core: &GhosttyPaneCore,
-    lines: usize,
-) -> Result<String, crate::ghostty::Error> {
-    let total_rows = core.terminal.total_rows()?;
-    let viewport_rows = usize::from(core.terminal.rows()?);
-    let cols = core.terminal.cols()?;
-    if total_rows == 0 || viewport_rows == 0 || cols == 0 || lines == 0 {
-        return Ok(String::new());
-    }
-
-    // Establish liveness from the current screen, not scrollback. Once the
-    // last nonblank live row is known, read backward far enough to recover a
-    // soft-wrapped footer whose prefix has scrolled above a narrow viewport.
-    let live_start = total_rows.saturating_sub(viewport_rows);
-    let Some(end) = (live_start..total_rows).rev().find(|row| {
-        u32::try_from(*row)
-            .ok()
-            .and_then(|row| ghostty_screen_row(&core.terminal, cols, row).ok())
-            .is_some_and(|text| !text.trim().is_empty())
-    }) else {
-        return Ok(String::new());
-    };
-    let start = end.saturating_add(1).saturating_sub(lines);
-    let rows = core.terminal.screen_text_rows_range(start, end + 1)?;
-    let retained =
-        RetainedTextBuffer::new_search(cols, rows, u32::try_from(start).unwrap_or(u32::MAX));
-    Ok(lines_to_text(
-        retained.lines.into_iter().map(|line| line.text).collect(),
-    ))
 }
 
 fn ghostty_recent_ansi_for_terminal(
@@ -5065,50 +5021,6 @@ mod tests {
 
         assert_eq!(pane.recent_text(3), "ABCDE\nFGHIJ\n");
         assert_eq!(pane.recent_unwrapped_text(3), "ABCDEFGHIJ");
-    }
-
-    #[test]
-    fn background_job_probe_retains_a_footer_taller_than_the_viewport() {
-        let (tx, _rx) = mpsc::channel(4);
-        let footer = "4 background terminals running · /ps to view · /stop to close";
-        let mut terminal = crate::ghostty::Terminal::new(1, 3, 100).unwrap();
-        terminal.write(footer.as_bytes());
-        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
-
-        assert!(!pane.detection_text().contains("4 background"));
-        let background_content = pane.background_detection_text(512);
-        assert_eq!(
-            crate::detect::background_job_count(
-                Some(crate::detect::Agent::Codex),
-                &background_content
-            ),
-            Some(4)
-        );
-
-        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[2J\x1b[H", &tx);
-        let stale_content = pane.background_detection_text(512);
-        assert_eq!(
-            crate::detect::background_job_count(Some(crate::detect::Agent::Codex), &stale_content),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn background_job_probe_accepts_a_live_footer_above_unused_rows() {
-        let (tx, _rx) = mpsc::channel(4);
-        let footer = "4 background terminals running · /ps to view · /stop to close";
-        let mut terminal = crate::ghostty::Terminal::new(80, 10, 100).unwrap();
-        terminal.write(footer.as_bytes());
-        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-
-        let background_content = pane.background_detection_text(512);
-        assert_eq!(
-            crate::detect::background_job_count(
-                Some(crate::detect::Agent::Codex),
-                &background_content
-            ),
-            Some(4)
-        );
     }
 
     #[test]

@@ -532,7 +532,8 @@ pub struct KeysConfig {
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
-    pub toggle_status_detail: BindingConfig,
+    /// Toggle the sidebar blocked filter. Default: "prefix+f".
+    pub toggle_blocked_filter: BindingConfig,
     /// Toggle dock collapse. Default: ["prefix+shift+e", "ctrl+alt+d"]
     pub toggle_dock: BindingConfig,
     /// Select the previous dock tab. Default: "prefix+shift+["
@@ -700,6 +701,8 @@ pub(crate) struct KeysConfigOverlay {
     toggle_sidebar: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_blocked_filter: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     toggle_dock: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_dock_tab: Option<BindingConfig>,
@@ -804,7 +807,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_pin_tab);
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
-        apply_field!(toggle_status_detail);
+        apply_field!(toggle_blocked_filter);
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
         apply_field!(next_dock_tab);
@@ -927,7 +930,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_pin_tab, keybinds.toggle_pin_tab);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
-        copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
+        copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
         copy_effective_action_field!(next_dock_tab, keybinds.next_dock_tab);
@@ -1289,7 +1292,7 @@ impl Default for KeysConfig {
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
-            toggle_status_detail: BindingConfig::one("prefix+shift+m"),
+            toggle_blocked_filter: BindingConfig::one("prefix+f"),
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
             next_dock_tab: BindingConfig::one("prefix+shift+]"),

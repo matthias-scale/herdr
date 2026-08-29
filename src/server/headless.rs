@@ -6865,9 +6865,9 @@ next_tab = ""
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
         server.app.state.mode = crate::app::Mode::Terminal;
-        // Sidebar ages are minute-granular (`<1m`, `1m`, …), so start just shy
-        // of the first minute boundary to keep the boundary wait short.
-        let started = Instant::now() - Duration::from_millis(59_900);
+        // Sidebar ages are minute-granular (`1m`, `2m`, …), so start just shy
+        // of the second minute boundary to keep the boundary wait short.
+        let started = Instant::now() - Duration::from_secs(119);
         server
             .app
             .state
@@ -6904,7 +6904,8 @@ next_tab = ""
                 .expect("initial clock frame"),
         );
         let first_text = frame_text(&first);
-        assert!(first_text.contains("<1m ago"), "{first_text:?}");
+        assert!(first_text.contains("1m"), "{first_text:?}");
+        assert!(!first_text.contains("ago"), "{first_text:?}");
 
         let deadline = server
             .app
@@ -6924,8 +6925,8 @@ next_tab = ""
                 .expect("advanced clock frame"),
         );
         let second_text = frame_text(&second);
-        assert!(second_text.contains("1m ago"), "{second_text:?}");
-        assert!(!second_text.contains("<1m ago"), "{second_text:?}");
+        assert!(second_text.contains("2m"), "{second_text:?}");
+        assert!(!second_text.contains("ago"), "{second_text:?}");
         assert_ne!(first, second);
     }
 

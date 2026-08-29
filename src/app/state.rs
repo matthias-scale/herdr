@@ -674,13 +674,6 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PrioPanelRowArea {
-    pub ws_idx: usize,
-    pub tab_idx: usize,
-    pub rect: Rect,
-}
-
 /// Attach-local sidebar state. The headless server swaps one instance into
 /// `AppState` while routing input or rendering for that client; the monolithic
 /// app keeps its own instance directly.
@@ -919,7 +912,6 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
-    pub prio_panel_row_areas: Vec<PrioPanelRowArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -948,8 +940,7 @@ pub struct ViewState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
-    Home,
-    Inbox,
+    BlockedFilter,
     Scratchpad,
     Dock,
     /// Expand or collapse the usage detail in the status row.
@@ -1746,6 +1737,8 @@ pub struct AppState {
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    /// Whether the sidebar is showing only rows that require human attention.
+    pub blocked_filter: bool,
     /// Whether the desktop focused-pane work-context panel is expanded.
     pub info_panel_expanded: bool,
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
@@ -2401,7 +2394,6 @@ impl AppState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
-                prio_panel_row_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -2460,6 +2452,7 @@ impl AppState {
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            blocked_filter: false,
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             prio_panel_collapsed: false,
