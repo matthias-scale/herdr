@@ -5029,6 +5029,7 @@ pub fn run_server() -> io::Result<()> {
             event_hub,
         );
         seed_startup_workspace_if_empty(&mut app);
+        app.state.open_home_on_launch(&loaded_config.config);
 
         // The server runs headless — disable local notification side effects.
         // Sound and terminal notifications are forwarded to connected clients
@@ -5139,6 +5140,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
         app.local_input_source_switch = false;
+        app.state.open_home_on_launch(&loaded_config.config);
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(

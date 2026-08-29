@@ -123,6 +123,25 @@ impl AppState {
             return None;
         }
 
+        // Home covers the panes, so every event inside its frame is consumed:
+        // otherwise a click that misses a row reaches the pane hidden behind it
+        // and silently moves focus. The status bar sits outside this rect, so
+        // its buttons — including the home button — keep working.
+        if self.home.is_some()
+            && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
+        {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.home_row_at(mouse.column, mouse.row) {
+                    let queue = self.blocked_agents();
+                    if let Some(home) = self.home.as_mut() {
+                        home.select(index);
+                    }
+                    self.jump_to_selected_home_agent(&queue);
+                }
+            }
+            return None;
+        }
+
         if self.mode == Mode::Terminal
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -1352,6 +1371,32 @@ impl AppState {
         let idx = self.tab_at(col, row)?;
         let rect = self.view.tab_hit_areas.get(idx)?;
         (rect.width > 1 && col == rect.x).then_some(idx)
+    }
+
+    fn point_in_rect(&self, rect: Rect, col: u16, row: u16) -> bool {
+        rect.width > 0
+            && rect.height > 0
+            && col >= rect.x
+            && col < rect.right()
+            && row >= rect.y
+            && row < rect.bottom()
+    }
+
+    /// Queue index of the home row under the pointer.
+    ///
+    /// Empty hit areas mean home is closed, so this needs no separate check.
+    pub(super) fn home_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.view
+            .home_row_hit_areas
+            .iter()
+            .find_map(|(index, area)| {
+                (area.width > 0
+                    && row >= area.y
+                    && row < area.y + area.height
+                    && col >= area.x
+                    && col < area.x + area.width)
+                    .then_some(*index)
+            })
     }
 
     pub(super) fn on_tab_bar(&self, col: u16, row: u16) -> bool {

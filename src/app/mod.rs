@@ -711,6 +711,7 @@ impl App {
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
+                home_row_hit_areas: Vec::new(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
                 dock_rect: Rect::default(),
@@ -2319,6 +2320,20 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn opening_home_on_launch_is_a_no_op_when_the_config_turns_it_off() {
+        let mut app = test_app();
+        assert!(app.state.home.is_none(), "the constructor opens nothing");
+
+        let mut config = Config::default();
+        config.ui.show_home_on_start = false;
+        app.state.open_home_on_launch(&config);
+        assert!(app.state.home.is_none());
+
+        app.state.open_home_on_launch(&Config::default());
+        assert!(app.state.home.is_some(), "home is the launch screen");
     }
 
     #[cfg(unix)]

@@ -424,6 +424,13 @@ fn compute_view_internal(
         dock_body_rect,
     ) = dock_geometry(dock_area, app.dock_collapsed);
 
+    let home_row_hit_areas = if app.home.is_some() {
+        let queue = app.blocked_agents();
+        home::row_hit_areas(app, &queue, terminal_area)
+    } else {
+        Vec::new()
+    };
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
@@ -467,6 +474,7 @@ fn compute_view_internal(
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
+        home_row_hit_areas,
         pane_infos,
         split_borders,
         dock_rect: dock_area,
@@ -594,6 +602,13 @@ fn compute_mobile_view(
         .map(|_| mobile_toast_banner_rect(area, app.config_diagnostic.is_some()))
         .unwrap_or_default();
 
+    let home_row_hit_areas = if app.home.is_some() {
+        let queue = app.blocked_agents();
+        home::row_hit_areas(app, &queue, terminal_area)
+    } else {
+        Vec::new()
+    };
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         status_bar_rect: Rect::default(),
@@ -615,6 +630,7 @@ fn compute_mobile_view(
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
+        home_row_hit_areas,
         pane_infos,
         split_borders,
         dock_rect: Rect::default(),

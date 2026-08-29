@@ -1055,6 +1055,8 @@ pub struct UiConfig {
     /// Saved values are "spaces" or "priority". Default: "spaces".
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
+    /// Open the home view on launch. Default: true.
+    pub show_home_on_start: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
@@ -1328,6 +1330,7 @@ impl Default for UiConfig {
             show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
             tab_bar_position: TabBarPositionConfig::Top,
+            show_home_on_start: true,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
@@ -1624,6 +1627,14 @@ tab_bar_position = "bottom"
         assert!(config.ui.hide_tab_bar_when_single_tab);
         assert!(!config.ui.show_subscription_usage);
         assert_eq!(config.ui.tab_bar_position, TabBarPositionConfig::Bottom);
+    }
+
+    #[test]
+    fn show_home_on_start_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().ui.show_home_on_start);
+        let config: Config =
+            toml::from_str("[ui]\nshow_home_on_start = false\n").expect("parse config");
+        assert!(!config.ui.show_home_on_start);
     }
 
     #[test]

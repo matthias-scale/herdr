@@ -932,6 +932,8 @@ pub struct ViewState {
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
     pub toast_hit_area: Rect,
+    /// `(queue index, row rect)` for each row the home view is showing.
+    pub home_row_hit_areas: Vec<(usize, Rect)>,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
     pub dock_rect: Rect,
@@ -2395,6 +2397,7 @@ impl AppState {
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
+                home_row_hit_areas: Vec::new(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
                 dock_rect: Rect::default(),

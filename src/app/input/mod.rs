@@ -1394,6 +1394,71 @@ mod tests {
         (app, pane_ids)
     }
 
+    #[tokio::test]
+    async fn clicking_a_home_row_selects_it_and_jumps_to_that_pane() {
+        let (mut app, pane_ids) = app_with_blocked_home_rows(3);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+
+        let hits = app.state.view.home_row_hit_areas.clone();
+        assert_eq!(hits.len(), 3, "every blocked row should be clickable");
+
+        // Click the second row rather than the first, so a jump proves the
+        // click chose the row instead of the cursor happening to be there.
+        let (index, rect) = hits[1];
+        let queue = app.state.blocked_agents();
+        let target = queue[index].pane_id;
+        assert_ne!(target, pane_ids[0]);
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        assert!(app.state.home.is_none(), "a jump leaves home");
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+    }
+
+    #[tokio::test]
+    async fn clicking_off_the_home_rows_neither_jumps_nor_closes_home() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let before = app.state.workspaces[0].focused_pane_id();
+
+        // The hint row at the bottom of the home frame is not a row.
+        let terminal_area = app.state.view.terminal_area;
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: terminal_area.x + 1,
+                row: terminal_area.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        assert!(app.state.home.is_some());
+        // Home covers the panes, so the click must not reach the one behind it.
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), before);
+    }
+
+    #[test]
+    fn home_row_hit_areas_are_dropped_as_soon_as_home_closes() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        assert!(!app.state.view.home_row_hit_areas.is_empty());
+
+        app.state.clear_home();
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+
+        assert!(app.state.view.home_row_hit_areas.is_empty());
+        assert_eq!(app.state.home_row_at(30, 3), None);
+    }
+
     #[test]
     fn opening_home_and_inbox_closes_the_other_overlay() {
         let mut app = test_app();
