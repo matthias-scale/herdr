@@ -620,6 +620,18 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.home",
+          "type": "keybinding",
+          "default": "[\"prefix+shift+o\", \"ctrl+alt+o\"]",
+          "description": "Open the home view."
+        },
+        {
+          "key": "keys.toggle_status_detail",
+          "type": "keybinding",
+          "default": "\"prefix+shift+m\"",
+          "description": "Expand or collapse usage detail in the status bar."
+        },
+        {
           "key": "keys.toggle_dock",
           "type": "keybinding",
           "default": "[\"prefix+shift+e\", \"ctrl+alt+d\"]",
@@ -831,6 +843,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Show local Codex and Claude Code subscription usage in the info panel."
+        },
+        {
+          "key": "ui.status_bar_expanded",
+          "type": "boolean",
+          "default": "false",
+          "description": "Start with the status bar expanded, showing usage percentages and reset times instead of bars alone."
         },
         {
           "key": "ui.status_bar.enabled",

@@ -303,9 +303,19 @@ Opening a completed tab clears `done` without moving it.
 
 ### Status row
 
-Desktop layouts show a right-aligned, full-width status row above the tab bar. Its only visible fields are Git branch, device name, CPU, then memory; the left side stays blank. The literal `CPU` and `MEM` segments stay visible at desktop widths; metrics use percent and GiB and show `CPU --%` or `MEM --/-- GiB` when a sample is unavailable. The row does not display a folder, Herdr version, session, workspace, tab, or pane identity or sample network details or usernames, and it does not show battery, date, or time. As the terminal narrows, branch then device name disappear.
+Desktop layouts show a right-aligned, full-width status row above the tab bar. Its visible fields are subscription usage per provider account, an offline dot, an agent dot, device name, CPU, memory, and disk; the left side carries the quick-access buttons. Each value is a filled column, `▁` through `█`, coloured green below 80%, yellow from 80%, red from 90%.
 
-The sampler starts when a renderable status row first exists, refreshes every two seconds with at most one sample in flight, and retries failures at the next interval. Samples that reach four seconds old are discarded so unavailable values render instead. CPU and memory metrics come from native APIs or local proc files.
+Provider blocks read `CC`, `CX`, and `KI` for Claude, Codex, and Kimi, each followed by a short account code and one column per quota window, five-hour first and seven-day second. Codex reports no five-hour window on plans that do not have one, so it shows a single column. A source older than its freshness budget renders dim rather than asserting a number, and a window whose reset has already passed is dropped entirely.
+
+The agent dot counts agents on this machine, turning red and reading `● 5/2` when two of the five are blocked. The offline dot is a lone red `●` and is invisible while the connection is up. Disk appears only at 80% or above and hides again below 78%, so a volume sitting at the threshold does not flicker.
+
+The row does not display a Git branch, folder, Herdr version, session, workspace, tab, or pane identity, or usernames, and it does not show battery, date, or time. As the terminal narrows, Kimi, then Codex, then Claude, then the device name disappear; CPU and memory always survive. An unavailable metric renders `CPU -`.
+
+The sampler starts when a renderable status row first exists, refreshes every two seconds with at most one sample in flight, and retries failures at the next interval. Samples that reach four seconds old are discarded so unavailable values render instead. CPU, memory, and disk metrics come from native APIs or local proc files; on macOS the disk figure measures the data volume, which is the one that fills.
+
+Quota is read every 60 seconds off the render thread, from sources that are already on disk or already installed: the Claude Code statusline cache, the newest Codex rollout record, and `kimi-usage`. No provider API is called, so an unreachable network costs a dim segment rather than a stalled frame. Reachability itself is one TCP connection every ten seconds, and two consecutive failures are required before the row calls the machine offline.
+
+`ui.status_bar_expanded` starts the row expanded, adding the percentage and the time to reset beside every column. `keys.toggle_status_detail` (default `prefix+shift+m`) and the `▸`/`▾` button toggle it at runtime. Any window at 88% or above shows its number and reset time without expanding.
 
 ```toml
 [ui.status_bar]
