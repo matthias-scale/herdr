@@ -3627,8 +3627,26 @@ mod tests {
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>();
 
+        // Two shapes only: blocked and done-unread are both `○`, and the palette
+        // separates them. Asserting the glyph alone would no longer distinguish them.
         assert!(text.iter().any(|line| line.contains('○')), "{text:?}");
-        assert!(text.iter().any(|line| line.contains('◆')), "{text:?}");
+        assert!(
+            !text.iter().any(|line| line.contains('◆')),
+            "done-unread must not reintroduce a third dot shape: {text:?}"
+        );
+
+        let buffer = terminal.backend().buffer();
+        let dot_colors = (0..area.height)
+            .filter_map(|row| {
+                (0..area.width - 1)
+                    .find(|x| buffer[(*x, row)].symbol() == "○")
+                    .map(|x| buffer[(x, row)].style().fg)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            dot_colors.len() >= 2,
+            "blocked and done-unread share a shape, so they must differ by colour: {dot_colors:?}"
+        );
     }
 
     #[test]
