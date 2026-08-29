@@ -165,8 +165,33 @@ pub(crate) fn sample_status_metrics(
         cpu_percent,
         mem_used_gib,
         mem_total_gib,
+        disk_percent: status_disk_percent(),
         hostname,
     }
+}
+
+/// Free space on the system drive. Windows reports the caller's quota-adjusted
+/// free bytes, which is the figure that decides whether a write succeeds.
+fn status_disk_percent() -> Option<u8> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let root: Vec<u16> = "C:\\\0".encode_utf16().collect();
+    let mut available = 0u64;
+    let mut total = 0u64;
+    // SAFETY: both out-params are valid for the call and `root` is NUL-terminated.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            root.as_ptr(),
+            &mut available,
+            &mut total,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || total == 0 || available > total {
+        return None;
+    }
+    let used = total - available;
+    u8::try_from((u128::from(used) * 100).div_ceil(u128::from(total))).ok()
 }
 
 #[cfg(test)]

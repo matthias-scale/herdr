@@ -45,13 +45,23 @@ pub(crate) fn sample_status_metrics(
         .and_then(status_used_memory_bytes)
         .map(|value| value as f32 / 1_073_741_824.0);
     let cpu_percent = status_cpu_ticks().and_then(|(idle, total)| sampler.cpu_percent(idle, total));
+    let disk_percent = status_disk_percent();
 
     super::status_metrics::StatusMetrics {
         cpu_percent,
         mem_used_gib,
         mem_total_gib,
+        disk_percent,
         hostname,
     }
+}
+
+/// On modern macOS the sealed system volume never grows, so `/` reports a
+/// reassuring number while the data volume is the one that actually fills.
+/// Measure the data volume and fall back to `/` only where it does not exist.
+fn status_disk_percent() -> Option<u8> {
+    super::unix_common::volume_used_percent(c"/System/Volumes/Data")
+        .or_else(|| super::unix_common::volume_used_percent(c"/"))
 }
 
 fn status_hostname() -> String {

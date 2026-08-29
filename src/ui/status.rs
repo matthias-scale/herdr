@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::PathBuf;
 
 use ratatui::{
@@ -8,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width, display_width_u16, truncate_end};
+use super::text::{display_width, display_width_u16};
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{
@@ -22,12 +23,17 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: branch · device · CPU · memory. The row before the
-/// first surviving segment is intentionally blank.
+/// Contents, left to right: provider quota (Claude, Codex, Kimi) · offline dot ·
+/// agent dot · device · CPU · memory · disk. The row before the first surviving
+/// segment is intentionally blank.
+///
+/// Every value is a filled column because the question the row answers is "is
+/// anything close to its ceiling", not "what is the exact number". Expanded
+/// mode adds the numbers and the reset times back.
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
-/// first surviving segment. On narrow widths, branch then device elide in that
-/// order; CPU and memory remain required.
+/// first surviving segment. On narrow widths Kimi, then Codex, then Claude,
+/// then the device elide in that order; CPU and memory remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -118,6 +124,18 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             " dock ".to_string(),
             !app.dock_collapsed,
         ),
+        // The toggle sits with the other affordances rather than beside the
+        // usage it expands: the row's right edge moves as segments elide, and a
+        // button that moves is a button nobody learns.
+        (
+            StatusButtonAction::StatusDetail,
+            if app.status_bar_expanded {
+                " \u{25be} ".to_string()
+            } else {
+                " \u{25b8} ".to_string()
+            },
+            app.status_bar_expanded,
+        ),
     ];
 
     // The right-aligned segments are load-bearing; buttons yield to them rather
@@ -199,7 +217,83 @@ fn fitted_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
 }
 
 pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
-    1 + display_width(" CPU 100% ") + display_width(" MEM 9999.9/9999.9 GiB ")
+    1 + display_width(" CPU \u{2588} 100 ") + display_width(" MEM \u{2588} 100 ")
+}
+
+/// The eight fill levels of a column glyph, from shortest to full.
+const FILL_LEVELS: [char; 8] = [
+    '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
+];
+/// A window at or above this fill reports its number and reset time even in
+/// compact mode. The one moment the exact figure matters is the moment the
+/// human should not have to press a key to see it.
+const ESCALATION_PERCENT: u8 = 88;
+const WARN_PERCENT: u8 = 80;
+const CRITICAL_PERCENT: u8 = 90;
+const DOT: char = '\u{25cf}';
+
+/// Maps a percentage onto a column glyph. Zero still draws the shortest column
+/// rather than a blank, so a present-but-idle account stays visibly present.
+pub(crate) fn fill_glyph(percent: u8) -> char {
+    let index = usize::from(percent.min(100)) * FILL_LEVELS.len() / 101;
+    FILL_LEVELS[index.min(FILL_LEVELS.len() - 1)]
+}
+
+fn load_color(percent: u8, p: &Palette) -> Color {
+    match percent {
+        percent if percent >= CRITICAL_PERCENT => p.red,
+        percent if percent >= WARN_PERCENT => p.yellow,
+        _ => p.green,
+    }
+}
+
+/// One provider block: label, account code when it can be named, then one
+/// column per window in the order 5h, 7d.
+pub(crate) fn provider_segment_text(
+    label: &str,
+    usage: &crate::provider_usage::AccountUsage,
+    expanded: bool,
+    now_unix: Option<i64>,
+) -> Option<String> {
+    if usage.is_empty() {
+        return None;
+    }
+    let mut text = format!(" {label}");
+    if let Some(account) = &usage.account {
+        text.push(' ');
+        text.push_str(account);
+    }
+    for window in [usage.five_hour, usage.seven_day].into_iter().flatten() {
+        text.push(' ');
+        text.push(fill_glyph(window.used_percent));
+        // A number and a reset time are only actionable when the window is
+        // nearly spent, or when the human asked for detail. Otherwise they are
+        // noise in every frame of the day.
+        if expanded || window.used_percent >= ESCALATION_PERCENT {
+            text.push_str(&window.used_percent.to_string());
+            if let Some(reset) = window
+                .resets_at
+                .zip(now_unix)
+                .and_then(|(resets_at, now)| crate::provider_usage::reset_label(resets_at, now))
+            {
+                text.push(' ');
+                text.push_str(&reset);
+            }
+        }
+    }
+    text.push(' ');
+    Some(text)
+}
+
+fn provider_style(usage: &crate::provider_usage::AccountUsage, color: Color, p: &Palette) -> Style {
+    if usage.stale {
+        return Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+    }
+    match usage.peak_percent() {
+        Some(percent) if percent >= CRITICAL_PERCENT => Style::default().fg(p.red),
+        Some(percent) if percent >= WARN_PERCENT => Style::default().fg(p.yellow),
+        _ => Style::default().fg(color),
+    }
 }
 
 fn status_segments(
@@ -208,16 +302,50 @@ fn status_segments(
     p: &Palette,
 ) -> Vec<Segment> {
     let mut out = Vec::new();
+    let expanded = app.status_bar_expanded;
+    let now_unix = app.status_now_unix;
 
-    let (_, branch) = focused_context(app);
+    // Providers elide from the right of the group inwards: Kimi is the most
+    // recent addition and the least load-bearing, Claude the most.
+    for (label, usage, color, rank) in [
+        ("CC", &app.provider_usage.claude, p.peach, 3u8),
+        ("CX", &app.provider_usage.codex, p.blue, 2),
+        ("KI", &app.provider_usage.kimi, p.mauve, 1),
+    ] {
+        if let Some(text) = provider_segment_text(label, usage, expanded, now_unix) {
+            out.push(Segment {
+                text,
+                style: provider_style(usage, color, p),
+                preserve_bg: false,
+                elide_rank: Some(rank),
+            });
+        }
+    }
 
-    if let Some(branch) = branch {
-        let branch = shorten_branch(&branch, 20);
+    // Offline exists only when something is wrong, so it never elides: a row
+    // too narrow to say "offline" would rather drop a provider than drop the
+    // reason none of them can be reached.
+    if !app.connectivity.is_online() {
         out.push(Segment {
-            text: format!("  {branch} "),
-            style: Style::default().fg(p.yellow),
+            text: format!(" {DOT} "),
+            style: Style::default().fg(p.red),
             preserve_bg: false,
-            elide_rank: Some(1),
+            elide_rank: None,
+        });
+    }
+
+    let (agents, blocked) = app.agent_dot_counts();
+    if agents > 0 {
+        let text = if blocked > 0 {
+            format!(" {DOT} {agents}/{blocked} ")
+        } else {
+            format!(" {DOT} {agents} ")
+        };
+        out.push(Segment {
+            text,
+            style: Style::default().fg(if blocked > 0 { p.red } else { p.accent }),
+            preserve_bg: false,
+            elide_rank: Some(5),
         });
     }
 
@@ -225,41 +353,58 @@ fn status_segments(
         text: format!(" {} ", metrics.hostname),
         style: Style::default().fg(p.green),
         preserve_bg: false,
-        elide_rank: Some(2),
+        elide_rank: Some(4),
     });
 
-    out.push(Segment {
-        text: metrics
-            .cpu_percent
-            .filter(|cpu| *cpu <= 100)
-            .map(|cpu| format!(" CPU {cpu:>3}% "))
-            .unwrap_or_else(|| " CPU  --% ".into()),
-        style: Style::default().fg(p.red),
-        preserve_bg: false,
-        elide_rank: None,
-    });
-
-    let memory = match (metrics.mem_used_gib, metrics.mem_total_gib) {
-        (Some(used), Some(total))
-            if used.is_finite()
-                && total.is_finite()
-                && used >= 0.0
-                && total >= used
-                && total <= 9_999.9 =>
-        {
-            format!(" MEM {used:>6.1}/{total:>6.1} GiB ")
-        }
-        _ => " MEM     --/    -- GiB ".into(),
-    };
-    out.push(Segment {
-        text: memory,
-        style: Style::default().fg(p.yellow),
-        preserve_bg: false,
-        elide_rank: None,
-    });
+    out.push(metric_segment("CPU", metrics.cpu_percent, expanded, p));
+    out.push(metric_segment("MEM", memory_percent(metrics), expanded, p));
+    if crate::platform::status_metrics::disk_segment_visible(
+        metrics.disk_percent,
+        app.status_disk_visible,
+    ) {
+        out.push(metric_segment("DSK", metrics.disk_percent, expanded, p));
+    }
     out
 }
 
+/// Memory as a share of the installed total, the form that needs no arithmetic
+/// from the reader. The GiB figures stay in the info panel for anyone who wants
+/// the absolute numbers.
+pub(crate) fn memory_percent(
+    metrics: &crate::platform::status_metrics::StatusMetrics,
+) -> Option<u8> {
+    let used = metrics.mem_used_gib?;
+    let total = metrics.mem_total_gib?;
+    if !used.is_finite() || !total.is_finite() || total <= 0.0 || used < 0.0 || used > total {
+        return None;
+    }
+    Some((used / total * 100.0).round().clamp(0.0, 100.0) as u8)
+}
+
+fn metric_segment(label: &str, percent: Option<u8>, expanded: bool, p: &Palette) -> Segment {
+    let (text, color) = match percent.filter(|percent| *percent <= 100) {
+        Some(percent) if expanded => (
+            format!(" {label} {} {percent} ", fill_glyph(percent)),
+            load_color(percent, p),
+        ),
+        Some(percent) => (
+            format!(" {label} {} ", fill_glyph(percent)),
+            load_color(percent, p),
+        ),
+        None => (format!(" {label} - "), p.overlay0),
+    };
+    Segment {
+        text,
+        style: Style::default().fg(color),
+        preserve_bg: false,
+        elide_rank: None,
+    }
+}
+
+#[cfg(test)]
+/// Focused pane cwd and branch, still projected for consumers that need the
+/// Git context. The status row no longer renders the branch: it never changed
+/// within a workspace, so it cost a column without answering a question.
 pub(crate) fn focused_context(app: &AppState) -> (Option<PathBuf>, Option<String>) {
     let Some(ws_idx) = app.active else {
         return (None, None);
@@ -285,14 +430,6 @@ pub(crate) fn focused_context(app: &AppState) -> (Option<PathBuf>, Option<String
         None
     };
     (cwd, branch)
-}
-
-fn shorten_branch(branch: &str, max_width: usize) -> String {
-    if display_width(branch) <= max_width {
-        branch.to_string()
-    } else {
-        truncate_end(branch, max_width)
-    }
 }
 
 pub(crate) fn copy_feedback_rect(
@@ -757,8 +894,8 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("MEM    8.0/  16.0 GiB"));
-        assert!(rendered.contains("CPU  12%"));
+        assert!(rendered.contains("MEM ▄"));
+        assert!(rendered.contains("CPU ▁"));
         assert!(!rendered.contains("feature/very-long"));
     }
 
@@ -793,8 +930,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("CPU  12%"), "{rendered}");
-        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
+        assert!(rendered.contains("CPU ▁"), "{rendered}");
+        assert!(rendered.contains("MEM ▄"), "{rendered}");
     }
 
     #[test]
@@ -806,6 +943,7 @@ mod tests {
                 cpu_percent: Some(100),
                 mem_used_gib: Some(17_179_869_184.0),
                 mem_total_gib: Some(17_179_869_184.0),
+                disk_percent: None,
                 hostname: "host-with-a-long-device-name".into(),
             },
             sampled_at: std::time::Instant::now(),
@@ -835,6 +973,7 @@ mod tests {
                 cpu_percent: Some(100),
                 mem_used_gib: Some(9_999.9),
                 mem_total_gib: Some(9_999.9),
+                disk_percent: None,
                 hostname: "wide-metrics".into(),
             },
             sampled_at: std::time::Instant::now(),
@@ -868,8 +1007,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("CPU 100%"), "{rendered}");
-        assert!(rendered.contains("MEM 9999.9/9999.9 GiB"), "{rendered}");
+        assert!(rendered.contains("CPU \u{2588}"), "{rendered}");
+        assert!(rendered.contains("MEM \u{2588}"), "{rendered}");
         assert!(
             rendered.starts_with(' '),
             "left side must stay blank: {rendered:?}"
@@ -902,8 +1041,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
-        assert!(rendered.contains("CPU  12%"), "{rendered}");
+        assert!(rendered.contains("MEM ▄"), "{rendered}");
+        assert!(rendered.contains("CPU ▁"), "{rendered}");
         assert!(!rendered.contains("Herdr v"), "{rendered}");
     }
 
@@ -1020,8 +1159,8 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("MEM     --/    -- GiB"));
-        assert!(rendered.contains("CPU  --%"));
+        assert!(rendered.contains("MEM -"), "{rendered}");
+        assert!(rendered.contains("CPU -"), "{rendered}");
     }
 
     #[test]
@@ -1033,6 +1172,7 @@ mod tests {
                 cpu_percent: Some(12),
                 mem_used_gib: Some(8.0),
                 mem_total_gib: Some(16.0),
+                disk_percent: None,
                 hostname: "testhost".into(),
             },
             &app.palette,
@@ -1041,14 +1181,17 @@ mod tests {
             cpu_percent: Some(101),
             mem_used_gib: Some(10_000.0),
             mem_total_gib: Some(10_000.0),
+            disk_percent: None,
             hostname: "testhost".into(),
         };
         let rendered = status_segments(&app, &metrics, &app.palette)
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(rendered.contains("CPU  --%"), "{rendered}");
-        assert!(rendered.contains("MEM     --/    -- GiB"), "{rendered}");
+        assert!(rendered.contains("CPU -"), "{rendered}");
+        // A percentage has no magnitude ceiling, so a full volume of any size
+        // is expressible; only the impossible CPU reading falls back.
+        assert!(rendered.contains("MEM \u{2588}"), "{rendered}");
         let fallback = status_segments(&app, &metrics, &app.palette);
         assert_eq!(
             segment_width(&baseline),
@@ -1077,32 +1220,33 @@ mod tests {
     }
 
     #[test]
-    fn status_elision_drops_branch_then_device() {
+    fn status_elision_drops_providers_then_device() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
         app.active = Some(0);
-        app.status_focused_cwd = Some(PathBuf::from("/home/test/work/status"));
-        app.status_git_cwd = app.status_focused_cwd.clone();
-        app.status_git_branch = Some("feature/native-status".into());
+        app.provider_usage = usage_fixture();
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let full = status_segments(&app, &metrics, &app.palette);
 
+        // Kimi first, then Codex, then Claude, then the device: the row sheds
+        // the least load-bearing account before it sheds a required metric.
         assert_eq!(
             full.iter()
                 .filter_map(|segment| segment.elide_rank)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![3, 2, 1, 4]
         );
 
-        let without_branch = fitted_segments(
+        let without_kimi = fitted_segments(
             status_segments(&app, &metrics, &app.palette),
-            segment_width(&full) - display_width(&full[0].text),
+            segment_width(&full) - display_width(&full[2].text),
         );
-        let rendered = without_branch
+        let rendered = without_kimi
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(!rendered.contains("feature/native-stat"), "{rendered}");
+        assert!(!rendered.contains("KI"), "{rendered}");
+        assert!(rendered.contains("CC"), "{rendered}");
         assert!(rendered.contains("testhost"), "{rendered}");
 
         let optional_width = full
@@ -1118,11 +1262,46 @@ mod tests {
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
-        assert!(!rendered.contains("feature/native-status"), "{rendered}");
+        assert!(!rendered.contains("CC"), "{rendered}");
         assert!(!rendered.contains("testhost"), "{rendered}");
-        assert!(!rendered.contains("Herdr v"), "{rendered}");
-        assert!(rendered.contains("CPU  12%"), "{rendered}");
-        assert!(rendered.contains("MEM    8.0/  16.0 GiB"), "{rendered}");
+        assert!(rendered.contains("CPU \u{2581}"), "{rendered}");
+        assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
+    }
+
+    /// Two providers with known windows: Claude half-spent on the week, Codex
+    /// idle. Fixed values so the glyph a percentage maps to is asserted, not
+    /// assumed.
+    fn usage_fixture() -> crate::provider_usage::ProviderUsageSnapshot {
+        use crate::provider_usage::{AccountUsage, ProviderUsageSnapshot, QuotaWindow};
+        ProviderUsageSnapshot {
+            claude: AccountUsage {
+                account: Some("SHQ".into()),
+                five_hour: Some(QuotaWindow {
+                    used_percent: 6,
+                    resets_at: Some(2_000_000_000),
+                }),
+                seven_day: Some(QuotaWindow {
+                    used_percent: 56,
+                    resets_at: Some(2_000_100_000),
+                }),
+                stale: false,
+            },
+            codex: AccountUsage {
+                account: Some("SHQ".into()),
+                seven_day: Some(QuotaWindow {
+                    used_percent: 19,
+                    resets_at: Some(2_000_100_000),
+                }),
+                ..AccountUsage::default()
+            },
+            kimi: AccountUsage {
+                seven_day: Some(QuotaWindow {
+                    used_percent: 24,
+                    resets_at: Some(2_000_100_000),
+                }),
+                ..AccountUsage::default()
+            },
+        }
     }
 
     #[test]
@@ -1138,19 +1317,22 @@ mod tests {
         app.status_git_cwd = Some(PathBuf::from("/home/test/work/status"));
         app.status_focused_cwd = app.status_git_cwd.clone();
         app.status_git_branch = Some("feature/native-status".into());
+        app.provider_usage = usage_fixture();
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let segments = status_segments(&app, &metrics, &app.palette);
-        assert_eq!(segments.len(), 4, "all visible status context fields");
+        assert_eq!(segments.len(), 6, "three providers, device, CPU, memory");
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         let ordered = [
-            "feature/native-stat",
+            "CC SHQ \u{2581} \u{2585}",
+            "CX SHQ \u{2582}",
+            "KI \u{2582}",
             "testhost",
-            "CPU  12%",
-            "MEM    8.0/  16.0 GiB",
+            "CPU \u{2581}",
+            "MEM \u{2584}",
         ];
         let mut previous = 0;
         for value in ordered {
@@ -1160,33 +1342,40 @@ mod tests {
             assert!(index >= previous, "{value} is out of order: {rendered}");
             previous = index;
         }
+        // The branch went with the redesign: it never changed inside a
+        // workspace, so it cost a column and answered nothing. Percentages and
+        // reset times belong to expanded mode, not to every frame.
         for removed in [
+            "feature/native-stat",
             "testuser",
             "10.0.0.2",
-            "100.64.0.1",
-            "203.0.113.10",
-            "↓",
-            "↑",
             "session:",
             "workspace:",
-            "tab:",
-            "pane:",
             "~/work/status",
             "Herdr v",
-            "88%",
-            "2026-01-02",
-            "03:04",
+            "GiB",
+            "56",
+            "12%",
         ] {
             assert!(!rendered.contains(removed), "{removed}: {rendered}");
         }
         assert_eq!(
             segments
                 .iter()
-                .find(|segment| segment.text.contains("feature/native-stat"))
+                .find(|segment| segment.text.contains("CC "))
                 .unwrap()
                 .style
                 .fg,
-            Some(app.palette.yellow)
+            Some(app.palette.peach)
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .find(|segment| segment.text.contains("CX "))
+                .unwrap()
+                .style
+                .fg,
+            Some(app.palette.blue)
         );
         assert_eq!(
             segments
@@ -1197,24 +1386,220 @@ mod tests {
                 .fg,
             Some(app.palette.green)
         );
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains("MEM "))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.yellow)
+        // A load colour, not a fixed one: CPU and memory are read for how close
+        // they are to their ceiling, and 12% and 50% are both far from it.
+        for label in ["CPU ", "MEM "] {
+            assert_eq!(
+                segments
+                    .iter()
+                    .find(|segment| segment.text.contains(label))
+                    .unwrap()
+                    .style
+                    .fg,
+                Some(app.palette.green),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_glyphs_span_the_range_without_a_blank_at_zero() {
+        // Zero draws the shortest column, not nothing: an account that is
+        // present and idle must look different from an account that is absent.
+        assert_eq!(fill_glyph(0), '\u{2581}');
+        assert_eq!(fill_glyph(50), '\u{2584}');
+        assert_eq!(fill_glyph(100), '\u{2588}');
+        for percent in 0..=100u8 {
+            assert!(FILL_LEVELS.contains(&fill_glyph(percent)), "{percent}");
+        }
+        // Out-of-range input saturates rather than panicking on the index.
+        assert_eq!(fill_glyph(255), '\u{2588}');
+    }
+
+    #[test]
+    fn compact_hides_numbers_and_expanded_restores_them_with_reset_times() {
+        let mut app = AppState::test_new();
+        app.provider_usage = usage_fixture();
+        app.status_now_unix = Some(1_999_990_100);
+
+        let compact = status_segments(&app, &StatusMetrics::default(), &app.palette)
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(compact.contains("CC SHQ \u{2581} \u{2585}"), "{compact}");
+        assert!(!compact.contains("56"), "{compact}");
+
+        app.status_bar_expanded = true;
+        let expanded = status_segments(&app, &StatusMetrics::default(), &app.palette)
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(expanded.contains("\u{2585}56"), "{expanded}");
+        assert!(expanded.contains("2h45"), "{expanded}");
+    }
+
+    #[test]
+    fn a_nearly_spent_window_shows_its_number_without_expanding() {
+        // The one moment the exact figure matters, it appears unasked.
+        let mut app = AppState::test_new();
+        app.provider_usage = usage_fixture();
+        app.provider_usage.claude.seven_day = Some(crate::provider_usage::QuotaWindow {
+            used_percent: 94,
+            resets_at: Some(1_999_999_999),
+        });
+        app.status_now_unix = Some(1_999_990_100);
+
+        let rendered = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let claude = rendered
+            .iter()
+            .find(|segment| segment.text.contains("CC "))
+            .expect("claude segment");
+        assert!(claude.text.contains("\u{2588}94"), "{}", claude.text);
+        assert_eq!(claude.style.fg, Some(app.palette.red));
+    }
+
+    #[test]
+    fn a_stale_source_renders_dim_instead_of_asserting_its_numbers() {
+        let mut app = AppState::test_new();
+        app.provider_usage = usage_fixture();
+        app.provider_usage.codex.stale = true;
+
+        let segments = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let codex = segments
+            .iter()
+            .find(|segment| segment.text.contains("CX "))
+            .expect("codex segment");
+        assert_eq!(codex.style.fg, Some(app.palette.overlay0));
+        assert!(codex.style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn the_offline_dot_appears_only_while_offline_and_never_elides() {
+        let mut app = AppState::test_new();
+        let online = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        assert!(
+            !online.iter().any(|segment| segment.text.contains(DOT)),
+            "an online machine gets no dot"
         );
-        assert_eq!(
-            segments
-                .iter()
-                .find(|segment| segment.text.contains("CPU "))
-                .unwrap()
-                .style
-                .fg,
-            Some(app.palette.red)
+
+        app.connectivity.observe(false);
+        app.connectivity.observe(false);
+        let offline = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let dot = offline
+            .iter()
+            .find(|segment| segment.text.trim() == DOT.to_string())
+            .expect("offline dot");
+        assert_eq!(dot.style.fg, Some(app.palette.red));
+        assert!(dot.elide_rank.is_none(), "the reason must outlive the data");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_agent_dot_turns_red_and_carries_the_blocked_count() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("agents")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal")
+            .clone();
+        {
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.state = AgentState::Working;
+        }
+
+        let working = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let dot = working
+            .iter()
+            .find(|segment| segment.text.contains(DOT))
+            .expect("agent dot");
+        assert_eq!(dot.text.trim(), format!("{DOT} 1"));
+        assert_eq!(dot.style.fg, Some(app.palette.accent));
+
+        app.terminals.get_mut(&terminal_id).expect("terminal").state = AgentState::Blocked;
+        let blocked = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let dot = blocked
+            .iter()
+            .find(|segment| segment.text.contains(DOT))
+            .expect("agent dot");
+        assert_eq!(dot.text.trim(), format!("{DOT} 1/1"));
+        assert_eq!(dot.style.fg, Some(app.palette.red));
+    }
+
+    #[test]
+    fn disk_appears_only_when_it_is_news_and_holds_through_the_hysteresis_gap() {
+        use crate::platform::status_metrics::disk_segment_visible;
+
+        assert!(!disk_segment_visible(Some(41), false));
+        assert!(disk_segment_visible(Some(80), false));
+        // Between 78 and 80 the segment keeps whatever state it had, so a
+        // volume hovering at the threshold does not flicker every sample.
+        assert!(disk_segment_visible(Some(79), true));
+        assert!(!disk_segment_visible(Some(79), false));
+        assert!(!disk_segment_visible(Some(77), true));
+        assert!(!disk_segment_visible(None, true));
+
+        let mut app = AppState::test_new();
+        app.status_disk_visible = true;
+        let metrics = StatusMetrics {
+            disk_percent: Some(97),
+            ..crate::platform::status_metrics::status_metrics_fixture()
+        };
+        let rendered = status_segments(&app, &metrics, &app.palette);
+        let disk = rendered
+            .iter()
+            .find(|segment| segment.text.contains("DSK"))
+            .expect("disk segment");
+        assert!(disk.text.contains('\u{2588}'), "{}", disk.text);
+        assert_eq!(disk.style.fg, Some(app.palette.red));
+    }
+
+    #[test]
+    fn the_detail_button_mirrors_the_expanded_state() {
+        let mut app = AppState::test_new();
+        let collapsed = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        let toggle = collapsed.last().expect("toggle button");
+        assert_eq!(toggle.action, StatusButtonAction::StatusDetail);
+        assert_eq!(toggle.label.trim(), "\u{25b8}");
+        assert!(!toggle.active);
+
+        app.status_bar_expanded = true;
+        let expanded = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        let toggle = expanded.last().expect("toggle button");
+        assert_eq!(toggle.label.trim(), "\u{25be}");
+        assert!(toggle.active);
+    }
+
+    /// End-to-end evidence, run by hand: every provider, metric, and account
+    /// label comes from this machine's real sources rather than a fixture.
+    /// Ignored in CI, where none of those sources exist.
+    #[test]
+    #[ignore = "reads this machine's real usage caches"]
+    fn live_smoke_renders_both_modes_from_real_sources() {
+        let mut app = AppState::test_new();
+        app.provider_usage = crate::provider_usage::collect(
+            crate::provider_usage::now_unix(),
+            std::time::Instant::now(),
         );
+        app.status_now_unix = crate::provider_usage::now_unix();
+        app.status_disk_visible = true;
+
+        // CPU is a delta, so it needs two samples a sampling interval apart.
+        let mut sampler = crate::platform::status_metrics::StatusMetricSampler::new();
+        let _ = crate::platform::sample_status_metrics(&mut sampler);
+        std::thread::sleep(crate::platform::status_metrics::STATUS_METRIC_REFRESH_INTERVAL);
+        let metrics = crate::platform::sample_status_metrics(&mut sampler);
+
+        for expanded in [false, true] {
+            app.status_bar_expanded = expanded;
+            let row: String = status_segments(&app, &metrics, &app.palette)
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect();
+            println!("{} |{row}", if expanded { "expanded" } else { "compact " });
+        }
     }
 
     #[test]
@@ -1229,7 +1614,8 @@ mod tests {
                 StatusButtonAction::Home,
                 StatusButtonAction::Inbox,
                 StatusButtonAction::Scratchpad,
-                StatusButtonAction::Dock
+                StatusButtonAction::Dock,
+                StatusButtonAction::StatusDetail
             ]
         );
         assert_eq!(buttons[0].rect.x, 0);

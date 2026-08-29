@@ -333,12 +333,9 @@ mod tests {
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         let status = frame_rect_text(&frame, app.view.status_bar_rect);
         assert!(status.starts_with(' '), "{status:?}");
-        assert!(status.contains("CPU  12%"), "{status:?}");
-        assert!(status.contains("MEM    8.0/  16.0 GiB"), "{status:?}");
-        assert!(
-            status.trim_end().ends_with("MEM    8.0/  16.0 GiB"),
-            "{status:?}"
-        );
+        assert!(status.contains("CPU \u{2581}"), "{status:?}");
+        assert!(status.contains("MEM \u{2584}"), "{status:?}");
+        assert!(status.trim_end().ends_with("MEM \u{2584}"), "{status:?}");
         let text = frame_text(&frame);
         assert!(text.lines().any(|line| line.contains("Spaces")));
         assert!(!text
