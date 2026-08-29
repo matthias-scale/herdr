@@ -859,11 +859,12 @@
         {
           "key": "ui.tab_bar_position",
           "type": "enum",
-          "default": "\"top\"",
-          "description": "Place the desktop tab row above or below the terminal panes.",
+          "default": "\"hidden\"",
+          "description": "Place the desktop tab row above or below the terminal panes, or hide it.",
           "values": [
             "top",
-            "bottom"
+            "bottom",
+            "hidden"
           ]
         },
         {
