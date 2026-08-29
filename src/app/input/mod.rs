@@ -1234,6 +1234,9 @@ fn app_for_mouse_test() -> App {
         crate::api::EventHub::default(),
     );
     app.state.mode = Mode::Terminal;
+    // Deliberately not the shipped default (`Hidden`): these tests click on a
+    // tab row, so they need one.
+    app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
     app.state.update_available = None;
     app.state.latest_release_notes_available = false;
     app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 20);

@@ -3864,6 +3864,33 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_tab_bar_leaves_its_old_row_to_the_terminal() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.tab_bar_position = crate::config::TabBarPositionConfig::Hidden;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        assert!(app.state.view.tab_hit_areas.is_empty());
+        let terminal_area = app.state.view.terminal_area;
+        // The row the tab bar used to own belongs to the terminal now, so no
+        // column in it may still hit-test as a tab click.
+        for col in terminal_area.x..terminal_area.right() {
+            assert!(
+                !app.state.on_tab_bar(col, terminal_area.y),
+                "col {col} still reads as tab bar"
+            );
+            assert_eq!(app.state.tab_at(col, terminal_area.y), None);
+        }
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
     fn bottom_mode_bar_consumes_hidden_tab_mouse_actions() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");

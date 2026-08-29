@@ -242,21 +242,24 @@ fn desktop_tab_bar_and_terminal_area(
     main_area: Rect,
 ) -> (Rect, Rect) {
     let hide_single_tab_bar = app.hide_tab_bar_when_single_tab && ws.tabs.len() == 1;
-    if !hide_single_tab_bar && main_area.height > 1 {
-        match app.tab_bar_position {
-            crate::config::TabBarPositionConfig::Top => {
-                let [tab_bar_rect, terminal_area] =
-                    Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-                (tab_bar_rect, terminal_area)
-            }
-            crate::config::TabBarPositionConfig::Bottom => {
-                let [terminal_area, tab_bar_rect] =
-                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(main_area);
-                (tab_bar_rect, terminal_area)
-            }
+    if hide_single_tab_bar || main_area.height <= 1 {
+        return (Rect::default(), main_area);
+    }
+    match app.tab_bar_position {
+        crate::config::TabBarPositionConfig::Top => {
+            let [tab_bar_rect, terminal_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
+            (tab_bar_rect, terminal_area)
         }
-    } else {
-        (Rect::default(), main_area)
+        crate::config::TabBarPositionConfig::Bottom => {
+            let [terminal_area, tab_bar_rect] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(main_area);
+            (tab_bar_rect, terminal_area)
+        }
+        // An empty rect is the established "no tab row" shape here: the mode bar
+        // checks the height and hit-testing is rect-based, so nothing downstream
+        // needs to learn about hiding.
+        crate::config::TabBarPositionConfig::Hidden => (Rect::default(), main_area),
     }
 }
 
@@ -1324,6 +1327,38 @@ mod tests {
         assert_eq!(app.view.tab_bar_rect, Rect::default());
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
+    }
+
+    #[test]
+    fn a_hidden_tab_bar_gives_the_row_back_to_the_terminal() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Hidden;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.workspaces[0].test_add_tab(Some("logs"));
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Prefix;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        // Two tabs, so this is the hiding of the row itself rather than the
+        // pre-existing single-tab case.
+        assert_eq!(app.workspaces[0].tabs.len(), 2);
+        assert_eq!(app.view.tab_bar_rect, Rect::default());
+        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 53, 19));
+        assert!(app.view.tab_hit_areas.is_empty());
+        assert_eq!(app.view.new_tab_hit_area, Rect::default());
+
+        // The mode bar has no tab row to borrow, so it falls back to the
+        // terminal area and still renders.
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let mode_row = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.terminal_area,
+            app.view.terminal_area.bottom() - 1,
+        );
+        assert!(mode_row.contains("PREFIX"), "{mode_row}");
     }
 
     #[test]
