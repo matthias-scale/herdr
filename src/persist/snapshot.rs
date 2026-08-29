@@ -138,6 +138,25 @@ pub struct PaneAgentSessionSnapshot {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+    /// The blocked report that was live when the server stopped.
+    ///
+    /// Only `Blocked` is carried across a restart. Idle and Working are
+    /// re-derived from the screen within a frame of the pane coming back, but a
+    /// blocked agent says nothing further until a human answers it, so dropping
+    /// the report loses the one state that was waiting on someone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<PaneAgentBlockedSnapshot>,
+}
+
+/// The parts of a blocked hook report that outlive the process that made it.
+///
+/// Only the message: a declared `wait`/`eta_s` describes work in flight and is
+/// dropped for any report that is not `Working`, so a blocked report never has
+/// one to carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAgentBlockedSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -385,11 +404,19 @@ fn capture_tab(
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
+                    // A retired report no longer speaks for the pane, so it
+                    // must not be revived by a restart either.
+                    let blocked = (authority.state == crate::detect::AgentState::Blocked
+                        && authority.retired_at.is_none())
+                    .then(|| PaneAgentBlockedSnapshot {
+                        message: authority.message.clone(),
+                    });
                     return Some(PaneAgentSessionSnapshot {
                         source: authority.source.clone(),
                         agent: authority.agent_label.clone(),
                         kind: session_ref.kind,
                         value: session_ref.value.clone(),
+                        blocked,
                     });
                 }
             }
@@ -401,6 +428,8 @@ fn capture_tab(
                     agent: session.agent.clone(),
                     kind: session.session_ref.kind,
                     value: session.session_ref.value.clone(),
+                    // No live authority, so there is no report to carry.
+                    blocked: None,
                 })
         });
         panes.insert(
@@ -1629,6 +1658,98 @@ mod tests {
             crate::agent_resume::AgentSessionRefKind::Path
         );
         assert_eq!(agent_session.value, session_path);
+    }
+
+    /// Build a pane whose agent has reported `state` through the closing-block
+    /// hook, and return what capture wrote for it.
+    fn captured_agent_session_for_reported_state(
+        state_reported: crate::detect::AgentState,
+        retire: bool,
+    ) -> Option<PaneAgentSessionSnapshot> {
+        let mut state = state_with_workspaces(&["one"]);
+        let session_path = test_session_path("pi-session.jsonl");
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Idle,
+        );
+        // The hook report is only routed onto a pane whose session identity is
+        // already anchored, which is what the agent's own integration does.
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
+        });
+        terminal.set_hook_authority_report_at(
+            "herdr:pi".into(),
+            "pi".into(),
+            state_reported,
+            Some("needs a decision".into()),
+            Some("review".into()),
+            Some(90),
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_path.clone()),
+            Some(20),
+            std::time::Instant::now(),
+        );
+        if retire {
+            terminal.retire_blocked_full_lifecycle_hook_authority_at(std::time::Instant::now());
+        }
+
+        let snapshot = capture_from_state(&state);
+        snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_session
+            .clone()
+    }
+
+    #[test]
+    fn capture_carries_a_live_blocked_report_with_its_message() {
+        let session =
+            captured_agent_session_for_reported_state(crate::detect::AgentState::Blocked, false)
+                .expect("agent session should be captured");
+        let blocked = session
+            .blocked
+            .as_ref()
+            .expect("a live blocked report must survive capture");
+
+        assert_eq!(blocked.message.as_deref(), Some("needs a decision"));
+    }
+
+    #[test]
+    fn capture_leaves_a_working_report_unblocked() {
+        // Working is re-derived from the screen on restore, so persisting it
+        // would only let a stale report outrank live detection.
+        let session =
+            captured_agent_session_for_reported_state(crate::detect::AgentState::Working, false)
+                .expect("agent session should be captured");
+
+        assert_eq!(session.blocked, None);
+    }
+
+    #[test]
+    fn capture_drops_a_retired_blocked_report() {
+        // A retired report has stopped speaking for the pane; a restart must not
+        // be the thing that brings it back.
+        let session =
+            captured_agent_session_for_reported_state(crate::detect::AgentState::Blocked, true)
+                .expect("agent session should be captured");
+
+        assert_eq!(session.blocked, None);
+    }
+
+    #[test]
+    fn agent_session_without_a_blocked_field_loads_as_not_blocked() {
+        // Sessions written before this field existed must still parse.
+        let session: PaneAgentSessionSnapshot =
+            serde_json::from_str(r#"{"source":"herdr:pi","agent":"pi","kind":"id","value":"s1"}"#)
+                .expect("legacy agent session should parse");
+
+        assert_eq!(session.blocked, None);
     }
 
     #[test]

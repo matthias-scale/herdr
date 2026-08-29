@@ -589,6 +589,9 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
+            if initial_restore_agent.is_some() && !startup.duplicate_agent_session {
+                reseed_blocked_hook_authority(&mut terminal, saved_agent_session);
+            }
             panes.insert(*id, PaneState::new(terminal_id));
             terminals.push(terminal);
             continue;
@@ -694,6 +697,9 @@ fn restore_tab(
                         false,
                         std::time::Instant::now(),
                     );
+                }
+                if initial_restore_agent.is_some() && !startup.duplicate_agent_session {
+                    reseed_blocked_hook_authority(&mut terminal, saved_agent_session);
                 }
                 #[cfg(unix)]
                 {
@@ -901,6 +907,51 @@ fn restore_plan_for_snapshot(
     crate::agent_resume::plan(&session.source, &session.agent, &persisted.session_ref)
 }
 
+/// Put a saved `Blocked` report back on a pane whose agent is being resumed.
+///
+/// Restore otherwise seeds every resumed agent as `Idle`, which is right for a
+/// pane that will speak for itself: the screen re-derives Idle and Working
+/// almost immediately. A blocked agent is the exception, because it is waiting
+/// on a human and emits nothing until answered, so without this the pane comes
+/// back looking finished.
+///
+/// The report is stored, not trusted: `hook_authority_is_effective` still
+/// requires the agent process to be present in the pane, so a resume that never
+/// produces the agent shows no state here either.
+fn reseed_blocked_hook_authority(
+    terminal: &mut TerminalState,
+    session: Option<&PaneAgentSessionSnapshot>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let Some(blocked) = session.blocked.as_ref() else {
+        return;
+    };
+    let Some(persisted) = persisted_agent_session_from_snapshot(session) else {
+        return;
+    };
+    // A hook report is only routed onto a pane whose session identity is already
+    // anchored, so anchor it here rather than depending on the order of the
+    // caller's other restore steps.
+    if terminal.persisted_agent_session.is_none() {
+        terminal.set_persisted_agent_session(persisted.clone());
+    }
+    let session_ref = Some(persisted.session_ref);
+    terminal.set_hook_authority_report_at(
+        session.source.clone(),
+        session.agent.clone(),
+        AgentState::Blocked,
+        blocked.message.clone(),
+        None,
+        None,
+        None,
+        session_ref,
+        None,
+        std::time::Instant::now(),
+    );
+}
+
 fn persisted_agent_session_from_snapshot(
     session: &PaneAgentSessionSnapshot,
 ) -> Option<crate::agent_resume::PersistedAgentSession> {
@@ -1029,6 +1080,75 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent_session_snapshot(
+        blocked: Option<super::super::snapshot::PaneAgentBlockedSnapshot>,
+    ) -> super::super::snapshot::PaneAgentSessionSnapshot {
+        super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "pi-session".into(),
+            blocked,
+        }
+    }
+
+    /// A pane that came back with its agent must come back blocked, because the
+    /// agent is waiting on a human and will say nothing more until answered.
+    #[test]
+    fn a_saved_blocked_report_is_put_back_on_the_restored_pane() {
+        let mut terminal = TerminalState::new(TerminalId::alloc(), "/tmp".into());
+        terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
+        let session =
+            agent_session_snapshot(Some(super::super::snapshot::PaneAgentBlockedSnapshot {
+                message: Some("needs a decision".into()),
+            }));
+
+        reseed_blocked_hook_authority(&mut terminal, Some(&session));
+
+        let authority = terminal
+            .hook_authority
+            .as_ref()
+            .expect("a saved blocked report should be reinstated");
+        assert_eq!(authority.state, AgentState::Blocked);
+        assert_eq!(authority.message.as_deref(), Some("needs a decision"));
+        assert_eq!(authority.source, "herdr:pi");
+        assert_eq!(authority.agent_label, "pi");
+    }
+
+    /// The session identity has to come back with the report, or the next real
+    /// report from the agent is treated as a different session.
+    #[test]
+    fn a_reinstated_blocked_report_keeps_its_session_identity() {
+        let mut terminal = TerminalState::new(TerminalId::alloc(), "/tmp".into());
+        terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
+        let session =
+            agent_session_snapshot(Some(super::super::snapshot::PaneAgentBlockedSnapshot {
+                message: None,
+            }));
+
+        reseed_blocked_hook_authority(&mut terminal, Some(&session));
+
+        let session_ref = terminal
+            .hook_authority
+            .as_ref()
+            .and_then(|authority| authority.session_ref.as_ref())
+            .expect("the reinstated report should carry the saved session");
+        assert_eq!(session_ref.value, "pi-session");
+    }
+
+    /// Everything that was not blocked stays unclaimed, so live screen detection
+    /// is what decides the pane's state.
+    #[test]
+    fn a_session_saved_without_a_blocked_report_claims_nothing() {
+        let mut terminal = TerminalState::new(TerminalId::alloc(), "/tmp".into());
+        terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
+
+        reseed_blocked_hook_authority(&mut terminal, Some(&agent_session_snapshot(None)));
+        reseed_blocked_hook_authority(&mut terminal, None);
+
+        assert!(terminal.hook_authority.is_none());
+    }
 
     #[test]
     fn ac3_generation_mismatch_drops_all_history() {
@@ -1179,6 +1299,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
+            blocked: None,
         };
 
         assert!(restore_plan_for_snapshot(&session, false).is_none());
@@ -1192,6 +1313,7 @@ mod tests {
             agent: "claude".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("claude-session"),
+            blocked: None,
         };
         assert!(restore_plan_for_snapshot(&unsupported_path, true).is_none());
     }
@@ -1204,6 +1326,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
+            blocked: None,
         };
         let mut resumed = HashSet::new();
 
@@ -1226,6 +1349,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            blocked: None,
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             pane_id: None,
@@ -1252,6 +1376,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            blocked: None,
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             pane_id: None,
@@ -1281,6 +1406,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            blocked: None,
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             pane_id: None,
@@ -1308,6 +1434,7 @@ mod tests {
             agent: "hermes".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Id,
             value: "hermes-session".into(),
+            blocked: None,
         };
 
         let preserved = restored_terminal_agent_session(Some(&session), false)
@@ -1324,6 +1451,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            blocked: None,
         };
         let mut resumed = HashSet::new();
         assert!(take_restore_plan_for_snapshot(&session, true, &mut resumed).is_some());
@@ -1374,6 +1502,7 @@ mod tests {
                                 agent: "opencode".into(),
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "opencode-session".into(),
+                                blocked: None,
                             }),
                             launch_argv: None,
                         },
@@ -1562,6 +1691,7 @@ mod tests {
                 agent: "codex".into(),
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "codex-session".into(),
+                blocked: None,
             }),
             launch_argv: None,
         };
@@ -1737,6 +1867,7 @@ mod tests {
                                 agent: "codex".into(),
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "codex-session".into(),
+                                blocked: None,
                             }),
                             launch_argv: None,
                         },
