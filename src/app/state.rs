@@ -941,7 +941,6 @@ pub struct ViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
     BlockedFilter,
-    Scratchpad,
     Dock,
     /// Expand or collapse the usage detail in the status row.
     StatusDetail,

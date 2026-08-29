@@ -271,7 +271,6 @@ impl App {
                     self.state.workspace_scroll,
                 );
             }
-            StatusButtonAction::Scratchpad => self.state.show_scratchpad_tab(),
             StatusButtonAction::Dock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
             }
