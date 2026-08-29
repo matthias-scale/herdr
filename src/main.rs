@@ -341,6 +341,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Show local Codex and Claude Code subscription usage in the info panel.
 # show_subscription_usage = true
+# Open the home view on launch. Esc dismisses it.
+# show_home_on_start = true
 
 # Start the status row expanded: usage percentages and reset times beside every
 # column, instead of the columns alone. Toggle at runtime with the status-bar
@@ -913,6 +915,7 @@ fn main() -> io::Result<()> {
             api_rx,
             event_hub,
         );
+        app.state.open_home_on_launch(config);
         let result = app.run(&mut terminal).await;
 
         // Reset modifyOtherKeys if we enabled it.

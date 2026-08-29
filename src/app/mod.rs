@@ -714,6 +714,7 @@ impl App {
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
+                home_row_hit_areas: Vec::new(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
                 dock_rect: Rect::default(),
@@ -1988,6 +1989,16 @@ impl App {
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
+                            // Home is a launch overlay, and `terminal_input_context`
+                            // reports no pane context while it is open. Settle home
+                            // first: a key it has no use for closes it and then
+                            // travels on as if home had never been there, rather
+                            // than being spent dismissing it.
+                            if self.state.home.is_some()
+                                && self.handle_home_key_headless(key.as_key_event())
+                            {
+                                continue;
+                            }
                             let initial_context = self.terminal_input_context();
                             let target = if initial_context.is_some() {
                                 self.handle_terminal_key_headless_from(source_id, key.clone())
@@ -2115,9 +2126,8 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return;
         }
-        if self.handle_home_key_headless(key_event) {
-            return;
-        }
+        // Home was already settled in `route_client_events_from`, before the
+        // pane-context decision that sends a key down this path at all.
         if self.handle_inbox_key_headless(key_event) {
             return;
         }
@@ -2333,6 +2343,20 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn opening_home_on_launch_is_a_no_op_when_the_config_turns_it_off() {
+        let mut app = test_app();
+        assert!(app.state.home.is_none(), "the constructor opens nothing");
+
+        let mut config = Config::default();
+        config.ui.show_home_on_start = false;
+        app.state.open_home_on_launch(&config);
+        assert!(app.state.home.is_none());
+
+        app.state.open_home_on_launch(&Config::default());
+        assert!(app.state.home.is_some(), "home is the launch screen");
     }
 
     #[cfg(unix)]

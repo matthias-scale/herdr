@@ -29,8 +29,11 @@ fn header_line(app: &AppState, counts: HomeCounts, width: u16) -> Line<'static> 
         Span::styled(
             left,
             Style::default()
+                // The palette reserves `red` for needs-attention/blocked, and
+                // the sidebar already says blocked in it. Accent is the generic
+                // highlight colour and read as "selected", not "waiting".
                 .fg(if counts.blocked > 0 {
-                    app.palette.accent
+                    app.palette.red
                 } else {
                     app.palette.overlay0
                 })
@@ -52,12 +55,22 @@ fn agent_line(app: &AppState, agent: &BlockedAgent, selected: bool, width: u16) 
     let ask_width = (width as usize)
         .saturating_sub(bullet.chars().count() + label_width + 1 + age.chars().count() + 2);
     let ask = truncate(&agent.agent_label, ask_width);
+    // Bold-vs-dim alone was not readable as a cursor. A filled row is, and it
+    // is the same surface the sidebar uses for its selection.
     let style = if selected {
         Style::default()
             .fg(app.palette.text)
+            .bg(app.palette.surface0)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(app.palette.subtext0)
+    };
+    let age_style = if selected {
+        Style::default()
+            .fg(app.palette.overlay1)
+            .bg(app.palette.surface0)
+    } else {
+        Style::default().fg(app.palette.overlay0)
     };
     Line::from(vec![
         Span::styled(bullet.to_string(), style),
@@ -65,7 +78,7 @@ fn agent_line(app: &AppState, agent: &BlockedAgent, selected: bool, width: u16) 
         Span::styled(format!("{ask:<ask_width$}"), style),
         Span::styled(
             format!("{age:>width$} ", width = age.chars().count() + 1),
-            Style::default().fg(app.palette.overlay0),
+            age_style,
         ),
     ])
 }
@@ -106,6 +119,49 @@ fn hint_line(app: &AppState, hidden_above: usize, hidden_below: usize) -> Line<'
     ))
 }
 
+/// The four bands home draws into: header, gap, body, hint.
+///
+/// Shared with hit-testing so a click can never land on a row the renderer put
+/// somewhere else.
+fn bands(area: Rect) -> [Rect; 4] {
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area)
+}
+
+/// One `(queue index, rect)` per row home is currently showing.
+///
+/// Empty when home is closed or the queue is, so the click handler needs no
+/// separate "is home open" test.
+pub(super) fn row_hit_areas(
+    app: &AppState,
+    queue: &[BlockedAgent],
+    area: Rect,
+) -> Vec<(usize, Rect)> {
+    let Some(home) = app.home.as_ref() else {
+        return Vec::new();
+    };
+    if queue.is_empty() || area.width == 0 || area.height < 4 {
+        return Vec::new();
+    }
+    let [_, _, body, _] = bands(area);
+    let visible = body.height as usize;
+    let scroll = home.scroll(queue, visible);
+    (scroll..queue.len().min(scroll + visible))
+        .enumerate()
+        .map(|(offset, index)| {
+            (
+                index,
+                Rect::new(body.x, body.y + offset as u16, body.width, 1),
+            )
+        })
+        .collect()
+}
+
 pub(super) fn render_home(
     app: &AppState,
     queue: &[BlockedAgent],
@@ -113,13 +169,7 @@ pub(super) fn render_home(
     area: Rect,
     frame: &mut Frame,
 ) {
-    let [header, _, body, hint] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [header, _, body, hint] = bands(area);
 
     frame.render_widget(Paragraph::new(header_line(app, counts, area.width)), header);
 
@@ -218,6 +268,105 @@ mod tests {
             buffer[(1, 3)].style().add_modifier(Modifier::BOLD),
             buffer[(1, 3)].style()
         );
+    }
+
+    #[test]
+    fn the_blocked_count_is_drawn_in_the_needs_attention_colour() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+
+        // The palette reserves `red` for blocked; `accent` is the generic
+        // highlight and reads as "selected" rather than "waiting".
+        assert_eq!(buffer[(1, 0)].style().fg, Some(app.palette.red));
+        assert_ne!(app.palette.red, app.palette.accent);
+
+        // With nothing waiting the count goes quiet rather than staying loud.
+        let buffer = draw_home(&app, &[], area);
+        assert_eq!(buffer[(1, 0)].style().fg, Some(app.palette.overlay0));
+    }
+
+    #[test]
+    fn the_selected_row_is_filled_across_its_full_width_not_only_emboldened() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        let queue = vec![blocked(0), blocked(1)];
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+
+        // Every cell of the cursor row carries the surface, so the cursor is
+        // legible as a band rather than as a weight difference.
+        for column in area.x..area.right() {
+            assert_eq!(
+                buffer[(column, 2)].style().bg,
+                Some(app.palette.surface0),
+                "column {column} of the selected row is not filled"
+            );
+        }
+        assert_ne!(buffer[(1, 3)].style().bg, Some(app.palette.surface0));
+    }
+
+    #[test]
+    fn home_row_hit_areas_line_up_with_the_rows_that_were_drawn() {
+        let mut app = AppState::test_new();
+        app.home = Some(crate::app::home::HomeState::default());
+        let queue = vec![blocked(0), blocked(1)];
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+        let hits = row_hit_areas(&app, &queue, area);
+
+        assert_eq!(hits.len(), 2);
+        for (index, rect) in &hits {
+            assert_eq!(rect.height, 1);
+            assert!(
+                row_text(&buffer, area, rect.y).contains(&format!("agent{index}")),
+                "hit area for row {index} is not where agent{index} was drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn home_offers_no_hit_areas_when_it_is_closed_or_has_nothing_to_show() {
+        let mut app = AppState::test_new();
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 60, 6);
+
+        // Closed: the click handler needs no separate "is home open" test.
+        assert!(row_hit_areas(&app, &queue, area).is_empty());
+
+        app.home = Some(crate::app::home::HomeState::default());
+        assert!(row_hit_areas(&app, &[], area).is_empty());
+        // Too short to have a body band at all.
+        assert!(row_hit_areas(&app, &queue, Rect::new(0, 0, 60, 3)).is_empty());
+    }
+
+    #[test]
+    fn a_scrolled_home_reports_hit_areas_for_the_rows_actually_on_screen() {
+        let mut app = AppState::test_new();
+        let mut home = crate::app::home::HomeState::default();
+        let queue: Vec<BlockedAgent> = (0..10).map(blocked).collect();
+        home.select(9);
+        app.home = Some(home);
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+        let hits = row_hit_areas(&app, &queue, area);
+
+        // Body is 3 rows tall, and the cursor is on the last agent, so the
+        // reported indices are the tail of the queue rather than its head.
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
+        for (index, rect) in &hits {
+            assert!(row_text(&buffer, area, rect.y).contains(&format!("agent{index}")));
+        }
     }
 
     #[test]

@@ -32,6 +32,12 @@ impl HomeState {
         self.selected.min(queue.len().saturating_sub(1))
     }
 
+    /// Put the cursor on a specific row. Clamped on read like every other
+    /// cursor move, so a stale index from a click is harmless.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index;
+    }
+
     /// Move down one row, stopping at the end.
     ///
     /// Deliberately does not wrap. The list is sorted by how long each agent has
@@ -86,6 +92,19 @@ impl crate::app::state::AppState {
                 Some(HomeState::default())
             }
         };
+    }
+
+    /// Open home as the launch screen, if the config wants it.
+    ///
+    /// Deliberately not done in `App::new`: that constructor is what dozens of
+    /// tests build from, and a full-frame overlay that covers the panes and
+    /// swallows input would change what every one of them is testing. Launching
+    /// is a concern of the thing that starts a session, not of the constructor.
+    pub(crate) fn open_home_on_launch(&mut self, config: &crate::config::Config) {
+        if config.ui.show_home_on_start {
+            self.home = Some(HomeState::default());
+            self.inbox = None;
+        }
     }
 
     pub(crate) fn clear_home(&mut self) {
