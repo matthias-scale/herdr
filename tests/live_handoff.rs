@@ -77,6 +77,10 @@ fn spawn_server_with_env(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    // Without a sandboxed state root the spawned server reads the developer's
+    // real ~/.local/state/herdr, including any agent manifest herdr downloaded
+    // there, and writes its own runtime state back into it.
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("HERDR_SOCKET_PATH", api_socket);
     cmd.env(
         "HERDR_CLIENT_SOCKET_PATH",
@@ -120,6 +124,10 @@ fn spawn_named_session_server(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    // Without a sandboxed state root the spawned server reads the developer's
+    // real ~/.local/state/herdr, including any agent manifest herdr downloaded
+    // there, and writes its own runtime state back into it.
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("HERDR_SESSION", session_name);
     cmd.env_remove("HERDR_SOCKET_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -154,6 +162,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    // Without a sandboxed state root the spawned server reads the developer's
+    // real ~/.local/state/herdr, including any agent manifest herdr downloaded
+    // there, and writes its own runtime state back into it.
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env_remove("HERDR_SESSION");
     cmd.env_remove("HERDR_SOCKET_PATH");
@@ -199,6 +210,10 @@ fn spawn_server_with_args_and_socket_env(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    // Without a sandboxed state root the spawned server reads the developer's
+    // real ~/.local/state/herdr, including any agent manifest herdr downloaded
+    // there, and writes its own runtime state back into it.
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env_remove("HERDR_SESSION");
     if let Some(api_socket_env) = api_socket_env {
         cmd.env("HERDR_SOCKET_PATH", api_socket_env);
@@ -406,6 +421,38 @@ fn start_agent_when_shell_is_ready(
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Block until `pane_id` no longer reports `agent_status: "working"`.
+///
+/// Detection reports Working for as long as a pane produced output inside
+/// `AGENT_RECENT_OUTPUT_WINDOW`, and a hook report of idle is rescanned back
+/// into Working while that window is open. A fixed sleep cannot express that
+/// precondition: on a loaded machine the shell can echo the launch command
+/// several seconds after `pane.send_input`, so the window is still open when
+/// the sleep ends and the later done label silently becomes working.
+fn wait_for_agent_status_not_working(socket_path: &Path, pane_id: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let response = request(
+            socket_path,
+            serde_json::json!({
+                "id": "test:pane:await-quiet",
+                "method": "pane.get",
+                "params": {"pane_id": pane_id}
+            }),
+        );
+        last = response["result"]["pane"]["agent_status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if last != "working" {
+            return;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    panic!("pane {pane_id} still reports agent_status {last:?} after {timeout:?}");
 }
 
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
@@ -977,7 +1024,11 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
     let fake_codex = base.join("codex");
 
     fs::create_dir_all(&base).unwrap();
-    fs::write(&fake_codex, "#!/bin/sh\nsleep 30\n").unwrap();
+    // Long enough that the fake agent outlives the whole test even when the
+    // suite runs under load: if it exits, the pane loses its agent and the
+    // latched label reads back as unknown rather than done. The server is
+    // stopped at the end of the test, which reaps it.
+    fs::write(&fake_codex, "#!/bin/sh\nsleep 600\n").unwrap();
     fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
@@ -1008,10 +1059,12 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
             }
         }),
     ));
-    // The shell echoes the launch command into the PTY. Wait beyond the
-    // recent-output window so that echo cannot turn the later idle report back
-    // into Working during the report-triggered screen rescan.
-    thread::sleep(Duration::from_secs(9));
+    // The shell echoes the launch command into the PTY. That echo has to age
+    // out of the recent-output window before the idle report below, otherwise
+    // the report-triggered screen rescan turns it back into Working. Wait for
+    // the observed status instead of a fixed delay.
+    wait_for_output(&api_socket, &done_pane_id, "codex");
+    wait_for_agent_status_not_working(&api_socket, &done_pane_id, Duration::from_secs(60));
     let created = request(
         &api_socket,
         serde_json::json!({
