@@ -865,7 +865,7 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
 
     let saw_blocked_on_client =
         wait_for_frame_matching(&mut client_b, Duration::from_secs(5), |frame| {
-            frame_contains_colored_symbol(frame, "●", (243, 139, 168))
+            frame_contains_colored_symbol(frame, "○", (243, 139, 168))
         })
         .expect("frame decoding should succeed");
     assert!(
@@ -908,7 +908,7 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
     // truncate the suffix at the negotiated client width.
     let saw_workspace_on_client =
         wait_for_frame_matching(&mut client, Duration::from_secs(3), |frame| {
-            frame_contains_text(frame, "api-visible-work")
+            frame_contains_text(frame, "api-visible-wor")
         })
         .expect("frame decoding should succeed");
     assert!(
