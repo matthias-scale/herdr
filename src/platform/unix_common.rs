@@ -135,8 +135,10 @@ pub(crate) fn volume_used_percent(path: &std::ffi::CStr) -> Option<u8> {
         stats.assume_init()
     };
 
-    let total = u64::from(stats.f_blocks);
-    let available = u64::from(stats.f_bavail);
+    // `statvfs` counters are 32-bit on some targets and 64-bit on others, so
+    // widen with a cast rather than a `From` that is a no-op on half of them.
+    let total = stats.f_blocks as u64;
+    let available = stats.f_bavail as u64;
     if total == 0 || available > total {
         return None;
     }
