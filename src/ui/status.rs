@@ -23,7 +23,7 @@ use crate::{
 
 /// Full-width, right-aligned top status row.
 ///
-/// Contents, left to right: provider quota (Claude, Codex, Kimi) · offline dot ·
+/// Contents, left to right: provider quota (Claude, Codex, Kimi) · link dot ·
 /// agent dot · device · CPU · memory · disk. The row before the first surviving
 /// segment is intentionally blank.
 ///
@@ -315,17 +315,16 @@ fn status_segments(
         }
     }
 
-    // Offline exists only when something is wrong, so it never elides: a row
-    // too narrow to say "offline" would rather drop a provider than drop the
-    // reason none of them can be reached.
-    if !app.connectivity.is_online() {
-        out.push(Segment {
-            text: format!(" {DOT} "),
-            style: Style::default().fg(p.red),
-            preserve_bg: false,
-            elide_rank: None,
-        });
-    }
+    // The link dot is always present: an absent dot cannot be told apart from a
+    // dot that elided, so "no red" would read as "online" on exactly the narrow
+    // row where the answer matters. Green online, red offline, never elided.
+    let online = app.connectivity.is_online();
+    out.push(Segment {
+        text: format!(" {DOT} "),
+        style: Style::default().fg(if online { p.green } else { p.red }),
+        preserve_bg: false,
+        elide_rank: None,
+    });
 
     let (agents, blocked) = app.agent_dot_counts();
     if agents > 0 {
@@ -1307,7 +1306,11 @@ mod tests {
 
         let metrics = crate::platform::status_metrics::status_metrics_fixture();
         let segments = status_segments(&app, &metrics, &app.palette);
-        assert_eq!(segments.len(), 6, "three providers, device, CPU, memory");
+        assert_eq!(
+            segments.len(),
+            7,
+            "three providers, link dot, device, CPU, memory"
+        );
         let rendered = segments
             .iter()
             .map(|segment| segment.text.as_str())
@@ -1316,6 +1319,7 @@ mod tests {
             "CC SHQ \u{2581} \u{2585}",
             "CX SHQ \u{2582}",
             "KI \u{2582}",
+            "\u{25cf}",
             "testhost",
             "CPU \u{2581}",
             "MEM \u{2584}",
@@ -1460,23 +1464,27 @@ mod tests {
     }
 
     #[test]
-    fn the_offline_dot_appears_only_while_offline_and_never_elides() {
+    fn the_link_dot_is_always_present_and_colours_by_state() {
         let mut app = AppState::test_new();
-        let online = status_segments(&app, &StatusMetrics::default(), &app.palette);
-        assert!(
-            !online.iter().any(|segment| segment.text.contains(DOT)),
-            "an online machine gets no dot"
-        );
+        fn bare_dot(segments: &[Segment]) -> (Option<Color>, Option<u8>) {
+            let dot = segments
+                .iter()
+                .find(|segment| segment.text.trim() == DOT.to_string())
+                .expect("link dot");
+            (dot.style.fg, dot.elide_rank)
+        }
+
+        let segments = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let (fg, rank) = bare_dot(&segments);
+        assert_eq!(fg, Some(app.palette.green));
+        assert!(rank.is_none(), "the link must outlive the data");
 
         app.connectivity.observe(false);
         app.connectivity.observe(false);
-        let offline = status_segments(&app, &StatusMetrics::default(), &app.palette);
-        let dot = offline
-            .iter()
-            .find(|segment| segment.text.trim() == DOT.to_string())
-            .expect("offline dot");
-        assert_eq!(dot.style.fg, Some(app.palette.red));
-        assert!(dot.elide_rank.is_none(), "the reason must outlive the data");
+        let segments = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        let (fg, rank) = bare_dot(&segments);
+        assert_eq!(fg, Some(app.palette.red));
+        assert!(rank.is_none(), "the reason must outlive the data");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1499,7 +1507,7 @@ mod tests {
         let working = status_segments(&app, &StatusMetrics::default(), &app.palette);
         let dot = working
             .iter()
-            .find(|segment| segment.text.contains(DOT))
+            .find(|segment| segment.text.contains(DOT) && segment.text.trim() != DOT.to_string())
             .expect("agent dot");
         assert_eq!(dot.text.trim(), format!("{DOT} 1"));
         assert_eq!(dot.style.fg, Some(app.palette.accent));
@@ -1508,7 +1516,7 @@ mod tests {
         let blocked = status_segments(&app, &StatusMetrics::default(), &app.palette);
         let dot = blocked
             .iter()
-            .find(|segment| segment.text.contains(DOT))
+            .find(|segment| segment.text.contains(DOT) && segment.text.trim() != DOT.to_string())
             .expect("agent dot");
         assert_eq!(dot.text.trim(), format!("{DOT} 1/1"));
         assert_eq!(dot.style.fg, Some(app.palette.red));
