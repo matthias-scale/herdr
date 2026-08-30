@@ -427,6 +427,13 @@ impl PaneWorkContextState {
         patch.validate_collisions()?;
         let pr_binding_replaced =
             patch.pr_urls.is_some() || patch.clear_fields.contains(&PaneWorkContextField::PrUrls);
+        // A pull request implies its repository only when this patch actually
+        // binds one, and never when the same patch clears the repository. A
+        // patch that merely touches an unrelated field must not re-derive it,
+        // or an explicit `--clear repo` would silently come back and an
+        // unrelated `--title` edit could relocate the pane.
+        let imply_repo_from_pull_request =
+            patch.pr_urls.is_some() && !patch.clear_fields.contains(&PaneWorkContextField::Repo);
 
         let mut candidate = self.manual.clone();
         if let Some(ticket_ids) = patch.ticket_ids {
@@ -457,7 +464,10 @@ impl PaneWorkContextState {
             candidate.role = None;
             candidate.active_owner = false;
         }
-        let candidate = candidate.normalized()?.with_repo_implied_by_pull_request();
+        let mut candidate = candidate.normalized()?;
+        if imply_repo_from_pull_request {
+            candidate = candidate.with_repo_implied_by_pull_request();
+        }
         if candidate == self.manual {
             return Ok(false);
         }
@@ -1057,14 +1067,17 @@ pub fn normalize_repo_slug(raw: &str) -> Result<String, String> {
         return Err(format!("invalid repository: {raw}"));
     }
     // Strip a transport prefix so remote URLs and web URLs collapse onto the
-    // same `owner/repo` path as a bare slug.
+    // same `owner/repo` path as a bare slug. Whenever a host is present it must
+    // be github.com: `owner/repo` is only a repository identity on GitHub, and
+    // routing a GitLab mirror into a GitHub-bound workspace would put a pane in
+    // the wrong space and then block binding the two separately.
     let path = if let Some((_, rest)) = trimmed.split_once("://") {
         match rest.split_once('/') {
-            Some((_authority, path)) => path,
-            None => return Err(format!("invalid repository: {raw}")),
+            Some((authority, path)) if is_github_authority(authority) => path,
+            _ => return Err(format!("invalid repository: {raw}")),
         }
     } else if let Some((authority, path)) = trimmed.split_once(':') {
-        if authority.is_empty() || authority.contains('/') {
+        if !is_github_authority(authority) {
             return Err(format!("invalid repository: {raw}"));
         }
         path
@@ -1081,6 +1094,24 @@ pub fn normalize_repo_slug(raw: &str) -> Result<String, String> {
         return Err(format!("invalid repository: {raw}"));
     }
     Ok(format!("{owner}/{repo}"))
+}
+
+/// Whether a remote authority points at github.com.
+///
+/// Accepts an optional `user@` prefix and an optional `:port` suffix, so both
+/// `git@github.com` and `github.com:443` resolve. Any other host is refused
+/// rather than silently reduced to its `owner/repo` path.
+fn is_github_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('/') || authority.contains('\\') {
+        return false;
+    }
+    let host = match authority.rsplit_once('@') {
+        Some((user, host)) if !user.is_empty() => host,
+        Some(_) => return false,
+        None => authority,
+    };
+    let host = host.rsplit_once(':').map_or(host, |(host, _port)| host);
+    host.eq_ignore_ascii_case("github.com")
 }
 
 /// Repository slugs are compared case-insensitively: GitHub preserves the case
@@ -1637,6 +1668,15 @@ mod tests {
             "owner /repo",
             "/repo",
             "owner/",
+            // A host that is not github.com must be refused outright. Reducing
+            // a GitLab mirror to its `owner/repo` path would route it into the
+            // GitHub-bound workspace, and the one-workspace-per-repository rule
+            // would then make binding the two separately impossible.
+            "git@gitlab.com:acme/tools.git",
+            "https://bitbucket.org/acme/tools",
+            "https://github.enterprise.corp/a/b",
+            "ssh://hg@x/y/z",
+            "https://gitlab.com/acme/tools.git",
         ] {
             assert!(
                 normalize_repo_slug(input).is_err(),
@@ -1677,6 +1717,113 @@ mod tests {
             })
             .expect("observation");
         assert_eq!(state.effective().repo.as_deref(), Some("owner/real"));
+    }
+
+    /// `--clear repo` must actually stick on a pane whose manual tier holds a
+    /// pull request. The implication that fills `repo` from a bound PR ran
+    /// after `clear_fields`, so the clear was silently undone and the patch
+    /// reported success having changed nothing.
+    #[test]
+    fn clearing_the_repository_sticks_on_a_pane_holding_a_pull_request() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec![
+                    "https://github.com/matthias-scale/herdr/pull/106".into()
+                ]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind a pull request");
+        assert_eq!(
+            state.effective().repo.as_deref(),
+            Some("matthias-scale/herdr"),
+            "a bound pull request implies its repository"
+        );
+
+        let changed = state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::Repo],
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("clear the repository");
+
+        assert!(changed, "clearing the repository must report a change");
+        assert_eq!(
+            state.effective().repo,
+            None,
+            "the cleared repository must not be re-derived from the pull request"
+        );
+        assert_eq!(
+            state.effective().pr_urls,
+            vec!["https://github.com/matthias-scale/herdr/pull/106".to_string()],
+            "clearing the repository must leave the pull request binding alone"
+        );
+    }
+
+    /// Having cleared the repository, the pane must be pinnable elsewhere.
+    #[test]
+    fn a_cleared_repository_can_be_repinned_without_dropping_the_pull_request() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec![
+                    "https://github.com/matthias-scale/herdr/pull/106".into()
+                ]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind a pull request");
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::Repo],
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("clear");
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                repo: Some("matthiasSchedel/ghx".into()),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("repin");
+
+        assert_eq!(
+            state.effective().repo.as_deref(),
+            Some("matthiasSchedel/ghx")
+        );
+    }
+
+    /// A patch touching an unrelated field must not re-derive the repository,
+    /// or an incidental edit could relocate the pane.
+    #[test]
+    fn an_unrelated_patch_does_not_re_derive_the_repository() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec![
+                    "https://github.com/matthias-scale/herdr/pull/106".into()
+                ]),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("bind");
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::Repo],
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("clear");
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                work_title: Some("unrelated edit".into()),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("title edit");
+
+        assert_eq!(
+            state.effective().repo,
+            None,
+            "an unrelated edit must not resurrect the cleared repository"
+        );
     }
 
     #[test]

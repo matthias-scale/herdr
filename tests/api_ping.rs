@@ -339,7 +339,7 @@ fn ping_over_socket_returns_version() {
     );
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
-    assert_eq!(value["result"]["protocol"], 20);
+    assert_eq!(value["result"]["protocol"], 21);
 
     cleanup_spawned_herdr(child, base);
 }

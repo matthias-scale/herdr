@@ -218,6 +218,9 @@ either from a declaration (`pane work-context set --repo`, or a `--pr` spawn
 binding, which implies its repository) or, failing that, from the `origin`
 remote of the pane's checkout. Declarations outrank the checkout, because a
 session often runs from a shared worktree while working on another repository.
+Repositories are GitHub-only: a remote on any other host is refused rather than
+reduced to its `owner/repo` path, which would otherwise route a mirror into the
+wrong workspace.
 
 Placement never takes focus, and the pane the human is currently focused in is
 never moved; it is placed later, once focus has moved on. `--reconcile` sorts
