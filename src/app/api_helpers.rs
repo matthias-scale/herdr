@@ -133,7 +133,7 @@ pub(super) fn pane_agent_status_with_stale(
     }
 }
 
-pub(super) fn read_terminal_snapshot(
+pub(crate) fn read_terminal_snapshot(
     terminal: &crate::terminal::TerminalRuntime,
     source: crate::api::schema::ReadSource,
     format: crate::api::schema::ReadFormat,

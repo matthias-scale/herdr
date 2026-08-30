@@ -727,7 +727,7 @@ fn render_with_runtime_registry_inner(
     } else if app.home.is_some() {
         let queue = app.blocked_agents();
         let counts = app.home_counts(&queue);
-        home::render_home(app, &queue, counts, terminal_area, frame);
+        home::render_home(app, terminal_runtimes, &queue, counts, terminal_area, frame);
     } else if let Some(inbox) = app.inbox.as_ref() {
         let queue = app.blocked_agents();
         inbox::render_inbox(

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -116,9 +116,12 @@ fn hint_line(
     hidden_above: usize,
     hidden_below: usize,
     composer_visible: bool,
+    lens_visible: bool,
 ) -> Line<'static> {
     let mut hint = if composer_visible {
         " ↑↓ browse · tab focus · ⏎ dispatch · esc back".to_string()
+    } else if lens_visible {
+        " ↑↓ browse · tab reply · ⏎ jump · d detach · esc closes".to_string()
     } else {
         " ↑↓ browse · ⏎ jump · esc closes".to_string()
     };
@@ -143,11 +146,21 @@ struct ComposerBands {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LensBands {
+    frame: Rect,
+    title: Rect,
+    output: Rect,
+    reply: Rect,
+    detach: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HomeBands {
     header: Rect,
     gap: Rect,
     body: Rect,
     composer: Option<ComposerBands>,
+    lens: Option<LensBands>,
     hint: Rect,
 }
 
@@ -155,8 +168,51 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
-fn bands(area: Rect) -> HomeBands {
-    if area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
+fn bands_for(area: Rect, lens_requested: bool) -> HomeBands {
+    if lens_requested && area.height >= crate::app::home::HOME_LENS_MIN_HEIGHT {
+        let [header, gap, body, frame, hint] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(6),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let inner = frame.inner(Margin::new(1, 1));
+        let [title, output, reply] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let detach_width = 12.min(inner.width);
+        let detach = Rect::new(
+            inner.right().saturating_sub(detach_width),
+            title.y,
+            detach_width,
+            title.height,
+        );
+        let title = Rect::new(
+            title.x,
+            title.y,
+            title.width.saturating_sub(detach_width.saturating_add(1)),
+            title.height,
+        );
+        HomeBands {
+            header,
+            gap,
+            body,
+            composer: None,
+            lens: Some(LensBands {
+                frame,
+                title,
+                output,
+                reply,
+                detach,
+            }),
+            hint,
+        }
+    } else if !lens_requested && area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
         let [header, gap, body, prompt, chips, target, hint] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
@@ -179,6 +235,7 @@ fn bands(area: Rect) -> HomeBands {
                 chips,
                 target,
             }),
+            lens: None,
             hint,
         }
     } else {
@@ -194,9 +251,27 @@ fn bands(area: Rect) -> HomeBands {
             gap,
             body,
             composer: None,
+            lens: None,
             hint,
         }
     }
+}
+
+#[cfg(test)]
+fn bands(area: Rect) -> HomeBands {
+    bands_for(area, false)
+}
+
+fn lens_requested(app: &AppState, queue: &[BlockedAgent]) -> bool {
+    app.home.as_ref().is_some_and(|home| {
+        !queue.is_empty()
+            && home.current(queue).is_some()
+            && matches!(home.focus, None | Some(HomeFocus::Reply))
+    })
+}
+
+fn home_bands(app: &AppState, queue: &[BlockedAgent], area: Rect) -> HomeBands {
+    bands_for(area, lens_requested(app, queue))
 }
 
 fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
@@ -320,6 +395,174 @@ fn composer_field_rect(
         .find_map(|(chip_focus, rect)| (chip_focus == focus).then_some(rect))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LensSnapshot {
+    title: String,
+    output: String,
+    reason: Option<String>,
+}
+
+fn lens_snapshot(
+    app: &AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    queue: &[BlockedAgent],
+    output_lines: u16,
+) -> Option<LensSnapshot> {
+    let home = app.home.as_ref()?;
+    let agent = home.current(queue)?;
+    let title = format!(
+        "{} · {}:p{}",
+        agent.agent_label,
+        agent.workspace_label,
+        agent.pane_id.raw()
+    );
+    let Some(terminal) = app.terminals.get(&agent.terminal_id) else {
+        return Some(LensSnapshot {
+            title,
+            output: String::new(),
+            reason: Some("pane is no longer available".into()),
+        });
+    };
+    if !crate::terminal::counts_as_blocked(
+        terminal.state,
+        !terminal.closing_gates.is_empty(),
+        terminal.usage_limited,
+    ) {
+        return Some(LensSnapshot {
+            title,
+            output: String::new(),
+            reason: Some("pane is no longer blocked".into()),
+        });
+    }
+    let Some(runtime) =
+        app.runtime_for_pane_in_workspace(terminal_runtimes, agent.ws_idx, agent.pane_id)
+    else {
+        return Some(LensSnapshot {
+            title,
+            output: String::new(),
+            reason: Some("pane output is unavailable".into()),
+        });
+    };
+    // Keep the lens on the same read contract as `pane.read`. Recent is the
+    // normal tail; visible is the API's bounded fallback for a pane with no
+    // retained history yet.
+    let recent = crate::app::read_terminal_snapshot(
+        runtime,
+        crate::api::schema::ReadSource::Recent,
+        crate::api::schema::ReadFormat::Text,
+        Some(u32::from(output_lines.max(1))),
+    );
+    let snapshot = if recent.text.trim().is_empty() {
+        crate::app::read_terminal_snapshot(
+            runtime,
+            crate::api::schema::ReadSource::Visible,
+            crate::api::schema::ReadFormat::Text,
+            Some(u32::from(output_lines.max(1))),
+        )
+    } else {
+        recent
+    };
+    let pending_draft = app
+        .pending_human_drafts
+        .get(&agent.pane_id)
+        .is_some_and(|draft| !draft.is_empty());
+    let reason = home
+        .reply_error
+        .clone()
+        .or_else(|| pending_draft.then_some("human draft pending · clear it in the pane".into()));
+    let reason = reason.or_else(|| {
+        snapshot
+            .text
+            .trim()
+            .is_empty()
+            .then_some("no output yet".into())
+    });
+    Some(LensSnapshot {
+        title,
+        output: snapshot.text,
+        reason,
+    })
+}
+
+fn render_lens(
+    app: &AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    queue: &[BlockedAgent],
+    bands: LensBands,
+    frame: &mut Frame,
+) {
+    let Some(home) = app.home.as_ref() else {
+        return;
+    };
+    let Some(snapshot) = lens_snapshot(app, terminal_runtimes, queue, bands.output.height) else {
+        return;
+    };
+    let border = Style::default().fg(app.palette.surface_dim);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border)
+            .style(Style::default().bg(app.palette.panel_bg)),
+        bands.frame,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&snapshot.title, bands.title.width as usize),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .style(Style::default().bg(app.palette.panel_bg)),
+        bands.title,
+    );
+    let mut output = snapshot.output;
+    if let Some(reason) = snapshot.reason {
+        output = if output.is_empty() {
+            reason
+        } else {
+            format!("{reason}\n{output}")
+        };
+    }
+    frame.render_widget(
+        Paragraph::new(output).style(
+            Style::default()
+                .fg(app.palette.overlay1)
+                .add_modifier(Modifier::DIM),
+        ),
+        bands.output,
+    );
+    let focused = home.focus == Some(HomeFocus::Reply);
+    let reply = if home.reply.is_empty() {
+        "type a reply".to_string()
+    } else {
+        home.reply.clone()
+    };
+    let suffix = if focused { "_" } else { "" };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("> {reply}{suffix}"),
+            if focused {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.palette.subtext0)
+            },
+        )))
+        .style(Style::default().bg(app.palette.panel_bg)),
+        bands.reply,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate("detach [d] →", bands.detach.width as usize),
+            Style::default().fg(app.palette.accent),
+        )))
+        .style(Style::default().bg(app.palette.panel_bg)),
+        bands.detach,
+    );
+}
+
 fn picker_popup_rect(
     app: &AppState,
     home: &HomeState,
@@ -388,7 +631,7 @@ pub(super) fn row_hit_areas(
     queue: &[BlockedAgent],
     area: Rect,
 ) -> Vec<(usize, Rect)> {
-    queue_row_hit_areas(app, queue, area, bands(area).body)
+    queue_row_hit_areas(app, queue, area, home_bands(app, queue, area).body)
 }
 
 pub(super) fn home_hit_areas(
@@ -399,7 +642,7 @@ pub(super) fn home_hit_areas(
     let Some(home) = app.home.as_ref() else {
         return Vec::new();
     };
-    let layout = bands(area);
+    let layout = home_bands(app, queue, area);
     let mut hits = Vec::new();
     if let Some(composer) = layout.composer {
         if let Some(popup) = picker_popup_rect(app, home, composer, area) {
@@ -431,7 +674,7 @@ pub(super) fn home_hit_areas(
                     HomeFocus::Model => HomeHitTarget::Model,
                     HomeFocus::Effort => HomeHitTarget::Effort,
                     HomeFocus::Directory => HomeHitTarget::Directory,
-                    HomeFocus::Prompt | HomeFocus::Target => continue,
+                    HomeFocus::Reply | HomeFocus::Prompt | HomeFocus::Target => continue,
                 },
                 rect,
             });
@@ -440,6 +683,27 @@ pub(super) fn home_hit_areas(
             hits.push(HomeHitArea {
                 target: HomeHitTarget::Target,
                 rect: composer.target,
+            });
+        }
+    } else if let Some(lens) = layout.lens {
+        hits.extend(
+            queue_row_hit_areas(app, queue, area, layout.body)
+                .into_iter()
+                .map(|(index, rect)| HomeHitArea {
+                    target: HomeHitTarget::QueueRow(index),
+                    rect,
+                }),
+        );
+        if lens.reply.width > 0 {
+            hits.push(HomeHitArea {
+                target: HomeHitTarget::Reply,
+                rect: lens.reply,
+            });
+        }
+        if lens.detach.width > 0 {
+            hits.push(HomeHitArea {
+                target: HomeHitTarget::Detach,
+                rect: lens.detach,
             });
         }
     } else {
@@ -457,16 +721,18 @@ pub(super) fn home_hit_areas(
 
 pub(super) fn render_home(
     app: &AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     queue: &[BlockedAgent],
     counts: HomeCounts,
     area: Rect,
     frame: &mut Frame,
 ) {
-    let layout = bands(area);
+    let layout = home_bands(app, queue, area);
     let HomeBands {
         header,
         body,
         composer,
+        lens,
         hint,
         ..
     } = layout;
@@ -586,9 +852,19 @@ pub(super) fn render_home(
         }
     }
 
+    if let Some(lens) = lens {
+        render_lens(app, terminal_runtimes, queue, lens, frame);
+    }
+
     let hidden_below = queue.len().saturating_sub(scroll + visible);
     frame.render_widget(
-        Paragraph::new(hint_line(app, scroll, hidden_below, composer.is_some())),
+        Paragraph::new(hint_line(
+            app,
+            scroll,
+            hidden_below,
+            composer.is_some(),
+            lens.is_some(),
+        )),
         hint,
     );
 }
@@ -597,7 +873,8 @@ pub(super) fn render_home(
 mod tests {
     use super::*;
     use crate::layout::PaneId;
-    use crate::terminal::TerminalId;
+    use crate::terminal::{TerminalId, TerminalRuntime};
+    use crate::workspace::Workspace;
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
     fn blocked(index: usize) -> BlockedAgent {
@@ -618,6 +895,7 @@ mod tests {
             .draw(|frame| {
                 render_home(
                     app,
+                    &crate::terminal::TerminalRuntimeRegistry::new(),
                     queue,
                     HomeCounts {
                         blocked: queue.len(),
@@ -636,6 +914,29 @@ mod tests {
         (area.x..area.x + area.width)
             .map(|column| buffer[(column, row)].symbol())
             .collect()
+    }
+
+    fn app_with_lens_screen(output: &[u8]) -> AppState {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("lens");
+        let pane_id = workspace.tabs[0].root_pane;
+        workspace.insert_test_runtime(
+            pane_id,
+            TerminalRuntime::test_with_scrollback_bytes(80, 8, 1024, output),
+        );
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .state = crate::detect::AgentState::Blocked;
+        let mut home = HomeState::default();
+        home.focus = None;
+        app.home = Some(home);
+        app
     }
 
     #[test]
@@ -857,7 +1158,7 @@ mod tests {
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Directory => HomeHitTarget::Directory,
-                HomeFocus::Prompt | HomeFocus::Target => continue,
+                HomeFocus::Reply | HomeFocus::Prompt | HomeFocus::Target => continue,
             };
             assert_eq!(
                 hits.iter()
@@ -1029,7 +1330,7 @@ mod tests {
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Directory => HomeHitTarget::Directory,
-                HomeFocus::Prompt | HomeFocus::Target => continue,
+                HomeFocus::Reply | HomeFocus::Prompt | HomeFocus::Target => continue,
             };
             assert_eq!(
                 hits.iter()
@@ -1060,5 +1361,127 @@ mod tests {
 
         assert_eq!(home.prompt, "j");
         assert_eq!(home.selected(&queue), 1);
+    }
+
+    #[test]
+    fn the_lens_follows_the_queue_cursor() {
+        let mut app = AppState::test_new();
+        let queue = vec![blocked(0), blocked(1)];
+        let mut home = HomeState::default();
+        home.focus = None;
+        app.home = Some(home);
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        let first = lens_snapshot(&app, &runtimes, &queue, 2).expect("first lens");
+        app.home.as_mut().expect("home").select(1);
+        let second = lens_snapshot(&app, &runtimes, &queue, 2).expect("second lens");
+
+        assert!(first.title.contains("agent0"));
+        assert!(second.title.contains("agent1"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_lens_renders_the_tail_returned_by_pane_read() {
+        let app = app_with_lens_screen(b"old line\r\nretry cap\r\nwhich do you want?\r\n");
+        let queue = app.blocked_agents();
+        let area = Rect::new(0, 0, 90, 12);
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let expected = lens_snapshot(&app, &runtimes, &queue, 2)
+            .expect("lens")
+            .output;
+        let buffer = draw_home(&app, &queue, area);
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(expected.contains("which do you want?"), "{expected:?}");
+        assert!(rendered.contains("which do you want?"), "{rendered:?}");
+    }
+
+    #[test]
+    fn a_short_lens_frame_omits_the_lens_without_panic() {
+        let mut app = AppState::test_new();
+        let queue = vec![blocked(0)];
+        let mut home = HomeState::default();
+        home.focus = None;
+        app.home = Some(home);
+        let area = Rect::new(0, 0, 60, 6);
+
+        let buffer = draw_home(&app, &queue, area);
+        let layout = home_bands(&app, &queue, area);
+        let hits = home_hit_areas(&app, &queue, area);
+
+        assert!(layout.lens.is_none());
+        assert!(hits
+            .iter()
+            .all(|hit| matches!(hit.target, HomeHitTarget::QueueRow(_))));
+        assert_eq!(*buffer.area(), area);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_missing_or_empty_lens_degrades_to_a_reason() {
+        let mut gone = AppState::test_new();
+        let queue = vec![blocked(0)];
+        let mut home = HomeState::default();
+        home.focus = None;
+        gone.home = Some(home);
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        assert_eq!(
+            lens_snapshot(&gone, &runtimes, &queue, 2)
+                .expect("lens")
+                .reason
+                .as_deref(),
+            Some("pane is no longer available")
+        );
+
+        let empty = app_with_lens_screen(b"");
+        let empty_queue = empty.blocked_agents();
+        assert_eq!(
+            lens_snapshot(&empty, &runtimes, &empty_queue, 2)
+                .expect("lens")
+                .reason
+                .as_deref(),
+            Some("no output yet")
+        );
+
+        let mut no_longer_blocked = app_with_lens_screen(b"");
+        let stale_queue = no_longer_blocked.blocked_agents();
+        no_longer_blocked
+            .terminals
+            .get_mut(&stale_queue[0].terminal_id)
+            .expect("test terminal")
+            .state = crate::detect::AgentState::Idle;
+        assert_eq!(
+            lens_snapshot(&no_longer_blocked, &runtimes, &stale_queue, 2)
+                .expect("lens")
+                .reason
+                .as_deref(),
+            Some("pane is no longer blocked")
+        );
+    }
+
+    #[test]
+    fn composer_and_lens_precedence_is_exclusive_and_focus_driven() {
+        let mut app = AppState::test_new();
+        let queue = vec![blocked(0)];
+        app.home = Some(HomeState::default());
+        let area = Rect::new(0, 0, 90, 12);
+
+        let composer = home_bands(&app, &queue, area);
+        assert!(composer.composer.is_some());
+        assert!(composer.lens.is_none());
+
+        app.home.as_mut().expect("home").focus = None;
+        let lens = home_bands(&app, &queue, area);
+        assert!(lens.composer.is_none());
+        assert!(lens.lens.is_some());
+
+        app.home.as_mut().expect("home").focus = Some(HomeFocus::Agent);
+        let composer_again = home_bands(&app, &queue, area);
+        assert!(composer_again.composer.is_some());
+        assert!(composer_again.lens.is_none());
     }
 }

@@ -27,6 +27,34 @@ use super::super::api_helpers::{
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
 
+#[derive(Debug)]
+pub(crate) enum PaneSendError {
+    NotFound,
+    Failed(String),
+}
+
+impl App {
+    pub(crate) fn try_send_text_to_pane(
+        &mut self,
+        public_pane_id: &str,
+        text: &str,
+    ) -> Result<(), PaneSendError> {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(public_pane_id) else {
+            return Err(PaneSendError::NotFound);
+        };
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return Err(PaneSendError::NotFound);
+        };
+        if let Err(err) = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes())) {
+            return Err(PaneSendError::Failed(err.to_string()));
+        }
+        if !text.is_empty() {
+            self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+        }
+        Ok(())
+    }
+}
+
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let work_context = match self.prepare_spawn_work_context(params.work_context.clone()) {
@@ -1737,18 +1765,12 @@ impl App {
         id: String,
         params: PaneSendTextParams,
     ) -> String {
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let has_bytes = !params.text.is_empty();
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
-            return encode_error(id, "pane_send_failed", err.to_string());
-        }
-        if has_bytes {
-            self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+        match self.try_send_text_to_pane(&params.pane_id, &params.text) {
+            Ok(()) => {}
+            Err(PaneSendError::NotFound) => return pane_not_found(id, &params.pane_id),
+            Err(PaneSendError::Failed(error)) => {
+                return encode_error(id, "pane_send_failed", error);
+            }
         }
 
         encode_success(id, ResponseResult::Ok {})
