@@ -16,6 +16,7 @@ pub(super) fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
         "get" => workspace_get(&args[1..]),
         "focus" => workspace_focus(&args[1..]),
         "rename" => workspace_rename(&args[1..]),
+        "bind" => workspace_bind(&args[1..]),
         "report-metadata" => workspace_report_metadata(&args[1..]),
         "close" => workspace_close(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -124,6 +125,55 @@ fn workspace_get(args: &[String]) -> std::io::Result<i32> {
     }
 
     super::runtime::workspace_get(super::normalize_workspace_id(raw_workspace_id))
+}
+
+/// `herdr workspace bind <workspace_id> <owner/repo> [--reconcile] | --clear`
+///
+/// `--reconcile` sorts the panes that already resolved this repository into
+/// the workspace. It never takes focus and never moves the pane the human is
+/// currently focused in.
+fn workspace_bind(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str =
+        "usage: herdr workspace bind <workspace_id> <owner/repo> [--reconcile]\n       herdr workspace bind <workspace_id> --clear";
+    let Some(raw_workspace_id) = args.first() else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let mut repo = None;
+    let mut clear = false;
+    let mut reconcile = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--clear" => {
+                clear = true;
+                index += 1;
+            }
+            "--reconcile" => {
+                reconcile = true;
+                index += 1;
+            }
+            value if !value.starts_with('-') && repo.is_none() => {
+                repo = Some(value.to_string());
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("{USAGE}");
+                return Ok(2);
+            }
+        }
+    }
+    if clear == repo.is_some() {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    }
+
+    super::runtime::workspace_bind(crate::api::schema::WorkspaceBindParams {
+        workspace_id: super::normalize_workspace_id(raw_workspace_id),
+        repo,
+        reconcile,
+    })
 }
 
 fn workspace_focus(args: &[String]) -> std::io::Result<i32> {
@@ -256,6 +306,8 @@ fn print_workspace_help() {
     eprintln!("  herdr workspace get <workspace_id>");
     eprintln!("  herdr workspace focus <workspace_id>");
     eprintln!("  herdr workspace rename <workspace_id> <label>");
+    eprintln!("  herdr workspace bind <workspace_id> <owner/repo> [--reconcile]");
+    eprintln!("  herdr workspace bind <workspace_id> --clear");
     eprintln!("  herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr workspace close <workspace_id>");
 }

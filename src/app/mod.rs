@@ -22,6 +22,7 @@ pub(crate) mod inbox;
 mod input;
 mod pane_lifecycle;
 mod popup;
+mod repo_routing;
 mod runtime;
 mod runtime_mutations;
 mod session;

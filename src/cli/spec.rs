@@ -226,6 +226,14 @@ fn workspace_command() -> Command {
                 .arg(required("label", "LABEL").num_args(1..)),
         )
         .subcommand(
+            Command::new("bind")
+                .about("Bind a workspace to the repository whose work it collects")
+                .arg(required("workspace_id", "WORKSPACE_ID"))
+                .arg(Arg::new("repo").value_name("OWNER/REPO"))
+                .arg(flag("clear"))
+                .arg(flag("reconcile")),
+        )
+        .subcommand(
             Command::new("report-metadata")
                 .about("Report display-only workspace metadata")
                 .arg(required("workspace_id", "WORKSPACE_ID"))
@@ -990,6 +998,7 @@ fn spawn_work_context_options() -> Vec<Arg> {
         repeatable_option("ticket", "ID"),
         option("pr", "URL"),
         option("branch", "BRANCH"),
+        option("repo", "OWNER/REPO"),
         option("role", "ROLE").value_parser(["baseline", "repair", "ship", "review"]),
         flag("active-owner"),
     ]
@@ -999,6 +1008,7 @@ fn worktree_work_context_options() -> Vec<Arg> {
     vec![
         repeatable_option("ticket", "ID"),
         option("pr", "URL"),
+        option("repo", "OWNER/REPO"),
         option("role", "ROLE").value_parser(["baseline", "repair", "ship", "review"]),
         flag("active-owner"),
     ]

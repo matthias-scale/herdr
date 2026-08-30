@@ -661,3 +661,143 @@ fn tab_management_commands_work() {
 
     cleanup_spawned_herdr(herdr, base);
 }
+
+/// The decay this feature exists to stop: panes accumulate in whichever
+/// workspace the session happened to be in, and the repository grouping has to
+/// be rebuilt by hand. Binding a workspace to a repository and declaring a
+/// pane's repository must place it with no manual sorting.
+///
+/// Crucially the pane's checkout points at a *different* repository than the
+/// one it declares — the shared-worktree case, where a cwd-driven rule would
+/// misfile exactly the panes that matter. The human sits in a third workspace
+/// throughout, and must still be sitting there afterwards.
+#[test]
+fn a_declared_repository_places_a_pane_despite_a_misleading_checkout() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    // A real checkout whose `origin` names the shared worktree, not the work.
+    let shared_worktree = base.join("shared-worktree");
+    create_committed_repo(&shared_worktree);
+    run_git(
+        &shared_worktree,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/shared-worktree.git",
+        ],
+    );
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    // Created first, so it takes initial focus: this is where the human sits.
+    let human = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let human_id = human["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The grab-bag: where panes land today, on the misleading checkout.
+    let grab_bag = run_cli_json(
+        &socket_path,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            shared_worktree.to_str().unwrap(),
+        ],
+    );
+    let grab_bag_id = grab_bag["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The workspace organised by repository.
+    let bound = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let bound_id = bound["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let binding = run_cli_json(
+        &socket_path,
+        &[
+            "workspace",
+            "bind",
+            &bound_id,
+            "git@github.com:owner/real-work.git",
+        ],
+    );
+    assert_eq!(
+        binding["result"]["workspace"]["repo_binding"], "owner/real-work",
+        "binding must canonicalize the remote URL: {binding}"
+    );
+
+    let panes = run_cli_json(&socket_path, &["pane", "list"]);
+    let pane = panes["result"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pane| pane["workspace_id"] == grab_bag_id.as_str())
+        .expect("the grab-bag workspace must hold a pane")
+        .clone();
+    let pane_id = pane["pane_id"].as_str().unwrap().to_string();
+    // Public pane ids are scoped to their workspace, so a routed pane is
+    // renumbered. The terminal id is what survives the move.
+    let terminal_id = pane["terminal_id"].as_str().unwrap().to_string();
+
+    // The session declares the repository it is actually working on, which is
+    // not the one its checkout points at.
+    let declared = run_cli_json(
+        &socket_path,
+        &[
+            "pane",
+            "work-context",
+            "set",
+            &pane_id,
+            "--repo",
+            "owner/real-work",
+        ],
+    );
+    assert!(
+        declared["error"].is_null(),
+        "declaring a repository must succeed: {declared}"
+    );
+
+    let panes = run_cli_json(&socket_path, &["pane", "list"]);
+    let placed = panes["result"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pane| pane["terminal_id"] == terminal_id.as_str())
+        .expect("the declared pane must still exist");
+    assert_eq!(
+        placed["work_context"]["repo"], "owner/real-work",
+        "the declaration must be visible on the pane: {panes}"
+    );
+    assert_eq!(
+        placed["workspace_id"],
+        bound_id.as_str(),
+        "the pane must follow its declared repository, not its checkout: {panes}"
+    );
+
+    // And the human's cursor must not have been dragged along with it.
+    let snapshot = run_cli_json(&socket_path, &["api", "snapshot"]);
+    assert_eq!(
+        snapshot["result"]["snapshot"]["focused_workspace_id"],
+        human_id.as_str(),
+        "automatic placement must leave the human exactly where they were: {snapshot}"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}

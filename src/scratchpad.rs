@@ -90,6 +90,7 @@ impl ScratchpadDoc {
             return Vec::new();
         }
         let context = PaneWorkContext {
+            repo: None,
             ticket_ids: extract_ticket_ids(&self.body),
             pr_urls: extract_pr_urls(&self.body),
             preview_urls: extract_preview_urls(&self.body),

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added `herdr workspace bind <workspace_id> <owner/repo>` and a `repo` field on pane work context, so a workspace organised by repository keeps collecting the right panes instead of decaying as new panes land wherever the session happened to be. A pane is placed once it resolves its repository, from a declaration (`pane work-context set --repo`, or a `--pr` spawn binding) or otherwise from its checkout's `origin` remote; declarations win, because sessions often run from a shared worktree while working on another repository. Placement never takes focus and never moves the pane the human is focused in.
 - Added account-level subscription usage to the status row: Claude, Codex, and Kimi, each as a filled column per quota window, read from local caches with no provider API call.
 - Added an agent dot, an offline dot, and a disk column to the status row. Disk appears only at 80% and hides again below 78%.
 - Added `ui.status_bar_expanded` and `keys.toggle_status_detail` (default `prefix+shift+m`), plus a status-bar button, to expand the row to percentages and reset times.

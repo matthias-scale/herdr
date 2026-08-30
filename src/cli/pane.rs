@@ -164,6 +164,15 @@ fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSe
                 }
                 index += 2;
             }
+            "--repo" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --repo".into());
+                };
+                if patch.repo.replace(value.clone()).is_some() {
+                    return Err("--repo may only be provided once".into());
+                }
+                index += 2;
+            }
             "--title" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --title".into());
@@ -198,6 +207,7 @@ fn parse_work_context_field(
         }
         "pr_urls" | "pr-urls" | "prs" => Ok(crate::work_context::PaneWorkContextField::PrUrls),
         "branch" => Ok(crate::work_context::PaneWorkContextField::Branch),
+        "repo" | "repository" => Ok(crate::work_context::PaneWorkContextField::Repo),
         "work_title" | "work-title" | "title" => {
             Ok(crate::work_context::PaneWorkContextField::WorkTitle)
         }
@@ -206,7 +216,7 @@ fn parse_work_context_field(
 }
 
 fn work_context_set_usage() -> String {
-    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...".into()
+    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--clear FIELD]...".into()
 }
 
 fn pane_current(args: &[String]) -> std::io::Result<i32> {
@@ -1756,6 +1766,30 @@ mod tests {
             params.patch.clear_fields,
             vec![crate::work_context::PaneWorkContextField::Branch]
         );
+    }
+
+    #[test]
+    fn work_context_set_accepts_a_repo_declaration_and_its_clear() {
+        let params =
+            parse_pane_work_context_set_args(&args(&["issue-1", "--repo", "matthiasSchedel/ghx"]))
+                .expect("parse");
+        assert_eq!(params.patch.repo.as_deref(), Some("matthiasSchedel/ghx"));
+
+        let cleared = parse_pane_work_context_set_args(&args(&["issue-1", "--clear", "repo"]))
+            .expect("parse");
+        assert_eq!(
+            cleared.patch.clear_fields,
+            vec![crate::work_context::PaneWorkContextField::Repo]
+        );
+    }
+
+    #[test]
+    fn work_context_set_rejects_a_repeated_or_contradictory_repo() {
+        assert!(parse_pane_work_context_set_args(&args(&[
+            "issue-1", "--repo", "a/b", "--repo", "c/d"
+        ]))
+        .is_err());
+        assert!(parse_pane_work_context_set_args(&args(&["issue-1", "--repo"])).is_err());
     }
 
     #[test]
