@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -160,6 +161,7 @@ pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
+    content_revision: AtomicU64,
 }
 
 pub(crate) struct GhosttyPaneCore {
@@ -202,6 +204,10 @@ impl PaneTerminal {
     ) -> ProcessBytesResult {
         self.ghostty
             .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
+    }
+
+    pub fn content_revision(&self) -> u64 {
+        self.ghostty.content_revision()
     }
 
     pub fn resize(
@@ -1043,7 +1049,12 @@ impl GhosttyPaneTerminal {
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
+            content_revision: AtomicU64::new(0),
         })
+    }
+
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision.load(Ordering::Acquire)
     }
 
     pub(super) fn set_windows_powershell_prompt_cwd_reporting(&self, enabled: bool) {
@@ -1276,6 +1287,9 @@ impl GhosttyPaneTerminal {
             xtgettcap_responses,
             &mut terminal_responses,
         );
+        if !filtered_bytes.is_empty() {
+            self.content_revision.fetch_add(1, Ordering::Release);
+        }
         let clipboard_writes = core.terminal.take_clipboard_writes();
         let reported_cwd = core
             .terminal

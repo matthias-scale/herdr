@@ -41,6 +41,7 @@ pub(crate) struct PendingAltScreenRead {
     upward_events: usize,
     reached_top: bool,
     valid: bool,
+    viewport_may_be_scrolled: bool,
 }
 
 impl PendingAltScreenRead {
@@ -73,40 +74,12 @@ impl PendingAltScreenRead {
             upward_events: 0,
             reached_top: false,
             valid: true,
+            viewport_may_be_scrolled: false,
         }
     }
 
     pub(crate) fn next_deadline(&self) -> Instant {
         self.next_poll_at
-    }
-
-    pub(crate) fn frozen_snapshot(
-        &self,
-        source: crate::api::schema::ReadSource,
-        lines: Option<u32>,
-    ) -> crate::pane::TerminalReadSnapshot {
-        let line_limit = lines.map(|lines| lines.min(1000) as usize);
-        match source {
-            crate::api::schema::ReadSource::Recent
-            | crate::api::schema::ReadSource::RecentUnwrapped => {
-                let limit = line_limit.unwrap_or(80);
-                crate::terminal::snapshot_text(
-                    &self.initial.rows,
-                    limit,
-                    source == crate::api::schema::ReadSource::RecentUnwrapped,
-                    self.initial.rows.len() > limit,
-                )
-            }
-            crate::api::schema::ReadSource::Visible | crate::api::schema::ReadSource::Detection => {
-                let snapshot = crate::terminal::snapshot_text(
-                    &self.initial.rows,
-                    self.initial.rows.len(),
-                    false,
-                    false,
-                );
-                crate::app::limit_snapshot_lines(snapshot.text, line_limit)
-            }
-        }
     }
 
     pub(crate) fn abort(mut self, runtime: Option<&TerminalRuntime>, now: Instant) -> PollOutcome {
@@ -125,7 +98,7 @@ impl PendingAltScreenRead {
 
     pub(crate) fn poll(mut self, runtime: Option<&TerminalRuntime>, now: Instant) -> PollOutcome {
         if now < self.next_poll_at {
-            return Some(self);
+            return PollOutcome::Pending(Box::new(self));
         }
         let Some(runtime) = runtime else {
             return self.complete_fallback();
@@ -180,7 +153,7 @@ impl PendingAltScreenRead {
                     self.phase = Phase::SettleInitial { checks: 0 };
                 }
                 self.next_poll_at = now + STEP_SETTLE;
-                Some(self)
+                PollOutcome::Pending(Box::new(self))
             }
             Phase::ProbeBottom => {
                 debug!(
@@ -204,18 +177,20 @@ impl PendingAltScreenRead {
                 {
                     self.phase = Phase::RestoreProbe;
                     self.restore_started_at = Some(now);
+                    self.viewport_may_be_scrolled = true;
                     self.next_poll_at = now + STEP_SETTLE;
-                    Some(self)
+                    PollOutcome::Pending(Box::new(self))
                 } else {
                     self.complete_fallback()
                 }
             }
             Phase::RestoreProbe => {
                 if snapshot.similar_text(&self.initial) {
+                    self.viewport_may_be_scrolled = false;
                     self.complete_fallback()
                 } else {
                     self.next_poll_at = now + STEP_SETTLE;
-                    Some(self)
+                    PollOutcome::Pending(Box::new(self))
                 }
             }
             Phase::Harvest { unaligned_checks } => {
@@ -242,7 +217,7 @@ impl PendingAltScreenRead {
                             unaligned_checks: unaligned_checks + 1,
                         };
                         self.next_poll_at = now + STEP_SETTLE;
-                        Some(self)
+                        PollOutcome::Pending(Box::new(self))
                     }
                     UpwardMerge::Unaligned => {
                         self.valid = false;
@@ -253,6 +228,7 @@ impl PendingAltScreenRead {
             Phase::Restore { stable_checks } => {
                 if snapshot.similar_text(&self.previous) {
                     if stable_checks >= 1 {
+                        self.viewport_may_be_scrolled = false;
                         if self.valid {
                             self.complete_success()
                         } else {
@@ -263,7 +239,7 @@ impl PendingAltScreenRead {
                             stable_checks: stable_checks + 1,
                         };
                         self.next_poll_at = now + STEP_SETTLE;
-                        Some(self)
+                        PollOutcome::Pending(Box::new(self))
                     }
                 } else {
                     self.previous = snapshot;
@@ -277,7 +253,7 @@ impl PendingAltScreenRead {
                     {
                         self.phase = Phase::Restore { stable_checks: 0 };
                         self.next_poll_at = now + STEP_SETTLE;
-                        Some(self)
+                        PollOutcome::Pending(Box::new(self))
                     } else {
                         self.complete_fallback()
                     }
@@ -292,11 +268,12 @@ impl PendingAltScreenRead {
             return self.complete_fallback();
         }
         self.upward_events = self.upward_events.saturating_add(events);
+        self.viewport_may_be_scrolled = true;
         self.phase = Phase::Harvest {
             unaligned_checks: 0,
         };
         self.next_poll_at = now + STEP_SETTLE;
-        Some(self)
+        PollOutcome::Pending(Box::new(self))
     }
 
     fn start_restore(mut self, runtime: &TerminalRuntime, now: Instant) -> PollOutcome {
@@ -316,7 +293,7 @@ impl PendingAltScreenRead {
         self.phase = Phase::Restore { stable_checks: 0 };
         self.restore_started_at = Some(now);
         self.next_poll_at = now + STEP_SETTLE;
-        Some(self)
+        PollOutcome::Pending(Box::new(self))
     }
 
     fn complete_success(mut self) -> PollOutcome {
@@ -338,7 +315,9 @@ impl PendingAltScreenRead {
         })
         .unwrap_or(self.fallback_response);
         let _ = self.respond_to.send(response);
-        None
+        PollOutcome::Complete {
+            viewport_restored: true,
+        }
     }
 
     fn complete_fallback(self) -> PollOutcome {
@@ -350,12 +329,16 @@ impl PendingAltScreenRead {
             valid = self.valid,
             "alternate-screen read fell back to passive snapshot"
         );
+        let viewport_restored = !self.viewport_may_be_scrolled;
         let _ = self.respond_to.send(self.fallback_response);
-        None
+        PollOutcome::Complete { viewport_restored }
     }
 }
 
-pub(crate) type PollOutcome = Option<PendingAltScreenRead>;
+pub(crate) enum PollOutcome {
+    Pending(Box<PendingAltScreenRead>),
+    Complete { viewport_restored: bool },
+}
 
 fn restore_batch_size(snapshot: &ScreenSnapshot) -> usize {
     snapshot.rows.len().saturating_div(2).max(1)

@@ -11,7 +11,6 @@ mod agents;
 mod api;
 mod api_helpers;
 pub(crate) mod claude_subagents;
-pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
 pub(crate) mod foreground_process;

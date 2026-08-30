@@ -350,6 +350,10 @@ impl TerminalRuntime {
         self.0.synchronized_output_active()
     }
 
+    pub fn content_revision(&self) -> u64 {
+        self.0.content_revision()
+    }
+
     pub fn visible_text(&self) -> String {
         self.0.visible_text()
     }

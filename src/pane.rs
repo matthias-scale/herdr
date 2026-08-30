@@ -2995,6 +2995,10 @@ impl PaneRuntime {
         self.terminal.synchronized_output_active()
     }
 
+    pub fn content_revision(&self) -> u64 {
+        self.terminal.content_revision()
+    }
+
     pub fn visible_text(&self) -> String {
         self.terminal.visible_text()
     }
