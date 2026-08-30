@@ -423,6 +423,9 @@ impl App {
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
         use crate::app::state::StatusButtonAction;
         match action {
+            StatusButtonAction::Home => {
+                self.state.toggle_home();
+            }
             StatusButtonAction::BlockedFilter => {
                 self.state.blocked_filter = !self.state.blocked_filter;
                 self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
