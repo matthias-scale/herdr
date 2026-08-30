@@ -834,11 +834,13 @@ mod tests {
 
     #[test]
     fn config_loaders_report_unreadable_path() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path =
-            std::env::temp_dir().join(format!("herdr-config-unreadable-{}", std::process::id()));
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-unreadable-{}",
+            crate::config::test_unique_suffix()
+        ));
         std::fs::create_dir_all(&path).unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+        env.set(CONFIG_PATH_ENV_VAR, &path);
 
         let startup = Config::load();
         assert!(startup
@@ -853,7 +855,7 @@ mod tests {
                 && diagnostic.contains("keeping current config")
         }));
 
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_dir_all(path);
     }
 
@@ -1000,17 +1002,17 @@ mouse_captur = true
 
     #[test]
     fn startup_config_accepts_legacy_agent_panel_scope_without_warning() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = std::env::temp_dir().join(format!(
             "herdr-config-legacy-agent-panel-scope-{}.toml",
-            std::process::id()
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(&path, "[ui]\nagent_panel_scope = \"all\"\n").unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+        env.set(CONFIG_PATH_ENV_VAR, &path);
 
         let loaded = Config::load();
 
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_file(path);
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
@@ -1018,10 +1020,10 @@ mouse_captur = true
 
     #[test]
     fn startup_config_load_warns_about_unknown_top_level_sections() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = std::env::temp_dir().join(format!(
             "herdr-config-unknown-section-{}.toml",
-            std::process::id()
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(
             &path,
@@ -1034,7 +1036,7 @@ delivery = "system"
 "#,
         )
         .unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+        env.set(CONFIG_PATH_ENV_VAR, &path);
 
         let loaded = Config::load();
 
@@ -1047,7 +1049,7 @@ delivery = "system"
             super::super::ToastDelivery::System
         );
 
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_file(path);
     }
 

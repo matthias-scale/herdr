@@ -1413,10 +1413,6 @@ mod tests {
     use super::*;
     use crate::workspace::Workspace;
 
-    fn config_env_lock() -> &'static std::sync::Mutex<()> {
-        crate::config::test_config_env_lock()
-    }
-
     fn temp_config_path(name: &str) -> std::path::PathBuf {
         let unique = format!(
             "herdr-modal-{name}-{}-{}",
@@ -1536,9 +1532,9 @@ mod tests {
 
     #[test]
     fn global_menu_whats_new_opens_saved_release_notes() {
-        let _guard = config_env_lock().lock().unwrap();
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = temp_config_path("whats-new-saved-release-notes");
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
         crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- Menu")
             .unwrap();
 
@@ -1558,7 +1554,7 @@ mod tests {
             Some("### Changed\n- Menu")
         );
 
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

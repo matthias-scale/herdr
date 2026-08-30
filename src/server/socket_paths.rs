@@ -104,7 +104,8 @@ mod tests {
 
     #[test]
     fn client_socket_path_defaults_to_config_dir() {
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.remove(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         let path = client_socket_path_from_overrides(None, None);
         assert_eq!(path, crate::config::config_dir().join("herdr-client.sock"));

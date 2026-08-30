@@ -4988,8 +4988,8 @@ navigate_pane_down = "ctrl+j"
         app.state.mode = Mode::Terminal;
 
         let output_path = unique_temp_path("edit-scrollback");
-        let previous_editor = std::env::var_os("EDITOR");
-        std::env::set_var(
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(
             "EDITOR",
             format!("sh -c 'cp \"$1\" {}' sh", output_path.display()),
         );
@@ -5003,10 +5003,7 @@ navigate_pane_down = "ctrl+j"
         app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
             .await;
 
-        match previous_editor {
-            Some(value) => std::env::set_var("EDITOR", value),
-            None => std::env::remove_var("EDITOR"),
-        }
+        drop(env);
 
         let content = wait_for_file(&output_path);
         assert!(content.contains("alpha"));
