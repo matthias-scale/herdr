@@ -114,6 +114,19 @@ fn notification_show_response_shown(response: &str) -> bool {
     )
 }
 
+fn alt_screen_restore_error_response(id: String) -> String {
+    serde_json::to_string(&api::schema::ErrorResponse {
+        id,
+        error: api::schema::ErrorBody {
+            code: "alternate_screen_restore_failed".into(),
+            message: "pane read cancelled an alternate-screen history capture, but the live viewport could not be restored; retry the read".into(),
+        },
+    })
+    .unwrap_or_else(|_| {
+        r#"{"id":"","error":{"code":"alternate_screen_restore_failed","message":"alternate-screen history capture could not restore the live viewport"}}"#.to_owned()
+    })
+}
+
 fn non_empty_body(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
@@ -284,8 +297,9 @@ struct AltScreenReadSpec {
 
 enum AltScreenReadConflict {
     None,
-    Frozen(crate::pane::TerminalReadSnapshot),
+    Cancelled,
     Defer,
+    RestoreFailed,
 }
 
 /// The headless server — runs the herdr event loop without a real terminal.
@@ -1011,6 +1025,7 @@ impl HeadlessServer {
                 response_write_complete: None,
             },
             true,
+            false,
         );
         match response_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(response) => serde_json::from_str::<api::schema::ErrorResponse>(&response)
@@ -3362,7 +3377,9 @@ impl HeadlessServer {
 
     fn poll_pending_alt_screen_reads(&mut self, now: Instant) {
         let pending = std::mem::take(&mut self.pending_alt_screen_reads);
+        let mut failed_restores = Vec::new();
         for read in pending {
+            let terminal_id = read.terminal_id.clone();
             let runtime = self.app.terminal_runtimes.get(&read.terminal_id);
             let remains_idle = self
                 .app
@@ -3378,42 +3395,85 @@ impl HeadlessServer {
             } else {
                 read.abort(runtime, now)
             };
-            if let Some(read) = outcome {
-                self.pending_alt_screen_reads.push(read);
+            match outcome {
+                crate::server::alt_screen_read::PollOutcome::Pending(read) => {
+                    self.pending_alt_screen_reads.push(*read);
+                }
+                crate::server::alt_screen_read::PollOutcome::Complete {
+                    viewport_restored: false,
+                } => failed_restores.push(terminal_id),
+                crate::server::alt_screen_read::PollOutcome::Complete {
+                    viewport_restored: true,
+                } => {}
             }
+        }
+        for terminal_id in failed_restores {
+            self.fail_deferred_alt_screen_reads(&terminal_id);
         }
     }
 
-    fn alt_screen_read_conflict(&self, request: &api::schema::Request) -> AltScreenReadConflict {
-        let (target, source, lines, format) = match &request.method {
-            api::schema::Method::AgentRead(params) => (
-                self.app.resolve_agent_target(&params.target).ok(),
-                params.source,
-                params.lines,
-                params.format,
-            ),
-            api::schema::Method::PaneRead(params) => (
-                self.app.resolve_terminal_target(&params.pane_id).ok(),
-                params.source,
-                params.lines,
-                params.format,
-            ),
-            _ => return AltScreenReadConflict::None,
+    fn pending_alt_screen_read_index(&self, request: &api::schema::Request) -> Option<usize> {
+        let target = match &request.method {
+            api::schema::Method::AgentRead(params) => {
+                self.app.resolve_agent_target(&params.target).ok()
+            }
+            api::schema::Method::PaneRead(params) => {
+                self.app.resolve_terminal_target(&params.pane_id).ok()
+            }
+            _ => return None,
         };
-        let Some(target) = target else {
-            return AltScreenReadConflict::None;
-        };
-        let Some(pending) = self
-            .pending_alt_screen_reads
+        let target = target?;
+        self.pending_alt_screen_reads
             .iter()
-            .find(|pending| pending.terminal_id.as_str() == target.terminal_id)
-        else {
+            .position(|pending| pending.terminal_id.as_str() == target.terminal_id)
+    }
+
+    fn cancel_alt_screen_read_conflict(
+        &mut self,
+        request: &api::schema::Request,
+        now: Instant,
+    ) -> AltScreenReadConflict {
+        let Some(index) = self.pending_alt_screen_read_index(request) else {
             return AltScreenReadConflict::None;
         };
-        if format == api::schema::ReadFormat::Text {
-            AltScreenReadConflict::Frozen(pending.frozen_snapshot(source, lines))
-        } else {
-            AltScreenReadConflict::Defer
+        let read = self.pending_alt_screen_reads.remove(index);
+        let runtime = self.app.terminal_runtimes.get(&read.terminal_id);
+        match read.abort(runtime, now) {
+            crate::server::alt_screen_read::PollOutcome::Pending(read) => {
+                self.pending_alt_screen_reads.push(*read);
+                AltScreenReadConflict::Defer
+            }
+            crate::server::alt_screen_read::PollOutcome::Complete {
+                viewport_restored: true,
+            } => AltScreenReadConflict::Cancelled,
+            crate::server::alt_screen_read::PollOutcome::Complete {
+                viewport_restored: false,
+            } => AltScreenReadConflict::RestoreFailed,
+        }
+    }
+
+    fn fail_deferred_alt_screen_reads(&mut self, terminal_id: &crate::terminal::TerminalId) {
+        let deferred = std::mem::take(&mut self.deferred_alt_screen_reads);
+        for msg in deferred {
+            let targets_terminal = match &msg.request.method {
+                api::schema::Method::AgentRead(params) => self
+                    .app
+                    .resolve_agent_target(&params.target)
+                    .ok()
+                    .is_some_and(|target| target.terminal_id == terminal_id.as_str()),
+                api::schema::Method::PaneRead(params) => self
+                    .app
+                    .resolve_terminal_target(&params.pane_id)
+                    .ok()
+                    .is_some_and(|target| target.terminal_id == terminal_id.as_str()),
+                _ => false,
+            };
+            if targets_terminal {
+                let response = alt_screen_restore_error_response(msg.request.id);
+                let _ = msg.respond_to.send(response);
+            } else {
+                self.deferred_alt_screen_reads.push(msg);
+            }
         }
     }
 
@@ -3421,13 +3481,10 @@ impl HeadlessServer {
         let deferred = std::mem::take(&mut self.deferred_alt_screen_reads);
         let mut changed = false;
         for msg in deferred {
-            match self.alt_screen_read_conflict(&msg.request) {
-                AltScreenReadConflict::None => {
-                    changed |= self.handle_api_request_with_shutdown_check(msg);
-                }
-                AltScreenReadConflict::Frozen(_) | AltScreenReadConflict::Defer => {
-                    self.deferred_alt_screen_reads.push(msg);
-                }
+            if self.pending_alt_screen_read_index(&msg.request).is_some() {
+                self.deferred_alt_screen_reads.push(msg);
+            } else {
+                changed |= self.handle_api_request_with_shutdown_check_inner(msg, false, true);
             }
         }
         changed
@@ -3459,7 +3516,7 @@ impl HeadlessServer {
     /// trigger internal events that may set toast state or would normally
     /// play sounds — in headless mode we forward these to clients instead.
     fn handle_api_request_with_shutdown_check(&mut self, msg: api::ApiRequestMessage) -> bool {
-        self.handle_api_request_with_shutdown_check_inner(msg, false)
+        self.handle_api_request_with_shutdown_check_inner(msg, false, false)
     }
 
     fn handle_api_request_with_render_impact(
@@ -3472,7 +3529,7 @@ impl HeadlessServer {
         ) {
             return self.handle_pane_graphics_stream_frame(msg);
         }
-        if self.handle_api_request_with_shutdown_check_inner(msg, false) {
+        if self.handle_api_request_with_shutdown_check_inner(msg, false, false) {
             RenderImpact::Full
         } else {
             RenderImpact::None
@@ -3483,6 +3540,7 @@ impl HeadlessServer {
         &mut self,
         msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
+        skip_alt_screen_capture: bool,
     ) -> bool {
         if self.shutting_down {
             // During shutdown, respond with server_unavailable.
@@ -3501,14 +3559,20 @@ impl HeadlessServer {
             return false;
         }
 
-        let frozen_alt_screen_read = match self.alt_screen_read_conflict(&msg.request) {
-            AltScreenReadConflict::None => None,
-            AltScreenReadConflict::Frozen(snapshot) => Some(snapshot),
-            AltScreenReadConflict::Defer => {
-                self.deferred_alt_screen_reads.push(msg);
-                return false;
-            }
-        };
+        let skip_alt_screen_capture =
+            match self.cancel_alt_screen_read_conflict(&msg.request, Instant::now()) {
+                AltScreenReadConflict::None => skip_alt_screen_capture,
+                AltScreenReadConflict::Cancelled => true,
+                AltScreenReadConflict::Defer => {
+                    self.deferred_alt_screen_reads.push(msg);
+                    return false;
+                }
+                AltScreenReadConflict::RestoreFailed => {
+                    let response = alt_screen_restore_error_response(msg.request.id);
+                    let _ = msg.respond_to.send(response);
+                    return false;
+                }
+            };
 
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
 
@@ -3623,7 +3687,9 @@ impl HeadlessServer {
             let _ = msg.respond_to.send(response);
             return changed;
         }
-        let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
+        let alt_screen_read_spec = (!skip_alt_screen_capture)
+            .then(|| self.alt_screen_read_spec(&msg.request))
+            .flatten();
         if matches!(
             &msg.request.method,
             api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
@@ -3633,7 +3699,7 @@ impl HeadlessServer {
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
-        let mut response = if matches!(
+        let response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
         ) {
@@ -3659,18 +3725,6 @@ impl HeadlessServer {
             self.app
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
-        if let Some(snapshot) = frozen_alt_screen_read {
-            if let Ok(mut success) = serde_json::from_str::<api::schema::SuccessResponse>(&response)
-            {
-                if let api::schema::ResponseResult::PaneRead { read } = &mut success.result {
-                    read.text = snapshot.text;
-                    read.truncated = snapshot.truncated;
-                    if let Ok(serialized) = serde_json::to_string(&success) {
-                        response = serialized;
-                    }
-                }
-            }
-        }
         if let Some(spec) = alt_screen_read_spec {
             if let Ok(success) = serde_json::from_str::<api::schema::SuccessResponse>(&response) {
                 if let api::schema::ResponseResult::PaneRead { read } = success.result {
@@ -6531,6 +6585,111 @@ next_tab = ""
                 ))
             );
         });
+    }
+
+    #[test]
+    fn pane_read_cancels_alt_screen_history_capture_before_serving_live_content() {
+        with_terminal_session_test_server(
+            |server, terminal_id, _terminal_id_string, public_pane_id| {
+                let runtime = server
+                    .app
+                    .terminal_runtimes
+                    .get(&terminal_id)
+                    .expect("runtime");
+                runtime.test_process_pty_bytes(
+                    b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[2J\x1b[Hcomposer-old",
+                );
+                let (_, initial) = runtime.screen_text_snapshot().expect("alternate screen");
+
+                let (baseline_tx, baseline_rx) = std::sync::mpsc::channel();
+                server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    request: api::schema::Request {
+                        id: "baseline".into(),
+                        method: api::schema::Method::PaneRead(api::schema::PaneReadParams {
+                            pane_id: public_pane_id.clone(),
+                            source: api::schema::ReadSource::Visible,
+                            lines: None,
+                            format: api::schema::ReadFormat::Text,
+                            strip_ansi: true,
+                            intent: api::schema::ReadIntent::Interactive,
+                        }),
+                    },
+                    respond_to: baseline_tx,
+                    response_write_complete: None,
+                });
+                let baseline: api::schema::SuccessResponse = serde_json::from_str(
+                    &baseline_rx
+                        .recv_timeout(Duration::from_millis(500))
+                        .expect("baseline pane read within 500 ms"),
+                )
+                .expect("baseline response");
+                let api::schema::ResponseResult::PaneRead { read: baseline } = baseline.result
+                else {
+                    panic!("expected baseline pane read");
+                };
+
+                let (history_tx, _history_rx) = std::sync::mpsc::channel();
+                server.pending_alt_screen_reads.push(
+                    crate::server::alt_screen_read::PendingAltScreenRead::start(
+                        terminal_id.clone(),
+                        "history".into(),
+                        history_tx,
+                        "fallback".into(),
+                        api::schema::PaneReadResult {
+                            pane_id: public_pane_id.clone(),
+                            workspace_id: "w1".into(),
+                            tab_id: "w1:t1".into(),
+                            source: api::schema::ReadSource::Recent,
+                            format: api::schema::ReadFormat::Text,
+                            text: String::new(),
+                            revision: baseline.revision,
+                            truncated: false,
+                        },
+                        200,
+                        false,
+                        initial,
+                        Instant::now(),
+                    ),
+                );
+
+                server
+                    .app
+                    .terminal_runtimes
+                    .get(&terminal_id)
+                    .expect("runtime")
+                    .test_process_pty_bytes(b"\x1b[2J\x1b[Hcomposer-new");
+
+                let (read_tx, read_rx) = std::sync::mpsc::channel();
+                server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    request: api::schema::Request {
+                        id: "live".into(),
+                        method: api::schema::Method::PaneRead(api::schema::PaneReadParams {
+                            pane_id: public_pane_id,
+                            source: api::schema::ReadSource::Recent,
+                            lines: Some(200),
+                            format: api::schema::ReadFormat::Text,
+                            strip_ansi: true,
+                            intent: api::schema::ReadIntent::Interactive,
+                        }),
+                    },
+                    respond_to: read_tx,
+                    response_write_complete: None,
+                });
+                let response: api::schema::SuccessResponse = serde_json::from_str(
+                    &read_rx
+                        .recv_timeout(Duration::from_millis(500))
+                        .expect("live pane read within 500 ms"),
+                )
+                .expect("live response");
+                let api::schema::ResponseResult::PaneRead { read } = response.result else {
+                    panic!("expected live pane read");
+                };
+
+                assert!(read.text.contains("composer-new"), "{read:?}");
+                assert!(!read.text.contains("composer-old"), "{read:?}");
+                assert!(read.revision > baseline.revision, "{read:?}");
+            },
+        );
     }
 
     #[test]
