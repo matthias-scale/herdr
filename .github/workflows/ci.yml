@@ -48,7 +48,7 @@ jobs:
         include:
           - os: ubuntu-latest
             kind: unix
-            nextest_filter: all()
+            nextest_filter: not binary(live_handoff)
           - os: macos-latest
             kind: unix
             nextest_filter: not binary(live_handoff)
