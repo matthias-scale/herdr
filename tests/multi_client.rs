@@ -102,13 +102,6 @@ fn wait_for_file(path: &Path, timeout: Duration) {
     panic!("socket did not accept connections at {}", path.display());
 }
 
-/// Spawn a server that actually reads `config`.
-///
-/// `spawn_server` writes to `<config_home>/herdr/config.toml`, but a debug build
-/// resolves its config dir as `herdr-dev`, so that file is never read and its
-/// settings never apply. Naming the path outright is what makes a test's config
-/// real. Kept as a separate entry point so the tests that have always run under
-/// the built-in defaults keep doing so.
 fn spawn_server_with_config(
     config_home: &Path,
     runtime_dir: &Path,
@@ -134,7 +127,7 @@ fn spawn_server_inner(
     let config_path = config_home.join("herdr/config.toml");
     fs::write(
         &config_path,
-        applied_config.unwrap_or("onboarding = false\n"),
+        applied_config.unwrap_or("onboarding = false\n[ui]\nshow_home_on_start = false\n"),
     )
     .unwrap();
 
@@ -150,9 +143,12 @@ fn spawn_server_inner(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
-    if applied_config.is_some() {
-        cmd.env("HERDR_CONFIG_PATH", &config_path);
-    }
+    // XDG_CONFIG_HOME alone is not enough: a debug build resolves its config dir as
+    // `herdr-dev` (src/config/io.rs app_dir_name), so the server would never read the
+    // `herdr/config.toml` written above. Naming the path outright is what makes the
+    // config real. Do not drop this: without it every config-dependent assertion in
+    // this file silently runs on built-in defaults.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -188,6 +184,9 @@ fn spawn_client_process(
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // Keep this aligned with spawn_server_inner: debug builds otherwise ignore the
+    // test's `herdr/config.toml` and load built-in defaults.
+    cmd.env("HERDR_CONFIG_PATH", config_home.join("herdr/config.toml"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -279,7 +278,7 @@ fn create_workspace_and_root_pane(socket_path: &Path, label: &str) -> (String, S
     let response = send_json_request(
         socket_path,
         &format!(
-            "{{\"id\":\"ws_create\",\"method\":\"workspace.create\",\"params\":{{\"label\":\"{label}\"}}}}"
+            "{{\"id\":\"ws_create\",\"method\":\"workspace.create\",\"params\":{{\"focus\":true,\"label\":\"{label}\"}}}}"
         ),
     );
 
@@ -903,7 +902,7 @@ fn non_foreground_render_preserves_interactive_tab_scroll() {
         &config_home,
         &runtime_dir,
         &api_socket,
-        "onboarding = false\n[ui]\ntab_bar_position = \"top\"\n",
+        "onboarding = false\n[ui]\nshow_home_on_start = false\ntab_bar_position = \"top\"\n",
     );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));

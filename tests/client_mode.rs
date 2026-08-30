@@ -95,6 +95,9 @@ fn spawn_client_process(
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // The paired server writes this path. Debug builds would otherwise resolve
+    // XDG_CONFIG_HOME under `herdr-dev`; do not drop the explicit path.
+    cmd.env("HERDR_CONFIG_PATH", config_home.join("herdr/config.toml"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -120,9 +123,10 @@ fn spawn_server(
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
+    let config_path = config_home.join("herdr/config.toml");
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -138,6 +142,9 @@ fn spawn_server(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // A debug build resolves XDG_CONFIG_HOME under `herdr-dev`, while this test
+    // writes `herdr/config.toml`. Do not drop the explicit path.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -343,11 +350,8 @@ fn client_sees_headless_startup_config_diagnostic() {
         "herdr"
     };
     fs::create_dir_all(config_home.join(app_dir)).unwrap();
-    fs::write(
-        config_home.join(app_dir).join("config.toml"),
-        "[keys\nprefix = \"ctrl+a\"\n",
-    )
-    .unwrap();
+    let config_path = config_home.join(app_dir).join("config.toml");
+    fs::write(&config_path, "[keys\nprefix = \"ctrl+a\"\n").unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     register_runtime_dir(&runtime_dir);
 
@@ -363,6 +367,9 @@ fn client_sees_headless_startup_config_diagnostic() {
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
+    // Keep the diagnostic fixture bound to the file it wrote. Do not let a
+    // build-mode directory change turn the invalid config into missing config.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -430,9 +437,10 @@ fn server_unreachable_shows_clear_error() {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     register_runtime_dir(&runtime_dir);
+    let config_path = config_home.join("herdr/config.toml");
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -440,6 +448,9 @@ fn server_unreachable_shows_clear_error() {
         .arg("client")
         .env("HERDR_DISABLE_SOUND", "1")
         .env("XDG_CONFIG_HOME", &config_home)
+        // Debug builds otherwise ignore the written `herdr/config.toml`.
+        // Do not drop the explicit path.
+        .env("HERDR_CONFIG_PATH", &config_path)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &api_socket)
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
@@ -504,7 +515,8 @@ fn server_crash_after_attach_causes_lost_connection_error() {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
                     output.push_str(&out);
-                    if out.contains("\u{2500}")
+                    if out.contains("\x1b[2J")
+                        || out.contains("\u{2500}")
                         || out.contains("workspace")
                         || out.contains("pane")
                         || out.contains("terminal")
@@ -662,7 +674,8 @@ fn attach_thin_client(
     let mut attached = false;
     while Instant::now() < deadline {
         let out = read_output(&output);
-        if out.contains('\u{2500}')
+        if out.contains("\x1b[2J")
+            || out.contains('\u{2500}')
             || out.contains("workspace")
             || out.contains("pane")
             || out.contains("terminal")
@@ -966,9 +979,10 @@ fn client_receives_notify_on_agent_state_change() {
 
     // Enable toast and sound in config so the server produces notifications.
     fs::create_dir_all(config_home.join("herdr")).unwrap();
+    let config_path = config_home.join("herdr/config.toml");
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n[ui.toast]\nenabled = true\n[ui.sound]\nenabled = true\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n[ui.toast]\nenabled = true\n[ui.sound]\nenabled = true\n",
     )
     .unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
@@ -988,6 +1002,9 @@ fn client_receives_notify_on_agent_state_change() {
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
+    // Keep this custom notification fixture real. Debug builds ignore
+    // `herdr/config.toml` without the explicit path; do not drop it.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");

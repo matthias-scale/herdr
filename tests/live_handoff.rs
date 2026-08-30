@@ -59,9 +59,10 @@ fn spawn_server_with_env(
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    let config_path = config_home.join("herdr/config.toml");
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -76,6 +77,9 @@ fn spawn_server_with_env(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // A debug build resolves XDG_CONFIG_HOME under `herdr-dev`, while this test
+    // writes `herdr/config.toml`. Do not drop the explicit path.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     // Without a sandboxed state root the spawned server reads the developer's
     // real ~/.local/state/herdr, including any agent manifest herdr downloaded
@@ -106,9 +110,10 @@ fn spawn_named_session_server(
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    let config_path = config_home.join("herdr-dev/config.toml");
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -123,6 +128,9 @@ fn spawn_named_session_server(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // Keep the config path bound to the fixture. Do not let a build-mode app
+    // directory rename make this handoff setup run on defaults.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     // Without a sandboxed state root the spawned server reads the developer's
     // real ~/.local/state/herdr, including any agent manifest herdr downloaded
@@ -144,9 +152,10 @@ fn spawn_named_session_server(
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    let config_path = config_home.join("herdr-dev/config.toml");
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -161,6 +170,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // Keep the config path bound to the fixture. Do not let a build-mode app
+    // directory rename make this handoff setup run on defaults.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     // Without a sandboxed state root the spawned server reads the developer's
     // real ~/.local/state/herdr, including any agent manifest herdr downloaded
@@ -188,9 +200,10 @@ fn spawn_server_with_args_and_socket_env(
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
+    let config_path = config_home.join("herdr-dev/config.toml");
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -209,6 +222,9 @@ fn spawn_server_with_args_and_socket_env(
     }
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // Keep the config path bound to the fixture. Do not let a build-mode app
+    // directory rename make this handoff setup run on defaults.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     // Without a sandboxed state root the spawned server reads the developer's
     // real ~/.local/state/herdr, including any agent manifest herdr downloaded

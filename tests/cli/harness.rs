@@ -127,7 +127,7 @@ pub(super) fn spawn_herdr(
         runtime_dir,
         socket_path,
         None,
-        "onboarding = false\n",
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
 }
 
@@ -141,7 +141,7 @@ pub(super) fn spawn_herdr_with_pane_history(
         runtime_dir,
         socket_path,
         None,
-        "onboarding = false\n[experimental]\npane_history = true\n",
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n[experimental]\npane_history = true\n",
     )
 }
 
@@ -169,9 +169,10 @@ pub(super) fn spawn_named_server(
     fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
     fs::write(
-        config_home.join(app_dir_name()).join("config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -179,6 +180,9 @@ pub(super) fn spawn_named_server(
     command
         .args(["--session", session, "server"])
         .env("XDG_CONFIG_HOME", config_home)
+        // Keep the process bound to the exact fixture. Do not let a build-mode
+        // app directory rename make the written config inert.
+        .env("HERDR_CONFIG_PATH", &config_path)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
@@ -230,8 +234,15 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_CONFIG_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV");
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
+    if config_path.exists() {
+        // Some CLI tests write config before invoking this helper. Keep those
+        // commands on that exact fixture; do not substitute built-in defaults.
+        command.env("HERDR_CONFIG_PATH", config_path);
+    }
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -271,7 +282,7 @@ pub(super) fn spawn_herdr_with_path(
         runtime_dir,
         socket_path,
         path_override,
-        "onboarding = false\n",
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
 }
 
@@ -285,11 +296,8 @@ pub(super) fn spawn_herdr_with_config(
     fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
-    fs::write(
-        config_home.join(app_dir_name()).join("config.toml"),
-        config_toml,
-    )
-    .unwrap();
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
+    fs::write(&config_path, config_toml).unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -303,6 +311,9 @@ pub(super) fn spawn_herdr_with_config(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // Keep the process bound to the exact fixture. Do not let a build-mode app
+    // directory rename make the written config inert.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");

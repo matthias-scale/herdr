@@ -99,9 +99,10 @@ fn spawn_server_with_path(
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
+    let config_path = config_home.join("herdr/config.toml");
     fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
+        &config_path,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
     )
     .unwrap();
 
@@ -117,6 +118,9 @@ fn spawn_server_with_path(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // A debug build resolves XDG_CONFIG_HOME under `herdr-dev`, while this test
+    // writes `herdr/config.toml`. Do not drop the explicit path.
+    cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -155,6 +159,9 @@ fn spawn_client_process(
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // The paired server writes this path. Keep the client on the same real
+    // config instead of debug-build defaults; do not drop it.
+    cmd.env("HERDR_CONFIG_PATH", config_home.join("herdr/config.toml"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -196,7 +203,7 @@ fn workspace_create(socket_path: &Path, label: &str) -> Value {
         socket_path,
         "workspace_create",
         "workspace.create",
-        json!({ "label": label }),
+        json!({ "focus": true, "label": label }),
     )
 }
 
@@ -1038,7 +1045,8 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
             match thin_reader.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
-                    if out.contains("\u{2500}")
+                    if out.contains("\x1b[2J")
+                        || out.contains("\u{2500}")
                         || out.contains("workspace")
                         || out.contains("pane")
                         || out.contains("terminal")
