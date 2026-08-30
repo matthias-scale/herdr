@@ -104,6 +104,11 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
         .count();
     let specs = [
         (
+            StatusButtonAction::Home,
+            " home ".to_string(),
+            app.home.is_some(),
+        ),
+        (
             StatusButtonAction::BlockedFilter,
             if blocked > 0 {
                 format!(" blocked {blocked} ")
@@ -1596,6 +1601,19 @@ mod tests {
         }
     }
 
+    /// Look a button up by what it does. Indexing by position makes every test
+    /// a hostage of the button order.
+    fn button_for(
+        buttons: &[StatusButton],
+        action: StatusButtonAction,
+    ) -> StatusButton {
+        buttons
+            .iter()
+            .find(|button| button.action == action)
+            .unwrap_or_else(|| panic!("no {action:?} button in {buttons:?}"))
+            .clone()
+    }
+
     #[test]
     fn quick_buttons_sit_at_the_left_edge_in_a_stable_order() {
         let app = AppState::test_new();
@@ -1605,6 +1623,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                StatusButtonAction::Home,
                 StatusButtonAction::BlockedFilter,
                 StatusButtonAction::Dock,
                 StatusButtonAction::StatusDetail
@@ -1625,8 +1644,9 @@ mod tests {
         app.ensure_test_terminals();
 
         let idle = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(idle[0].label.trim(), "blocked");
-        assert!(!idle[0].active, "the filter starts disabled");
+        let idle = button_for(&idle, StatusButtonAction::BlockedFilter);
+        assert_eq!(idle.label.trim(), "blocked");
+        assert!(!idle.active, "the filter starts disabled");
 
         let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
         let terminal_id = app.workspaces[0]
@@ -1639,19 +1659,23 @@ mod tests {
             .state = AgentState::Blocked;
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(blocked[0].label.trim(), "blocked 1");
-        assert!(!blocked[0].active);
+        let blocked = button_for(&blocked, StatusButtonAction::BlockedFilter);
+        assert_eq!(blocked.label.trim(), "blocked 1");
+        assert!(!blocked.active);
         app.blocked_filter = true;
-        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[0].active);
+        let filtered = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(button_for(&filtered, StatusButtonAction::BlockedFilter).active);
     }
 
     #[test]
     fn the_dock_button_lights_up_only_while_the_dock_is_showing() {
         let mut app = AppState::test_new();
         app.dock_collapsed = true;
-        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        let collapsed = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(!button_for(&collapsed, StatusButtonAction::Dock).active);
         app.dock_collapsed = false;
-        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        let showing = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(button_for(&showing, StatusButtonAction::Dock).active);
     }
 
     #[test]

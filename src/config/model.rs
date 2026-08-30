@@ -1317,9 +1317,7 @@ impl Default for KeysConfig {
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
-            // Home is disabled for now: the overlay is unfinished and the blocked
-            // filter answers the same question in place. Restoring it is one line.
-            home: BindingConfig::empty(),
+            home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
