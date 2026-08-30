@@ -432,6 +432,10 @@ pub struct PluginPaneOpenParams {
     pub direction: Option<SplitDirection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Opt in to moving the session focus to the new plugin pane. Defaults to
+    /// false so an automated open never yanks the human's cursor. Placements
+    /// that exist to surface (`popup`, `overlay`, `zoomed`) surface regardless,
+    /// so this only affects background `split` and `tab` opens.
     #[serde(default)]
     pub focus: bool,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

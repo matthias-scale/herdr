@@ -471,6 +471,39 @@ fn wait_for_agent_status_not_working(socket_path: &Path, pane_id: &str, timeout:
     panic!("pane {pane_id} still reports agent_status {last:?} after {timeout:?}");
 }
 
+/// `pane.get` and agent reports are eventually consistent, so the first query
+/// after a report can still return the previous status.
+fn wait_for_pane_agent_status(
+    socket_path: &Path,
+    request_id: &str,
+    pane_id: &str,
+    expected: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pane = request(
+            socket_path,
+            serde_json::json!({
+                "id": request_id,
+                "method": "pane.get",
+                "params": {"pane_id": pane_id}
+            }),
+        );
+        let observed = pane["result"]["pane"]["agent_status"].as_str();
+        if observed == Some(expected) {
+            return pane;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "pane {pane_id} never reported agent_status {expected:?} after {timeout:?}; \
+                 last observed agent_status: {observed:?}; last response: {pane}"
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut last_text = String::new();
@@ -1148,28 +1181,24 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
             }
         }),
     ));
-    let before = request(
+    let before = wait_for_pane_agent_status(
         &api_socket,
-        serde_json::json!({
-            "id": "test:pane:before",
-            "method": "pane.get",
-            "params": {"pane_id": pane_id}
-        }),
+        "test:pane:before",
+        &pane_id,
+        "blocked",
+        Duration::from_secs(5),
     );
-    assert_eq!(before["result"]["pane"]["agent_status"], "blocked");
     assert_eq!(
         before["result"]["pane"]["gates"].as_array().unwrap().len(),
         1
     );
-    let done_before = request(
+    wait_for_pane_agent_status(
         &api_socket,
-        serde_json::json!({
-            "id": "test:done:before",
-            "method": "pane.get",
-            "params": {"pane_id": done_pane_id}
-        }),
+        "test:done:before",
+        &done_pane_id,
+        "done",
+        Duration::from_secs(15),
     );
-    assert_eq!(done_before["result"]["pane"]["agent_status"], "done");
 
     assert_ok(request(
         &api_socket,
@@ -1194,15 +1223,13 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
         after["result"]["pane"]["gates"].as_array().unwrap().len(),
         1
     );
-    let done_after = request(
+    wait_for_pane_agent_status(
         &api_socket,
-        serde_json::json!({
-            "id": "test:done:after",
-            "method": "pane.get",
-            "params": {"pane_id": done_pane_id}
-        }),
+        "test:done:after",
+        &done_pane_id,
+        "done",
+        Duration::from_secs(15),
     );
-    assert_eq!(done_after["result"]["pane"]["agent_status"], "done");
 
     let _ = request(
         &api_socket,
@@ -1456,6 +1483,13 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
             }
         }),
     ));
+    wait_for_pane_agent_status(
+        &api_socket,
+        "test:old-pane-report:wait",
+        &pane_id,
+        "working",
+        Duration::from_secs(5),
+    );
     let agents = request(
         &api_socket,
         serde_json::json!({"id":"test:agent-list","method":"agent.list","params":{}}),
