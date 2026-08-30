@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -167,6 +167,9 @@ fn bands(area: Rect) -> HomeBands {
             Constraint::Length(1),
         ])
         .areas(area);
+        let prompt = prompt.inner(Margin::new(1, 0));
+        let chips = chips.inner(Margin::new(1, 0));
+        let target = target.inner(Margin::new(1, 0));
         HomeBands {
             header,
             gap,
@@ -215,22 +218,33 @@ fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
 }
 
 fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
+    let specs = chip_specs(home);
+    let label_width = specs
+        .iter()
+        .map(|(_, label)| label.chars().count())
+        .sum::<usize>();
+    let gaps = specs.len().saturating_sub(1);
+    let gap = if label_width.saturating_add(gaps.saturating_mul(3)) <= area.width as usize {
+        3
+    } else {
+        1
+    };
     let mut x = area.x;
     let right = area.right();
-    chip_specs(home)
+    specs
         .into_iter()
         .filter_map(|(focus, label)| {
             if x >= right {
                 return None;
             }
-            let width = u16::try_from(label.chars().count().saturating_add(1))
+            let width = u16::try_from(label.chars().count())
                 .unwrap_or(u16::MAX)
                 .min(right - x);
             if width == 0 {
                 return None;
             }
             let rect = Rect::new(x, area.y, width, area.height);
-            x += width;
+            x = x.saturating_add(width).saturating_add(gap);
             Some((focus, rect))
         })
         .collect()
@@ -799,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_geometry_matches_the_hit_areas_used_by_clicks() {
+    fn composer_inset_matches_queue_content_and_click_targets() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
@@ -807,8 +821,24 @@ mod tests {
         let layout = bands(area);
         let composer = layout.composer.expect("composer should fit");
         let home = app.home.as_ref().expect("home");
+        let buffer = draw_home(&app, &queue, area);
         let hits = home_hit_areas(&app, &queue, area);
 
+        assert_eq!(buffer[(area.x + 1, layout.body.y)].symbol(), "▸");
+        assert_eq!(buffer[(area.x + 1, composer.prompt.y)].symbol(), ">");
+        assert_eq!(buffer[(area.x + 1, composer.chips.y)].symbol(), "c");
+        assert_eq!(buffer[(area.x + 1, composer.target.y)].symbol(), "→");
+        assert_eq!(composer.prompt.x, area.x + 1);
+        assert_eq!(composer.chips.x, area.x + 1);
+        assert_eq!(composer.target.x, area.x + 1);
+        let wide_chip_rects = chip_rects(home, composer.chips);
+        assert!(wide_chip_rects
+            .windows(2)
+            .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
+        assert!(
+            row_text(&buffer, area, composer.chips.y).contains("claude ▾   opus ▾   medium ▾"),
+            "wide composer should keep the intended chip spacing"
+        );
         assert_eq!(
             hits.iter()
                 .find(|hit| hit.target == HomeHitTarget::Prompt)
@@ -889,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn home_tab_order_skips_effort_when_codex_does_not_support_it() {
+    fn home_tab_order_includes_each_agents_supported_effort_options() {
         let mut home = HomeState::default();
         let claude_order = [
             HomeFocus::Agent,
@@ -905,11 +935,17 @@ mod tests {
         }
 
         home.set_agent(crate::detect::Agent::Codex);
+        assert_eq!(
+            effort_options(crate::detect::Agent::Codex),
+            &["low", "medium", "high", "xhigh"]
+        );
         home.focus = Some(HomeFocus::Model);
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Effort));
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Directory));
         home.move_focus(true);
-        assert_eq!(home.focus, Some(HomeFocus::Model));
+        assert_eq!(home.focus, Some(HomeFocus::Effort));
     }
 
     #[test]
@@ -939,6 +975,69 @@ mod tests {
                 "implement the retry cap"
             ]
         );
+    }
+
+    #[test]
+    fn codex_dispatch_plan_uses_the_reasoning_effort_config_override() {
+        let mut home = HomeState::default();
+        home.prompt = "implement the retry cap".into();
+        home.set_agent(crate::detect::Agent::Codex);
+        home.model = "gpt-5.3-codex".into();
+        home.effort = Some("xhigh".into());
+
+        let plan = home.dispatch_plan().expect("prompt should dispatch");
+
+        assert_eq!(plan.agent, crate::detect::Agent::Codex);
+        assert_eq!(plan.effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            plan.argv,
+            vec![
+                "codex",
+                "--model",
+                "gpt-5.3-codex",
+                "-c",
+                "model_reasoning_effort=xhigh",
+                "implement the retry cap"
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_composer_collapses_chip_gaps_and_keeps_click_targets_in_bounds() {
+        let mut app = AppState::test_new();
+        app.home = Some(HomeState::default());
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 24, 12);
+        let composer = bands(area).composer.expect("composer should fit");
+        let home = app.home.as_ref().expect("home");
+        let rects = chip_rects(home, composer.chips);
+        let buffer = draw_home(&app, &queue, area);
+        let chip_row = row_text(&buffer, area, composer.chips.y);
+
+        assert!(
+            chip_row.starts_with(" claude ▾ opus ▾ medium"),
+            "{chip_row:?}"
+        );
+        assert_eq!(rects[0].1.right() + 1, rects[1].1.x);
+        assert!(rects.windows(2).all(|pair| pair[0].1.right() < pair[1].1.x));
+        assert!(rects.iter().all(|(_, rect)| rect.right() <= area.right()));
+
+        let hits = home_hit_areas(&app, &queue, area);
+        for (focus, rect) in rects {
+            let target = match focus {
+                HomeFocus::Agent => HomeHitTarget::Agent,
+                HomeFocus::Model => HomeHitTarget::Model,
+                HomeFocus::Effort => HomeHitTarget::Effort,
+                HomeFocus::Directory => HomeHitTarget::Directory,
+                HomeFocus::Prompt | HomeFocus::Target => continue,
+            };
+            assert_eq!(
+                hits.iter()
+                    .find(|hit| hit.target == target)
+                    .map(|hit| hit.rect),
+                Some(rect)
+            );
+        }
     }
 
     #[test]

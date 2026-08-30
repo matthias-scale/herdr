@@ -106,6 +106,7 @@ pub(crate) fn model_options(agent: Agent) -> &'static [&'static str] {
 pub(crate) fn effort_options(agent: Agent) -> &'static [&'static str] {
     match agent {
         Agent::Claude => &["low", "medium", "high"],
+        Agent::Codex => &["low", "medium", "high", "xhigh"],
         _ => &[],
     }
 }
@@ -256,7 +257,12 @@ impl HomeState {
                     argv.extend(["--effort".into(), effort.clone()]);
                 }
             }
-            Agent::Codex => argv.extend(["--model".into(), self.model.clone()]),
+            Agent::Codex => {
+                argv.extend(["--model".into(), self.model.clone()]);
+                if let Some(effort) = &self.effort {
+                    argv.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
+                }
+            }
             _ => return Err("that agent cannot be dispatched from home".into()),
         }
         argv.push(prompt.into());
