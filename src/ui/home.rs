@@ -919,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn home_tab_order_skips_effort_when_codex_does_not_support_it() {
+    fn home_tab_order_includes_each_agents_supported_effort_options() {
         let mut home = HomeState::default();
         let claude_order = [
             HomeFocus::Agent,
@@ -935,11 +935,17 @@ mod tests {
         }
 
         home.set_agent(crate::detect::Agent::Codex);
+        assert_eq!(
+            effort_options(crate::detect::Agent::Codex),
+            &["low", "medium", "high", "xhigh"]
+        );
         home.focus = Some(HomeFocus::Model);
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Effort));
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Directory));
         home.move_focus(true);
-        assert_eq!(home.focus, Some(HomeFocus::Model));
+        assert_eq!(home.focus, Some(HomeFocus::Effort));
     }
 
     #[test]
@@ -966,6 +972,31 @@ mod tests {
                 "sonnet",
                 "--effort",
                 "high",
+                "implement the retry cap"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_dispatch_plan_uses_the_reasoning_effort_config_override() {
+        let mut home = HomeState::default();
+        home.prompt = "implement the retry cap".into();
+        home.set_agent(crate::detect::Agent::Codex);
+        home.model = "gpt-5.3-codex".into();
+        home.effort = Some("xhigh".into());
+
+        let plan = home.dispatch_plan().expect("prompt should dispatch");
+
+        assert_eq!(plan.agent, crate::detect::Agent::Codex);
+        assert_eq!(plan.effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            plan.argv,
+            vec![
+                "codex",
+                "--model",
+                "gpt-5.3-codex",
+                "-c",
+                "model_reasoning_effort=xhigh",
                 "implement the retry cap"
             ]
         );
