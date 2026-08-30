@@ -570,23 +570,21 @@ contains = ["{contains}"]
         /// process pointed at a deleted config root or a stale manifest cache.
         struct Sandbox {
             env: crate::config::TestConfigEnvGuard,
-            reloads: Option<std::sync::MutexGuard<'static, ()>>,
+            reloads: Option<crate::detect::manifest::ManifestReloadGuard>,
             dir: std::path::PathBuf,
         }
 
         impl Drop for Sandbox {
             fn drop(&mut self) {
                 self.env.restore();
-                // Release the reload lock first: the rebuild below must be the
-                // ordinary locking reload so it cannot deadlock on itself.
-                self.reloads.take();
                 crate::detect::manifest::reload_manifests();
+                self.reloads.take();
                 let _ = fs::remove_dir_all(&self.dir);
             }
         }
 
         let mut env = crate::config::TestConfigEnvGuard::acquire();
-        let reloads = crate::detect::manifest::lock_manifest_reloads();
+        let reloads = crate::detect::manifest::ManifestReloadGuard::acquire();
         let dir = std::env::temp_dir().join(format!(
             "herdr-manifest-update-{name}-{}",
             crate::config::test_unique_suffix()
@@ -599,8 +597,7 @@ contains = ["{contains}"]
             reloads: Some(reloads),
             dir: dir.clone(),
         };
-        // Already holding the reload lock, so rebuild through the unlocked path.
-        crate::detect::manifest::reload_manifests_locked_for_test();
+        crate::detect::manifest::reload_manifests();
         f()
     }
 

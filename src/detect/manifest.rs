@@ -277,30 +277,64 @@ fn manifest_reload_lock() -> &'static Mutex<()> {
     MANIFEST_RELOAD_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// The thread currently running a manifest sandbox, if any.
+#[cfg(test)]
+static SANDBOX_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
 /// Hold the reload lock across a whole test sandbox.
 ///
 /// `App::new` reloads the manifest cache, so any test that builds an `App`
 /// rebuilds this global from the *current* environment. A sandbox that only
-/// reloads at entry would have its cache clobbered mid-test by an unrelated
+/// reloaded at entry would have its cache clobbered mid-test by an unrelated
 /// test on another thread. Holding the reload lock for the sandbox's lifetime
 /// makes those reloads wait instead.
+///
+/// The sandbox itself reloads repeatedly (each `write_remote_*` helper does),
+/// so the owning thread is recorded and allowed straight through; a
+/// non-reentrant lock alone would deadlock the sandbox against itself.
 #[cfg(test)]
-pub(crate) fn lock_manifest_reloads() -> std::sync::MutexGuard<'static, ()> {
-    manifest_reload_lock()
+pub(crate) struct ManifestReloadGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ManifestReloadGuard {
+    pub(crate) fn acquire() -> Self {
+        let lock = manifest_reload_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *sandbox_owner() = Some(std::thread::current().id());
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ManifestReloadGuard {
+    fn drop(&mut self) {
+        *sandbox_owner() = None;
+    }
+}
+
+#[cfg(test)]
+fn sandbox_owner() -> std::sync::MutexGuard<'static, Option<std::thread::ThreadId>> {
+    SANDBOX_OWNER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(test)]
+fn current_thread_owns_sandbox() -> bool {
+    *sandbox_owner() == Some(std::thread::current().id())
+}
+
 pub(crate) fn reload_manifests() -> Vec<AgentManifestSummary> {
+    #[cfg(test)]
+    if current_thread_owns_sandbox() {
+        return reload_manifests_locked();
+    }
     let _reload_guard = manifest_reload_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    reload_manifests_locked()
-}
-
-/// Rebuild the cache from a caller that already holds the reload lock.
-#[cfg(test)]
-pub(crate) fn reload_manifests_locked_for_test() -> Vec<AgentManifestSummary> {
     reload_manifests_locked()
 }
 
@@ -1563,20 +1597,20 @@ pub(crate) fn with_bundled_manifests<T>(name: &str, f: impl FnOnce() -> T) -> T 
     /// process pointed at a deleted config root or a stale manifest cache.
     struct Sandbox {
         env: crate::config::TestConfigEnvGuard,
-        _reloads: std::sync::MutexGuard<'static, ()>,
+        _reloads: ManifestReloadGuard,
         base: std::path::PathBuf,
     }
 
     impl Drop for Sandbox {
         fn drop(&mut self) {
             self.env.restore();
-            reload_manifests_locked();
+            reload_manifests();
             let _ = std::fs::remove_dir_all(&self.base);
         }
     }
 
     let mut env = crate::config::TestConfigEnvGuard::acquire();
-    let reloads = lock_manifest_reloads();
+    let reloads = ManifestReloadGuard::acquire();
     let base = std::env::temp_dir().join(format!(
         "herdr-manifest-sandbox-{name}-{}",
         crate::config::test_unique_suffix()
@@ -1589,7 +1623,7 @@ pub(crate) fn with_bundled_manifests<T>(name: &str, f: impl FnOnce() -> T) -> T 
         _reloads: reloads,
         base: base.clone(),
     };
-    reload_manifests_locked();
+    reload_manifests();
     f()
 }
 
