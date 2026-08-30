@@ -29,13 +29,13 @@ pub(crate) fn derive_completion_tier(
     closing_idle: Option<bool>,
     open_blockers: bool,
     active_subagents: Option<u32>,
-    background_job_count: Option<u16>,
+    holds_shell: bool,
     has_closing_block_tokens: bool,
 ) -> Option<CompletionTier> {
     let quiet = state == AgentState::Idle
         && !open_blockers
         && active_subagents.unwrap_or_default() == 0
-        && background_job_count.unwrap_or_default() == 0;
+        && !holds_shell;
     if !quiet {
         return None;
     }
@@ -3422,7 +3422,7 @@ mod tests {
                     idle,
                     false,
                     None,
-                    None,
+                    false,
                     has_tokens,
                 ),
                 Some(expected)
@@ -3440,7 +3440,7 @@ mod tests {
                 Some(true),
                 false,
                 None,
-                None,
+                false,
                 true,
             )
         };
@@ -3453,15 +3453,15 @@ mod tests {
                 Some(true),
                 false,
                 None,
-                None,
+                false,
                 true,
             ),
             None
         );
         for (gates, agents, shells) in [
-            (true, None, None),
-            (false, Some(1), None),
-            (false, None, Some(1)),
+            (true, None, false),
+            (false, Some(1), false),
+            (false, None, true),
         ] {
             assert_eq!(
                 derive_completion_tier(

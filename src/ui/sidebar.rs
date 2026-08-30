@@ -19,6 +19,8 @@ use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
+use crate::terminal::state::CompletionTier;
+use crate::terminal::state::derive_completion_tier;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
@@ -315,10 +317,15 @@ fn compact_row_layout(
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
     if entry_has_gate(entry) || entry.usage_limited {
-        p.red
-    } else {
-        state_label_color(entry.state, entry.seen, p)
+        return p.red;
     }
+    // A session that declared a contract and reported it met is the one kind of
+    // done you can act on without reading the pane: close it. That earns its own
+    // colour rather than a fourth dot shape.
+    if entry.completion_tier == Some(CompletionTier::ContractSatisfied) {
+        return p.mauve;
+    }
+    state_label_color(entry.state, entry.seen, p)
 }
 
 fn provider_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
@@ -555,7 +562,7 @@ pub(crate) struct AgentPanelEntry {
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
     /// pane stops working.
     pub open_blockers: bool,
-    pub completion_tier: Option<crate::terminal::state::CompletionTier>,
+    pub completion_tier: Option<CompletionTier>,
     /// The pane's agent stopped on an exhausted plan usage/rate limit. Nobody
     /// can answer it, so it reads as its own red "usage" label rather than a
     /// gate or a lifecycle state.
@@ -721,14 +728,14 @@ fn collect_agent_panel_entries_with_runtimes(
                         .filter(|count| *count > 0);
                     let has_closing_block_tokens =
                         detail.tokens.keys().any(|key| key.starts_with("closing_"));
-                    let completion_tier = crate::terminal::state::derive_completion_tier(
+                    let completion_tier = derive_completion_tier(
                         detail.state,
                         detail.closing_contract.as_deref(),
                         detail.closing_contract_met,
                         detail.closing_idle,
                         detail.open_blockers,
                         active_subagents,
-                        detail.background_job_count,
+                        detail.holds_shell,
                         has_closing_block_tokens,
                     );
                     AgentPanelEntry {
@@ -937,7 +944,7 @@ fn aggregate_tab_entries(
                 if entry.state != AgentState::Idle
                     || entry.open_blockers
                     || entry.active_subagents.unwrap_or_default() > 0
-                    || entry.background_job_count.unwrap_or_default() > 0
+                    || entry.holds_shell
                 {
                     entry.completion_tier = None;
                 }
@@ -3117,6 +3124,39 @@ mod tests {
                 ..Default::default()
             })
             .expect("valid test work context");
+    }
+
+    #[test]
+    fn a_satisfied_contract_recolours_the_row_dot_without_a_new_shape() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Idle, false, None, "done");
+
+        let done_unread = compact_row_color(&entry, &palette);
+        assert_eq!(compact_row_dot(&entry), "\u{25cb}");
+
+        entry.completion_tier = Some(CompletionTier::ContractSatisfied);
+        assert_eq!(
+            compact_row_color(&entry, &palette),
+            palette.mauve,
+            "a met contract is the one done you can act on"
+        );
+        assert_ne!(
+            compact_row_color(&entry, &palette),
+            done_unread,
+            "it must not share a colour with plain done-unread"
+        );
+        assert_eq!(
+            compact_row_dot(&entry),
+            "\u{25cb}",
+            "the shape stays hollow: colour carries the tier, not a fourth glyph"
+        );
+
+        entry.open_blockers = true;
+        assert_eq!(
+            compact_row_color(&entry, &palette),
+            palette.red,
+            "an open gate still outranks a satisfied contract"
+        );
     }
 
     fn aggregation_entry(

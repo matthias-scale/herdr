@@ -685,7 +685,7 @@ impl App {
             terminal.closing_idle,
             !terminal.closing_gates.is_empty(),
             active_subagents,
-            terminal.background_job_count,
+            terminal.holds_shell,
             tokens.keys().any(|key| key.starts_with("closing_")),
         );
         if tier != Some(crate::terminal::state::CompletionTier::ContractSatisfied) {
