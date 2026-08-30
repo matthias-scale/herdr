@@ -10,6 +10,7 @@ pub(crate) mod agent_view;
 mod agents;
 mod api;
 mod api_helpers;
+pub(crate) use api_helpers::read_terminal_snapshot;
 pub(crate) mod claude_subagents;
 mod config_io;
 mod creation;
@@ -629,6 +630,7 @@ impl App {
             symphony_detail: None,
             inbox: None,
             home: None,
+            pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,

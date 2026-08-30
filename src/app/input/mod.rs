@@ -143,6 +143,21 @@ impl App {
         self.state.home.is_some() && self.handle_home_key_event(key)
     }
 
+    fn handle_home_text_commit(&mut self, text: &str) -> bool {
+        let Some(home) = self.state.home.as_mut() else {
+            return false;
+        };
+        match home.focus {
+            Some(crate::app::home::HomeFocus::Prompt) => home.prompt.push_str(text),
+            Some(crate::app::home::HomeFocus::Reply) => {
+                home.reply.push_str(text);
+                home.reply_error = None;
+            }
+            _ => {}
+        }
+        true
+    }
+
     /// Handle a key while home is open. Returns whether home consumed it.
     fn handle_home_key_event(&mut self, event: KeyEvent) -> bool {
         if self.state.home.is_none() {
@@ -181,12 +196,28 @@ impl App {
         match event.code {
             KeyCode::Tab if event.modifiers.is_empty() => {
                 if let Some(home) = self.state.home.as_mut() {
-                    home.move_focus(false);
+                    if focus.is_none() {
+                        home.focus = Some(if queue.is_empty() {
+                            crate::app::home::HomeFocus::Prompt
+                        } else {
+                            crate::app::home::HomeFocus::Reply
+                        });
+                    } else {
+                        home.move_focus(false);
+                    }
                 }
             }
             KeyCode::BackTab => {
                 if let Some(home) = self.state.home.as_mut() {
-                    home.move_focus(true);
+                    if focus.is_none() {
+                        home.focus = Some(if queue.is_empty() {
+                            crate::app::home::HomeFocus::Prompt
+                        } else {
+                            crate::app::home::HomeFocus::Reply
+                        });
+                    } else {
+                        home.move_focus(true);
+                    }
                 }
             }
             KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() && focus.is_none() => {
@@ -202,6 +233,9 @@ impl App {
             KeyCode::Enter if event.modifiers.is_empty() => match focus {
                 None => {
                     self.state.jump_to_selected_home_agent(&queue);
+                }
+                Some(crate::app::home::HomeFocus::Reply) => {
+                    self.reply_to_selected_home_agent();
                 }
                 Some(crate::app::home::HomeFocus::Prompt) => self.dispatch_home_prompt(),
                 Some(focus) => {
@@ -221,6 +255,11 @@ impl App {
                     self.state.mode = Mode::Terminal;
                 }
             }
+            KeyCode::Char('d')
+                if event.modifiers.is_empty() && focus.is_none() && !queue.is_empty() =>
+            {
+                self.state.jump_to_selected_home_agent(&queue);
+            }
             KeyCode::Backspace
                 if event.modifiers.is_empty()
                     && focus == Some(crate::app::home::HomeFocus::Prompt) =>
@@ -235,6 +274,22 @@ impl App {
             {
                 if let Some(home) = self.state.home.as_mut() {
                     home.append_prompt(character);
+                }
+            }
+            KeyCode::Backspace
+                if event.modifiers.is_empty()
+                    && focus == Some(crate::app::home::HomeFocus::Reply) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.backspace_reply();
+                }
+            }
+            KeyCode::Char(character)
+                if event.modifiers.is_empty()
+                    && focus == Some(crate::app::home::HomeFocus::Reply) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.append_reply(character);
                 }
             }
             _ => {}
@@ -481,6 +536,10 @@ impl App {
         if text.is_empty() || self.state.symphony_detail.is_some() {
             return;
         }
+        if self.state.home.is_some() {
+            self.handle_home_text_commit(text);
+            return;
+        }
         if self.state.popup_pane.is_some() {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
@@ -513,12 +572,17 @@ impl App {
                 });
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                self.state.note_human_text(pane_id, text);
             }
         }
     }
 
     pub(super) async fn handle_text_commit(&mut self, text: String) {
         if text.is_empty() || self.state.symphony_detail.is_some() {
+            return;
+        }
+        if self.state.home.is_some() {
+            self.handle_home_text_commit(&text);
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -547,18 +611,26 @@ impl App {
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
             {
-                runtime.send_bytes(Bytes::from(text)).await.is_ok()
+                runtime
+                    .send_bytes(Bytes::copy_from_slice(text.as_bytes()))
+                    .await
+                    .is_ok()
             } else {
                 false
             };
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                self.state.note_human_text(pane_id, &text);
             }
         }
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
         if self.state.symphony_detail.is_some() {
+            return;
+        }
+        if self.state.home.is_some() {
+            self.handle_home_text_commit(&text);
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -585,6 +657,7 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            let draft = text.clone();
             let has_text = !text.is_empty();
             let sent = if let Some(runtime) = self
                 .state
@@ -596,6 +669,7 @@ impl App {
             };
             if let (true, Some(pane_id)) = (sent && has_text, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                self.state.note_human_text(pane_id, &draft);
             }
         }
     }
@@ -1636,6 +1710,71 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn pressing_enter_in_the_home_reply_sends_and_returns_focus_to_the_queue() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.state.toggle_home();
+        app.state.home.as_mut().expect("home overlay").focus = None;
+        app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+        assert_eq!(
+            app.state.home.as_ref().and_then(|home| home.focus),
+            Some(crate::app::home::HomeFocus::Reply)
+        );
+
+        for character in "answer".chars() {
+            app.handle_key(TerminalKey::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            ))
+            .await;
+        }
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(rx.recv().await.expect("reply bytes").as_ref(), b"answer\r");
+        assert_eq!(
+            app.state.home.as_ref().and_then(|home| home.focus),
+            None,
+            "a sent reply returns to queue focus"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pending_human_draft_rejects_a_home_reply_without_changing_the_draft() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state
+            .pending_human_drafts
+            .insert(pane_id, "human draft byte exact".into());
+        app.state.toggle_home();
+        let home = app.state.home.as_mut().expect("home overlay");
+        home.focus = Some(crate::app::home::HomeFocus::Reply);
+        home.reply = "answer anyway".into();
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(
+            app.state
+                .pending_human_drafts
+                .get(&pane_id)
+                .map(String::as_bytes),
+            Some(b"human draft byte exact".as_slice())
+        );
+        assert_eq!(
+            app.state
+                .home
+                .as_ref()
+                .and_then(|home| home.reply_error.as_deref()),
+            Some("human draft pending · clear it in the pane")
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the protected pane must not receive bytes"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn pressing_escape_leaves_the_composer_before_closing_home() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
 
@@ -1649,6 +1788,35 @@ mod tests {
             .await;
         assert!(app.state.home.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn clicking_detach_jumps_to_the_selected_pane_and_closes_home() {
+        let (mut app, pane_ids) = app_with_blocked_home_rows(2);
+        app.state.home.as_mut().expect("home overlay").focus = None;
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let detach = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Detach)
+            .expect("detach should be clickable")
+            .rect;
+        let target = pane_ids[0];
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: detach.x,
+                row: detach.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        assert!(app.state.home.is_none());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
     }
 
     #[tokio::test(flavor = "current_thread")]

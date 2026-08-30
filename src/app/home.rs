@@ -12,12 +12,16 @@
 
 use std::path::PathBuf;
 
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
 use crate::{app::inbox::BlockedAgent, detect::Agent};
 
 pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 7;
+pub(crate) const HOME_LENS_MIN_HEIGHT: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeFocus {
+    Reply,
     Prompt,
     Agent,
     Model,
@@ -29,6 +33,7 @@ pub(crate) enum HomeFocus {
 impl HomeFocus {
     pub(crate) fn next(self, effort_visible: bool) -> Self {
         match self {
+            Self::Reply => Self::Prompt,
             Self::Prompt => Self::Agent,
             Self::Agent => Self::Model,
             Self::Model if effort_visible => Self::Effort,
@@ -41,6 +46,7 @@ impl HomeFocus {
 
     pub(crate) fn previous(self, effort_visible: bool) -> Self {
         match self {
+            Self::Reply => Self::Target,
             Self::Prompt => Self::Target,
             Self::Agent => Self::Prompt,
             Self::Model => Self::Agent,
@@ -64,6 +70,7 @@ pub(crate) enum HomePicker {
 impl HomePicker {
     pub(crate) fn for_focus(focus: HomeFocus) -> Option<Self> {
         match focus {
+            HomeFocus::Reply => None,
             HomeFocus::Prompt => None,
             HomeFocus::Agent => Some(Self::Agent),
             HomeFocus::Model => Some(Self::Model),
@@ -121,6 +128,8 @@ pub(crate) struct HomeState {
     selected: usize,
     pub(crate) focus: Option<HomeFocus>,
     pub(crate) prompt: String,
+    pub(crate) reply: String,
+    pub(crate) reply_error: Option<String>,
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
@@ -136,6 +145,8 @@ impl Default for HomeState {
             selected: 0,
             focus: Some(HomeFocus::Prompt),
             prompt: String::new(),
+            reply: String::new(),
+            reply_error: None,
             agent: Agent::Claude,
             model: "opus".into(),
             effort: Some("medium".into()),
@@ -166,6 +177,7 @@ impl HomeState {
     /// cursor move, so a stale index from a click is harmless.
     pub(crate) fn select(&mut self, index: usize) {
         self.selected = index;
+        self.reply_error = None;
     }
 
     /// Move down one row, stopping at the end.
@@ -174,6 +186,7 @@ impl HomeState {
     /// been waiting, so the ends mean something — arriving at the bottom should
     /// read as "that is all of them", not put you back on the oldest.
     pub(crate) fn select_next(&mut self, queue: &[BlockedAgent]) {
+        self.reply_error = None;
         if queue.is_empty() {
             self.selected = 0;
             return;
@@ -184,6 +197,7 @@ impl HomeState {
     /// Move up one row, stopping at the top.
     pub(crate) fn select_prev(&mut self, queue: &[BlockedAgent]) {
         self.selected = self.selected(queue).saturating_sub(1);
+        self.reply_error = None;
     }
 
     /// First visible row, given how many rows fit.
@@ -234,6 +248,16 @@ impl HomeState {
 
     pub(crate) fn append_prompt(&mut self, character: char) {
         self.prompt.push(character);
+    }
+
+    pub(crate) fn append_reply(&mut self, character: char) {
+        self.reply.push(character);
+        self.reply_error = None;
+    }
+
+    pub(crate) fn backspace_reply(&mut self) {
+        self.reply.pop();
+        self.reply_error = None;
     }
 
     pub(crate) fn backspace_prompt(&mut self) {
@@ -291,6 +315,75 @@ pub(crate) struct HomeCounts {
 }
 
 impl crate::app::state::AppState {
+    pub(crate) fn pane_id_for_terminal(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> Option<crate::layout::PaneId> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.iter())
+            .find_map(|(pane_id, pane)| {
+                (pane.attached_terminal_id == *terminal_id).then_some(*pane_id)
+            })
+    }
+
+    pub(crate) fn note_human_key(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        key: &crate::input::TerminalKey,
+    ) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        let has_terminal_modifier = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        if has_terminal_modifier {
+            return;
+        }
+        match key.code {
+            KeyCode::Char(character) => {
+                let character = key
+                    .shifted_codepoint
+                    .and_then(char::from_u32)
+                    .unwrap_or(character);
+                let draft = self.pending_human_drafts.entry(pane_id).or_default();
+                for _ in 0..key.repeat_count.max(1) {
+                    draft.push(character);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(draft) = self.pending_human_drafts.get_mut(&pane_id) {
+                    for _ in 0..key.repeat_count.max(1) {
+                        draft.pop();
+                    }
+                    if draft.is_empty() {
+                        self.pending_human_drafts.remove(&pane_id);
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                self.pending_human_drafts.remove(&pane_id);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn note_human_text(&mut self, pane_id: crate::layout::PaneId, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if text.contains(['\r', '\n']) {
+            self.pending_human_drafts.remove(&pane_id);
+            return;
+        }
+        self.pending_human_drafts
+            .entry(pane_id)
+            .or_default()
+            .push_str(text);
+    }
+
     pub(crate) fn toggle_home(&mut self) {
         self.home = match self.home.take() {
             Some(_) => None,
@@ -522,6 +615,63 @@ impl crate::app::state::AppState {
         self.focus_pane_in_workspace(ws_idx, pane_id);
         self.clear_home();
         true
+    }
+}
+
+impl crate::app::App {
+    pub(crate) fn reply_to_selected_home_agent(&mut self) {
+        let queue = self.state.blocked_agents();
+        let Some((ws_idx, pane_id, reply)) = self.state.home.as_ref().and_then(|home| {
+            home.current(&queue)
+                .map(|agent| (agent.ws_idx, agent.pane_id, home.reply.clone()))
+        }) else {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("no blocked pane is selected".into());
+            }
+            return;
+        };
+        if reply.trim().is_empty() {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("type a reply first".into());
+            }
+            return;
+        }
+        if self
+            .state
+            .pending_human_drafts
+            .get(&pane_id)
+            .is_some_and(|draft| !draft.is_empty())
+        {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("human draft pending · clear it in the pane".into());
+            }
+            return;
+        }
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("pane is no longer available".into());
+            }
+            return;
+        };
+        match self.try_send_text_to_pane(&public_pane_id, &format!("{reply}\r")) {
+            Ok(()) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.reply.clear();
+                    home.reply_error = None;
+                    home.focus = None;
+                }
+            }
+            Err(crate::app::api::PaneSendError::NotFound) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.reply_error = Some("pane is no longer available".into());
+                }
+            }
+            Err(crate::app::api::PaneSendError::Failed(error)) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.reply_error = Some(format!("reply failed · {error}"));
+                }
+            }
+        }
     }
 }
 

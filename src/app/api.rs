@@ -16,6 +16,8 @@ mod tabs;
 mod workspaces;
 mod worktrees;
 
+pub(crate) use panes::PaneSendError;
+
 use super::{api_helpers::pane_agent_status_with_stale, App, Mode, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
 

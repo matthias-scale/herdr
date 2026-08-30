@@ -145,6 +145,15 @@ impl AppState {
                             }
                             self.home_accept_picker();
                         }
+                        HomeHitTarget::Reply => {
+                            if let Some(home) = self.home.as_mut() {
+                                home.focus = Some(crate::app::home::HomeFocus::Reply);
+                            }
+                        }
+                        HomeHitTarget::Detach => {
+                            let queue = self.blocked_agents();
+                            self.jump_to_selected_home_agent(&queue);
+                        }
                         target => {
                             let focus = match target {
                                 HomeHitTarget::Prompt => crate::app::home::HomeFocus::Prompt,
@@ -153,7 +162,10 @@ impl AppState {
                                 HomeHitTarget::Effort => crate::app::home::HomeFocus::Effort,
                                 HomeHitTarget::Directory => crate::app::home::HomeFocus::Directory,
                                 HomeHitTarget::Target => crate::app::home::HomeFocus::Target,
-                                HomeHitTarget::QueueRow(_) | HomeHitTarget::PickerOption(_) => {
+                                HomeHitTarget::QueueRow(_)
+                                | HomeHitTarget::Reply
+                                | HomeHitTarget::Detach
+                                | HomeHitTarget::PickerOption(_) => {
                                     return None;
                                 }
                             };
