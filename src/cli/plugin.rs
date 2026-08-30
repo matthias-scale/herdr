@@ -524,75 +524,47 @@ fn parse_plugin_pane_open_args(args: &[String]) -> Option<PluginPaneOpenParams> 
     while index < args.len() {
         match args[index].as_str() {
             "--plugin" => {
-                let Some(value) = required_value(args, &mut index, "--plugin") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--plugin")?;
                 plugin_id = Some(value);
             }
             "--entrypoint" => {
-                let Some(value) = required_value(args, &mut index, "--entrypoint") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--entrypoint")?;
                 entrypoint = Some(value);
             }
             "--placement" => {
-                let Some(value) = required_value(args, &mut index, "--placement") else {
-                    return None;
-                };
-                let Some(parsed) = parse_pane_placement(&value) else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--placement")?;
+                let parsed = parse_pane_placement(&value)?;
                 placement = Some(parsed);
             }
             "--width" => {
-                let Some(value) = required_value(args, &mut index, "--width") else {
-                    return None;
-                };
-                let Some(parsed) = parse_popup_dimension(&value, "--width") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--width")?;
+                let parsed = parse_popup_dimension(&value, "--width")?;
                 width = Some(parsed);
             }
             "--height" => {
-                let Some(value) = required_value(args, &mut index, "--height") else {
-                    return None;
-                };
-                let Some(parsed) = parse_popup_dimension(&value, "--height") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--height")?;
+                let parsed = parse_popup_dimension(&value, "--height")?;
                 height = Some(parsed);
             }
             "--workspace" => {
-                let Some(value) = required_value(args, &mut index, "--workspace") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--workspace")?;
                 workspace_id = Some(value);
             }
             "--target-pane" => {
-                let Some(value) = required_value(args, &mut index, "--target-pane") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--target-pane")?;
                 target_pane_id = Some(value);
             }
             "--direction" => {
-                let Some(value) = required_value(args, &mut index, "--direction") else {
-                    return None;
-                };
-                let Some(parsed) = parse_split_direction(&value) else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--direction")?;
+                let parsed = parse_split_direction(&value)?;
                 direction = Some(parsed);
             }
             "--cwd" => {
-                let Some(value) = required_value(args, &mut index, "--cwd") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--cwd")?;
                 cwd = Some(value);
             }
             "--env" => {
-                let Some(value) = required_value(args, &mut index, "--env") else {
-                    return None;
-                };
+                let value = required_value(args, &mut index, "--env")?;
                 let (key, value) = match super::parse_env_assignment(&value) {
                     Ok(pair) => pair,
                     Err(err) => {
