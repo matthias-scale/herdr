@@ -4143,6 +4143,7 @@
             },
             "focus": {
               "default": false,
+              "description": "Opt in to moving the session focus to the new plugin pane. Defaults to\nfalse so an automated open never yanks the human's cursor. Placements\nthat exist to surface (`popup`, `overlay`, `zoomed`) surface regardless,\nso this only affects background `split` and `tab` opens.",
               "type": "boolean"
             },
             "height": {

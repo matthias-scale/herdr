@@ -495,6 +495,13 @@ fn run_plugin_pane_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
+    let Some(params) = parse_plugin_pane_open_args(args) else {
+        return Ok(2);
+    };
+    print_plugin_response(Method::PluginPaneOpen(params))
+}
+
+fn parse_plugin_pane_open_args(args: &[String]) -> Option<PluginPaneOpenParams> {
     let mut plugin_id = None;
     let mut entrypoint = None;
     let mut placement = None;
@@ -504,7 +511,13 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
     let mut target_pane_id = None;
     let mut direction = None;
     let mut cwd = None;
-    let mut focus = true;
+    // Socket-API/CLI plugin pane opens must never steal the human's focus.
+    // Focus is strictly opt-in via `--focus`, matching the wire default
+    // (`PluginPaneOpenParams.focus` is `#[serde(default)]` = false) and
+    // `pane move`. Placements that exist to surface (popup, overlay, zoomed)
+    // surface regardless of this flag, so only background `split` and `tab`
+    // opens are affected.
+    let mut focus = false;
     let mut env = HashMap::new();
 
     let mut index = 0;
@@ -512,79 +525,79 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--plugin" => {
                 let Some(value) = required_value(args, &mut index, "--plugin") else {
-                    return Ok(2);
+                    return None;
                 };
                 plugin_id = Some(value);
             }
             "--entrypoint" => {
                 let Some(value) = required_value(args, &mut index, "--entrypoint") else {
-                    return Ok(2);
+                    return None;
                 };
                 entrypoint = Some(value);
             }
             "--placement" => {
                 let Some(value) = required_value(args, &mut index, "--placement") else {
-                    return Ok(2);
+                    return None;
                 };
                 let Some(parsed) = parse_pane_placement(&value) else {
-                    return Ok(2);
+                    return None;
                 };
                 placement = Some(parsed);
             }
             "--width" => {
                 let Some(value) = required_value(args, &mut index, "--width") else {
-                    return Ok(2);
+                    return None;
                 };
                 let Some(parsed) = parse_popup_dimension(&value, "--width") else {
-                    return Ok(2);
+                    return None;
                 };
                 width = Some(parsed);
             }
             "--height" => {
                 let Some(value) = required_value(args, &mut index, "--height") else {
-                    return Ok(2);
+                    return None;
                 };
                 let Some(parsed) = parse_popup_dimension(&value, "--height") else {
-                    return Ok(2);
+                    return None;
                 };
                 height = Some(parsed);
             }
             "--workspace" => {
                 let Some(value) = required_value(args, &mut index, "--workspace") else {
-                    return Ok(2);
+                    return None;
                 };
                 workspace_id = Some(value);
             }
             "--target-pane" => {
                 let Some(value) = required_value(args, &mut index, "--target-pane") else {
-                    return Ok(2);
+                    return None;
                 };
                 target_pane_id = Some(value);
             }
             "--direction" => {
                 let Some(value) = required_value(args, &mut index, "--direction") else {
-                    return Ok(2);
+                    return None;
                 };
                 let Some(parsed) = parse_split_direction(&value) else {
-                    return Ok(2);
+                    return None;
                 };
                 direction = Some(parsed);
             }
             "--cwd" => {
                 let Some(value) = required_value(args, &mut index, "--cwd") else {
-                    return Ok(2);
+                    return None;
                 };
                 cwd = Some(value);
             }
             "--env" => {
                 let Some(value) = required_value(args, &mut index, "--env") else {
-                    return Ok(2);
+                    return None;
                 };
                 let (key, value) = match super::parse_env_assignment(&value) {
                     Ok(pair) => pair,
                     Err(err) => {
                         eprintln!("{err}");
-                        return Ok(2);
+                        return None;
                     }
                 };
                 env.insert(key, value);
@@ -599,21 +612,21 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
             }
             other => {
                 eprintln!("unknown option: {other}");
-                return Ok(2);
+                return None;
             }
         }
     }
 
     let Some(plugin_id) = plugin_id else {
         eprintln!("missing required --plugin");
-        return Ok(2);
+        return None;
     };
     let Some(entrypoint) = entrypoint else {
         eprintln!("missing required --entrypoint");
-        return Ok(2);
+        return None;
     };
 
-    print_plugin_response(Method::PluginPaneOpen(PluginPaneOpenParams {
+    Some(PluginPaneOpenParams {
         plugin_id,
         entrypoint,
         placement,
@@ -625,7 +638,7 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
         cwd,
         focus,
         env,
-    }))
+    })
 }
 
 fn parse_popup_dimension(value: &str, flag: &str) -> Option<PopupSize> {
@@ -1688,6 +1701,46 @@ fn print_plugin_pane_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin_pane_open_args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_plugin_pane_open_args_default_does_not_steal_focus() {
+        for placement in ["split", "tab", "zoomed", "overlay", "popup"] {
+            let params = parse_plugin_pane_open_args(&plugin_pane_open_args(&[
+                "--plugin",
+                "acme.tools",
+                "--entrypoint",
+                "dashboard",
+                "--placement",
+                placement,
+            ]))
+            .expect("plugin pane open args parse");
+            assert!(
+                !params.focus,
+                "socket-API plugin pane open must not focus by default: {placement}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_plugin_pane_open_args_focus_flag_opts_into_focus() {
+        let base = ["--plugin", "acme.tools", "--entrypoint", "dashboard"];
+
+        let mut with_focus = base.to_vec();
+        with_focus.push("--focus");
+        let params = parse_plugin_pane_open_args(&plugin_pane_open_args(&with_focus))
+            .expect("plugin pane open args parse");
+        assert!(params.focus);
+
+        let mut with_no_focus = with_focus.clone();
+        with_no_focus.push("--no-focus");
+        let params = parse_plugin_pane_open_args(&plugin_pane_open_args(&with_no_focus))
+            .expect("plugin pane open args parse");
+        assert!(!params.focus);
+    }
 
     fn unique_plugin_id(label: &str) -> String {
         let nanos = SystemTime::now()
