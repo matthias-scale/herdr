@@ -97,6 +97,8 @@ impl ScratchpadDoc {
             branch: None,
             work_title: None,
             session_name: None,
+            role: None,
+            active_owner: false,
         };
         work_link_candidates(&context)
     }

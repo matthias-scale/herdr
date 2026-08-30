@@ -71,6 +71,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
     let mut path = None;
     let mut label = None;
     let mut focus = false;
+    let mut work_context = None;
 
     let mut index = 0;
     while index < args.len() {
@@ -132,19 +133,29 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
                 index += 1;
             }
             "--json" => index += 1,
-            other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
-            }
+            other => match super::parse_spawn_work_context_arg(args, index, &mut work_context) {
+                Ok(Some(next)) => index = next,
+                Ok(None) => {
+                    eprintln!("unknown option: {other}");
+                    return Ok(2);
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    return Ok(2);
+                }
+            },
         }
     }
     if workspace_id.is_some() && cwd.is_some() {
         eprintln!(
-            "usage: herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus]"
+            "usage: herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--ticket ID] [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]"
         );
         return Ok(2);
     }
 
+    if let (Some(context), Some(branch)) = (work_context.as_mut(), branch.as_ref()) {
+        context.branch = Some(branch.clone());
+    }
     super::runtime::worktree_create(WorktreeCreateParams {
         workspace_id,
         cwd,
@@ -153,6 +164,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
         path,
         label,
         focus,
+        work_context,
     })
 }
 
@@ -163,6 +175,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
     let mut branch = None;
     let mut label = None;
     let mut focus = false;
+    let mut work_context = None;
 
     let mut index = 0;
     while index < args.len() {
@@ -216,25 +229,35 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
                 index += 1;
             }
             "--json" => index += 1,
-            other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
-            }
+            other => match super::parse_spawn_work_context_arg(args, index, &mut work_context) {
+                Ok(Some(next)) => index = next,
+                Ok(None) => {
+                    eprintln!("unknown option: {other}");
+                    return Ok(2);
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    return Ok(2);
+                }
+            },
         }
     }
     if workspace_id.is_some() && cwd.is_some() {
         eprintln!(
-            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]"
+            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--ticket ID] [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]"
         );
         return Ok(2);
     }
     if path.is_some() == branch.is_some() {
         eprintln!(
-            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]"
+            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--ticket ID] [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]"
         );
         return Ok(2);
     }
 
+    if let (Some(context), Some(branch)) = (work_context.as_mut(), branch.as_ref()) {
+        context.branch = Some(branch.clone());
+    }
     super::runtime::worktree_open(WorktreeOpenParams {
         workspace_id,
         cwd,
@@ -242,6 +265,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
         branch,
         label,
         focus,
+        work_context,
     })
 }
 
@@ -287,10 +311,10 @@ fn print_worktree_help() {
     eprintln!("herdr worktree commands:");
     eprintln!("  herdr worktree list [--workspace ID | --cwd PATH]");
     eprintln!(
-        "  herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus]"
+        "  herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--ticket ID] [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]"
     );
     eprintln!(
-        "  herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]"
+        "  herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--ticket ID] [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]"
     );
     eprintln!("  herdr worktree remove --workspace ID [--force]");
 }

@@ -365,6 +365,7 @@ impl App {
                     .clone()
                     .or_else(|| Some(workflow.name.clone())),
                 env: crate::symphony::launch_env(&workflow),
+                work_context: None,
             },
         );
         self.state.clear_symphony();

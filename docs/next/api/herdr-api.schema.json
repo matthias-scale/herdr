@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 19,
+  "protocol": 20,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1346,6 +1346,10 @@
         },
         "PaneWorkContext": {
           "properties": {
+            "active_owner": {
+              "description": "Whether this pane currently owns its pull request. Other attached runs\nremain visible as history.",
+              "type": "boolean"
+            },
             "branch": {
               "type": [
                 "string",
@@ -1373,6 +1377,17 @@
               },
               "type": "array"
             },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneWorkRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Role of this run in the lifecycle of its primary pull request."
+            },
             "session_name": {
               "description": "Name the agent gave this session (Claude's `ai-title`). It is an\nexplicit identity for the work, not a derivation from the prompt or the\ncheckout path, so display surfaces rank it above every derived title.",
               "type": [
@@ -1395,6 +1410,15 @@
             }
           },
           "type": "object"
+        },
+        "PaneWorkRole": {
+          "enum": [
+            "baseline",
+            "repair",
+            "ship",
+            "review"
+          ],
+          "type": "string"
         },
         "SplitDirection": {
           "enum": [
@@ -3609,6 +3633,16 @@
                 "null"
               ]
             },
+            "work_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": [
                 "string",
@@ -3706,6 +3740,10 @@
         },
         "PaneWorkContext": {
           "properties": {
+            "active_owner": {
+              "description": "Whether this pane currently owns its pull request. Other attached runs\nremain visible as history.",
+              "type": "boolean"
+            },
             "branch": {
               "type": [
                 "string",
@@ -3732,6 +3770,17 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Role of this run in the lifecycle of its primary pull request."
             },
             "session_name": {
               "description": "Name the agent gave this session (Claude's `ai-title`). It is an\nexplicit identity for the work, not a derivation from the prompt or the\ncheckout path, so display surfaces rank it above every derived title.",
@@ -3811,6 +3860,15 @@
             "pane_id"
           ],
           "type": "object"
+        },
+        "PaneWorkRole": {
+          "enum": [
+            "baseline",
+            "repair",
+            "ship",
+            "review"
+          ],
+          "type": "string"
         },
         "PaneZoomMode": {
           "enum": [
@@ -4702,6 +4760,16 @@
                 "null"
               ]
             },
+            "work_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": [
                 "string",
@@ -4842,6 +4910,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "work_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkContext"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -5019,6 +5097,16 @@
                 "null"
               ]
             },
+            "work_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": [
                 "string",
@@ -5073,6 +5161,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "work_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkContext"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "workspace_id": {
@@ -9198,6 +9296,10 @@
         },
         "PaneWorkContext": {
           "properties": {
+            "active_owner": {
+              "description": "Whether this pane currently owns its pull request. Other attached runs\nremain visible as history.",
+              "type": "boolean"
+            },
             "branch": {
               "type": [
                 "string",
@@ -9225,6 +9327,17 @@
               },
               "type": "array"
             },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneWorkRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Role of this run in the lifecycle of its primary pull request."
+            },
             "session_name": {
               "description": "Name the agent gave this session (Claude's `ai-title`). It is an\nexplicit identity for the work, not a derivation from the prompt or the\ncheckout path, so display surfaces rank it above every derived title.",
               "type": [
@@ -9247,6 +9360,15 @@
             }
           },
           "type": "object"
+        },
+        "PaneWorkRole": {
+          "enum": [
+            "baseline",
+            "repair",
+            "ship",
+            "review"
+          ],
+          "type": "string"
         },
         "PaneZoomReason": {
           "enum": [

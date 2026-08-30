@@ -24,6 +24,8 @@ pub struct WorktreeCreateParams {
     pub label: Option<String>,
     #[serde(default)]
     pub focus: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_context: Option<crate::work_context::PaneWorkContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
@@ -40,6 +42,8 @@ pub struct WorktreeOpenParams {
     pub label: Option<String>,
     #[serde(default)]
     pub focus: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_context: Option<crate::work_context::PaneWorkContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

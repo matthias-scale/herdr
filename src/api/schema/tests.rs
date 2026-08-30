@@ -54,11 +54,21 @@ fn request_uses_dot_method_names() {
             focus: true,
             label: Some("api".into()),
             env: Default::default(),
+            work_context: Some(crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-42".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+                branch: Some("feat/binding".into()),
+                role: Some(crate::work_context::PaneWorkRole::Ship),
+                active_owner: true,
+                ..Default::default()
+            }),
         }),
     };
 
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["method"], "workspace.create");
+    assert_eq!(json["params"]["work_context"]["role"], "ship");
+    assert_eq!(json["params"]["work_context"]["active_owner"], true);
 }
 
 #[test]

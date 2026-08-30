@@ -54,9 +54,10 @@ pub(crate) fn fit_tab_display_projection(
         TabDisplayProjection::Derived {
             agent,
             ticket,
+            binding,
             title,
         } => {
-            let full = [&ticket, &title]
+            let full = [&ticket, &binding, &title]
                 .into_iter()
                 .filter_map(|part| part.as_deref())
                 .collect::<Vec<_>>()
@@ -68,6 +69,11 @@ pub(crate) fn fit_tab_display_projection(
             if let Some(ticket) = ticket {
                 if !candidates.contains(&ticket) {
                     candidates.push(ticket);
+                }
+            }
+            if let Some(binding) = binding {
+                if !candidates.contains(&binding) {
+                    candidates.push(binding);
                 }
             }
             if let Some(title) = title {
@@ -668,6 +674,7 @@ mod tests {
         let projection = TabDisplayProjection::Derived {
             agent: Some("Claude".into()),
             ticket: Some("SCA-42".into()),
+            binding: None,
             title: Some("repair login regression".into()),
         };
 
@@ -681,6 +688,7 @@ mod tests {
         let narrow_projection = TabDisplayProjection::Derived {
             agent: Some("cx".into()),
             ticket: Some("LONG-TICKET".into()),
+            binding: None,
             title: Some("task".into()),
         };
         assert_eq!(
@@ -697,6 +705,7 @@ mod tests {
         let titled = TabDisplayProjection::Derived {
             agent: Some("claude".into()),
             ticket: None,
+            binding: None,
             title: Some("Create Python Script".into()),
         };
         assert_eq!(
@@ -707,9 +716,69 @@ mod tests {
         let agent_only = TabDisplayProjection::Derived {
             agent: Some("codex".into()),
             ticket: None,
+            binding: None,
             title: None,
         };
         assert_eq!(fit_tab_display_projection(agent_only, 80), "codex");
+    }
+
+    #[test]
+    fn tab_projection_distinguishes_owner_history_and_unowned_pr() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("owner"), Workspace::test_new("review")];
+        app.ensure_test_terminals();
+        let terminal_ids = app
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .terminal_id(workspace.tabs[0].root_pane)
+                    .cloned()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (terminal_id, role, active_owner) in [
+            (
+                &terminal_ids[0],
+                crate::work_context::PaneWorkRole::Ship,
+                true,
+            ),
+            (
+                &terminal_ids[1],
+                crate::work_context::PaneWorkRole::Review,
+                false,
+            ),
+        ] {
+            let context = crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+                role: Some(role),
+                active_owner,
+                ..Default::default()
+            }
+            .normalized_spawn_binding()
+            .unwrap();
+            app.terminals
+                .get_mut(terminal_id)
+                .unwrap()
+                .replace_prevalidated_manual_work_context(context);
+        }
+
+        assert_eq!(
+            tab_chrome_label(&app.workspaces[0], &app.terminals, 0, 80),
+            "owner/ship"
+        );
+        assert_eq!(
+            tab_chrome_label(&app.workspaces[1], &app.terminals, 0, 80),
+            "history/review"
+        );
+        app.terminals
+            .get_mut(&terminal_ids[0])
+            .unwrap()
+            .clear_active_work_owner();
+        assert_eq!(
+            tab_chrome_label(&app.workspaces[1], &app.terminals, 0, 80),
+            "history/review · un-owned"
+        );
     }
 
     #[test]

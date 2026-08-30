@@ -41,6 +41,10 @@ impl App {
         id: String,
         params: WorkspaceCreateParams,
     ) -> String {
+        let work_context = match self.prepare_spawn_work_context(params.work_context) {
+            Ok(context) => context,
+            Err(message) => return encode_error(id, "invalid_work_context", message),
+        };
         let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
             let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
                 self.focused_pane_cwd_in_workspace(ws_idx)
@@ -52,7 +56,12 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
-        match self.create_workspace_with_launch_env(cwd, params.focus, extra_env) {
+        match self.create_workspace_with_launch_env_and_work_context(
+            cwd,
+            params.focus,
+            extra_env,
+            work_context,
+        ) {
             Ok(index) => {
                 if let Some(label) = params.label {
                     if let Some(workspace) = self.state.workspaces.get_mut(index) {
@@ -385,6 +394,7 @@ mod tests {
                 focus: true,
                 label: None,
                 env: Default::default(),
+                work_context: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -414,6 +424,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                work_context: None,
             },
         );
 

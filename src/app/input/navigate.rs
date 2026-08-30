@@ -303,6 +303,7 @@ impl App {
                                 focus: true,
                                 label: None,
                                 env: Default::default(),
+                                work_context: None,
                             },
                         );
                         leave_navigate_mode(&mut self.state);
@@ -897,6 +898,7 @@ impl App {
                 cwd: None,
                 focus: true,
                 env: Default::default(),
+                work_context: None,
             },
         );
     }

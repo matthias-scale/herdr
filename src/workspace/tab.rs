@@ -40,6 +40,7 @@ pub(crate) enum TabDisplayProjection {
     Derived {
         agent: Option<String>,
         ticket: Option<String>,
+        binding: Option<String>,
         title: Option<String>,
     },
     Fallback(String),
@@ -61,11 +62,12 @@ impl TabDisplayProjection {
             Self::Derived {
                 agent,
                 ticket,
+                binding,
                 title,
             } => {
                 // The agent identity is surfaced separately (sidebar suffix, agent
                 // rows); it only stands in as the label when nothing else exists.
-                let label = [ticket, title]
+                let label = [ticket, binding, title]
                     .into_iter()
                     .filter_map(|part| part.as_deref())
                     .collect::<Vec<_>>()
@@ -85,6 +87,7 @@ impl TabDisplayProjection {
             Self::Derived {
                 agent: Some(_),
                 ticket: None,
+                binding: None,
                 title: None,
             }
         )
@@ -257,6 +260,13 @@ impl Tab {
             .or_else(|| terminal.agent_name.clone())
             .or_else(|| terminal.effective_agent_label().map(str::to_string));
         let ticket = context.primary_ticket().map(str::to_string);
+        let pr_has_active_owner = context.primary_pr().is_some_and(|pr_url| {
+            terminals.values().any(|candidate| {
+                let candidate = candidate.effective_work_context();
+                candidate.is_active_owner_of(pr_url)
+            })
+        });
+        let binding = context.binding_display(pr_has_active_owner);
         // Precedence: a human pane label, then the name the agent gave its own
         // session, then a novel terminal title, then the prompt-derived work
         // title. The session name outranks the terminal title because the
@@ -276,10 +286,11 @@ impl Tab {
                     .map(|title| Self::terminal_title_without_leading_agent(terminal, &title))
             })
             .or_else(|| context.work_title.clone());
-        (agent.is_some() || ticket.is_some() || title.is_some()).then_some(
+        (agent.is_some() || ticket.is_some() || binding.is_some() || title.is_some()).then_some(
             TabDisplayProjection::Derived {
                 agent,
                 ticket,
+                binding,
                 title,
             },
         )

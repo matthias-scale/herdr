@@ -1493,6 +1493,8 @@ mod tests {
                                 branch: Some("feat/context".into()),
                                 work_title: Some("Restore context".into()),
                                 session_name: None,
+                                role: None,
+                                active_owner: false,
                             },
                             work_context_tiers: None,
                             label: Some("reviewer".into()),
@@ -1559,6 +1561,8 @@ mod tests {
                 branch: Some("feat/context".into()),
                 work_title: Some("Restore context".into()),
                 session_name: None,
+                role: None,
+                active_owner: false,
             }
         );
         let session = terminal

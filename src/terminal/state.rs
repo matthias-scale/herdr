@@ -653,6 +653,25 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn replace_prevalidated_manual_work_context(
+        &mut self,
+        context: crate::work_context::PaneWorkContext,
+    ) -> bool {
+        let changed = self.work_context.replace_manual_normalized(context);
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        changed
+    }
+
+    pub(crate) fn clear_active_work_owner(&mut self) -> bool {
+        let changed = self.work_context.clear_active_owner();
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        changed
+    }
+
     pub(crate) fn replace_hook_work_context(
         &mut self,
         context: crate::work_context::PaneWorkContext,

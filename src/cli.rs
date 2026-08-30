@@ -55,6 +55,63 @@ pub(crate) fn parse_env_assignment(raw: &str) -> Result<(String, String), String
     Ok((key.to_string(), value.to_string()))
 }
 
+pub(crate) fn parse_spawn_work_context_arg(
+    args: &[String],
+    index: usize,
+    context: &mut Option<crate::work_context::PaneWorkContext>,
+) -> Result<Option<usize>, String> {
+    let Some(option) = args.get(index).map(String::as_str) else {
+        return Ok(None);
+    };
+    match option {
+        "--ticket" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --ticket".to_string())?;
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .ticket_ids
+                .push(value.clone());
+            Ok(Some(index + 2))
+        }
+        "--pr" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --pr".to_string())?;
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .pr_urls
+                .push(value.clone());
+            Ok(Some(index + 2))
+        }
+        "--branch" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --branch".to_string())?;
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .branch = Some(value.clone());
+            Ok(Some(index + 2))
+        }
+        "--role" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --role".to_string())?;
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .role = Some(value.parse()?);
+            Ok(Some(index + 2))
+        }
+        "--active-owner" => {
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .active_owner = true;
+            Ok(Some(index + 1))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub enum CommandOutcome {
     Handled(i32),
     NotCli,
@@ -1108,6 +1165,38 @@ mod tests {
             super::parse_env_assignment("HERDR_ROLE").unwrap_err(),
             "env must use KEY=VALUE"
         );
+    }
+
+    #[test]
+    fn parses_spawn_work_context_flags() {
+        let args = [
+            "--ticket",
+            "sca-42",
+            "--pr",
+            "https://github.com/o/r/pull/42",
+            "--branch",
+            "feat/binding",
+            "--role",
+            "review",
+            "--active-owner",
+        ]
+        .map(str::to_string);
+        let mut context = None;
+        let mut index = 0;
+        while index < args.len() {
+            index = super::parse_spawn_work_context_arg(&args, index, &mut context)
+                .unwrap()
+                .unwrap();
+        }
+        let context = context.unwrap().normalized_spawn_binding().unwrap();
+        assert_eq!(context.ticket_ids, vec!["SCA-42"]);
+        assert_eq!(context.primary_pr(), Some("https://github.com/o/r/pull/42"));
+        assert_eq!(context.branch.as_deref(), Some("feat/binding"));
+        assert_eq!(
+            context.role,
+            Some(crate::work_context::PaneWorkRole::Review)
+        );
+        assert!(context.active_owner);
     }
 
     #[test]

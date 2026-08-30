@@ -95,6 +95,8 @@ pub(crate) fn request_from_turn_start(
         // The turn-title path never names the session; only the guarded
         // session-name report may.
         session_name: None,
+        role: None,
+        active_owner: false,
     };
 
     Some(PaneReportMetadataParams {

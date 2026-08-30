@@ -88,6 +88,7 @@ struct InfoPanelLayout {
     link_rows: Vec<Rect>,
     empty_links: Option<Rect>,
     branch: Rect,
+    binding: Rect,
     agent: Rect,
     usage_start: usize,
 }
@@ -145,6 +146,7 @@ fn info_panel_layout(
         .is_empty()
         .then(|| allocate(wrapped_height(inner.width, "links: ", "—")));
     let branch = allocate(wrapped_height(inner.width, "branch: ", branch));
+    let binding = allocate(1);
     let agent = allocate(1);
     let usage_start = usize::from(y.saturating_sub(inner.y));
     Some(InfoPanelLayout {
@@ -153,6 +155,7 @@ fn info_panel_layout(
         link_rows,
         empty_links,
         branch,
+        binding,
         agent,
         usage_start,
     })
@@ -1190,6 +1193,15 @@ pub(super) fn render_info_panel(
     let candidates = visible_candidates(terminal);
     let title = context.work_title.as_deref().unwrap_or("untitled");
     let branch = context.branch.as_deref().unwrap_or("—");
+    let pr_has_active_owner = context.primary_pr().is_some_and(|pr_url| {
+        app.terminals.values().any(|candidate| {
+            let candidate = candidate.effective_work_context();
+            candidate.is_active_owner_of(pr_url)
+        })
+    });
+    let binding = context
+        .binding_display(pr_has_active_owner)
+        .unwrap_or_else(|| "—".to_string());
     let Some(layout) = info_panel_layout(area, title, &candidates, branch) else {
         return;
     };
@@ -1244,6 +1256,12 @@ pub(super) fn render_info_panel(
         frame.render_widget(
             Paragraph::new(field_line("branch", branch, &app.palette)).wrap(Wrap { trim: false }),
             layout.branch,
+        );
+    }
+    if layout.binding.height > 0 {
+        frame.render_widget(
+            Paragraph::new(field_line("binding", &binding, &app.palette)),
+            layout.binding,
         );
     }
     if layout.agent.height > 0 {
@@ -1883,5 +1901,46 @@ mod tests {
             let rendered = rendered.replace(' ', "");
             assert!(rendered.contains(label), "row {}: {rendered}", row.rect.y);
         }
+    }
+
+    #[test]
+    fn info_panel_marks_history_when_pr_has_no_live_owner() {
+        let mut app = AppState::test_new();
+        app.workspaces
+            .push(crate::workspace::Workspace::test_new("review"));
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane_id).cloned().unwrap();
+        let context = crate::work_context::PaneWorkContext {
+            pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+            role: Some(crate::work_context::PaneWorkRole::Review),
+            active_owner: false,
+            ..Default::default()
+        }
+        .normalized_spawn_binding()
+        .unwrap();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .replace_prevalidated_manual_work_context(context);
+
+        let area = Rect::new(0, 0, 40, 14);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_info_panel(&app, frame, area, None))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("binding: history/review · un-owned"),
+            "panel: {rendered}"
+        );
     }
 }
