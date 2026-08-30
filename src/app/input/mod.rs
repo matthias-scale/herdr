@@ -144,41 +144,146 @@ impl App {
     }
 
     /// Handle a key while home is open. Returns whether home consumed it.
-    ///
-    /// Home owns its own keys and nothing else. A key it has no use for closes
-    /// home and travels on to the pane, so a session that launches into home is
-    /// never input-blocked: you type, and what you typed lands where you meant
-    /// it. Only `esc` closes home without spending the keystroke.
     fn handle_home_key_event(&mut self, event: KeyEvent) -> bool {
-        let queue = self.state.blocked_agents();
-        if event.modifiers.is_empty() {
+        if self.state.home.is_none() {
+            return false;
+        }
+
+        if self
+            .state
+            .home
+            .as_ref()
+            .is_some_and(|home| home.picker.is_some())
+        {
             match event.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if let Some(home) = self.state.home.as_mut() {
-                        home.select_prev(&queue);
-                    }
-                    return true;
+                KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() => {
+                    self.state.home_move_picker(-1);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if let Some(home) = self.state.home.as_mut() {
-                        home.select_next(&queue);
-                    }
-                    return true;
+                KeyCode::Down | KeyCode::Char('j') if event.modifiers.is_empty() => {
+                    self.state.home_move_picker(1);
                 }
-                KeyCode::Enter => {
-                    self.state.jump_to_selected_home_agent(&queue);
-                    return true;
+                KeyCode::Enter if event.modifiers.is_empty() => {
+                    self.state.home_accept_picker();
                 }
                 KeyCode::Esc => {
-                    self.state.clear_home();
-                    self.state.mode = Mode::Terminal;
-                    return true;
+                    if let Some(home) = self.state.home.as_mut() {
+                        home.picker = None;
+                    }
                 }
                 _ => {}
             }
+            return true;
         }
-        self.state.clear_home();
-        false
+
+        let focus = self.state.home.as_ref().and_then(|home| home.focus);
+        let queue = self.state.blocked_agents();
+
+        match event.code {
+            KeyCode::Tab if event.modifiers.is_empty() => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.move_focus(false);
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.move_focus(true);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() && focus.is_none() => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.select_prev(&queue);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if event.modifiers.is_empty() && focus.is_none() => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.select_next(&queue);
+                }
+            }
+            KeyCode::Enter if event.modifiers.is_empty() => match focus {
+                None => {
+                    self.state.jump_to_selected_home_agent(&queue);
+                }
+                Some(crate::app::home::HomeFocus::Prompt) => self.dispatch_home_prompt(),
+                Some(focus) => {
+                    if let Some(picker) = crate::app::home::HomePicker::for_focus(focus) {
+                        self.state.home_open_picker(picker);
+                    }
+                }
+            },
+            KeyCode::Esc => {
+                let close_home = self
+                    .state
+                    .home
+                    .as_mut()
+                    .is_some_and(|home| home.close_composer_or_home());
+                if close_home {
+                    self.state.clear_home();
+                    self.state.mode = Mode::Terminal;
+                }
+            }
+            KeyCode::Backspace
+                if event.modifiers.is_empty()
+                    && focus == Some(crate::app::home::HomeFocus::Prompt) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.backspace_prompt();
+                }
+            }
+            KeyCode::Char(character)
+                if event.modifiers.is_empty()
+                    && focus == Some(crate::app::home::HomeFocus::Prompt) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.append_prompt(character);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn dispatch_home_prompt(&mut self) {
+        let Some(plan) = self
+            .state
+            .home
+            .as_ref()
+            .and_then(|home| home.dispatch_plan().ok())
+        else {
+            let message = self
+                .state
+                .home
+                .as_ref()
+                .and_then(|home| home.dispatch_plan().err())
+                .unwrap_or_else(|| "dispatch failed".into());
+            let previous_toast = self.state.toast.clone();
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: crate::app::state::ToastKind::NeedsAttention,
+                title: "dispatch failed".into(),
+                context: message,
+                position: None,
+                target: None,
+            });
+            self.sync_toast_deadline(previous_toast);
+            return;
+        };
+
+        match self.dispatch_home_composer(plan) {
+            Ok(()) => {
+                self.state.clear_home();
+                self.state.mode = Mode::Terminal;
+            }
+            Err(error) => {
+                let previous_toast = self.state.toast.clone();
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: "dispatch failed".into(),
+                    context: error.to_string(),
+                    position: None,
+                    target: None,
+                });
+                self.sync_toast_deadline(previous_toast);
+            }
+        }
     }
 
     pub(crate) fn handle_loop_run_history_key(&mut self, key: KeyEvent) -> bool {
@@ -1448,6 +1553,38 @@ mod tests {
         assert_eq!(app.state.workspaces[0].focused_pane_id(), before);
     }
 
+    #[tokio::test]
+    async fn clicking_a_home_composer_chip_keeps_home_open_and_opens_its_picker() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let chip = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Agent)
+            .expect("agent chip should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: chip.x,
+                row: chip.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app
+            .state
+            .home
+            .as_ref()
+            .expect("chip click must not close home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Agent));
+        assert_eq!(home.picker, Some(crate::app::home::HomePicker::Agent));
+    }
+
     #[test]
     fn home_row_hit_areas_are_dropped_as_soon_as_home_closes() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
@@ -1479,6 +1616,7 @@ mod tests {
     async fn pressing_enter_after_the_selected_home_pane_closes_leaves_home_open() {
         let (mut app, pane_ids) = app_with_blocked_home_rows(1);
         app.state.workspaces[0].tabs[0].panes.remove(&pane_ids[0]);
+        app.state.home.as_mut().expect("home overlay").focus = None;
 
         app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
@@ -1489,6 +1627,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn pressing_enter_on_an_existing_home_pane_closes_home() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        app.state.home.as_mut().expect("home overlay").focus = None;
 
         app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
@@ -1497,12 +1636,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pressing_escape_closes_the_home_overlay() {
+    async fn pressing_escape_leaves_the_composer_before_closing_home() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
 
         app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
             .await;
 
+        assert!(app.state.home.is_some());
+        assert_eq!(app.state.home.as_ref().and_then(|home| home.focus), None);
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
         assert!(app.state.home.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
     }
@@ -1510,6 +1654,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn home_cursor_moves_with_vi_and_arrow_keys_without_wrapping() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(3);
+        app.state.home.as_mut().expect("home overlay").focus = None;
         let selected = |app: &App| {
             app.state
                 .home
@@ -1540,28 +1685,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_key_home_has_no_use_for_closes_home_and_reaches_the_pane() {
+    async fn home_prompt_typing_is_consumed_by_the_composer() {
         let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
         app.state.toggle_home();
 
         let target = app
-            .handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .handle_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()))
             .await;
 
-        // A launch-open overlay that ate keystrokes would leave a fresh session
-        // unable to type until the operator guessed at `esc`.
-        assert!(
-            app.state.home.is_none(),
-            "the key closed home on its way past"
+        assert!(app.state.home.is_some());
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some("j")
         );
-        assert!(target.is_some(), "and went on to the pane");
+        assert!(target.is_none(), "the prompt key stays inside home");
         let _ = &mut rx;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn home_keeps_the_keys_it_uses_and_lets_the_rest_through() {
+    async fn home_keeps_queue_navigation_keys_inside_the_overlay() {
         let (mut app, _terminal_id, _rx) = terminal_app_with_blocked_hook();
         app.state.toggle_home();
+        app.state.home.as_mut().expect("home overlay").focus = None;
 
         for code in [
             KeyCode::Down,
@@ -1582,7 +1727,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn headless_home_keys_follow_the_same_pass_through_rule() {
+    async fn headless_home_keys_follow_the_composer_input_rule() {
         let (mut app, _terminal_id, _rx) = terminal_app_with_blocked_hook();
         app.state.toggle_home();
 
@@ -1594,7 +1739,10 @@ mod tests {
             false,
         );
 
-        assert!(app.state.home.is_none());
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.as_str()),
+            Some("x")
+        );
     }
 
     #[tokio::test]

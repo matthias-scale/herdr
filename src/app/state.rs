@@ -905,6 +905,24 @@ impl DockTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeHitTarget {
+    QueueRow(usize),
+    Prompt,
+    Agent,
+    Model,
+    Effort,
+    Directory,
+    Target,
+    PickerOption(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HomeHitArea {
+    pub(crate) target: HomeHitTarget,
+    pub(crate) rect: Rect,
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
@@ -926,6 +944,8 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     /// `(queue index, row rect)` for each row the home view is showing.
     pub home_row_hit_areas: Vec<(usize, Rect)>,
+    /// All clickable home controls, including composer fields and open pickers.
+    pub(crate) home_hit_areas: Vec<HomeHitArea>,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
     pub dock_rect: Rect,
@@ -2411,6 +2431,7 @@ impl AppState {
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 home_row_hit_areas: Vec::new(),
+                home_hit_areas: Vec::new(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
                 dock_rect: Rect::default(),

@@ -5,8 +5,9 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, MenuListState, Mode,
-        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
+        AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, HomeHitTarget,
+        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
+        WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -129,12 +130,42 @@ impl AppState {
             && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
         {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = self.home_row_at(mouse.column, mouse.row) {
-                    let queue = self.blocked_agents();
-                    if let Some(home) = self.home.as_mut() {
-                        home.select(index);
+                if let Some(target) = self.home_hit_at(mouse.column, mouse.row) {
+                    match target {
+                        HomeHitTarget::QueueRow(index) => {
+                            let queue = self.blocked_agents();
+                            if let Some(home) = self.home.as_mut() {
+                                home.select(index);
+                            }
+                            self.jump_to_selected_home_agent(&queue);
+                        }
+                        HomeHitTarget::PickerOption(index) => {
+                            if let Some(home) = self.home.as_mut() {
+                                home.picker_selected = index;
+                            }
+                            self.home_accept_picker();
+                        }
+                        target => {
+                            let focus = match target {
+                                HomeHitTarget::Prompt => crate::app::home::HomeFocus::Prompt,
+                                HomeHitTarget::Agent => crate::app::home::HomeFocus::Agent,
+                                HomeHitTarget::Model => crate::app::home::HomeFocus::Model,
+                                HomeHitTarget::Effort => crate::app::home::HomeFocus::Effort,
+                                HomeHitTarget::Directory => crate::app::home::HomeFocus::Directory,
+                                HomeHitTarget::Target => crate::app::home::HomeFocus::Target,
+                                HomeHitTarget::QueueRow(_) | HomeHitTarget::PickerOption(_) => {
+                                    return None;
+                                }
+                            };
+                            let picker = crate::app::home::HomePicker::for_focus(focus);
+                            if let Some(home) = self.home.as_mut() {
+                                home.focus = Some(focus);
+                            }
+                            if let Some(picker) = picker {
+                                self.home_open_picker(picker);
+                            }
+                        }
                     }
-                    self.jump_to_selected_home_agent(&queue);
                 }
             }
             return None;
@@ -1352,18 +1383,43 @@ impl AppState {
     /// Queue index of the home row under the pointer.
     ///
     /// Empty hit areas mean home is closed, so this needs no separate check.
+    #[cfg(test)]
     pub(super) fn home_row_at(&self, col: u16, row: u16) -> Option<usize> {
-        self.view
-            .home_row_hit_areas
-            .iter()
-            .find_map(|(index, area)| {
-                (area.width > 0
-                    && row >= area.y
-                    && row < area.y + area.height
-                    && col >= area.x
-                    && col < area.x + area.width)
-                    .then_some(*index)
-            })
+        self.home_hit_at(col, row).and_then(|target| match target {
+            HomeHitTarget::QueueRow(index) => Some(index),
+            _ => None,
+        })
+    }
+
+    pub(super) fn home_hit_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::HomeHitTarget> {
+        let hit = self.view.home_hit_areas.iter().find_map(|hit| {
+            (hit.rect.width > 0
+                && hit.rect.height > 0
+                && row >= hit.rect.y
+                && row < hit.rect.y.saturating_add(hit.rect.height)
+                && col >= hit.rect.x
+                && col < hit.rect.x.saturating_add(hit.rect.width))
+            .then_some(hit.target)
+        });
+        hit.or_else(|| {
+            self.view
+                .home_row_hit_areas
+                .iter()
+                .rev()
+                .find_map(|(index, area)| {
+                    (area.width > 0
+                        && area.height > 0
+                        && row >= area.y
+                        && row < area.y.saturating_add(area.height)
+                        && col >= area.x
+                        && col < area.x.saturating_add(area.width))
+                    .then_some(HomeHitTarget::QueueRow(*index))
+                })
+        })
     }
 
     pub(super) fn on_tab_bar(&self, col: u16, row: u16) -> bool {

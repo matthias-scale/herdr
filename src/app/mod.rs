@@ -718,6 +718,7 @@ impl App {
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 home_row_hit_areas: Vec::new(),
+                home_hit_areas: Vec::new(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
                 dock_rect: Rect::default(),
