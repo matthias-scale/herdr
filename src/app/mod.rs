@@ -2346,17 +2346,20 @@ mod tests {
     }
 
     #[test]
-    fn opening_home_on_launch_is_a_no_op_when_the_config_turns_it_off() {
+    fn opening_home_on_launch_is_a_no_op_unless_the_config_asks_for_it() {
         let mut app = test_app();
         assert!(app.state.home.is_none(), "the constructor opens nothing");
 
-        let mut config = Config::default();
-        config.ui.show_home_on_start = false;
-        app.state.open_home_on_launch(&config);
-        assert!(app.state.home.is_none());
-
         app.state.open_home_on_launch(&Config::default());
-        assert!(app.state.home.is_some(), "home is the launch screen");
+        assert!(
+            app.state.home.is_none(),
+            "home is opt-in: the launch screen hides the panes you asked for"
+        );
+
+        let mut config = Config::default();
+        config.ui.show_home_on_start = true;
+        app.state.open_home_on_launch(&config);
+        assert!(app.state.home.is_some());
     }
 
     #[cfg(unix)]
