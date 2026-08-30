@@ -112,8 +112,7 @@ impl TestConfigEnvGuard {
         if self.saved.iter().any(|(saved, _)| saved == key) {
             return;
         }
-        self.saved
-            .push((key.to_owned(), std::env::var_os(key)));
+        self.saved.push((key.to_owned(), std::env::var_os(key)));
     }
 
     pub(crate) fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
