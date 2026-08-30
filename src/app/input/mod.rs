@@ -1552,6 +1552,38 @@ mod tests {
         assert_eq!(app.state.workspaces[0].focused_pane_id(), before);
     }
 
+    #[tokio::test]
+    async fn clicking_a_home_composer_chip_keeps_home_open_and_opens_its_picker() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let chip = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Agent)
+            .expect("agent chip should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: chip.x,
+                row: chip.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app
+            .state
+            .home
+            .as_ref()
+            .expect("chip click must not close home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Agent));
+        assert_eq!(home.picker, Some(crate::app::home::HomePicker::Agent));
+    }
+
     #[test]
     fn home_row_hit_areas_are_dropped_as_soon_as_home_closes() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
