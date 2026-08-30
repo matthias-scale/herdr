@@ -566,31 +566,39 @@ contains = ["{contains}"]
     }
 
     fn with_state_dir<T>(name: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let old_config = std::env::var_os("XDG_CONFIG_HOME");
-        let old_state = std::env::var_os("XDG_STATE_HOME");
+        /// Restores the sandbox on drop so a panicking `f` cannot leave the
+        /// process pointed at a deleted config root or a stale manifest cache.
+        struct Sandbox {
+            env: crate::config::TestConfigEnvGuard,
+            reloads: Option<crate::detect::manifest::ManifestReloadGuard>,
+            dir: std::path::PathBuf,
+        }
+
+        impl Drop for Sandbox {
+            fn drop(&mut self) {
+                self.env.restore();
+                crate::detect::manifest::reload_manifests();
+                self.reloads.take();
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let reloads = crate::detect::manifest::ManifestReloadGuard::acquire();
         let dir = std::env::temp_dir().join(format!(
             "herdr-manifest-update-{name}-{}",
-            std::process::id()
+            crate::config::test_unique_suffix()
         ));
-        let config_dir = dir.join("config");
-        let state_dir = dir.join("state");
         let _ = fs::remove_dir_all(&dir);
-        std::env::set_var("XDG_CONFIG_HOME", &config_dir);
-        std::env::set_var("XDG_STATE_HOME", &state_dir);
+        env.set("XDG_CONFIG_HOME", dir.join("config"));
+        env.set("XDG_STATE_HOME", dir.join("state"));
+        let _sandbox = Sandbox {
+            env,
+            reloads: Some(reloads),
+            dir: dir.clone(),
+        };
         crate::detect::manifest::reload_manifests();
-        let result = f();
-        match old_config {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match old_state {
-            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
-        crate::detect::manifest::reload_manifests();
-        let _ = fs::remove_dir_all(&dir);
-        result
+        f()
     }
 
     #[test]

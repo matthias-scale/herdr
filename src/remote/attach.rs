@@ -3245,9 +3245,11 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// The process environment is one shared resource, so every test that
+    /// repoints it must take the *same* lock. A per-module lock excludes only
+    /// its own module and lets a test elsewhere move `XDG_CONFIG_HOME` mid-test.
     fn remote_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        crate::config::test_config_env_lock()
     }
 
     #[cfg(unix)]
@@ -3259,7 +3261,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_forward_socket_path_uses_readable_name_when_it_fits() {
-        let _guard = remote_env_lock().lock().unwrap();
+        let _guard = remote_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Short target + session leave plenty of room — keep the human-
         // readable form so the socket path stays grep-friendly.
         let path = local_forward_socket_path("dev", "default");
@@ -3284,7 +3288,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_forward_socket_path_fits_in_sun_path() {
-        let _guard = remote_env_lock().lock().unwrap();
+        let _guard = remote_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Worst case for the readable form: macOS-style 49-char TMPDIR +
         // max-length sanitized components. Should fall back to the hashed
         // short name, which fits under TMPDIR.
@@ -3302,7 +3308,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_forward_socket_path_falls_back_to_tmp_when_dir_is_long() {
-        let _guard = remote_env_lock().lock().unwrap();
+        let _guard = remote_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Force a TMPDIR long enough that even the hashed short name cannot
         // fit inside it. The fallback should drop to /tmp.
         let prior = std::env::var_os("TMPDIR");

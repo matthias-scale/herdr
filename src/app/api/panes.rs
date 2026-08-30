@@ -5764,19 +5764,13 @@ mod tests {
 
     #[cfg(unix)]
     fn save_and_restore_work_context(app: &mut App) -> crate::work_context::PaneWorkContext {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
         let config_home = std::env::temp_dir().join(format!(
-            "herdr-pr24-work-context-save-{}-{suffix}",
-            std::process::id()
+            "herdr-pr24-work-context-save-{}",
+            crate::config::test_unique_suffix()
         ));
-        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let original_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
 
         app.save_session_now();
         assert!(!app.state.session_dirty, "session save should complete");
@@ -5804,14 +5798,7 @@ mod tests {
             runtime.shutdown();
         }
 
-        match original_config_home {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match original_session {
-            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
-            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
-        }
+        drop(env);
         let _ = std::fs::remove_dir_all(config_home);
         context
     }

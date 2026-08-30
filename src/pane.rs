@@ -3986,8 +3986,8 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", &bin);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set("PATH", &bin);
 
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("fake-shell", crate::config::ShellModeConfig::Login),
@@ -4000,10 +4000,7 @@ mod tests {
             cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
             shell.to_str()
         );
-        match original_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
+        drop(env);
         let _ = std::fs::remove_dir_all(base);
     }
 

@@ -708,7 +708,6 @@ mod tests {
     use crate::api::schema::{
         Method, PaneListParams, PluginSourceInfo, PluginSourceKind, Request, SuccessResponse,
     };
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -728,11 +727,10 @@ mod tests {
     }
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "herdr-{name}-{}",
+            crate::config::test_unique_suffix()
+        ))
     }
 
     fn canonical_path_string(path: &std::path::Path) -> String {
@@ -829,6 +827,9 @@ action = "bootstrap"
 
     #[test]
     fn plugin_link_creates_stable_config_and_state_dirs() {
+        // Reads env-derived config/state paths; hold the env guard so no
+        // concurrent test can repoint XDG_CONFIG_HOME underneath it.
+        let _env = crate::config::TestConfigEnvGuard::acquire();
         let mut app = test_app();
         let root = unique_temp_path("plugin-link-dirs");
         let config_dir = super::env::plugin_config_dir("example.config-dirs");
@@ -858,6 +859,9 @@ platforms = ["linux", "macos", "windows"]
 
     #[test]
     fn plugin_link_seeds_stable_config_dir_from_legacy_unhashed_dir() {
+        // Reads env-derived config/state paths; hold the env guard so no
+        // concurrent test can repoint XDG_CONFIG_HOME underneath it.
+        let _env = crate::config::TestConfigEnvGuard::acquire();
         let mut app = test_app();
         let root = unique_temp_path("plugin-link-legacy-config");
         let config_dir = super::env::plugin_config_dir("example.legacy-config");
@@ -1578,6 +1582,9 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \
     #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_injects_plugin_paths_and_protects_overrides() {
+        // Reads env-derived config/state paths; hold the env guard so no
+        // concurrent test can repoint XDG_CONFIG_HOME underneath it.
+        let _env = crate::config::TestConfigEnvGuard::acquire();
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-path-env")];
         app.state.ensure_test_terminals();
@@ -2168,10 +2175,9 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
 
     #[test]
     fn non_cli_plugin_consumers_refresh_global_enabled_state() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let mut guard = crate::config::TestConfigEnvGuard::acquire();
         let base = unique_temp_path("plugin-global-refresh");
-        std::env::set_var("XDG_CONFIG_HOME", &base);
+        guard.set("XDG_CONFIG_HOME", &base);
         let root = base.join("plugin");
         write_manifest(&root);
         let plugin = load_plugin_manifest(&root.display().to_string(), false).unwrap();
@@ -2253,11 +2259,8 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
         });
         assert_eq!(app.state.plugin_command_logs.len(), logs_before);
 
+        drop(guard);
         let _ = std::fs::remove_dir_all(&base);
-        match previous_config_home {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[cfg(unix)]
@@ -2330,6 +2333,9 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
     #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_injects_plugin_paths() {
+        // Reads env-derived config/state paths; hold the env guard so no
+        // concurrent test can repoint XDG_CONFIG_HOME underneath it.
+        let _env = crate::config::TestConfigEnvGuard::acquire();
         let mut app = test_app();
         let root = unique_temp_path("plugin-action-path-env");
         write_manifest_content(

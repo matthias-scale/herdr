@@ -5368,14 +5368,10 @@ mod tests {
         app.local_terminal_notifications = false;
         app.local_input_source_switch = false;
 
-        let dir = std::env::temp_dir().join(format!(
-            "hh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        // A wall-clock suffix is not unique: two tests entering this helper in
+        // the same clock tick derive the same directory and race to bind the
+        // same socket, which surfaces as AddrInUse. A counter cannot collide.
+        let dir = std::env::temp_dir().join(format!("hh-{}", crate::config::test_unique_suffix()));
         let _ = fs::create_dir_all(&dir);
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
@@ -6187,16 +6183,12 @@ new_tab = "prefix+t"
     #[test]
     fn local_keybinding_client_keeps_local_keybindings_after_settings_save() {
         let path = std::env::temp_dir().join(format!(
-            "herdr-headless-settings-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            "herdr-headless-settings-{}.toml",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(&path, "onboarding = false\n").unwrap();
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut server = test_headless_server();
         let local_config: crate::config::Config = toml::from_str(
@@ -6246,7 +6238,7 @@ next_tab = ""
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("delivery = \"herdr\""));
 
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_file(path);
     }
 
@@ -6254,20 +6246,16 @@ next_tab = ""
     fn invalid_server_keybindings_apply_valid_subset_after_settings_save_without_caching_local_keybindings(
     ) {
         let path = std::env::temp_dir().join(format!(
-            "herdr-headless-invalid-settings-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            "herdr-headless-invalid-settings-{}.toml",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(
             &path,
             "onboarding = false\n[keys]\nnew_workspace = \"x\"\n[ui.toast]\ndelivery = \"off\"\n",
         )
         .unwrap();
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut server = test_headless_server();
         let previous_server_config: crate::config::Config =
@@ -6330,7 +6318,7 @@ next_tab = ""
             .any(|binding| binding.label == "prefix+n"));
         assert!(server.app.state.keybinds.new_workspace.bindings.is_empty());
 
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_file(path);
     }
 

@@ -273,11 +273,73 @@ const MAX_MATCHERS_PER_GATE: usize = 32;
 const MAX_TOTAL_MATCHERS: usize = 1024;
 const MAX_MATCHER_CHARS: usize = 512;
 
+fn manifest_reload_lock() -> &'static Mutex<()> {
+    MANIFEST_RELOAD_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// The thread currently running a manifest sandbox, if any.
+#[cfg(test)]
+static SANDBOX_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+/// Hold the reload lock across a whole test sandbox.
+///
+/// `App::new` reloads the manifest cache, so any test that builds an `App`
+/// rebuilds this global from the *current* environment. A sandbox that only
+/// reloaded at entry would have its cache clobbered mid-test by an unrelated
+/// test on another thread. Holding the reload lock for the sandbox's lifetime
+/// makes those reloads wait instead.
+///
+/// The sandbox itself reloads repeatedly (each `write_remote_*` helper does),
+/// so the owning thread is recorded and allowed straight through; a
+/// non-reentrant lock alone would deadlock the sandbox against itself.
+#[cfg(test)]
+pub(crate) struct ManifestReloadGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ManifestReloadGuard {
+    pub(crate) fn acquire() -> Self {
+        let lock = manifest_reload_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *sandbox_owner() = Some(std::thread::current().id());
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ManifestReloadGuard {
+    fn drop(&mut self) {
+        *sandbox_owner() = None;
+    }
+}
+
+#[cfg(test)]
+fn sandbox_owner() -> std::sync::MutexGuard<'static, Option<std::thread::ThreadId>> {
+    SANDBOX_OWNER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+fn current_thread_owns_sandbox() -> bool {
+    *sandbox_owner() == Some(std::thread::current().id())
+}
+
 pub(crate) fn reload_manifests() -> Vec<AgentManifestSummary> {
-    let _reload_guard = MANIFEST_RELOAD_LOCK
-        .get_or_init(|| Mutex::new(()))
+    #[cfg(test)]
+    if current_thread_owns_sandbox() {
+        return reload_manifests_locked();
+    }
+    let _reload_guard = manifest_reload_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    reload_manifests_locked()
+}
+
+/// Rebuild the cache assuming the caller already holds the reload lock.
+fn reload_manifests_locked() -> Vec<AgentManifestSummary> {
     let cache = build_manifest_cache();
     let summaries = manifest_summaries_from_cache(&cache);
     let lock = MANIFEST_CACHE.get_or_init(|| RwLock::new(cache.clone()));
@@ -1531,36 +1593,38 @@ fn line_start_offset(content: &str, lines: &[&str], index: usize) -> usize {
 /// what it says on every machine.
 #[cfg(test)]
 pub(crate) fn with_bundled_manifests<T>(name: &str, f: impl FnOnce() -> T) -> T {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    /// Restores the sandbox on drop so a panicking `f` cannot leave the
+    /// process pointed at a deleted config root or a stale manifest cache.
+    struct Sandbox {
+        env: crate::config::TestConfigEnvGuard,
+        _reloads: ManifestReloadGuard,
+        base: std::path::PathBuf,
+    }
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            self.env.restore();
+            reload_manifests();
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
 
-    let _guard = crate::config::test_config_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let old_config = std::env::var_os("XDG_CONFIG_HOME");
-    let old_state = std::env::var_os("XDG_STATE_HOME");
+    let mut env = crate::config::TestConfigEnvGuard::acquire();
+    let reloads = ManifestReloadGuard::acquire();
     let base = std::env::temp_dir().join(format!(
-        "herdr-manifest-sandbox-{name}-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
+        "herdr-manifest-sandbox-{name}-{}",
+        crate::config::test_unique_suffix()
     ));
     let _ = std::fs::remove_dir_all(&base);
-    std::env::set_var("XDG_CONFIG_HOME", base.join("config"));
-    std::env::set_var("XDG_STATE_HOME", base.join("state"));
+    env.set("XDG_CONFIG_HOME", base.join("config"));
+    env.set("XDG_STATE_HOME", base.join("state"));
+    let _sandbox = Sandbox {
+        env,
+        _reloads: reloads,
+        base: base.clone(),
+    };
     reload_manifests();
-    let result = f();
-    match old_config {
-        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-        None => std::env::remove_var("XDG_CONFIG_HOME"),
-    }
-    match old_state {
-        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-        None => std::env::remove_var("XDG_STATE_HOME"),
-    }
-    reload_manifests();
-    let _ = std::fs::remove_dir_all(&base);
-    result
+    f()
 }
 
 #[cfg(test)]
