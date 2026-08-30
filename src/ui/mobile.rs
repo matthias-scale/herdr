@@ -1328,6 +1328,7 @@ mod tests {
             prio: false,
             state: AgentState::Idle,
             open_blockers: false,
+            completion_tier: None,
             active_subagents: None,
             holds_shell: false,
             gate_count: 0,

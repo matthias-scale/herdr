@@ -1370,7 +1370,7 @@ impl App {
         let raw_title_set = params.title.is_some();
         let raw_display_agent_set = params.display_agent.is_some();
         let raw_state_labels_set = !params.state_labels.is_empty();
-        let tokens = if params.tokens.is_empty() {
+        let mut tokens = if params.tokens.is_empty() {
             None
         } else {
             match normalize_metadata_tokens(params.tokens) {
@@ -1534,6 +1534,18 @@ impl App {
         ) {
             return encode_success(id, ResponseResult::Ok {});
         }
+        let closing_block_metadata = applies_to_source.as_deref() == Some(source.as_str())
+            && terminal
+                .effective_agent_label()
+                .is_some_and(|agent| crate::detect::is_closing_block_source(&source, agent));
+        if closing_block_metadata {
+            if let Some(tokens) = tokens.as_mut() {
+                if tokens.contains_key("closing_idle") {
+                    tokens.entry("closing_contract".into()).or_insert(None);
+                    tokens.entry("closing_contract_met".into()).or_insert(None);
+                }
+            }
+        }
         if !terminal.metadata_report_sequence_is_fresh(&source, params.seq) {
             return encode_success(id, ResponseResult::Ok {});
         }
@@ -1634,10 +1646,12 @@ impl App {
         if unchanged_title_only {
             return encode_success(id, ResponseResult::Ok {});
         }
+        let now = std::time::Instant::now();
+        let closing_contract_changed = tokens.as_ref().is_some_and(|tokens| {
+            closing_block_metadata && terminal.apply_closing_contract_tokens(tokens, now)
+        });
         let token_changed = tokens.is_some_and(|tokens| {
-            let changed = terminal
-                .metadata_tokens
-                .patch(tokens, ttl, std::time::Instant::now());
+            let changed = terminal.metadata_tokens.patch(tokens, ttl, now);
             if changed {
                 terminal.revision = terminal.revision.saturating_add(1);
             }
@@ -1666,7 +1680,8 @@ impl App {
         if hook_context_changed || session_name_changed {
             self.schedule_session_save();
         }
-        if token_changed || hook_context_changed || session_name_changed {
+        if token_changed || closing_contract_changed || hook_context_changed || session_name_changed
+        {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
@@ -4348,6 +4363,70 @@ mod tests {
             .attached_terminal_id
             .clone();
         assert!(app.state.terminals[&terminal_id].agent_metadata.is_empty());
+    }
+
+    #[test]
+    fn closing_block_metadata_replaces_contract_state_and_clears_absent_tokens() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let source = "herdr:claude-closing-block";
+        let mut report = metadata_params(pane_id.clone());
+        report.title = None;
+        report.source = source.into();
+        report.applies_to_source = Some(source.into());
+        report.seq = Some(1);
+        report.tokens = std::collections::HashMap::from([
+            ("closing_idle".into(), Some("1".into())),
+            ("closing_contract".into(), Some("x".repeat(200))),
+            ("closing_contract_met".into(), Some("1".into())),
+        ]);
+        assert!(app
+            .handle_pane_report_metadata("contract".into(), report)
+            .contains("\"result\""));
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.closing_contract.as_deref(),
+            Some("x".repeat(200).as_str())
+        );
+        assert_eq!(terminal.closing_contract_met, Some(true));
+        assert!(terminal.closing_contract_met_at.is_some());
+
+        let mut clear = metadata_params(pane_id.clone());
+        clear.title = None;
+        clear.source = source.into();
+        clear.applies_to_source = Some(source.into());
+        clear.seq = Some(2);
+        clear.tokens = std::collections::HashMap::from([("closing_idle".into(), Some("1".into()))]);
+        app.handle_pane_report_metadata("clear".into(), clear);
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.closing_idle, Some(true));
+        assert!(terminal.closing_contract.is_none());
+        assert!(terminal.closing_contract_met.is_none());
+        assert!(terminal.closing_contract_met_at.is_none());
+
+        let mut untrusted = metadata_params(pane_id);
+        untrusted.title = None;
+        untrusted.source = "user:metadata.test-1".into();
+        untrusted.seq = Some(1);
+        untrusted.tokens = std::collections::HashMap::from([
+            ("closing_idle".into(), Some("1".into())),
+            ("closing_contract".into(), Some("spoofed".into())),
+            ("closing_contract_met".into(), Some("1".into())),
+        ]);
+        app.handle_pane_report_metadata("untrusted".into(), untrusted);
+        assert!(app.state.terminals[&terminal_id].closing_contract.is_none());
     }
 
     #[test]

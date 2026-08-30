@@ -8,7 +8,7 @@ use crate::{
         AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, MenuListState, Mode,
         RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
-    layout::{PaneInfo, SplitBorder},
+    layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
     terminal::TerminalRuntimeRegistry,
 };
@@ -86,6 +86,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) {
+        self.forwarded_pane_input = None;
         if self.mode != Mode::Terminal || self.symphony_detail.is_some() || self.inbox.is_some() {
             return;
         }
@@ -114,6 +115,7 @@ impl AppState {
         terminal_runtimes: &mut TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
+        self.forwarded_pane_input = None;
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
@@ -1731,7 +1733,7 @@ impl AppState {
     }
 
     pub(super) fn forward_pane_mouse_button(
-        &self,
+        &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         info: &PaneInfo,
         mouse: MouseEvent,
@@ -1751,12 +1753,14 @@ impl AppState {
         rt.scroll_reset();
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
+        } else {
+            self.forwarded_pane_input = Some(info.id);
         }
         true
     }
 
     pub(super) fn forward_pane_mouse_motion(
-        &self,
+        &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         info: &PaneInfo,
         mouse: MouseEvent,
@@ -1775,12 +1779,14 @@ impl AppState {
         };
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse motion event");
+        } else {
+            self.forwarded_pane_input = Some(info.id);
         }
         true
     }
 
     fn forward_pane_reported_wheel(
-        &self,
+        &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         info: &PaneInfo,
         mouse: MouseEvent,
@@ -1804,12 +1810,14 @@ impl AppState {
         };
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, "failed to forward mouse wheel event");
+        } else {
+            self.forwarded_pane_input = Some(info.id);
         }
         true
     }
 
     pub(super) fn forward_pane_wheel(
-        &self,
+        &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         info: &PaneInfo,
         mouse: MouseEvent,
@@ -1834,6 +1842,8 @@ impl AppState {
                 };
                 if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
                     warn!(pane = info.id.raw(), err = %err, "failed to forward mouse wheel event");
+                } else {
+                    self.forwarded_pane_input = Some(info.id);
                 }
                 true
             }
@@ -1844,10 +1854,16 @@ impl AppState {
                 };
                 if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
                     warn!(pane = info.id.raw(), err = %err, "failed to forward alternate-scroll key");
+                } else {
+                    self.forwarded_pane_input = Some(info.id);
                 }
                 true
             }
         }
+    }
+
+    pub(crate) fn take_forwarded_pane_input(&mut self) -> Option<PaneId> {
+        self.forwarded_pane_input.take()
     }
 
     pub(super) fn set_pane_scroll_offset(

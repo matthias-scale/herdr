@@ -205,6 +205,8 @@ def report(
     items: list[dict[str, Any] | str] | None = None,
     decisions: list[dict[str, Any]] | None = None,
     agent_names: list[str] | None = None,
+    contract: str | None = None,
+    contract_met: bool | None = None,
     session_id: str | None = None,
     session_path: str | None = None,
     title: str | None = None,
@@ -290,6 +292,9 @@ def report(
         "closing_gates": "; ".join(gate_texts)[:200],
         "session_title": (title or "")[:120],
     }
+    if contract and isinstance(contract_met, bool):
+        tokens["closing_contract"] = contract[:200]
+        tokens["closing_contract_met"] = "1" if contract_met else "0"
     meta_params = {
         "pane_id": pane_id,
         "source": source,

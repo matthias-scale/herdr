@@ -19,6 +19,8 @@ use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
+use crate::terminal::state::derive_completion_tier;
+use crate::terminal::state::CompletionTier;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
@@ -315,10 +317,15 @@ fn compact_row_layout(
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
     if entry_has_gate(entry) || entry.usage_limited {
-        p.red
-    } else {
-        state_label_color(entry.state, entry.seen, p)
+        return p.red;
     }
+    // A session that declared a contract and reported it met is the one kind of
+    // done you can act on without reading the pane: close it. That earns its own
+    // colour rather than a fourth dot shape.
+    if entry.completion_tier == Some(CompletionTier::ContractSatisfied) {
+        return p.mauve;
+    }
+    state_label_color(entry.state, entry.seen, p)
 }
 
 fn provider_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
@@ -555,6 +562,7 @@ pub(crate) struct AgentPanelEntry {
     /// the lifecycle state has moved on. It becomes a red blocker dot once the
     /// pane stops working.
     pub open_blockers: bool,
+    pub completion_tier: Option<CompletionTier>,
     /// The pane's agent stopped on an exhausted plan usage/rate limit. Nobody
     /// can answer it, so it reads as its own red "usage" label rather than a
     /// gate or a lifecycle state.
@@ -707,6 +715,29 @@ fn collect_agent_panel_entries_with_runtimes(
                     let thread_title = ws
                         .tab_display_name_from(&app.terminals, detail.tab_idx)
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
+                    // Prefer the live count; fall back to the reported token so
+                    // panes without a live source keep a count.
+                    let active_subagents = detail
+                        .active_subagents
+                        .or_else(|| {
+                            detail
+                                .tokens
+                                .get("closing_agents")
+                                .and_then(|value| value.parse::<u32>().ok())
+                        })
+                        .filter(|count| *count > 0);
+                    let has_closing_block_tokens =
+                        detail.tokens.keys().any(|key| key.starts_with("closing_"));
+                    let completion_tier = derive_completion_tier(
+                        detail.state,
+                        detail.closing_contract.as_deref(),
+                        detail.closing_contract_met,
+                        detail.closing_idle,
+                        detail.open_blockers,
+                        active_subagents,
+                        detail.holds_shell,
+                        has_closing_block_tokens,
+                    );
                     AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
@@ -728,18 +759,9 @@ fn collect_agent_panel_entries_with_runtimes(
                         prio,
                         state: detail.state,
                         open_blockers: detail.open_blockers,
+                        completion_tier,
                         usage_limited: detail.usage_limited,
-                        // Prefer the live count; fall back to the reported
-                        // token so panes without a live source keep a count.
-                        active_subagents: detail
-                            .active_subagents
-                            .or_else(|| {
-                                detail
-                                    .tokens
-                                    .get("closing_agents")
-                                    .and_then(|value| value.parse::<u32>().ok())
-                            })
-                            .filter(|count| *count > 0),
+                        active_subagents,
                         seen: detail.seen,
                         stale: detail.stale,
                         reported_at: detail.reported_at,
@@ -858,6 +880,7 @@ fn aggregate_tab_entries(
                         tab_entry.state = candidate.0;
                         tab_entry.seen = candidate.1;
                         tab_entry.stale = entry.stale;
+                        tab_entry.completion_tier = entry.completion_tier;
                         tab_entry.state_labels = entry.state_labels.clone();
                         tab_entry.foreground_process_name = entry
                             .foreground_process_name
@@ -918,6 +941,13 @@ fn aggregate_tab_entries(
                     .flatten();
                 entry.agent_context = agent_context;
                 entry.has_agent = has_agent;
+                if entry.state != AgentState::Idle
+                    || entry.open_blockers
+                    || entry.active_subagents.unwrap_or_default() > 0
+                    || entry.holds_shell
+                {
+                    entry.completion_tier = None;
+                }
                 if let Some(usage_label) = usage_label {
                     entry.state_labels.insert("usage".into(), usage_label);
                 }
@@ -3096,6 +3126,39 @@ mod tests {
             .expect("valid test work context");
     }
 
+    #[test]
+    fn a_satisfied_contract_recolours_the_row_dot_without_a_new_shape() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Idle, false, None, "done");
+
+        let done_unread = compact_row_color(&entry, &palette);
+        assert_eq!(compact_row_dot(&entry), "\u{25cb}");
+
+        entry.completion_tier = Some(CompletionTier::ContractSatisfied);
+        assert_eq!(
+            compact_row_color(&entry, &palette),
+            palette.mauve,
+            "a met contract is the one done you can act on"
+        );
+        assert_ne!(
+            compact_row_color(&entry, &palette),
+            done_unread,
+            "it must not share a colour with plain done-unread"
+        );
+        assert_eq!(
+            compact_row_dot(&entry),
+            "\u{25cb}",
+            "the shape stays hollow: colour carries the tier, not a fourth glyph"
+        );
+
+        entry.open_blockers = true;
+        assert_eq!(
+            compact_row_color(&entry, &palette),
+            palette.red,
+            "an open gate still outranks a satisfied contract"
+        );
+    }
+
     fn aggregation_entry(
         state: AgentState,
         seen: bool,
@@ -3129,6 +3192,7 @@ mod tests {
             prio: true,
             state,
             open_blockers: false,
+            completion_tier: None,
             active_subagents: None,
             holds_shell: false,
             gate_count: 0,

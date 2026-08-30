@@ -26,6 +26,9 @@ pub struct PaneDetail {
     /// to working while the human decision is still open.
     pub open_blockers: bool,
     pub gate_count: usize,
+    pub closing_idle: Option<bool>,
+    pub closing_contract: Option<String>,
+    pub closing_contract_met: Option<bool>,
     /// The pane's agent is refusing to work because its plan usage/rate limit
     /// is exhausted. Live screen state, never latched.
     pub usage_limited: bool,
@@ -118,6 +121,9 @@ impl Tab {
                     state,
                     open_blockers: !terminal.closing_gates.is_empty(),
                     gate_count: terminal.closing_gates.len(),
+                    closing_idle: terminal.closing_idle,
+                    closing_contract: terminal.closing_contract.clone(),
+                    closing_contract_met: terminal.closing_contract_met,
                     usage_limited: terminal.usage_limited,
                     holds_shell: terminal.holds_shell,
                     active_subagents: terminal.active_subagents,

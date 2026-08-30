@@ -43,6 +43,14 @@ DECLARED_BLOCKING_WITHOUT_ITEMS = """\
 Done here.
 """
 
+CONTRACT_MET = """\
+CONTRACT: Both required verification commands exit 0. — met
+
+**Critical action points (0 blocking)**
+
+Done here.
+"""
+
 MULTI_WHAT = """\
 **Critical action points (2 blocking)**
 
@@ -353,6 +361,32 @@ Done here.
 
 
 class ClosingBlockV2Tests(unittest.TestCase):
+    def test_contract_line_parses_met_and_unmet_states(self):
+        met = closing_block.parse(CONTRACT_MET)
+        unmet = closing_block.parse(CONTRACT_MET.replace("— met", "— unmet"))
+
+        self.assertEqual(met.contract, "Both required verification commands exit 0.")
+        self.assertTrue(met.contract_met)
+        self.assertFalse(unmet.contract_met)
+
+    def test_contract_is_absent_without_a_valid_contract_line(self):
+        for text in (
+            ZERO_COUNT_GATE,
+            ZERO_COUNT_GATE.replace(
+                "Done here.", "CONTRACT: missing state\n\nDone here."
+            ),
+            ZERO_COUNT_GATE.replace(
+                "Done here.", "CONTRACT: condition — unknown\n\nDone here."
+            ),
+            ZERO_COUNT_GATE.replace(
+                "Done here.", "```\nCONTRACT: fenced — met\n```\n\nDone here."
+            ),
+        ):
+            with self.subTest(text=text):
+                block = closing_block.parse(text)
+                self.assertIsNone(block.contract)
+                self.assertIsNone(block.contract_met)
+
     def test_cap_gate_becomes_nonempty_object_gate(self):
         block = closing_block.parse(REALISTIC_CAP)
 
@@ -866,6 +900,50 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(params["state_labels"]["blocked"], "gate")
         self.assertNotIn("Approve PR #2606", params["state_labels"]["blocked"])
         self.assertIn("Approve PR #2606", params["tokens"]["closing_gates"])
+
+    def test_report_emits_contract_tokens_together_and_truncates_text(self):
+        contract = "x" * 220
+        with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
+            herdr_status.os.environ,
+            {"XDG_STATE_HOME": self._state_dir()},
+            clear=False,
+        ):
+            herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                contract=contract,
+                contract_met=True,
+                pane_id="w9:p15",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        tokens = rpc.call_args_list[-1].args[3]["tokens"]
+        self.assertEqual(tokens["closing_contract"], "x" * 200)
+        self.assertEqual(tokens["closing_contract_met"], "1")
+
+    def test_report_omits_both_contract_tokens_without_a_valid_contract(self):
+        for contract, contract_met in ((None, None), ("", True), ("condition", None)):
+            with self.subTest(contract=contract, contract_met=contract_met), mock.patch.object(
+                herdr_status, "_rpc"
+            ) as rpc, mock.patch.dict(
+                herdr_status.os.environ,
+                {"XDG_STATE_HOME": self._state_dir()},
+                clear=False,
+            ):
+                herdr_status.report(
+                    agent="claude",
+                    blocking=0,
+                    agents=0,
+                    contract=contract,
+                    contract_met=contract_met,
+                    pane_id="w9:p16",
+                    sock_path="/tmp/herdr-test.sock",
+                )
+
+            tokens = rpc.call_args_list[-1].args[3]["tokens"]
+            self.assertNotIn("closing_contract", tokens)
+            self.assertNotIn("closing_contract_met", tokens)
 
     def test_emit_forces_legacy_default_fields_to_null(self):
         with self._isolated():

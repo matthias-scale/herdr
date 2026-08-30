@@ -184,6 +184,8 @@ pub struct App {
     pub(crate) last_dock_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) pending_url_click_sources: HashSet<InputSourceId>,
+    pub(crate) contract_false_positive_burst_panes: HashSet<crate::layout::PaneId>,
+    pub(crate) contract_false_positive_log_path_override: Option<std::path::PathBuf>,
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
@@ -629,6 +631,7 @@ impl App {
             status_git_branch: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
+            forwarded_pane_input: None,
             status_bar_enabled: config.ui.status_bar.enabled,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
                 config
@@ -942,6 +945,8 @@ impl App {
             last_dock_divider_click: None,
             last_pane_click: None,
             pending_url_click_sources: HashSet::new(),
+            contract_false_positive_burst_panes: HashSet::new(),
+            contract_false_positive_log_path_override: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
@@ -1981,6 +1986,7 @@ impl App {
         events: Vec<crate::raw_input::RawInputEvent>,
         apply_host_terminal_theme: bool,
     ) {
+        self.begin_contract_false_positive_input_burst();
         for event in events {
             let previous_mode = self.state.mode;
             match event {
@@ -2042,6 +2048,12 @@ impl App {
                     } else {
                         self.state
                             .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
+                        if let Some(pane_id) = self.state.take_forwarded_pane_input() {
+                            self.retire_blocked_hook_authority_for_pane(
+                                pane_id,
+                                std::time::Instant::now(),
+                            );
+                        }
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {

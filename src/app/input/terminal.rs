@@ -332,27 +332,53 @@ impl App {
     }
 
     pub(crate) fn forward_terminal_key_to_target_headless(
-        &self,
+        &mut self,
         target: &TerminalInputTarget,
         key: TerminalKey,
     ) -> bool {
-        let Some(runtime) = self.terminal_input_runtime(target) else {
-            return false;
+        let (sent, has_bytes) = {
+            let Some(runtime) = self.terminal_input_runtime(target) else {
+                return false;
+            };
+            let bytes = runtime.encode_terminal_key(key.clone());
+            let has_bytes = !bytes.is_empty();
+            (
+                !has_bytes || runtime.try_send_bytes(Bytes::from(bytes)).is_ok(),
+                has_bytes,
+            )
         };
-        let bytes = runtime.encode_terminal_key(key.clone());
-        bytes.is_empty() || runtime.try_send_bytes(Bytes::from(bytes)).is_ok()
+        if sent && has_bytes {
+            self.retire_blocked_hook_authority_for_terminal(
+                &target.terminal_id,
+                std::time::Instant::now(),
+            );
+        }
+        sent
     }
 
     pub(crate) async fn forward_terminal_key_to_target(
-        &self,
+        &mut self,
         target: &TerminalInputTarget,
         key: TerminalKey,
     ) -> bool {
-        let Some(runtime) = self.terminal_input_runtime(target) else {
-            return false;
+        let (sent, has_bytes) = {
+            let Some(runtime) = self.terminal_input_runtime(target) else {
+                return false;
+            };
+            let bytes = runtime.encode_terminal_key(key.clone());
+            let has_bytes = !bytes.is_empty();
+            (
+                !has_bytes || runtime.send_bytes(Bytes::from(bytes)).await.is_ok(),
+                has_bytes,
+            )
         };
-        let bytes = runtime.encode_terminal_key(key.clone());
-        bytes.is_empty() || runtime.send_bytes(Bytes::from(bytes)).await.is_ok()
+        if sent && has_bytes {
+            self.retire_blocked_hook_authority_for_terminal(
+                &target.terminal_id,
+                std::time::Instant::now(),
+            );
+        }
+        sent
     }
 
     fn take_pressed_keys_for_source(

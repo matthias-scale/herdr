@@ -95,6 +95,7 @@ impl App {
         &mut self,
         first: crate::raw_input::RawInputEvent,
     ) -> bool {
+        self.begin_contract_false_positive_input_burst();
         let mut changed = self.handle_raw_input_event(first).await;
 
         while let Some(rx) = self.input_rx.as_mut() {
@@ -229,6 +230,12 @@ impl App {
                 } else {
                     self.state
                         .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
+                    if let Some(pane_id) = self.state.take_forwarded_pane_input() {
+                        self.retire_blocked_hook_authority_for_pane(
+                            pane_id,
+                            std::time::Instant::now(),
+                        );
+                    }
                 }
                 changes_view
             }
