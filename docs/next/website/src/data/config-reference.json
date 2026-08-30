@@ -1223,6 +1223,24 @@
           "type": "boolean",
           "default": "true",
           "description": "Resume supported AI-agent panes into their native conversation sessions when restoring a Herdr session."
+        },
+        {
+          "key": "session.hide_done_after_minutes",
+          "type": "integer",
+          "default": "30",
+          "description": "Move Done panes into the collapsed Recently done sidebar section after this many minutes."
+        },
+        {
+          "key": "session.reap_done_after_minutes",
+          "type": "integer",
+          "default": "240",
+          "description": "Close eligible Done panes after this many minutes. The default is 4 hours."
+        },
+        {
+          "key": "session.reap_done_panes",
+          "type": "boolean",
+          "default": "true",
+          "description": "Automatically close eligible Done panes. Set false to disable reaping entirely."
         }
       ]
     },

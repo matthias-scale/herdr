@@ -573,6 +573,7 @@ pub(crate) struct AgentPanelEntry {
     pub holds_shell: bool,
     pub gate_count: usize,
     pub seen: bool,
+    pub done_since: Option<std::time::Instant>,
     pub stale: bool,
     pub reported_at: Option<std::time::Instant>,
     pub last_agent_state_change_seq: Option<u64>,
@@ -763,6 +764,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         usage_limited: detail.usage_limited,
                         active_subagents,
                         seen: detail.seen,
+                        done_since: detail.done_since,
                         stale: detail.stale,
                         reported_at: detail.reported_at,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
@@ -1016,6 +1018,7 @@ pub(crate) enum SidebarRow {
 /// omitted entirely when empty, which is the common case.
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
 pub(crate) const AGENTS_SECTION_TITLE: &str = "Agents";
+pub(crate) const RECENTLY_DONE_SECTION_TITLE: &str = "Recently done";
 #[cfg(test)]
 pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
@@ -1085,8 +1088,11 @@ fn compact_sidebar_rows_inner(
     } else {
         entries.clone()
     };
+    let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
+        .into_iter()
+        .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
     if !app.sidebar_shows_spaces_tree() {
-        let mut rows = Vec::with_capacity(visible_entries.len() + 1);
+        let mut rows = Vec::with_capacity(visible_entries.len() + recently_done.len() + 2);
         if !visible_entries.is_empty() {
             rows.push(SidebarRow::SectionHeader {
                 title: AGENTS_SECTION_TITLE,
@@ -1100,10 +1106,12 @@ fn compact_sidebar_rows_inner(
                 }));
             }
         }
+        append_recently_done_rows(app, &mut rows, recently_done);
         return rows;
     }
 
     let mut rows = Vec::new();
+    append_recently_done_rows(app, &mut rows, recently_done);
     let mut entries_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
     for entry in visible_entries {
         entries_by_workspace
@@ -1157,6 +1165,38 @@ fn compact_sidebar_rows_inner(
         }
     }
     rows
+}
+
+fn append_recently_done_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: Vec<AgentPanelEntry>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let collapsed = section_is_collapsed(app, RECENTLY_DONE_SECTION_TITLE);
+    rows.push(SidebarRow::SectionHeader {
+        title: RECENTLY_DONE_SECTION_TITLE,
+        count: entries.len(),
+        collapsed,
+    });
+    if !collapsed {
+        rows.extend(entries.into_iter().map(|entry| SidebarRow::Agent {
+            entry: Box::new(entry),
+            depth: 0,
+        }));
+    }
+}
+
+fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) -> bool {
+    entry.has_agent
+        && entry.state == AgentState::Idle
+        && !entry.seen
+        && !entry.stale
+        && entry.done_since.is_some_and(|done_since| {
+            app.view_observed_at.saturating_duration_since(done_since) > app.hide_done_after
+        })
 }
 
 pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
@@ -3197,6 +3237,7 @@ mod tests {
             holds_shell: false,
             gate_count: 0,
             seen,
+            done_since: None,
             stale: false,
             reported_at: None,
             last_agent_state_change_seq: None,
@@ -6248,6 +6289,98 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal.state = *state;
         }
         app
+    }
+
+    #[test]
+    fn done_pane_moves_to_recently_done_only_after_hide_threshold() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.hide_done_after = std::time::Duration::from_secs(30 * 60);
+
+        app.view_observed_at = done_since + app.hide_done_after;
+        let boundary = sidebar_rows(&app);
+        assert!(!boundary.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. }
+                if *title == RECENTLY_DONE_SECTION_TITLE
+        )));
+        assert!(boundary
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Tab { .. })));
+
+        app.view_observed_at += std::time::Duration::from_nanos(1);
+        let hidden = sidebar_rows(&app);
+        assert!(hidden.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title,
+                count: 1,
+                collapsed: true,
+            } if *title == RECENTLY_DONE_SECTION_TITLE
+        )));
+        assert!(!hidden
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Tab { .. })));
+
+        app.collapsed_sidebar_groups
+            .remove(RECENTLY_DONE_SECTION_TITLE);
+        let expanded = sidebar_rows(&app);
+        assert!(expanded
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Agent { .. })));
+    }
+
+    #[test]
+    fn recently_done_header_renders_at_narrow_and_normal_widths() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.view_observed_at =
+            done_since + app.hide_done_after + std::time::Duration::from_nanos(1);
+
+        for width in [18, 40] {
+            let expected_label = if width == 18 {
+                "Recently"
+            } else {
+                RECENTLY_DONE_SECTION_TITLE
+            };
+            let area = Rect::new(0, 0, width, 20);
+            let mut desktop = Terminal::new(TestBackend::new(width, area.height)).unwrap();
+            desktop
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let desktop_text = (0..area.height)
+                .map(|row| row_text(desktop.backend().buffer(), row, width))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(desktop_text.contains(expected_label), "{width}");
+
+            app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
+            app.view.terminal_area = Rect::new(0, 2, width, 18);
+            let mut mobile = Terminal::new(TestBackend::new(width, area.height)).unwrap();
+            mobile
+                .draw(|frame| {
+                    super::super::mobile::render_mobile_panel(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        area,
+                    )
+                })
+                .unwrap();
+            let mobile_text = (0..area.height)
+                .map(|row| row_text(mobile.backend().buffer(), row, width))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(mobile_text.contains(expected_label), "{width}");
+        }
     }
 
     #[test]

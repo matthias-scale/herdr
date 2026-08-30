@@ -1814,6 +1814,7 @@ impl PaneRuntime {
             agent_activity: None,
             agent_state: None,
             pane_seen: None,
+            pane_done_for_ms: None,
         }
     }
 
@@ -2036,6 +2037,7 @@ impl PaneRuntime {
             agent_activity: _,
             agent_state: _,
             pane_seen: _,
+            pane_done_for_ms: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;

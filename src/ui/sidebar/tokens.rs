@@ -247,6 +247,7 @@ mod tests {
             holds_shell: false,
             gate_count: 0,
             seen: true,
+            done_since: None,
             stale: false,
             reported_at: None,
             last_agent_state_change_seq: None,

@@ -1793,6 +1793,23 @@ impl App {
 
     /// Close a pane; `Err` carries the encoded error response.
     pub(super) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
+        self.close_pane_with_scope(id, target, false)
+    }
+
+    pub(crate) fn close_pane_for_reap(
+        &mut self,
+        id: String,
+        target: &PaneTarget,
+    ) -> Result<(), String> {
+        self.close_pane_with_scope(id, target, true)
+    }
+
+    fn close_pane_with_scope(
+        &mut self,
+        id: String,
+        target: &PaneTarget,
+        exact_workspace: bool,
+    ) -> Result<(), String> {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
@@ -1801,7 +1818,8 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(ws_idx);
         let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
-        if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+        if !exact_workspace
+            && self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
             return Err(encode_error(
@@ -1821,7 +1839,11 @@ impl App {
         self.state.remove_plugin_pane_records([pane_id]);
         if should_close_workspace {
             self.state.selected = ws_idx;
-            self.state.close_selected_workspace();
+            if exact_workspace {
+                self.state.close_workspace_exact(ws_idx);
+            } else {
+                self.state.close_selected_workspace();
+            }
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
                 event: EventKind::PaneClosed,

@@ -1224,6 +1224,9 @@ impl AppState {
         }
 
         match crate::ui::mobile_switcher_target_at(self, mouse.column, mouse.row) {
+            Some(crate::ui::MobileSwitcherTarget::Section(title)) => {
+                self.toggle_sidebar_group(title);
+            }
             Some(crate::ui::MobileSwitcherTarget::NewWorkspace) => {
                 return MobileMouseResult::Action(MouseAction::NewWorkspace);
             }

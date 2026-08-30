@@ -13,7 +13,7 @@ use super::sidebar::AgentPanelEntry;
 use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout, render_compact_agent_row,
     sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
-    sidebar_workspace_labels, SidebarRow,
+    sidebar_workspace_labels, SidebarRow, RECENTLY_DONE_SECTION_TITLE,
 };
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width, display_width_u16, truncate_end};
@@ -39,6 +39,7 @@ pub(crate) struct MobileSwitcherAreas {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
+    Section(&'static str),
     NewWorkspace,
     Workspace(usize),
     WorkspaceDisclosure(usize),
@@ -261,10 +262,9 @@ pub(crate) fn mobile_switcher_target_at(
     for entry in &rows {
         let row_height = mobile_sidebar_row_height(entry);
         if doc_row >= cursor && doc_row < cursor + row_height {
-            // A section header names a group; there is nothing behind it to
-            // open, so a tap on it is a tap on nothing.
-            if let SidebarRow::SectionHeader { .. } = entry {
-                return None;
+            if let SidebarRow::SectionHeader { title, .. } = entry {
+                return (*title == RECENTLY_DONE_SECTION_TITLE)
+                    .then_some(MobileSwitcherTarget::Section(title));
             }
             return mobile_switcher_target_for_row(content, col, doc_row, cursor, entry);
         }
@@ -732,7 +732,14 @@ fn render_mobile_switcher_content(
                     );
                 }
             }
-            SidebarRow::SectionHeader { title, .. } => {
+            SidebarRow::SectionHeader {
+                title, collapsed, ..
+            } => {
+                let label = if *title == RECENTLY_DONE_SECTION_TITLE {
+                    format!("  {} {title}", if *collapsed { "▸" } else { "▾" })
+                } else {
+                    format!("  {title}")
+                };
                 render_one_line_item(
                     frame,
                     viewport,
@@ -741,7 +748,7 @@ fn render_mobile_switcher_content(
                     app.mobile_switcher_scroll,
                     p.panel_bg,
                     Line::from(Span::styled(
-                        format!("  {title}"),
+                        label,
                         Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
                     )),
                 );
@@ -1333,6 +1340,7 @@ mod tests {
             holds_shell: false,
             gate_count: 0,
             seen: true,
+            done_since: None,
             stale: false,
             reported_at: None,
             last_agent_state_change_seq: None,

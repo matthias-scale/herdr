@@ -20,6 +20,7 @@ pub(crate) mod home;
 mod ids;
 pub(crate) mod inbox;
 mod input;
+mod pane_lifecycle;
 mod popup;
 mod runtime;
 mod runtime_mutations;
@@ -617,7 +618,10 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
-            collapsed_sidebar_groups: std::collections::HashSet::new(),
+            collapsed_sidebar_groups: std::iter::once(
+                crate::ui::RECENTLY_DONE_SECTION_TITLE.to_string(),
+            )
+            .collect(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
@@ -638,6 +642,13 @@ impl App {
                     .agent_detection
                     .full_lifecycle_hook_authority_timeout_seconds,
             ),
+            hide_done_after: std::time::Duration::from_secs(
+                config.session.hide_done_after_minutes.saturating_mul(60),
+            ),
+            reap_done_after: std::time::Duration::from_secs(
+                config.session.reap_done_after_minutes.saturating_mul(60),
+            ),
+            reap_done_panes: config.session.reap_done_panes,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1663,6 +1674,21 @@ impl App {
                     .agent_detection
                     .full_lifecycle_hook_authority_timeout_seconds,
             );
+        }
+
+        if !invalid_section("session") {
+            let hide_done_after = std::time::Duration::from_secs(
+                config.session.hide_done_after_minutes.saturating_mul(60),
+            );
+            let hide_threshold_changed = self.state.hide_done_after != hide_done_after;
+            self.state.hide_done_after = hide_done_after;
+            self.state.reap_done_after = std::time::Duration::from_secs(
+                config.session.reap_done_after_minutes.saturating_mul(60),
+            );
+            self.state.reap_done_panes = config.session.reap_done_panes;
+            if hide_threshold_changed {
+                self.state.mark_sidebar_projection_changed();
+            }
         }
 
         if !invalid_section("keys") {

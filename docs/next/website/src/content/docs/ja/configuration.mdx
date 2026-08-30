@@ -96,6 +96,19 @@ worktree アクションは Git ワークスペースの行から使えます。
 
 worktree チェックアウトの削除は明示的に行います。グループ化された子ワークスペースで `Delete worktree checkout...` を使うと `git worktree remove` が実行されます。Herdr はまず Git に安全な削除を要求します。チェックアウトに変更済みまたは未追跡のファイルがあり Git が拒否した場合、Herdr は強制削除を実行する前にもう一度確認します。ブランチは削除されません。
 
+## 完了ペインのライフサイクル
+
+Done ペインは 30 分間メインのサイドバーに残り、その後、折りたたまれた `Recently done` セクションへ移動します。4 時間後、Herdr は対象の Done ペインを閉じ、`~/.local/state/herdr/reap-log.jsonl` に記録します。
+
+```toml
+[session]
+hide_done_after_minutes = 30
+reap_done_after_minutes = 240
+reap_done_panes = true
+```
+
+Herdr は、フォーカス中のペイン、ピン留めされたタブ内のペイン、Done 以外の状態のペインを自動終了しません。ペインに Git worktree がリンクされている場合、チェックアウトがクリーンで、すべてのコミットが設定済みの upstream ブランチに存在するときだけ削除します。`reap_done_panes = false` にすると、`Recently done` セクションを残したまま自動終了を無効にできます。
+
 ## リモートアタッチ
 
 リモートアタッチは、デフォルトで一時的なキープアライブと、対応する環境では接続再利用を使って SSH 接続を管理します。

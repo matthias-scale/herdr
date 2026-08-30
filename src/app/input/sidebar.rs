@@ -1226,7 +1226,10 @@ mod tests {
             header.rect.x + 1,
             header.rect.y,
         ));
-        assert!(app.state.collapsed_sidebar_groups.is_empty());
+        assert!(!app
+            .state
+            .collapsed_sidebar_groups
+            .contains(crate::ui::SPACES_SECTION_TITLE));
         assert_eq!(crate::ui::sidebar_rows(&app.state).len(), rows_open);
     }
 

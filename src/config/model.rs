@@ -284,12 +284,23 @@ pub struct SessionConfig {
     /// Resume supported AI-agent panes into their native conversation sessions
     /// when restoring a Herdr session. Default: true.
     pub resume_agents_on_restore: bool,
+    /// Move Done panes into the collapsed Recently done sidebar section after
+    /// this many minutes. Default: 30.
+    pub hide_done_after_minutes: u64,
+    /// Close eligible Done panes after this many minutes. Default: 240 (4 hours).
+    pub reap_done_after_minutes: u64,
+    /// Automatically close eligible Done panes. Set false to disable reaping.
+    /// Default: true.
+    pub reap_done_panes: bool,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             resume_agents_on_restore: true,
+            hide_done_after_minutes: 30,
+            reap_done_after_minutes: 4 * 60,
+            reap_done_panes: true,
         }
     }
 }
@@ -1562,13 +1573,22 @@ new_cwd = "~/Projects"
     fn resume_agents_on_restore_defaults_on_and_parses() {
         let default_config = Config::default();
         assert!(default_config.session.resume_agents_on_restore);
+        assert_eq!(default_config.session.hide_done_after_minutes, 30);
+        assert_eq!(default_config.session.reap_done_after_minutes, 240);
+        assert!(default_config.session.reap_done_panes);
 
         let toml = r#"
 [session]
 resume_agents_on_restore = false
+hide_done_after_minutes = 15
+reap_done_after_minutes = 90
+reap_done_panes = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
+        assert_eq!(config.session.hide_done_after_minutes, 15);
+        assert_eq!(config.session.reap_done_after_minutes, 90);
+        assert!(!config.session.reap_done_panes);
     }
 
     #[test]

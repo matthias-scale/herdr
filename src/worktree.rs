@@ -196,7 +196,6 @@ pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
     )
 }
 
-#[cfg(any(windows, test))]
 pub(crate) fn checkout_has_dirty_files(path: &Path) -> Result<bool, String> {
     let path_arg = path.display().to_string();
     let output = crate::noninteractive_process::command("git")
@@ -223,6 +222,32 @@ pub(crate) fn checkout_has_dirty_files(path: &Path) -> Result<bool, String> {
     } else {
         Err(format!("git status failed with status {}", output.status))
     }
+}
+
+pub(crate) fn checkout_is_clean_and_pushed(path: &Path) -> Result<bool, String> {
+    if checkout_has_dirty_files(path)? {
+        return Ok(false);
+    }
+
+    let path_arg = path.display().to_string();
+    let output = crate::noninteractive_process::command("git")
+        .args(["-C", &path_arg, "rev-list", "--count", "@{upstream}..HEAD"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() {
+        return Err(if stderr.is_empty() {
+            format!("git rev-list failed with status {}", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    stdout
+        .parse::<u64>()
+        .map(|ahead| ahead == 0)
+        .map_err(|err| format!("invalid git rev-list count {stdout:?}: {err}"))
 }
 
 pub(crate) fn build_worktree_add_new_branch_command(
