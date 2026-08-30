@@ -96,6 +96,19 @@ Grouped worktrees still behave like normal Herdr workspaces: they can be focused
 
 Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
 
+## Done pane lifecycle
+
+Done panes stay in the main sidebar for 30 minutes, then move into the collapsed `Recently done` section. After four hours, Herdr closes an eligible Done pane and records the reap in `~/.local/state/herdr/reap-log.jsonl`.
+
+```toml
+[session]
+hide_done_after_minutes = 30
+reap_done_after_minutes = 240
+reap_done_panes = true
+```
+
+Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose status is not Done. When the pane owns a linked Git worktree, Herdr removes that checkout only when it is clean and its commits are present on the configured upstream branch. Set `reap_done_panes = false` to keep automatic reaping disabled while retaining the Recently done section.
+
 ## Remote attach
 
 Remote attach manages its SSH connection with temporary keepalives and, where supported, connection reuse by default.

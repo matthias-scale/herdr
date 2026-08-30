@@ -96,6 +96,19 @@ Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果
 
 删除 worktree 检出需要显式操作。在归组的子工作区上使用 `Delete worktree checkout...` 来运行 `git worktree remove`。Herdr 会先请求 Git 安全删除。如果 Git 因检出中存在已修改或未跟踪的文件而拒绝，Herdr 会在强制删除前再次确认。分支不会被删除。
 
+## 已完成窗格生命周期
+
+Done 窗格会在主侧边栏保留 30 分钟，随后移入默认折叠的 `Recently done` 区段。四小时后，Herdr 会关闭符合条件的 Done 窗格，并将记录追加到 `~/.local/state/herdr/reap-log.jsonl`。
+
+```toml
+[session]
+hide_done_after_minutes = 30
+reap_done_after_minutes = 240
+reap_done_panes = true
+```
+
+Herdr 绝不会回收当前聚焦的窗格、置顶标签页中的窗格或状态不是 Done 的窗格。如果窗格关联 Git worktree，Herdr 只会在检出干净且全部提交都已存在于配置的 upstream 分支时删除它。设置 `reap_done_panes = false` 可保留 `Recently done` 区段，同时彻底关闭自动回收。
+
 ## 远程连接
 
 远程连接默认使用临时保活设置，并在支持时复用连接，以管理 SSH 连接。
