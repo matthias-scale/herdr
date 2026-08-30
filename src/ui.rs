@@ -425,6 +425,12 @@ fn compute_view_internal(
     } else {
         Vec::new()
     };
+    let home_hit_areas = if app.home.is_some() {
+        let queue = app.blocked_agents();
+        home::home_hit_areas(app, &queue, terminal_area)
+    } else {
+        Vec::new()
+    };
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
@@ -469,6 +475,7 @@ fn compute_view_internal(
         mobile_menu_hit_area: Rect::default(),
         toast_hit_area,
         home_row_hit_areas,
+        home_hit_areas,
         pane_infos,
         split_borders,
         dock_rect: dock_area,
@@ -602,6 +609,12 @@ fn compute_mobile_view(
     } else {
         Vec::new()
     };
+    let home_hit_areas = if app.home.is_some() {
+        let queue = app.blocked_agents();
+        home::home_hit_areas(app, &queue, terminal_area)
+    } else {
+        Vec::new()
+    };
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
@@ -624,6 +637,7 @@ fn compute_mobile_view(
         mobile_menu_hit_area: header_hits.menu,
         toast_hit_area,
         home_row_hit_areas,
+        home_hit_areas,
         pane_infos,
         split_borders,
         dock_rect: Rect::default(),

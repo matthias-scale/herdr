@@ -7,14 +7,143 @@
 //!
 //! Like the inbox, the queue is derived on every read rather than cached, so an
 //! agent that answers its own gate simply stops appearing. The only thing held
-//! here is the cursor, which cannot be re-derived.
+//! here is the cursor plus the draft dispatch settings, which cannot be
+//! re-derived.
 
-use crate::app::inbox::BlockedAgent;
+use std::path::PathBuf;
 
-/// Cursor state for an open home view.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+use crate::{app::inbox::BlockedAgent, detect::Agent};
+
+pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeFocus {
+    Prompt,
+    Agent,
+    Model,
+    Effort,
+    Directory,
+    Target,
+}
+
+impl HomeFocus {
+    pub(crate) fn next(self, effort_visible: bool) -> Self {
+        match self {
+            Self::Prompt => Self::Agent,
+            Self::Agent => Self::Model,
+            Self::Model if effort_visible => Self::Effort,
+            Self::Model => Self::Directory,
+            Self::Effort => Self::Directory,
+            Self::Directory => Self::Target,
+            Self::Target => Self::Prompt,
+        }
+    }
+
+    pub(crate) fn previous(self, effort_visible: bool) -> Self {
+        match self {
+            Self::Prompt => Self::Target,
+            Self::Agent => Self::Prompt,
+            Self::Model => Self::Agent,
+            Self::Effort => Self::Model,
+            Self::Directory if effort_visible => Self::Effort,
+            Self::Directory => Self::Model,
+            Self::Target => Self::Directory,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomePicker {
+    Agent,
+    Model,
+    Effort,
+    Directory,
+    Target,
+}
+
+impl HomePicker {
+    pub(crate) fn for_focus(focus: HomeFocus) -> Option<Self> {
+        match focus {
+            HomeFocus::Prompt => None,
+            HomeFocus::Agent => Some(Self::Agent),
+            HomeFocus::Model => Some(Self::Model),
+            HomeFocus::Effort => Some(Self::Effort),
+            HomeFocus::Directory => Some(Self::Directory),
+            HomeFocus::Target => Some(Self::Target),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HomeTarget {
+    NewSpace,
+    Existing(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeDispatchPlan {
+    pub(crate) agent: Agent,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) directory: PathBuf,
+    pub(crate) target: HomeTarget,
+    pub(crate) prompt: String,
+    pub(crate) argv: Vec<String>,
+}
+
+fn default_directory() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+pub(crate) fn model_options(agent: Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::Claude => &["opus", "sonnet", "haiku"],
+        Agent::Codex => &["gpt-5.4", "gpt-5.3-codex"],
+        _ => &[],
+    }
+}
+
+pub(crate) fn effort_options(agent: Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::Claude => &["low", "medium", "high"],
+        _ => &[],
+    }
+}
+
+pub(crate) fn dispatchable_agents() -> &'static [Agent] {
+    &[Agent::Claude, Agent::Codex]
+}
+
+/// Cursor and dispatch state for an open home view.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeState {
     selected: usize,
+    pub(crate) focus: Option<HomeFocus>,
+    pub(crate) prompt: String,
+    pub(crate) agent: Agent,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) directory: PathBuf,
+    pub(crate) target: HomeTarget,
+    pub(crate) picker: Option<HomePicker>,
+    pub(crate) picker_selected: usize,
+}
+
+impl Default for HomeState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            focus: Some(HomeFocus::Prompt),
+            prompt: String::new(),
+            agent: Agent::Claude,
+            model: "opus".into(),
+            effort: Some("medium".into()),
+            directory: default_directory(),
+            target: HomeTarget::NewSpace,
+            picker: None,
+            picker_selected: 0,
+        }
+    }
 }
 
 impl HomeState {
@@ -67,6 +196,80 @@ impl HomeState {
         let selected = self.selected(queue);
         let max_scroll = queue.len() - visible_rows;
         selected.saturating_sub(visible_rows - 1).min(max_scroll)
+    }
+
+    pub(crate) fn effort_visible(&self) -> bool {
+        self.effort.is_some()
+    }
+
+    pub(crate) fn move_focus(&mut self, backwards: bool) {
+        let current = self.focus.unwrap_or(HomeFocus::Prompt);
+        self.focus = Some(if backwards {
+            current.previous(self.effort_visible())
+        } else {
+            current.next(self.effort_visible())
+        });
+    }
+
+    pub(crate) fn close_composer_or_home(&mut self) -> bool {
+        if self.picker.take().is_some() {
+            return false;
+        }
+        if self.focus.take().is_some() {
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn set_agent(&mut self, agent: Agent) {
+        self.agent = agent;
+        self.model = model_options(agent)
+            .first()
+            .copied()
+            .unwrap_or_default()
+            .into();
+        self.effort = effort_options(agent).first().copied().map(str::to_owned);
+    }
+
+    pub(crate) fn append_prompt(&mut self, character: char) {
+        self.prompt.push(character);
+    }
+
+    pub(crate) fn backspace_prompt(&mut self) {
+        self.prompt.pop();
+    }
+
+    pub(crate) fn dispatch_plan(&self) -> Result<HomeDispatchPlan, String> {
+        let prompt = self.prompt.trim();
+        if prompt.is_empty() {
+            return Err("enter a prompt before dispatching".into());
+        }
+        if model_options(self.agent).is_empty() {
+            return Err("that agent cannot be dispatched from home".into());
+        }
+
+        let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
+        match self.agent {
+            Agent::Claude => {
+                argv.extend(["--model".into(), self.model.clone()]);
+                if let Some(effort) = &self.effort {
+                    argv.extend(["--effort".into(), effort.clone()]);
+                }
+            }
+            Agent::Codex => argv.extend(["--model".into(), self.model.clone()]),
+            _ => return Err("that agent cannot be dispatched from home".into()),
+        }
+        argv.push(prompt.into());
+
+        Ok(HomeDispatchPlan {
+            agent: self.agent,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            directory: self.directory.clone(),
+            target: self.target.clone(),
+            prompt: prompt.into(),
+            argv,
+        })
     }
 }
 
@@ -127,6 +330,170 @@ impl crate::app::state::AppState {
             blocked: queue.len(),
             agents,
             spaces: self.workspaces.len(),
+        }
+    }
+
+    pub(crate) fn home_directory_options(&self) -> Vec<PathBuf> {
+        let mut options = Vec::new();
+        if let Some(home) = &self.home {
+            options.push(home.directory.clone());
+        }
+        if let Ok(current) = std::env::current_dir() {
+            if !options.contains(&current) {
+                options.push(current);
+            }
+        }
+        for cwd in self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.identity_cwd.clone())
+        {
+            if !options.contains(&cwd) {
+                options.push(cwd);
+            }
+        }
+        options
+    }
+
+    pub(crate) fn home_target_options(&self) -> Vec<HomeTarget> {
+        let mut options = vec![HomeTarget::NewSpace];
+        options.extend(
+            self.workspaces
+                .iter()
+                .map(|workspace| HomeTarget::Existing(workspace.id.clone())),
+        );
+        options
+    }
+
+    fn home_picker_len(&self, picker: HomePicker) -> usize {
+        match picker {
+            HomePicker::Agent => dispatchable_agents().len(),
+            HomePicker::Model => self
+                .home
+                .as_ref()
+                .map(|home| model_options(home.agent).len())
+                .unwrap_or(0),
+            HomePicker::Effort => self
+                .home
+                .as_ref()
+                .map(|home| effort_options(home.agent).len())
+                .unwrap_or(0),
+            HomePicker::Directory => self.home_directory_options().len(),
+            HomePicker::Target => self.home_target_options().len(),
+        }
+    }
+
+    pub(crate) fn home_open_picker(&mut self, picker: HomePicker) {
+        let length = self.home_picker_len(picker);
+        if length == 0 {
+            return;
+        }
+        let current = self
+            .home
+            .as_ref()
+            .and_then(|home| match picker {
+                HomePicker::Agent => dispatchable_agents()
+                    .iter()
+                    .position(|agent| *agent == home.agent),
+                HomePicker::Model => model_options(home.agent)
+                    .iter()
+                    .position(|model| *model == home.model),
+                HomePicker::Effort => home.effort.as_deref().and_then(|effort| {
+                    effort_options(home.agent)
+                        .iter()
+                        .position(|option| *option == effort)
+                }),
+                HomePicker::Directory => self
+                    .home_directory_options()
+                    .iter()
+                    .position(|directory| directory == &home.directory),
+                HomePicker::Target => self
+                    .home_target_options()
+                    .iter()
+                    .position(|target| target == &home.target),
+            })
+            .unwrap_or(0);
+        if let Some(home) = self.home.as_mut() {
+            home.picker = Some(picker);
+            home.picker_selected = current.min(length - 1);
+        }
+    }
+
+    pub(crate) fn home_move_picker(&mut self, delta: i32) {
+        let Some((picker, selected)) = self
+            .home
+            .as_ref()
+            .and_then(|home| home.picker.map(|picker| (picker, home.picker_selected)))
+        else {
+            return;
+        };
+        let length = self.home_picker_len(picker);
+        if length == 0 {
+            return;
+        }
+        let selected = (selected as i32 + delta).clamp(0, length as i32 - 1) as usize;
+        if let Some(home) = self.home.as_mut() {
+            home.picker_selected = selected;
+        }
+    }
+
+    pub(crate) fn home_accept_picker(&mut self) {
+        let Some((picker, selected)) = self
+            .home
+            .as_ref()
+            .and_then(|home| home.picker.map(|picker| (picker, home.picker_selected)))
+        else {
+            return;
+        };
+        match picker {
+            HomePicker::Agent => {
+                if let Some(agent) = dispatchable_agents().get(selected).copied() {
+                    if let Some(home) = self.home.as_mut() {
+                        home.set_agent(agent);
+                    }
+                }
+            }
+            HomePicker::Model => {
+                let model = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| model_options(home.agent).get(selected))
+                    .copied()
+                    .map(str::to_owned);
+                if let Some(model) = model {
+                    if let Some(home) = self.home.as_mut() {
+                        home.model = model;
+                    }
+                }
+            }
+            HomePicker::Effort => {
+                let effort = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| effort_options(home.agent).get(selected))
+                    .copied()
+                    .map(str::to_owned);
+                if let Some(home) = self.home.as_mut() {
+                    home.effort = effort;
+                }
+            }
+            HomePicker::Directory => {
+                if let Some(directory) = self.home_directory_options().get(selected).cloned() {
+                    if let Some(home) = self.home.as_mut() {
+                        home.directory = directory;
+                    }
+                }
+            }
+            HomePicker::Target => {
+                if let Some(target) = self.home_target_options().get(selected).cloned() {
+                    if let Some(home) = self.home.as_mut() {
+                        home.target = target;
+                    }
+                }
+            }
+        }
+        if let Some(home) = self.home.as_mut() {
+            home.picker = None;
         }
     }
 

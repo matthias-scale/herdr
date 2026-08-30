@@ -226,6 +226,80 @@ impl App {
         self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new())
     }
 
+    pub(crate) fn dispatch_home_composer(
+        &mut self,
+        plan: crate::app::home::HomeDispatchPlan,
+    ) -> std::io::Result<()> {
+        let (rows, cols) = self.state.estimate_pane_size();
+        let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+        let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
+
+        match plan.target {
+            crate::app::home::HomeTarget::NewSpace => {
+                let (workspace, terminal, runtime) = Workspace::new_argv_command_with_extra_env(
+                    plan.directory,
+                    rows,
+                    cols,
+                    &plan.argv,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    host_terminal_appearance,
+                    self.event_tx.clone(),
+                    self.render_notify.clone(),
+                    self.render_dirty.clone(),
+                    Vec::new(),
+                )?;
+                self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+                self.state.terminals.insert(terminal.id.clone(), terminal);
+                self.state.workspaces.push(workspace);
+                let ws_idx = self.state.workspaces.len() - 1;
+                self.state.remove_alias_shadowed_by_new_pane(
+                    self.state.workspaces[ws_idx].tabs[0].root_pane,
+                );
+                self.state.switch_workspace(ws_idx);
+                self.state.mode = Mode::Terminal;
+                self.emit_workspace_open_events(ws_idx);
+            }
+            crate::app::home::HomeTarget::Existing(workspace_id) => {
+                let Some(ws_idx) = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+                else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "selected space no longer exists",
+                    ));
+                };
+                let (tab_idx, terminal, runtime, root_pane) = {
+                    let workspace = &mut self.state.workspaces[ws_idx];
+                    let (tab_idx, terminal, runtime) = workspace.create_tab_argv_command(
+                        rows,
+                        cols,
+                        plan.directory,
+                        &plan.argv,
+                        Vec::new(),
+                        scrollback_limit_bytes,
+                        host_terminal_theme,
+                        host_terminal_appearance,
+                    )?;
+                    let root_pane = workspace.tabs[tab_idx].root_pane;
+                    (tab_idx, terminal, runtime, root_pane)
+                };
+                self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+                self.state.terminals.insert(terminal.id.clone(), terminal);
+                self.state.remove_alias_shadowed_by_new_pane(root_pane);
+                self.state.switch_workspace_tab(ws_idx, tab_idx);
+                self.state.mode = Mode::Terminal;
+                self.emit_tab_created_events(ws_idx, tab_idx);
+            }
+        }
+        self.schedule_session_save();
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn create_workspace_with_events(
         &mut self,
