@@ -341,8 +341,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Show local Codex and Claude Code subscription usage in the info panel.
 # show_subscription_usage = true
-# Open the home view on launch. Esc dismisses it.
-# show_home_on_start = true
+# Open the home view on launch. Esc dismisses it. Off by default: the launch
+# screen hides the panes you asked for.
+# show_home_on_start = false
 
 # Start the status row expanded: usage percentages and reset times beside every
 # column, instead of the columns alone. Toggle at runtime with the status-bar
