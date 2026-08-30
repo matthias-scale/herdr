@@ -667,6 +667,7 @@ impl App {
                 .custom_name
                 .clone(),
             previous_worktree_space: self.state.workspaces[source_ws_idx].worktree_space.clone(),
+            previous_repo_binding: self.state.workspaces[source_ws_idx].repo_binding.clone(),
             identity_cwd: self.state.workspaces[source_ws_idx].identity_cwd.clone(),
         };
 
@@ -1076,6 +1077,7 @@ impl App {
             );
             workspace.id = context.previous_workspace_id;
             workspace.worktree_space = context.previous_worktree_space;
+            workspace.repo_binding = context.previous_repo_binding;
             let insert_idx = context.source_ws_idx.min(self.state.workspaces.len());
             if let Some(active) = self.state.active {
                 if active >= insert_idx {
@@ -1198,9 +1200,15 @@ impl App {
             Ok(changed) => changed,
             Err(message) => return encode_error(id, "invalid_work_context", message),
         };
+        let mut ws_idx = ws_idx;
         if changed {
             self.state.mark_session_dirty();
             self.emit_pane_updated(ws_idx, pane_id);
+            // A declaration is the strongest repository evidence there is, so
+            // act on it immediately. The move never takes focus and never
+            // touches the pane the human is in.
+            self.route_pane_to_bound_workspace(ws_idx, pane_id);
+            ws_idx = self.workspace_index_for_pane(pane_id).unwrap_or(ws_idx);
         }
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
@@ -1430,14 +1438,21 @@ impl App {
             && applies_to_source.is_some()
             && agent_session_id.is_some();
         if let Some(context) = requested_hook_context.as_ref() {
+            // `repo` is refused on both hook shapes. The hook context is
+            // derived from prompt text, and a repository named in prose is
+            // ambient rather than evidence; letting it through would hand a
+            // prose mention the precedence of a declaration and misfile the
+            // pane. Repositories arrive by declaration or by observation only.
             let valid_work_title_context = work_title_request
                 && context.branch.is_none()
+                && context.repo.is_none()
                 && context.session_name.is_none()
                 && context.work_title == requested_work_title;
             let valid_session_name_context = session_name_request
                 && context.session_name.is_some()
                 && context.work_title.is_none()
                 && context.branch.is_none()
+                && context.repo.is_none()
                 && context.ticket_ids.is_empty()
                 && context.pr_urls.is_empty()
                 && context.preview_urls.is_empty()
@@ -2103,6 +2118,9 @@ struct PaneMoveRecoveryContext {
     previous_workspace_label: Option<String>,
     previous_tab_label: Option<String>,
     previous_worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
+    /// A failed move must not silently drop the source workspace's repository
+    /// binding; losing it would reintroduce the decay this feature prevents.
+    previous_repo_binding: Option<String>,
     identity_cwd: std::path::PathBuf,
 }
 
@@ -2223,6 +2241,7 @@ mod tests {
             PaneWorkContextSetParams {
                 pane_id: pane_id.clone(),
                 patch: crate::work_context::PaneWorkContextPatch {
+                    repo: None,
                     ticket_ids: Some(vec!["mat-7".into(), "SCA-2".into()]),
                     pr_urls: Some(vec!["https://github.com/o/r/pull/09".into()]),
                     branch: Some("feat/context".into()),
@@ -2264,6 +2283,7 @@ mod tests {
             PaneWorkContextSetParams {
                 pane_id: pane_id.clone(),
                 patch: crate::work_context::PaneWorkContextPatch {
+                    repo: None,
                     ticket_ids: Some(vec!["MAT-7".into(), "SCA-2".into()]),
                     pr_urls: Some(vec!["https://github.com/o/r/pull/9".into()]),
                     branch: Some("feat/context".into()),
@@ -2281,6 +2301,7 @@ mod tests {
             PaneWorkContextSetParams {
                 pane_id,
                 patch: crate::work_context::PaneWorkContextPatch {
+                    repo: None,
                     ticket_ids: Some(vec!["SCA-99".into()]),
                     pr_urls: Some(vec!["https://evil.test/o/r/pull/1".into()]),
                     ..Default::default()
@@ -3058,6 +3079,7 @@ mod tests {
             .get_mut(&source_terminal)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 ticket_ids: Some(vec!["MAT-42".into()]),
                 work_title: Some("Move context".into()),
                 ..Default::default()
@@ -3797,6 +3819,7 @@ mod tests {
             previous_workspace_label: app.state.workspaces[0].custom_name.clone(),
             previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
             previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
+            previous_repo_binding: app.state.workspaces[0].repo_binding.clone(),
             identity_cwd: app.state.workspaces[0].identity_cwd.clone(),
         };
         let taken = app.state.workspaces[0]
@@ -5465,6 +5488,7 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 branch: Some("feat/SCA-88-context".into()),
                 ..Default::default()
             })
@@ -5579,6 +5603,7 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 ticket_ids: Some(vec!["MAT-500".into()]),
                 pr_urls: Some(vec!["https://github.com/manual/repo/pull/99".into()]),
                 work_title: Some("Manual context".into()),
@@ -5648,6 +5673,7 @@ mod tests {
             .get_mut(terminal_id)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 ticket_ids: Some(vec!["MAT-500".into()]),
                 pr_urls: Some(vec!["https://github.com/manual/repo/pull/99".into()]),
                 work_title: Some("Manual context".into()),

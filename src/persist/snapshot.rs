@@ -63,6 +63,10 @@ pub struct WorkspaceSnapshot {
     pub identity_cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
+    /// Absent in session files written before repository binding existed, so
+    /// it defaults rather than forcing a snapshot-version migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_binding: Option<String>,
     #[serde(default)]
     pub public_pane_numbers: HashMap<u32, usize>,
     #[serde(default)]
@@ -208,6 +212,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             custom_name: snap.custom_name,
             identity_cwd,
             worktree_space: None,
+            repo_binding: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
@@ -350,6 +355,7 @@ fn capture_workspace(
             .resolved_identity_cwd_from(terminals, terminal_runtimes)
             .unwrap_or_else(|| ws.identity_cwd.clone()),
         worktree_space: ws.worktree_space.clone(),
+        repo_binding: ws.repo_binding.clone(),
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
@@ -1114,6 +1120,44 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_binding_survives_a_session_round_trip() {
+        // The binding is the durable half of the feature. If it did not
+        // persist, repository organisation would decay across a restart just
+        // as it decays across an afternoon.
+        let mut ws = crate::workspace::Workspace::test_new("bound");
+        ws.repo_binding = Some("matthias-scale/herdr".into());
+
+        let captured = capture_workspace(&ws, &Default::default(), &Default::default());
+        let encoded = serde_json::to_string(&captured).expect("encode");
+        let decoded: WorkspaceSnapshot = serde_json::from_str(&encoded).expect("decode");
+
+        assert_eq!(
+            decoded.repo_binding.as_deref(),
+            Some("matthias-scale/herdr")
+        );
+    }
+
+    #[test]
+    fn a_session_file_written_before_bindings_existed_still_loads() {
+        // The field defaults rather than forcing a snapshot-version migration,
+        // so older session files must deserialize unchanged.
+        let legacy = serde_json::json!({
+            "identity_cwd": "/tmp/herdr",
+            "public_pane_numbers": {},
+            "next_public_pane_number": 1,
+            "public_tab_numbers": [1],
+            "next_public_tab_number": 2,
+            "tabs": [],
+            "active_tab": 0,
+        });
+
+        let decoded: WorkspaceSnapshot =
+            serde_json::from_value(legacy).expect("legacy snapshot must decode");
+
+        assert_eq!(decoded.repo_binding, None);
+    }
+
+    #[test]
     fn round_trip_full_workspace_snapshot() {
         let mut panes = HashMap::new();
         panes.insert(
@@ -1150,6 +1194,7 @@ mod tests {
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
                 worktree_space: None,
+                repo_binding: None,
                 public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
                 next_public_pane_number: 3,
                 public_tab_numbers: vec![1],
@@ -1845,6 +1890,7 @@ mod tests {
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
                 worktree_space: None,
+                repo_binding: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),

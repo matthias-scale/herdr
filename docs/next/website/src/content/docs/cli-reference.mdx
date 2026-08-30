@@ -120,6 +120,8 @@ herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket I
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
+herdr workspace bind <workspace_id> <owner/repo> [--reconcile]
+herdr workspace bind <workspace_id> --clear
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
 ```
@@ -186,7 +188,7 @@ herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--c
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
 herdr pane work-context get <pane_id>
-herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...
+herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--clear FIELD]...
 herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
@@ -205,9 +207,22 @@ After `pane move`, use `.result.move_result.pane.pane_id` for later commands. A 
 
 `pane work-context set` applies one atomic manual patch. Repeated `--ticket` and
 `--pr` flags replace those lists in first-seen order; omitted fields stay
-unchanged. `--clear` accepts `ticket_ids`, `pr_urls`, `branch`, or `work_title`.
+unchanged. `--clear` accepts `ticket_ids`, `pr_urls`, `branch`, `repo`, or `work_title`.
 `pane work-context get` returns the same `PaneInfo` response as `pane get`,
 including its effective `work_context` object.
+
+`workspace bind` records the repository a workspace collects work for, so the
+grouping survives new panes instead of having to be rebuilt by hand. A pane is
+placed in the bound workspace once it resolves its own repository, which comes
+either from a declaration (`pane work-context set --repo`, or a `--pr` spawn
+binding, which implies its repository) or, failing that, from the `origin`
+remote of the pane's checkout. Declarations outrank the checkout, because a
+session often runs from a shared worktree while working on another repository.
+
+Placement never takes focus, and the pane the human is currently focused in is
+never moved; it is placed later, once focus has moved on. `--reconcile` sorts
+panes that already resolved the repository, under the same two rules. A
+repository may be bound to only one workspace.
 
 Read output:
 

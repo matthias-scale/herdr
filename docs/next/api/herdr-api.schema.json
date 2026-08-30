@@ -1377,6 +1377,13 @@
               },
               "type": "array"
             },
+            "repo": {
+              "description": "Canonical `owner/repo` of the repository this pane actually works on.\n\nDeliberately NOT derived from prose: a repository named in a prompt is\nambient noise, not evidence of the work. It is either declared (manual\nor spawn binding) or observed from the checkout's `origin` remote, and\nthe declaration always outranks the observation — see `recompute`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "anyOf": [
                 {
@@ -1495,6 +1502,13 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repo_binding": {
+              "description": "Repository this workspace collects work for, if bound.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",
@@ -3771,6 +3785,13 @@
               },
               "type": "array"
             },
+            "repo": {
+              "description": "Canonical `owner/repo` of the repository this pane actually works on.\n\nDeliberately NOT derived from prose: a repository named in a prompt is\nambient noise, not evidence of the work. It is either declared (manual\nor spawn binding) or observed from the checkout's `origin` remote, and\nthe declaration always outranks the observation — see `recompute`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "anyOf": [
                 {
@@ -3810,6 +3831,7 @@
             "ticket_ids",
             "pr_urls",
             "branch",
+            "repo",
             "work_title"
           ],
           "type": "string"
@@ -3837,6 +3859,12 @@
               },
               "type": [
                 "array",
+                "null"
+              ]
+            },
+            "repo": {
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -4888,6 +4916,30 @@
           ],
           "type": "string"
         },
+        "WorkspaceBindParams": {
+          "description": "Bind a workspace to the repository whose work it collects.",
+          "properties": {
+            "reconcile": {
+              "default": false,
+              "description": "Route matching panes that already exist into this workspace. Never\ntakes focus, and never moves the pane the human is focused in.",
+              "type": "boolean"
+            },
+            "repo": {
+              "description": "`owner/repo`, a GitHub URL, or a git remote URL. `None` clears the\nbinding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceCreateParams": {
           "properties": {
             "cwd": {
@@ -5432,6 +5484,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.bind",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceBindParams"
             }
           },
           "required": [
@@ -9328,6 +9396,13 @@
               },
               "type": "array"
             },
+            "repo": {
+              "description": "Canonical `owner/repo` of the repository this pane actually works on.\n\nDeliberately NOT derived from prose: a repository named in a prompt is\nambient noise, not evidence of the work. It is either declared (manual\nor spawn binding) or observed from the checkout's `origin` remote, and\nthe declaration always outranks the observation — see `recompute`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "anyOf": [
                 {
@@ -11432,6 +11507,13 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repo_binding": {
+              "description": "Repository this workspace collects work for, if bound.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",

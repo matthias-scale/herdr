@@ -43,6 +43,11 @@ pub(crate) struct GitWorkContextInput {
     pub(crate) cwd: PathBuf,
     pub(crate) repo_root: Option<PathBuf>,
     pub(crate) branch: Option<String>,
+    /// `owner/repo` of the checkout's `origin` remote. This is an observation,
+    /// not a declaration: it describes where the pane's cwd points, which is
+    /// frequently not the repository the pane is working on. It therefore
+    /// enters the lowest work-context tier and any declaration outranks it.
+    pub(crate) repo: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,6 +262,10 @@ impl App {
             changed = true;
             self.schedule_session_save();
             self.emit_pane_updated(ws_idx, observation.pane_id);
+            // The observation may have resolved the repository for the first
+            // time. It is the weakest tier, so it only routes a pane that has
+            // declared nothing better.
+            self.route_pane_to_bound_workspace(ws_idx, observation.pane_id);
         }
 
         self.prune_git_work_context_state();
@@ -371,6 +380,10 @@ fn refresh_git_work_contexts(
             }
             _ => crate::work_context::PaneWorkContext::default(),
         };
+        // Applied outside the branch cache so a detached HEAD, which produces
+        // no branch and therefore no cache key, still reports its repository.
+        let mut context = context;
+        context.repo = input.repo.clone();
 
         observations.push(GitWorkContextObservation {
             pane_id: target.pane_id,
@@ -410,6 +423,7 @@ fn discover_git_input(
                 cwd: cwd.to_path_buf(),
                 repo_root: None,
                 branch: None,
+                repo: None,
             });
         }
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return None,
@@ -418,6 +432,7 @@ fn discover_git_input(
                 cwd: cwd.to_path_buf(),
                 repo_root: None,
                 branch: None,
+                repo: None,
             });
         }
     };
@@ -431,6 +446,7 @@ fn discover_git_input(
             cwd: cwd.to_path_buf(),
             repo_root: None,
             branch: None,
+            repo: None,
         });
     };
 
@@ -451,11 +467,34 @@ fn discover_git_input(
         Err(_) => None,
     };
 
+    let repo = discover_origin_repo(cwd, deadline, git_program);
+
     Some(GitWorkContextInput {
         cwd: cwd.to_path_buf(),
         repo_root: Some(repo_root),
         branch,
+        repo,
     })
+}
+
+/// Read `origin` and canonicalize it to `owner/repo`.
+///
+/// A checkout without an `origin`, with a non-GitHub or unparseable remote,
+/// simply yields no observation: an absent repository is always safer than a
+/// wrong one, because a wrong one would route the pane into another
+/// repository's space.
+fn discover_origin_repo(cwd: &Path, deadline: Instant, git_program: &Path) -> Option<String> {
+    let mut command = crate::noninteractive_process::command(git_program);
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(["config", "--get", "remote.origin.url"]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote = String::from_utf8(output.stdout).ok()?;
+    crate::work_context::normalize_repo_slug(remote.trim()).ok()
 }
 
 fn git_work_context_for_branch(
@@ -1223,6 +1262,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             vec![GitWorkContextObservation {
                 pane_id,
                 input: GitWorkContextInput {
+                    repo: None,
                     cwd: cwd.clone(),
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1254,6 +1294,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             vec![GitWorkContextObservation {
                 pane_id,
                 input: GitWorkContextInput {
+                    repo: None,
                     cwd: cwd.clone(),
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1268,6 +1309,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             vec![GitWorkContextObservation {
                 pane_id,
                 input: GitWorkContextInput {
+                    repo: None,
                     cwd,
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1340,6 +1382,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             vec![GitWorkContextObservation {
                 pane_id,
                 input: GitWorkContextInput {
+                    repo: None,
                     cwd,
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1412,6 +1455,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             vec![GitWorkContextObservation {
                 pane_id,
                 input: GitWorkContextInput {
+                    repo: None,
                     cwd,
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1471,6 +1515,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 observations: vec![GitWorkContextObservation {
                     pane_id,
                     input: GitWorkContextInput {
+                        repo: None,
                         cwd,
                         repo_root: None,
                         branch: None,

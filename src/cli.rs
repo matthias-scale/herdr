@@ -93,6 +93,15 @@ pub(crate) fn parse_spawn_work_context_arg(
                 .branch = Some(value.clone());
             Ok(Some(index + 2))
         }
+        "--repo" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --repo".to_string())?;
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .repo = Some(value.clone());
+            Ok(Some(index + 2))
+        }
         "--role" => {
             let value = args
                 .get(index + 1)

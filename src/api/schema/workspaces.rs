@@ -24,6 +24,20 @@ pub struct WorkspaceRenameParams {
     pub label: String,
 }
 
+/// Bind a workspace to the repository whose work it collects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceBindParams {
+    pub workspace_id: String,
+    /// `owner/repo`, a GitHub URL, or a git remote URL. `None` clears the
+    /// binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Route matching panes that already exist into this workspace. Never
+    /// takes focus, and never moves the pane the human is focused in.
+    #[serde(default)]
+    pub reconcile: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceMoveParams {
     pub workspace_id: String,
@@ -65,6 +79,9 @@ pub struct WorkspaceInfo {
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+    /// Repository this workspace collects work for, if bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_binding: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

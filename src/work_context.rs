@@ -75,6 +75,14 @@ pub struct PaneWorkContext {
     pub missive_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Canonical `owner/repo` of the repository this pane actually works on.
+    ///
+    /// Deliberately NOT derived from prose: a repository named in a prompt is
+    /// ambient noise, not evidence of the work. It is either declared (manual
+    /// or spawn binding) or observed from the checkout's `origin` remote, and
+    /// the declaration always outranks the observation — see `recompute`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_title: Option<String>,
     /// Name the agent gave this session (Claude's `ai-title`). It is an
@@ -181,6 +189,7 @@ impl PaneWorkContext {
             preview_urls: normalize_preview_urls(self.preview_urls)?,
             missive_urls: normalize_missive_urls(self.missive_urls)?,
             branch: normalize_optional_text("branch", self.branch)?,
+            repo: normalize_optional_repo(self.repo)?,
             work_title: normalize_optional_text("work title", self.work_title)?,
             session_name: normalize_optional_text("session name", self.session_name)?,
             role: self.role,
@@ -195,8 +204,24 @@ impl PaneWorkContext {
         Ok(normalized)
     }
 
+    /// Fill an absent repository from an explicitly bound pull request.
+    ///
+    /// Applied only to declaration tiers. A pull request URL a human or agent
+    /// deliberately bound to the pane names the repository unambiguously,
+    /// whereas one merely scraped out of prompt text does not, so the hook tier
+    /// never gets this treatment.
+    fn with_repo_implied_by_pull_request(mut self) -> Self {
+        if self.repo.is_none() {
+            self.repo = self
+                .pr_urls
+                .first()
+                .and_then(|url| repo_slug_from_pr_url(url));
+        }
+        self
+    }
+
     pub(crate) fn normalized_spawn_binding(self) -> Result<Self, String> {
-        let normalized = self.normalized()?;
+        let normalized = self.normalized()?.with_repo_implied_by_pull_request();
         if normalized.pr_urls.len() > 1 {
             return Err("a spawn-time binding accepts one pull request".into());
         }
@@ -271,6 +296,7 @@ pub enum PaneWorkContextField {
     TicketIds,
     PrUrls,
     Branch,
+    Repo,
     WorkTitle,
 }
 
@@ -283,6 +309,8 @@ pub struct PaneWorkContextPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clear_fields: Vec<PaneWorkContextField>,
@@ -293,6 +321,7 @@ impl PaneWorkContextPatch {
         self.ticket_ids.is_none()
             && self.pr_urls.is_none()
             && self.branch.is_none()
+            && self.repo.is_none()
             && self.work_title.is_none()
             && self.clear_fields.is_empty()
     }
@@ -303,6 +332,7 @@ impl PaneWorkContextPatch {
             (PaneWorkContextField::TicketIds, self.ticket_ids.is_some()),
             (PaneWorkContextField::PrUrls, self.pr_urls.is_some()),
             (PaneWorkContextField::Branch, self.branch.is_some()),
+            (PaneWorkContextField::Repo, self.repo.is_some()),
             (PaneWorkContextField::WorkTitle, self.work_title.is_some()),
         ] {
             if supplied && cleared.contains(&field) {
@@ -322,6 +352,7 @@ impl PaneWorkContextField {
             Self::TicketIds => "ticket_ids",
             Self::PrUrls => "pr_urls",
             Self::Branch => "branch",
+            Self::Repo => "repo",
             Self::WorkTitle => "work_title",
         }
     }
@@ -407,6 +438,9 @@ impl PaneWorkContextState {
         if let Some(branch) = patch.branch {
             candidate.branch = Some(branch);
         }
+        if let Some(repo) = patch.repo {
+            candidate.repo = Some(repo);
+        }
         if let Some(work_title) = patch.work_title {
             candidate.work_title = Some(work_title);
         }
@@ -415,6 +449,7 @@ impl PaneWorkContextState {
                 PaneWorkContextField::TicketIds => candidate.ticket_ids.clear(),
                 PaneWorkContextField::PrUrls => candidate.pr_urls.clear(),
                 PaneWorkContextField::Branch => candidate.branch = None,
+                PaneWorkContextField::Repo => candidate.repo = None,
                 PaneWorkContextField::WorkTitle => candidate.work_title = None,
             }
         }
@@ -422,7 +457,7 @@ impl PaneWorkContextState {
             candidate.role = None;
             candidate.active_owner = false;
         }
-        let candidate = candidate.normalized()?;
+        let candidate = candidate.normalized()?.with_repo_implied_by_pull_request();
         if candidate == self.manual {
             return Ok(false);
         }
@@ -564,6 +599,17 @@ impl PaneWorkContextState {
                 self.hook_turn.branch.as_ref(),
                 self.git_observation.branch.as_ref(),
                 self.restored_fallback.branch.as_ref(),
+            ]),
+            // Declaration beats observation. The git tier is derived from the
+            // pane cwd, which is a poor proxy for the work: many sessions run
+            // from one shared worktree while operating on other repositories.
+            // Ordering it last is what stops a misleading cwd from misfiling a
+            // pane that has declared its repository.
+            repo: first_present([
+                self.manual.repo.as_ref(),
+                self.hook_turn.repo.as_ref(),
+                self.git_observation.repo.as_ref(),
+                self.restored_fallback.repo.as_ref(),
             ]),
             work_title: first_present([
                 self.manual.work_title.as_ref(),
@@ -827,6 +873,11 @@ pub(crate) fn hook_turn_context(
         preview_urls: prompt_context.preview_urls,
         missive_urls: prompt_context.missive_urls,
         branch: None,
+        // The hook tier never carries a repository: see the note on
+        // `PaneWorkContext::repo`. Agents declare theirs through the manual
+        // tier (`herdr pane work-context set --repo`), which also outranks the
+        // cwd-derived git observation.
+        repo: None,
         work_title,
         session_name: prompt_context.session_name,
         role: None,
@@ -991,6 +1042,68 @@ fn valid_vercel_subdomain(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Canonicalize a repository declaration to `owner/repo`.
+///
+/// Accepts the bare slug, a GitHub web/API URL, and both SSH and HTTPS remote
+/// forms, so a caller can pass whatever `git remote get-url origin` printed.
+pub fn normalize_repo_slug(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("repository must not be empty".into());
+    }
+    if trimmed.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(format!("invalid repository: {raw}"));
+    }
+    // Strip a transport prefix so remote URLs and web URLs collapse onto the
+    // same `owner/repo` path as a bare slug.
+    let path = if let Some((_, rest)) = trimmed.split_once("://") {
+        match rest.split_once('/') {
+            Some((_authority, path)) => path,
+            None => return Err(format!("invalid repository: {raw}")),
+        }
+    } else if let Some((authority, path)) = trimmed.split_once(':') {
+        if authority.is_empty() || authority.contains('/') {
+            return Err(format!("invalid repository: {raw}"));
+        }
+        path
+    } else {
+        trimmed
+    };
+    let path = path.trim_start_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<_> = path.split('/').collect();
+    let [owner, repo] = parts.as_slice() else {
+        return Err(format!("invalid repository: {raw}"));
+    };
+    if !valid_github_owner(owner) || !valid_github_repo(repo) {
+        return Err(format!("invalid repository: {raw}"));
+    }
+    Ok(format!("{owner}/{repo}"))
+}
+
+/// Repository slugs are compared case-insensitively: GitHub preserves the case
+/// an owner registered but does not distinguish on it, so `matthiasSchedel/ghx`
+/// and `matthiasschedel/ghx` are one repository and must route to one space.
+pub fn repo_slugs_match(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn normalize_optional_repo(value: Option<String>) -> Result<Option<String>, String> {
+    value.map(|repo| normalize_repo_slug(&repo)).transpose()
+}
+
+/// Extract `owner/repo` from an already-normalized GitHub pull request URL.
+pub fn repo_slug_from_pr_url(url: &str) -> Option<String> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next()? != "pull" || !valid_github_owner(owner) || !valid_github_repo(repo) {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 fn valid_github_owner(value: &str) -> bool {
@@ -1326,6 +1439,7 @@ mod tests {
             PaneWorkContext::default(),
             Some(PaneWorkContextTiers {
                 manual: PaneWorkContext {
+                    repo: None,
                     missive_urls: vec![
                         "https://mail.missiveapp.com/#inbox/conversations/manual".into()
                     ],
@@ -1493,6 +1607,109 @@ mod tests {
     }
 
     #[test]
+    fn repo_slugs_are_canonicalized_from_every_form_a_caller_may_hold() {
+        for (input, expected) in [
+            ("owner/repo", "owner/repo"),
+            ("owner/repo/", "owner/repo"),
+            ("owner/repo.git", "owner/repo"),
+            ("https://github.com/owner/repo", "owner/repo"),
+            ("https://github.com/owner/repo.git", "owner/repo"),
+            ("git@github.com:owner/repo.git", "owner/repo"),
+            ("ssh://git@github.com/owner/repo.git", "owner/repo"),
+            ("matthiasSchedel/ghx", "matthiasSchedel/ghx"),
+        ] {
+            assert_eq!(
+                normalize_repo_slug(input).as_deref(),
+                Ok(expected),
+                "{input} must canonicalize to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unusable_repository_is_rejected_rather_than_guessed() {
+        // A wrong repository routes a pane into someone else's space, so every
+        // ambiguous form must fail closed instead of resolving to a guess.
+        for input in [
+            "",
+            "owner",
+            "owner/repo/extra",
+            "owner /repo",
+            "/repo",
+            "owner/",
+        ] {
+            assert!(
+                normalize_repo_slug(input).is_err(),
+                "{input:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_repository_outranks_a_cwd_derived_observation() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                repo: Some("owner/shared-worktree".into()),
+                ..PaneWorkContext::default()
+            })
+            .expect("observation");
+        assert_eq!(
+            state.effective().repo.as_deref(),
+            Some("owner/shared-worktree"),
+            "an observation resolves the repository when nothing better exists"
+        );
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                repo: Some("owner/real".into()),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("declaration");
+
+        assert_eq!(state.effective().repo.as_deref(), Some("owner/real"));
+
+        // A later observation must not win it back.
+        state
+            .replace_git_observation(PaneWorkContext {
+                repo: Some("owner/shared-worktree".into()),
+                ..PaneWorkContext::default()
+            })
+            .expect("observation");
+        assert_eq!(state.effective().repo.as_deref(), Some("owner/real"));
+    }
+
+    #[test]
+    fn an_explicitly_bound_pull_request_implies_its_repository() {
+        let bound = PaneWorkContext {
+            pr_urls: vec!["https://github.com/matthias-scale/herdr/pull/106".into()],
+            role: Some(PaneWorkRole::Ship),
+            ..PaneWorkContext::default()
+        }
+        .normalized_spawn_binding()
+        .expect("spawn binding");
+
+        assert_eq!(bound.repo.as_deref(), Some("matthias-scale/herdr"));
+    }
+
+    #[test]
+    fn a_prose_scraped_pull_request_does_not_imply_a_repository() {
+        // The hook tier is built from prompt text. A pull request named there
+        // is a mention, not a binding, so it must not set the repository.
+        let hook = hook_turn_context(
+            Some("Look at herdr".into()),
+            None,
+            PaneWorkContext {
+                pr_urls: vec!["https://github.com/matthias-scale/herdr/pull/106".into()],
+                ..PaneWorkContext::default()
+            },
+        )
+        .expect("hook context");
+
+        assert_eq!(hook.repo, None);
+    }
+
+    #[test]
     fn spawn_binding_wins_over_git_inference() {
         let mut state = PaneWorkContextState::default();
         let binding = PaneWorkContext {
@@ -1554,6 +1771,7 @@ mod tests {
             PaneWorkContext::default(),
             Some(PaneWorkContextTiers {
                 manual: PaneWorkContext {
+                    repo: None,
                     ticket_ids: vec!["MAT-1".into()],
                     pr_urls: vec!["https://github.com/o/r/pull/2".into()],
                     preview_urls: Vec::new(),
@@ -1695,6 +1913,7 @@ mod tests {
         // A legacy flat snapshot has unknown provenance: it must load intact
         // but be superseded by later live hook/git observations.
         let mut restored = PaneWorkContextState::from_restored(PaneWorkContext {
+            repo: None,
             ticket_ids: vec!["MAT-1".into()],
             pr_urls: vec!["https://github.com/o/r/pull/2".into()],
             preview_urls: Vec::new(),

@@ -85,12 +85,17 @@ pub(crate) fn request_from_turn_start(
         .filter(|value| !value.is_empty())?;
     let prompt = input.prompt.as_deref()?;
     let title = calculate_work_title(prompt);
+    // `repo` is intentionally absent: this context is mined from the prompt
+    // text, and a repository named in prose is ambient noise rather than
+    // evidence of the work. Repositories are declared or observed, never read
+    // out of what the human happened to type.
     let work_context = crate::work_context::PaneWorkContext {
         ticket_ids: crate::work_context::extract_ticket_ids(prompt),
         pr_urls: crate::work_context::extract_pr_urls(prompt),
         preview_urls: crate::work_context::extract_preview_urls(prompt),
         missive_urls: crate::work_context::extract_missive_urls(prompt),
         branch: None,
+        repo: None,
         work_title: title.clone(),
         // The turn-title path never names the session; only the guarded
         // session-name report may.
