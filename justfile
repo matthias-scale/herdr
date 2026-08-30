@@ -63,7 +63,27 @@ install-hooks:
     @echo "installed git hooks from .githooks"
 
 # Build release binary
+#
+# The vendored libghostty-vt requires zig 0.15.x (see vendor/libghostty-vt/build.zig).
+# A newer zig on PATH fails the build with a confusing comptime error, so prefer an
+# explicitly installed zig@0.15 when one exists. CI installs the same formula.
 build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # $ZIG wins; otherwise try the known-good locations per host.
+    if [ -n "${ZIG:-}" ]; then
+        export PATH="$(dirname "$ZIG"):$PATH"
+    else
+        for candidate in \
+            "$(brew --prefix zig@0.15 2>/dev/null)/bin/zig" \
+            "$HOME/.local/zig-0.15.2/zig" \
+            "$HOME/.local/bin/zig"; do
+            if [ -x "$candidate" ] && "$candidate" version 2>/dev/null | grep -q '^0\.15\.'; then
+                export PATH="$(dirname "$candidate"):$PATH"
+                break
+            fi
+        done
+    fi
     cargo build --release --locked
 
 # Build the website and documentation
