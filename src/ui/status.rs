@@ -1603,10 +1603,7 @@ mod tests {
 
     /// Look a button up by what it does. Indexing by position makes every test
     /// a hostage of the button order.
-    fn button_for(
-        buttons: &[StatusButton],
-        action: StatusButtonAction,
-    ) -> StatusButton {
+    fn button_for(buttons: &[StatusButton], action: StatusButtonAction) -> StatusButton {
         buttons
             .iter()
             .find(|button| button.action == action)
