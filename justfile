@@ -70,8 +70,19 @@ install-hooks:
 build:
     #!/usr/bin/env bash
     set -euo pipefail
-    if zig_prefix=$(brew --prefix zig@0.15 2>/dev/null) && [ -x "$zig_prefix/bin/zig" ]; then
-        export PATH="$zig_prefix/bin:$PATH"
+    # $ZIG wins; otherwise try the known-good locations per host.
+    if [ -n "${ZIG:-}" ]; then
+        export PATH="$(dirname "$ZIG"):$PATH"
+    else
+        for candidate in \
+            "$(brew --prefix zig@0.15 2>/dev/null)/bin/zig" \
+            "$HOME/.local/zig-0.15.2/zig" \
+            "$HOME/.local/bin/zig"; do
+            if [ -x "$candidate" ] && "$candidate" version 2>/dev/null | grep -q '^0\.15\.'; then
+                export PATH="$(dirname "$candidate"):$PATH"
+                break
+            fi
+        done
     fi
     cargo build --release --locked
 
