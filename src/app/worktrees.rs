@@ -599,6 +599,7 @@ impl App {
                 base: Some("HEAD".into()),
                 focus: true,
                 label: None,
+                work_context: None,
             },
         );
         if let Some(message) = immediate_api_error_message(immediate_response.as_deref()) {
@@ -728,6 +729,7 @@ impl App {
                 branch: None,
                 focus: true,
                 label: None,
+                work_context: None,
             },
         );
         if serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok() {

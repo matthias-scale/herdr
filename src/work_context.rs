@@ -7,6 +7,42 @@ use serde::{Deserialize, Serialize};
 pub const MAX_PREVIEW_URLS: usize = 8;
 pub const MAX_MISSIVE_URLS: usize = 4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneWorkRole {
+    Baseline,
+    Repair,
+    Ship,
+    Review,
+}
+
+impl PaneWorkRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Repair => "repair",
+            Self::Ship => "ship",
+            Self::Review => "review",
+        }
+    }
+}
+
+impl std::str::FromStr for PaneWorkRole {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "baseline" => Ok(Self::Baseline),
+            "repair" => Ok(Self::Repair),
+            "ship" => Ok(Self::Ship),
+            "review" => Ok(Self::Review),
+            _ => Err(format!(
+                "invalid work role {value}: expected baseline, repair, ship, or review"
+            )),
+        }
+    }
+}
+
 /// Missive conversations are always served from this single host.
 const MISSIVE_HOST: &str = "mail.missiveapp.com";
 
@@ -46,6 +82,17 @@ pub struct PaneWorkContext {
     /// checkout path, so display surfaces rank it above every derived title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
+    /// Role of this run in the lifecycle of its primary pull request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<PaneWorkRole>,
+    /// Whether this pane currently owns its pull request. Other attached runs
+    /// remain visible as history.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub active_owner: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Build the canonical, stable-order links shared by the picker and info panel.
@@ -128,7 +175,7 @@ fn missive_link_label(url: &str) -> String {
 
 impl PaneWorkContext {
     pub(crate) fn normalized(self) -> Result<Self, String> {
-        Ok(Self {
+        let normalized = Self {
             ticket_ids: normalize_ticket_ids(self.ticket_ids)?,
             pr_urls: normalize_pr_urls(self.pr_urls)?,
             preview_urls: normalize_preview_urls(self.preview_urls)?,
@@ -136,6 +183,45 @@ impl PaneWorkContext {
             branch: normalize_optional_text("branch", self.branch)?,
             work_title: normalize_optional_text("work title", self.work_title)?,
             session_name: normalize_optional_text("session name", self.session_name)?,
+            role: self.role,
+            active_owner: self.active_owner,
+        };
+        if normalized.active_owner && normalized.role.is_none() {
+            return Err("active pull-request ownership requires a work role".into());
+        }
+        if normalized.role.is_some() && normalized.pr_urls.is_empty() {
+            return Err("a work role requires a pull request".into());
+        }
+        Ok(normalized)
+    }
+
+    pub(crate) fn normalized_spawn_binding(self) -> Result<Self, String> {
+        let normalized = self.normalized()?;
+        if normalized.pr_urls.len() > 1 {
+            return Err("a spawn-time binding accepts one pull request".into());
+        }
+        if !normalized.pr_urls.is_empty() && normalized.role.is_none() {
+            return Err("a spawn-time pull-request binding requires --role".into());
+        }
+        Ok(normalized)
+    }
+
+    pub(crate) fn binding_display(&self, pr_has_active_owner: bool) -> Option<String> {
+        self.role.map(|role| {
+            let run = format!(
+                "{}/{}",
+                if self.active_owner {
+                    "owner"
+                } else {
+                    "history"
+                },
+                role.as_str()
+            );
+            if !self.active_owner && !pr_has_active_owner {
+                format!("{run} · un-owned")
+            } else {
+                run
+            }
         })
     }
 
@@ -148,6 +234,13 @@ impl PaneWorkContext {
     #[allow(dead_code)]
     pub fn primary_pr(&self) -> Option<&str> {
         self.pr_urls.first().map(String::as_str)
+    }
+
+    pub(crate) fn is_active_owner_of(&self, pr_url: &str) -> bool {
+        self.active_owner
+            && self
+                .primary_pr()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(pr_url))
     }
 
     #[allow(dead_code)]
@@ -301,6 +394,8 @@ impl PaneWorkContextState {
             return Err("missing work-context field to set or clear".into());
         }
         patch.validate_collisions()?;
+        let pr_binding_replaced =
+            patch.pr_urls.is_some() || patch.clear_fields.contains(&PaneWorkContextField::PrUrls);
 
         let mut candidate = self.manual.clone();
         if let Some(ticket_ids) = patch.ticket_ids {
@@ -323,6 +418,10 @@ impl PaneWorkContextState {
                 PaneWorkContextField::WorkTitle => candidate.work_title = None,
             }
         }
+        if pr_binding_replaced || candidate.pr_urls.is_empty() {
+            candidate.role = None;
+            candidate.active_owner = false;
+        }
         let candidate = candidate.normalized()?;
         if candidate == self.manual {
             return Ok(false);
@@ -330,6 +429,32 @@ impl PaneWorkContextState {
         self.manual = candidate;
         self.recompute();
         Ok(true)
+    }
+
+    pub(crate) fn replace_manual_normalized(&mut self, context: PaneWorkContext) -> bool {
+        if context == self.manual {
+            return false;
+        }
+        self.manual = context;
+        self.recompute();
+        true
+    }
+
+    pub(crate) fn clear_active_owner(&mut self) -> bool {
+        let mut changed = false;
+        for context in [
+            &mut self.manual,
+            &mut self.hook_turn,
+            &mut self.git_observation,
+            &mut self.restored_fallback,
+        ] {
+            changed |= context.active_owner;
+            context.active_owner = false;
+        }
+        if changed {
+            self.recompute();
+        }
+        changed
     }
 
     // PR-1 defines source-tier replacement before hook and git producers land.
@@ -394,6 +519,15 @@ impl PaneWorkContextState {
     }
 
     fn recompute(&mut self) {
+        let (role, active_owner) = [
+            &self.manual,
+            &self.hook_turn,
+            &self.git_observation,
+            &self.restored_fallback,
+        ]
+        .into_iter()
+        .find_map(|context| context.role.map(|role| (Some(role), context.active_owner)))
+        .unwrap_or((None, false));
         self.effective = PaneWorkContext {
             ticket_ids: stable_merge([
                 &self.manual.ticket_ids,
@@ -443,6 +577,8 @@ impl PaneWorkContextState {
                 self.git_observation.session_name.as_ref(),
                 self.restored_fallback.session_name.as_ref(),
             ]),
+            role,
+            active_owner,
         };
     }
 }
@@ -693,6 +829,8 @@ pub(crate) fn hook_turn_context(
         branch: None,
         work_title,
         session_name: prompt_context.session_name,
+        role: None,
+        active_owner: false,
     })
 }
 
@@ -1355,6 +1493,62 @@ mod tests {
     }
 
     #[test]
+    fn spawn_binding_wins_over_git_inference() {
+        let mut state = PaneWorkContextState::default();
+        let binding = PaneWorkContext {
+            ticket_ids: vec!["SCA-42".into()],
+            pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+            branch: Some("feat/spawn-binding".into()),
+            role: Some(PaneWorkRole::Ship),
+            active_owner: true,
+            ..PaneWorkContext::default()
+        }
+        .normalized_spawn_binding()
+        .unwrap();
+        state.replace_manual_normalized(binding);
+        state
+            .replace_git_observation(PaneWorkContext {
+                ticket_ids: vec!["SCA-99".into()],
+                pr_urls: vec!["https://github.com/o/r/pull/99".into()],
+                branch: Some("guessed".into()),
+                ..PaneWorkContext::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().primary_ticket(), Some("SCA-42"));
+        assert_eq!(
+            state.effective().primary_pr(),
+            Some("https://github.com/o/r/pull/42")
+        );
+        assert_eq!(
+            state.effective().branch.as_deref(),
+            Some("feat/spawn-binding")
+        );
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+    }
+
+    #[test]
+    fn work_role_and_owner_round_trip() {
+        for role in [
+            PaneWorkRole::Baseline,
+            PaneWorkRole::Repair,
+            PaneWorkRole::Ship,
+            PaneWorkRole::Review,
+        ] {
+            let context = PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+                role: Some(role),
+                active_owner: true,
+                ..PaneWorkContext::default()
+            };
+            let json = serde_json::to_string(&context).unwrap();
+            let restored: PaneWorkContext = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, context);
+        }
+    }
+
+    #[test]
     fn ac1_patch_is_atomic_and_omitted_fields_are_untouched() {
         let mut state = PaneWorkContextState::from_restored_with_tiers(
             PaneWorkContext::default(),
@@ -1367,6 +1561,8 @@ mod tests {
                     branch: Some("main".into()),
                     work_title: Some("Initial".into()),
                     session_name: None,
+                    role: None,
+                    active_owner: false,
                 },
                 ..PaneWorkContextTiers::default()
             }),
@@ -1506,6 +1702,8 @@ mod tests {
             branch: Some("old-branch".into()),
             work_title: Some("Old title".into()),
             session_name: None,
+            role: None,
+            active_owner: false,
         })
         .unwrap();
         assert_eq!(restored.effective().ticket_ids, vec!["MAT-1"]);

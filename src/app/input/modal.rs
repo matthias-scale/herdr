@@ -1032,6 +1032,7 @@ impl App {
                             focus: true,
                             label,
                             env: Default::default(),
+                            work_context: None,
                         },
                     );
                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
@@ -1060,6 +1061,7 @@ impl App {
                         focus: true,
                         label,
                         env: Default::default(),
+                        work_context: None,
                     },
                 );
             }

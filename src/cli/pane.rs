@@ -677,6 +677,7 @@ fn parse_pane_split_args(
     let mut ratio = None;
     let mut cwd = None;
     let mut focus = false;
+    let mut work_context = None;
 
     let mut index = 0;
     if args
@@ -743,7 +744,10 @@ fn parse_pane_split_args(
                 env.insert(key, value);
                 index += 2;
             }
-            other => return Err(format!("unknown option: {other}")),
+            other => match super::parse_spawn_work_context_arg(args, index, &mut work_context)? {
+                Some(next) => index = next,
+                None => return Err(format!("unknown option: {other}")),
+            },
         }
     }
 
@@ -762,6 +766,7 @@ fn parse_pane_split_args(
         cwd,
         focus,
         env,
+        work_context,
     })
 }
 
@@ -1682,7 +1687,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
-        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
+        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--ticket ID] [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]"
     );
     eprintln!("  herdr pane swap --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane swap --source-pane ID --target-pane ID");

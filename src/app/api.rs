@@ -320,6 +320,10 @@ impl App {
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
+            if let Some(ws_idx) = self.orphan_pane_work_owner(*pane_id) {
+                self.schedule_session_save();
+                self.emit_pane_updated(ws_idx, *pane_id);
+            }
             if self.handle_dock_editor_exit(*pane_id) {
                 return None;
             }
@@ -2799,6 +2803,16 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
                 .expect("test session id should be valid"),
         });
+        terminal.replace_prevalidated_manual_work_context(
+            crate::work_context::PaneWorkContext {
+                pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+                role: Some(crate::work_context::PaneWorkRole::Ship),
+                active_owner: true,
+                ..Default::default()
+            }
+            .normalized_spawn_binding()
+            .unwrap(),
+        );
 
         app.handle_internal_event(AppEvent::PaneDied { pane_id });
 
@@ -2814,6 +2828,15 @@ mod tests {
         assert!(!terminal.respawn_shell_on_exit);
         assert!(terminal.persisted_agent_session.is_none());
         assert!(terminal.agent_name.is_none());
+        assert_eq!(
+            terminal.effective_work_context().primary_pr(),
+            Some("https://github.com/o/r/pull/42")
+        );
+        assert_eq!(
+            terminal.effective_work_context().role,
+            Some(crate::work_context::PaneWorkRole::Ship)
+        );
+        assert!(!terminal.effective_work_context().active_owner);
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

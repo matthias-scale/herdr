@@ -77,6 +77,16 @@ impl App {
         id: String,
         params: WorktreeOpenParams,
     ) -> String {
+        let mut requested_work_context = params.work_context.clone();
+        if let (Some(context), Some(branch)) =
+            (requested_work_context.as_mut(), params.branch.as_ref())
+        {
+            context.branch = Some(branch.clone());
+        }
+        let work_context = match self.prepare_spawn_work_context(requested_work_context) {
+            Ok(context) => context,
+            Err(message) => return encode_error(id, "invalid_work_context", message),
+        };
         if params.path.is_some() == params.branch.is_some() {
             return encode_error(
                 id,
@@ -99,6 +109,13 @@ impl App {
         let canonical_source = crate::worktree::canonical_or_original(&source.source_checkout_path);
         let target_is_source = canonical_path == canonical_source;
         let already_open = self.open_workspace_idx_for_checkout(&canonical_path);
+        if already_open.is_some() && work_context.is_some() {
+            return encode_error(
+                id,
+                "worktree_already_open",
+                "spawn work context requires a newly created workspace",
+            );
+        }
         let defer_source_created_event = target_is_source && already_open.is_none();
         let created_source_workspace =
             match self.ensure_source_parent_membership(&mut source, !defer_source_created_event) {
@@ -124,6 +141,9 @@ impl App {
                 Err(err) => return encode_error(id, "worktree_open_failed", err.to_string()),
             }
         };
+        if created_workspace {
+            self.bind_workspace_root_work_context(ws_idx, work_context);
+        }
         self.mark_worktree_membership(
             &source,
             ws_idx,
@@ -1193,6 +1213,7 @@ mod tests {
                 repo_name: "herdr".into(),
                 label: None,
                 focus: false,
+                work_context: None,
                 respond_to,
             }),
             result: Ok(()),
@@ -2110,6 +2131,7 @@ mod tests {
                     path: Some(checkout.display().to_string()),
                     label: None,
                     focus: false,
+                    work_context: None,
                 }),
             },
             respond_to,

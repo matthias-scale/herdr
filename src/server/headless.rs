@@ -974,6 +974,7 @@ impl HeadlessServer {
                 focus: true,
                 label,
                 env: Default::default(),
+                work_context: None,
             }),
         )
     }
@@ -991,6 +992,7 @@ impl HeadlessServer {
                 focus: true,
                 label,
                 env: Default::default(),
+                work_context: None,
             }),
         )
     }

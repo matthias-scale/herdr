@@ -115,6 +115,20 @@ impl App {
             );
             return;
         }
+        let mut requested_work_context = params.work_context;
+        if let Some(context) = requested_work_context.as_mut() {
+            context.branch = Some(branch.clone());
+        }
+        let work_context = match self.prepare_spawn_work_context(requested_work_context) {
+            Ok(context) => context,
+            Err(message) => {
+                Self::send_api_response(
+                    respond_to,
+                    encode_error(id, "invalid_work_context", message),
+                );
+                return;
+            }
+        };
         let base = params.base.unwrap_or_else(|| "HEAD".into());
         let source = match self.resolve_worktree_source(params.workspace_id, params.cwd) {
             Ok(source) => source,
@@ -182,6 +196,7 @@ impl App {
             repo_name: source.repo_name,
             label: params.label,
             focus: params.focus,
+            work_context,
             respond_to,
         };
         let path = checkout_path;
@@ -379,6 +394,17 @@ impl App {
             return;
         }
 
+        let work_context = match self.prepare_spawn_work_context(api.work_context.clone()) {
+            Ok(context) => context,
+            Err(message) => {
+                Self::send_api_response(
+                    api.respond_to,
+                    encode_error(api.id, "invalid_work_context", message),
+                );
+                return;
+            }
+        };
+
         let source_workspace_idx = self.api_create_source_workspace_idx(&api);
         let mut source = WorktreeSource {
             workspace_idx: source_workspace_idx,
@@ -414,6 +440,20 @@ impl App {
                     }
                 }
             };
+        if !created_workspace && work_context.is_some() {
+            Self::send_api_response(
+                api.respond_to,
+                encode_error(
+                    api.id,
+                    "worktree_already_open",
+                    "spawn work context requires a newly created workspace",
+                ),
+            );
+            return;
+        }
+        if created_workspace {
+            self.bind_workspace_root_work_context(ws_idx, work_context);
+        }
 
         self.mark_worktree_membership(
             &source,

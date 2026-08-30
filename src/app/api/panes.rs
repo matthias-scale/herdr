@@ -29,6 +29,10 @@ use super::responses::{encode_error, encode_success};
 
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
+        let work_context = match self.prepare_spawn_work_context(params.work_context.clone()) {
+            Ok(context) => context,
+            Err(message) => return encode_error(id, "invalid_work_context", message),
+        };
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
             self.parse_pane_id(target_pane_id)
         } else if let Some(workspace_id) = params.workspace_id.as_deref() {
@@ -105,11 +109,12 @@ impl App {
                 params.focus,
             ),
         };
-        let (target_tab_idx, new_pane) = match split_result {
+        let (target_tab_idx, mut new_pane) = match split_result {
             Some(Ok(result)) => result,
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
+        Self::bind_spawn_work_context(&mut new_pane.terminal, work_context);
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
             self.state

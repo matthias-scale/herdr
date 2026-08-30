@@ -116,7 +116,7 @@ Use `default` as the session name when you need to stop the default session expl
 
 ```bash
 herdr workspace list
-herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
@@ -136,8 +136,8 @@ A workspace is the top-level project or work context. Creating one also creates 
 
 ```bash
 herdr worktree list [--workspace ID | --cwd PATH]
-herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus]
-herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--ticket ID]... [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--ticket ID]... [--pr URL --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr worktree remove --workspace ID [--force]
 ```
 
@@ -149,7 +149,7 @@ Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree cr
 
 ```bash
 herdr tab list [--workspace <workspace_id>]
-herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
@@ -159,6 +159,8 @@ herdr tab close <tab_id>
 A tab is another terminal layout inside a workspace. Without `--workspace`, `tab create` uses the active workspace and fails if none exists. Its JSON response exposes `.result.tab.tab_id` and `.result.root_pane.pane_id`. Closing a workspace's last tab also closes the workspace, matching the TUI close-tab action; when `confirm_close` is enabled and that would also close a whole worktree group, `tab close` returns a `confirmation_required` error instead.
 
 Workspace and tab creation, and pane splitting, leave focus unchanged by default. `--focus` selects the new layout; `--no-focus` states the default explicitly. Without `--cwd`, new terminals follow the configured `terminal.new_cwd` policy, which follows the source pane or workspace by default. Each `--env KEY=VALUE` adds or replaces that variable in the new root shell.
+
+Creation commands can bind the new pane to one pull request before its shell starts. A PR binding requires one `--pr` and a `--role` of `baseline`, `repair`, `ship`, or `review`; `--active-owner` asks Herdr to make that pane the active owner. If the PR already has a live owner, Herdr keeps the existing owner and returns the new pane with `active_owner: false`, so the run remains attached as history. When the owner pane exits, surviving runs show the PR as un-owned.
 
 ## Windows
 
@@ -185,7 +187,7 @@ herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
 herdr pane work-context get <pane_id>
 herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...
-herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
+herdr pane split [<pane_id>|--pane ID|--current] --direction left|right|up|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--ticket ID]... [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
 herdr pane move <pane_id> --tab <tab_id> --split left|right|up|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]

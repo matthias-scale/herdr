@@ -59,6 +59,7 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
     let mut focus = false;
     let mut label = None;
     let mut env = HashMap::new();
+    let mut work_context = None;
 
     let mut index = 0;
     while index < args.len() {
@@ -110,10 +111,17 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
                 env.insert(key, value);
                 index += 2;
             }
-            other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
-            }
+            other => match super::parse_spawn_work_context_arg(args, index, &mut work_context) {
+                Ok(Some(next)) => index = next,
+                Ok(None) => {
+                    eprintln!("unknown option: {other}");
+                    return Ok(2);
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    return Ok(2);
+                }
+            },
         }
     }
 
@@ -123,6 +131,7 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
         focus,
         label,
         env,
+        work_context,
     })
 }
 
@@ -250,7 +259,7 @@ fn print_tab_help() {
     eprintln!("herdr tab commands:");
     eprintln!("  herdr tab list [--workspace <workspace_id>]");
     eprintln!(
-        "  herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]"
+        "  herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--ticket ID] [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]"
     );
     eprintln!("  herdr tab get <tab_id>");
     eprintln!("  herdr tab focus <tab_id>");

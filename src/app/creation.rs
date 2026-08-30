@@ -49,6 +49,76 @@ pub(super) fn launch_cwd_for_terminal(
 }
 
 impl App {
+    pub(super) fn prepare_spawn_work_context(
+        &self,
+        context: Option<crate::work_context::PaneWorkContext>,
+    ) -> Result<Option<crate::work_context::PaneWorkContext>, String> {
+        let Some(mut context) = context else {
+            return Ok(None);
+        };
+        context = context.normalized_spawn_binding()?;
+        let Some(pr_url) = context.primary_pr() else {
+            return Ok(Some(context));
+        };
+        if context.active_owner
+            && self.state.workspaces.iter().any(|workspace| {
+                workspace.tabs.iter().any(|tab| {
+                    tab.panes.values().any(|pane| {
+                        self.state
+                            .terminals
+                            .get(&pane.attached_terminal_id)
+                            .map(crate::terminal::TerminalState::effective_work_context)
+                            .is_some_and(|existing| existing.is_active_owner_of(pr_url))
+                    })
+                })
+            })
+        {
+            context.active_owner = false;
+        }
+        Ok(Some(context))
+    }
+
+    pub(super) fn bind_spawn_work_context(
+        terminal: &mut crate::terminal::TerminalState,
+        context: Option<crate::work_context::PaneWorkContext>,
+    ) {
+        if let Some(context) = context {
+            terminal.replace_prevalidated_manual_work_context(context);
+        }
+    }
+
+    pub(super) fn bind_workspace_root_work_context(
+        &mut self,
+        ws_idx: usize,
+        context: Option<crate::work_context::PaneWorkContext>,
+    ) {
+        let terminal_id = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.tabs.first())
+            .and_then(|tab| tab.terminal_id(tab.root_pane))
+            .cloned();
+        if let Some(terminal) =
+            terminal_id.and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
+        {
+            Self::bind_spawn_work_context(terminal, context);
+        }
+    }
+
+    pub(super) fn orphan_pane_work_owner(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<usize> {
+        let (ws_idx, pane) = self.find_pane(pane_id)?;
+        let terminal_id = pane.attached_terminal_id.clone();
+        self.state
+            .terminals
+            .get_mut(&terminal_id)?
+            .clear_active_work_owner()
+            .then_some(ws_idx)
+    }
+
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         self.state
             .workspaces
@@ -114,6 +184,7 @@ impl App {
                 focus: true,
                 label: None,
                 env: Default::default(),
+                work_context: None,
             },
         );
         self.state.mode = if self.state.active.is_some() {
@@ -243,8 +314,18 @@ impl App {
         focus: bool,
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<usize> {
+        self.create_workspace_with_launch_env_and_work_context(initial_cwd, focus, extra_env, None)
+    }
+
+    pub(crate) fn create_workspace_with_launch_env_and_work_context(
+        &mut self,
+        initial_cwd: PathBuf,
+        focus: bool,
+        extra_env: Vec<(String, String)>,
+        work_context: Option<crate::work_context::PaneWorkContext>,
+    ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();
-        let (ws, terminal, runtime) = Workspace::new_with_extra_env(
+        let (ws, mut terminal, runtime) = Workspace::new_with_extra_env(
             initial_cwd,
             rows,
             cols,
@@ -257,6 +338,7 @@ impl App {
             self.render_dirty.clone(),
             extra_env,
         )?;
+        Self::bind_spawn_work_context(&mut terminal, work_context);
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
@@ -879,5 +961,80 @@ mod tests {
         terminal.set_terminal_title(Some("/Users/example/herdr".into()));
 
         assert_eq!(app.tab_info(0, 0).unwrap().label, "1");
+    }
+
+    #[test]
+    fn second_spawn_for_same_pr_is_history_without_displacing_owner() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("owner"), Workspace::test_new("review")];
+        app.state.ensure_test_terminals();
+        let terminal_ids = app
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                let pane_id = workspace.tabs[0].root_pane;
+                workspace.terminal_id(pane_id).cloned().unwrap()
+            })
+            .collect::<Vec<_>>();
+        let requested = |pr_url: &str, role| crate::work_context::PaneWorkContext {
+            pr_urls: vec![pr_url.into()],
+            role: Some(role),
+            active_owner: true,
+            ..Default::default()
+        };
+
+        let first = app
+            .prepare_spawn_work_context(Some(requested(
+                "https://github.com/O/R/pull/42",
+                crate::work_context::PaneWorkRole::Ship,
+            )))
+            .unwrap()
+            .unwrap();
+        App::bind_spawn_work_context(
+            app.state.terminals.get_mut(&terminal_ids[0]).unwrap(),
+            Some(first),
+        );
+        let second = app
+            .prepare_spawn_work_context(Some(requested(
+                "https://github.com/o/r/pull/42",
+                crate::work_context::PaneWorkRole::Review,
+            )))
+            .unwrap()
+            .unwrap();
+        assert!(!second.active_owner);
+        App::bind_spawn_work_context(
+            app.state.terminals.get_mut(&terminal_ids[1]).unwrap(),
+            Some(second),
+        );
+
+        let contexts = terminal_ids
+            .iter()
+            .map(|id| app.state.terminals[id].effective_work_context())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts
+                .iter()
+                .filter(|context| context.active_owner)
+                .count(),
+            1
+        );
+        assert_eq!(
+            contexts[0].role,
+            Some(crate::work_context::PaneWorkRole::Ship)
+        );
+        assert!(contexts[0].active_owner);
+        assert_eq!(
+            contexts[1].role,
+            Some(crate::work_context::PaneWorkRole::Review)
+        );
+        assert!(!contexts[1].active_owner);
     }
 }

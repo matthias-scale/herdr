@@ -53,7 +53,12 @@ impl App {
             focus,
             label,
             env,
+            work_context,
         } = params;
+        let work_context = match self.prepare_spawn_work_context(work_context) {
+            Ok(context) => context,
+            Err(message) => return encode_error(id, "invalid_work_context", message),
+        };
         let ws_idx = if let Some(workspace_id) = workspace_id {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
                 return workspace_not_found(id, &workspace_id);
@@ -94,7 +99,8 @@ impl App {
                 )
             });
         match result {
-            Ok((tab_idx, terminal, runtime)) => {
+            Ok((tab_idx, mut terminal, runtime)) => {
+                Self::bind_spawn_work_context(&mut terminal, work_context);
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
                 self.state.remove_alias_shadowed_by_new_pane(
@@ -745,6 +751,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                work_context: None,
             },
         );
 
@@ -756,6 +763,70 @@ mod tests {
         assert_eq!(
             crate::worktree::canonical_or_original(created_cwd),
             crate::worktree::canonical_or_original(&cached_cwd)
+        );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn tab_create_returns_second_pr_run_as_history() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = ShellModeConfig::NonLogin;
+        app.state.workspaces = vec![Workspace::test_new("owner")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let owner_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let owner_terminal_id = app.state.workspaces[0]
+            .terminal_id(owner_pane)
+            .cloned()
+            .unwrap();
+        let owner = crate::work_context::PaneWorkContext {
+            pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+            role: Some(crate::work_context::PaneWorkRole::Ship),
+            active_owner: true,
+            ..Default::default()
+        }
+        .normalized_spawn_binding()
+        .unwrap();
+        app.state
+            .terminals
+            .get_mut(&owner_terminal_id)
+            .unwrap()
+            .replace_prevalidated_manual_work_context(owner);
+
+        let response = app.handle_tab_create(
+            "req".into(),
+            TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+                work_context: Some(crate::work_context::PaneWorkContext {
+                    pr_urls: vec!["https://github.com/o/r/pull/42".into()],
+                    role: Some(crate::work_context::PaneWorkRole::Review),
+                    active_owner: true,
+                    ..Default::default()
+                }),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabCreated { root_pane, .. } = success.result else {
+            panic!("expected tab_created response");
+        };
+        assert_eq!(
+            root_pane.work_context.role,
+            Some(crate::work_context::PaneWorkRole::Review)
+        );
+        assert!(!root_pane.work_context.active_owner);
+        assert!(
+            app.state.terminals[&owner_terminal_id]
+                .effective_work_context()
+                .active_owner
         );
         shutdown_test_runtimes(&mut app);
     }

@@ -213,6 +213,7 @@ fn workspace_command() -> Command {
                 .arg(path_option("cwd", "PATH"))
                 .arg(option("label", "TEXT"))
                 .arg(env_option())
+                .args(spawn_work_context_options())
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -255,6 +256,7 @@ fn worktree_command() -> Command {
                 .arg(option("base", "REF"))
                 .arg(path_option("path", "PATH"))
                 .arg(option("label", "TEXT"))
+                .args(worktree_work_context_options())
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -266,6 +268,7 @@ fn worktree_command() -> Command {
                 .arg(path_option("path", "PATH"))
                 .arg(option("branch", "NAME"))
                 .arg(option("label", "TEXT"))
+                .args(worktree_work_context_options())
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -292,6 +295,7 @@ fn tab_command() -> Command {
                 .arg(path_option("cwd", "PATH"))
                 .arg(option("label", "TEXT"))
                 .arg(env_option())
+                .args(spawn_work_context_options())
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -570,6 +574,7 @@ fn pane_command() -> Command {
                 .arg(option("ratio", "FLOAT"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(env_option())
+                .args(spawn_work_context_options())
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
@@ -978,6 +983,25 @@ fn env_option() -> Arg {
     option("env", "KEY=VALUE")
         .action(ArgAction::Append)
         .help("Set an environment variable for the launched process")
+}
+
+fn spawn_work_context_options() -> Vec<Arg> {
+    vec![
+        repeatable_option("ticket", "ID"),
+        option("pr", "URL"),
+        option("branch", "BRANCH"),
+        option("role", "ROLE").value_parser(["baseline", "repair", "ship", "review"]),
+        flag("active-owner"),
+    ]
+}
+
+fn worktree_work_context_options() -> Vec<Arg> {
+    vec![
+        repeatable_option("ticket", "ID"),
+        option("pr", "URL"),
+        option("role", "ROLE").value_parser(["baseline", "repair", "ship", "review"]),
+        flag("active-owner"),
+    ]
 }
 
 fn flag(name: &'static str) -> Arg {
