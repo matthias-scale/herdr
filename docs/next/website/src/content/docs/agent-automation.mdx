@@ -20,7 +20,9 @@ Creating a workspace also creates its first tab and root pane; creating a tab cr
 Creation commands print JSON. Capture IDs from the response instead of predicting them:
 
 ```bash
-created=$(herdr workspace create --cwd ~/project --label api --no-focus)
+created=$(herdr workspace create --cwd ~/project --label api \
+  --ticket SCA-42 --pr https://github.com/acme/api/pull/42 \
+  --branch feat/api --role ship --active-owner --no-focus)
 pane_id=$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id')
 
 split=$(herdr pane split "$pane_id" --direction right --no-focus)
@@ -28,6 +30,8 @@ review_pane=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
 ```
 
 `workspace create` returns `.result.workspace`, `.result.tab`, and `.result.root_pane`. `tab create` returns `.result.tab` and `.result.root_pane`. `pane split` returns the new pane as `.result.pane`.
+
+Pass `--pr` with `--role baseline|repair|ship|review` to make the pane's work binding authoritative instead of waiting for Git inference. `--active-owner` requests ownership. Herdr permits one live owner per PR; another run on the same PR is returned as history with `active_owner: false`. Parallel review panes remain attached, and they show the PR as un-owned if the owner pane exits.
 
 Moving a pane to another workspace changes its workspace-qualified pane ID. After any `pane move`, continue with `.result.move_result.pane.pane_id`; the response keeps the old value at `.result.move_result.previous_pane_id`. A running process keeps its launch-time Herdr environment, but the old `HERDR_PANE_ID` remains an alias for that terminal, so `--current` stays safe. New commands can still resolve the agent by name after the move, but a wait already in progress ends with `agent_not_running`.
 

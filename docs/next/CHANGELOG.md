@@ -8,6 +8,7 @@
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 - Desktop sessions now have a theme-derived native status row for Git branch, device name, CPU, and memory. Disable it with `ui.status_bar.enabled = false`. (#2, #13)
 - Agent work context now persists and appears in the CLI, API, info panel, Prio view, and copy picker. Hooks and Git metadata can supply work titles plus ticket, pull request, preview, and Missive links. (#22-#27, #37)
+- Workspace, worktree, tab, and pane creation can bind a new pane to one pull request with a lifecycle role. One live pane owns the PR while parallel and previous runs remain attached as history.
 - The info panel now shows Claude and Codex subscription usage windows. (#30)
 - Loops now have a receipt-backed run-history detail view with live updates, `prefix+ctrl+h`, the read-only `loop.run_history` API, and `loop.run_history_updated` events. (#47, MAT-126)
 - The sidebar now includes a read-only Symphony workflow dashboard. (#52, MAT-138)
