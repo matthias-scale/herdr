@@ -580,3 +580,181 @@ fn pane_read_rejects_invalid_value_with_usage_error() {
     assert!(stderr.contains("invalid read source: bogus"));
     assert!(!stderr.contains("Error: Custom"));
 }
+
+fn session_focus(socket_path: &std::path::Path) -> (String, String) {
+    let snapshot = run_cli_json(socket_path, &["api", "snapshot"]);
+    let snapshot = &snapshot["result"]["snapshot"];
+    (
+        snapshot["focused_workspace_id"]
+            .as_str()
+            .expect("snapshot should report a focused workspace")
+            .to_string(),
+        snapshot["focused_pane_id"]
+            .as_str()
+            .expect("snapshot should report a focused pane")
+            .to_string(),
+    )
+}
+
+/// Socket-API-initiated `workspace create` and `pane move` must never yank the
+/// human's cursor. Focus is opt-in via `--focus`; without it the session focus
+/// stays exactly where the user left it, including when the moved pane is the
+/// pane the user is sitting in.
+#[test]
+fn api_initiated_move_and_workspace_create_do_not_steal_focus() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    // The human's workspace: first one created, so it becomes the active one.
+    let human_ws = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    )["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let root_pane = format!("{human_ws}:p1");
+
+    let mut spare_panes = Vec::new();
+    for direction in ["right", "down", "right"] {
+        let split = run_cli_json(
+            &socket_path,
+            &[
+                "pane",
+                "split",
+                &root_pane,
+                "--direction",
+                direction,
+                "--no-focus",
+            ],
+        );
+        spare_panes.push(
+            split["result"]["pane"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    let baseline = session_focus(&socket_path);
+    assert_eq!(baseline, (human_ws.clone(), root_pane.clone()));
+
+    // 1. workspace.create without a focus flag must not switch workspaces.
+    let agent_ws = run_cli_json(&socket_path, &["workspace", "create", "--cwd", "/tmp"])["result"]
+        ["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(agent_ws, human_ws);
+    assert_eq!(
+        session_focus(&socket_path),
+        baseline,
+        "workspace create without --focus must leave the user's focus alone"
+    );
+
+    // 2. pane.move without a focus flag must not move focus, and must not
+    //    report the freshly created tab as focused.
+    let moved = run_cli_json(
+        &socket_path,
+        &[
+            "pane",
+            "move",
+            &spare_panes[0],
+            "--new-tab",
+            "--workspace",
+            &agent_ws,
+        ],
+    );
+    assert_eq!(
+        moved["result"]["move_result"]["created_tab"]["focused"],
+        false
+    );
+    assert_eq!(
+        session_focus(&socket_path),
+        baseline,
+        "pane move without --focus must leave the user's focus alone"
+    );
+
+    // 3. Moving the pane the user is sitting in keeps focus in the SOURCE
+    //    workspace; it must never jump to the destination workspace.
+    let moved_focused = run_cli_json(
+        &socket_path,
+        &[
+            "pane",
+            "move",
+            &root_pane,
+            "--new-tab",
+            "--workspace",
+            &agent_ws,
+        ],
+    );
+    let move_result = &moved_focused["result"]["move_result"];
+    let (focused_ws, focused_pane) = session_focus(&socket_path);
+    assert_eq!(
+        focused_ws, human_ws,
+        "moving the focused pane must not switch the user to the destination workspace"
+    );
+    assert!(
+        focused_pane.starts_with(&format!("{human_ws}:")),
+        "focus should fall back inside the source workspace, got {focused_pane}"
+    );
+    assert_ne!(focused_pane, move_result["pane"]["pane_id"]);
+
+    // `move_result.focused_pane_id` describes the DESTINATION layout, not the
+    // session focus. Pin that documented meaning so it is not misread again.
+    assert_eq!(
+        move_result["focused_pane_id"],
+        move_result["target_layout"]["focused_pane_id"]
+    );
+    assert!(
+        move_result["focused_pane_id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{agent_ws}:")),
+        "focused_pane_id reports the destination layout"
+    );
+    assert_ne!(move_result["focused_pane_id"], focused_pane);
+
+    // 4. `--focus` still focuses, for both commands.
+    let opted_in = run_cli_json(
+        &socket_path,
+        &[
+            "pane",
+            "move",
+            &spare_panes[1],
+            "--new-tab",
+            "--workspace",
+            &agent_ws,
+            "--focus",
+        ],
+    );
+    let opted_in_pane = opted_in["result"]["move_result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        session_focus(&socket_path),
+        (agent_ws.clone(), opted_in_pane),
+        "pane move --focus must still focus the moved pane"
+    );
+
+    let focused_ws = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", "/tmp", "--focus"],
+    )["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        session_focus(&socket_path).0,
+        focused_ws,
+        "workspace create --focus must still focus the new workspace"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}

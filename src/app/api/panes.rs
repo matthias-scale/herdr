@@ -3586,6 +3586,95 @@ mod tests {
         }
     }
 
+    // An API-initiated move must never yank the human's cursor: with
+    // `focus: false` the session focus stays in the source workspace even when
+    // the moved pane is the pane the user was sitting in.
+    #[test]
+    fn api_pane_move_to_new_workspace_without_focus_keeps_session_focus_in_source() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+        app.state.active = Some(0);
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let source_workspace = app.public_workspace_id(0);
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::NewWorkspace {
+                    label: Some("agent".into()),
+                    tab_label: None,
+                },
+                focus: false,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert!(move_result.changed);
+        assert_eq!(move_result.closed_workspace_id, None);
+        assert_eq!(app.public_workspace_id(0), source_workspace);
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "session focus must stay in the source workspace"
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), sibling);
+        assert_eq!(
+            move_result.created_workspace.as_ref().map(|ws| ws.focused),
+            Some(false)
+        );
+        assert_eq!(
+            move_result.created_tab.as_ref().map(|tab| tab.focused),
+            Some(false)
+        );
+        // `focused_pane_id` reports the destination layout, never session focus.
+        assert_eq!(
+            move_result.focused_pane_id,
+            move_result.target_layout.focused_pane_id
+        );
+        assert_eq!(move_result.focused_pane_id, move_result.pane.pane_id);
+    }
+
+    // The explicit opt-in keeps working: `focus: true` still moves the session.
+    #[test]
+    fn api_pane_move_to_new_workspace_with_focus_moves_session_focus() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let _sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+        app.state.active = Some(0);
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::NewWorkspace {
+                    label: Some("agent".into()),
+                    tab_label: None,
+                },
+                focus: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(
+            move_result.created_workspace.as_ref().map(|ws| ws.focused),
+            Some(true)
+        );
+    }
+
     #[test]
     fn api_pane_move_same_tab_returns_same_tab_noop() {
         let mut app = app_with_linked_worktree();

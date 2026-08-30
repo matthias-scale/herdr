@@ -8984,6 +8984,7 @@
               ]
             },
             "focused_pane_id": {
+              "description": "Focused pane of the destination tab layout, not the session's focused\npane. A move made without `focus: true` leaves the session focus where\nthe user left it; read `session.snapshot.focused_pane_id` for that.",
               "type": "string"
             },
             "pane": {

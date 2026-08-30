@@ -812,7 +812,9 @@ fn parse_pane_move_args(args: &[String]) -> Result<PaneMoveParams, String> {
     let mut ratio = None;
     let mut label = None;
     let mut tab_label = None;
-    let mut focus = true;
+    // Socket-API/CLI moves must never steal the human's focus. Focus is
+    // strictly opt-in via `--focus`; interactive moves do not use this parser.
+    let mut focus = false;
 
     let mut index = 1;
     while index < args.len() {
@@ -1917,6 +1919,32 @@ mod tests {
                 ratio: Some(0.25),
             }
         );
+    }
+
+    #[test]
+    fn parse_pane_move_args_default_does_not_steal_focus() {
+        for destination in [
+            vec!["issue-1", "--new-tab"],
+            vec!["issue-1", "--new-workspace"],
+            vec!["issue-1", "--tab", "issue:2", "--split", "right"],
+        ] {
+            let params = parse_pane_move_args(&args(&destination)).unwrap();
+            assert!(
+                !params.focus,
+                "socket-API pane move must not focus by default: {destination:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_pane_move_args_focus_flag_opts_into_focus() {
+        let params = parse_pane_move_args(&args(&["issue-1", "--new-tab", "--focus"])).unwrap();
+        assert!(params.focus);
+
+        let params =
+            parse_pane_move_args(&args(&["issue-1", "--new-tab", "--focus", "--no-focus"]))
+                .unwrap();
+        assert!(!params.focus);
     }
 
     #[test]
