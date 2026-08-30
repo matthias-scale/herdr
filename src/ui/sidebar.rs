@@ -19,8 +19,8 @@ use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
-use crate::terminal::state::CompletionTier;
 use crate::terminal::state::derive_completion_tier;
+use crate::terminal::state::CompletionTier;
 use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 1;
