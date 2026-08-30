@@ -33,6 +33,8 @@ pub(crate) struct HandoffRuntimeState {
     pub agent_state: Option<crate::terminal::TerminalAgentHandoffState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_seen: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_done_for_ms: Option<u64>,
 }
 
 #[cfg(unix)]

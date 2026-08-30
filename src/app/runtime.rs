@@ -359,6 +359,17 @@ impl App {
             }
         }
 
+        if self.state.done_hide_transition_due(now) {
+            changed = true;
+        }
+        if self
+            .state
+            .next_done_reap_deadline(now)
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed |= self.reap_due_done_panes(now);
+        }
+
         if self
             .state
             .next_full_lifecycle_hook_authority_deadline()
@@ -822,6 +833,10 @@ impl App {
             self.state.next_managed_agent_deadline(),
             self.state.next_agent_watchdog_deadline(),
             self.state.next_full_lifecycle_hook_authority_deadline(),
+            include_client_refresh
+                .then(|| self.state.next_done_hide_deadline(now))
+                .flatten(),
+            self.state.next_done_reap_deadline(now),
             self.copy_feedback_deadline,
             self.status_metric_refresh.deadline().filter(|_| {
                 include_client_refresh

@@ -1172,7 +1172,7 @@ impl HeadlessServer {
                 for (pane_id, pane) in &tab.panes {
                     pane_by_terminal.insert(
                         pane.attached_terminal_id.clone(),
-                        (pane_id.raw(), pane.seen),
+                        (pane_id.raw(), pane.seen, pane.done_since),
                     );
                 }
             }
@@ -1218,7 +1218,9 @@ impl HeadlessServer {
         let mut handoff_entries = Vec::new();
         let handoff_captured_at = Instant::now();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
-            let Some((pane_id, pane_seen)) = pane_by_terminal.get(terminal_id).copied() else {
+            let Some((pane_id, pane_seen, pane_done_since)) =
+                pane_by_terminal.get(terminal_id).copied()
+            else {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
@@ -1228,6 +1230,12 @@ impl HeadlessServer {
             handoff_runtime.agent_state = terminal
                 .and_then(|terminal| terminal.terminal_agent_handoff_state(handoff_captured_at));
             handoff_runtime.pane_seen = Some(pane_seen);
+            handoff_runtime.pane_done_for_ms = pane_done_since.map(|done_since| {
+                handoff_captured_at
+                    .saturating_duration_since(done_since)
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64
+            });
             let has_agent_session =
                 terminal.is_some_and(|terminal| terminal.persisted_agent_session.is_some());
             if !has_agent_session {
@@ -4666,6 +4674,18 @@ impl HeadlessServer {
                 self.app.emit_pane_state_update(&update);
                 changed = true;
             }
+        }
+
+        if has_app_client && self.app.state.done_hide_transition_due(now) {
+            changed = true;
+        }
+        if self
+            .app
+            .state
+            .next_done_reap_deadline(now)
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed |= self.app.reap_due_done_panes(now);
         }
 
         if self

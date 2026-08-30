@@ -1625,6 +1625,9 @@ pub struct AppState {
     /// show/hide threshold its hysteresis.
     pub(crate) status_disk_visible: bool,
     pub(crate) full_lifecycle_hook_authority_timeout: std::time::Duration,
+    pub(crate) hide_done_after: std::time::Duration,
+    pub(crate) reap_done_after: std::time::Duration,
+    pub(crate) reap_done_panes: bool,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -2339,6 +2342,9 @@ impl AppState {
                     .agent_detection
                     .full_lifecycle_hook_authority_timeout_seconds,
             ),
+            hide_done_after: std::time::Duration::from_secs(30 * 60),
+            reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
+            reap_done_panes: true,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -2374,7 +2380,10 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_sidebar_groups: std::collections::HashSet::new(),
+            collapsed_sidebar_groups: std::iter::once(
+                crate::ui::RECENTLY_DONE_SECTION_TITLE.to_string(),
+            )
+            .collect(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,

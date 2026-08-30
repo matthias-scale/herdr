@@ -78,6 +78,7 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
+pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]

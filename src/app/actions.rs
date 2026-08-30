@@ -360,6 +360,7 @@ impl AppState {
             .and_then(|tab| tab.panes.get_mut(&pane_id))
         {
             pane.seen = true;
+            pane.done_since = None;
         }
         if previous.as_ref() == Some(&target) {
             return false;
@@ -1156,12 +1157,21 @@ impl AppState {
             .into_iter()
             .filter_map(|(ws_idx, pane_id, terminal_id)| {
                 let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
+                let previous_stale = self.terminals.get(&terminal_id)?.supervisor_stale;
                 let mutation = self
                     .terminals
                     .get_mut(&terminal_id)?
                     .expire_agent_metadata_at(scheduled_deadline, now)?;
                 let change = mutation.effective_state_change?;
-                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
+                let stale = self.terminals.get(&terminal_id)?.supervisor_stale;
+                let seen = self.apply_pane_state_change(
+                    ws_idx,
+                    pane_id,
+                    &change,
+                    previous_stale,
+                    stale,
+                    now,
+                )?;
                 let update = PaneStateUpdate {
                     pane_id,
                     ws_idx,
@@ -1172,7 +1182,7 @@ impl AppState {
                     previous_wait: None,
                     previous_eta_s: None,
                     previous_reported_at: None,
-                    previous_stale: false,
+                    previous_stale,
                     previous_presentation: change.previous_presentation.clone(),
                     agent_label: change.agent_label.clone(),
                     known_agent: change.known_agent,
@@ -1181,7 +1191,7 @@ impl AppState {
                     wait: None,
                     eta_s: None,
                     reported_at: None,
-                    stale: false,
+                    stale,
                     presentation: change.presentation.clone(),
                     agent_name_changed: false,
                     session_ref_changed: mutation.session_ref_changed,
@@ -1426,6 +1436,7 @@ impl AppState {
             false
         } else {
             pane.seen = true;
+            pane.done_since = None;
             true
         }
     }
@@ -1830,9 +1841,6 @@ impl AppState {
         if self.workspaces.is_empty() {
             return;
         }
-        self.selection = None;
-        self.selection_autoscroll = None;
-        self.mark_session_dirty();
         let close_indices = self
             .workspaces
             .get(self.selected)
@@ -1851,6 +1859,20 @@ impl AppState {
             })
             .filter(|indices| indices.len() >= 2)
             .unwrap_or_else(|| vec![self.selected]);
+
+        self.close_workspace_indices(close_indices);
+    }
+
+    pub(crate) fn close_workspace_exact(&mut self, ws_idx: usize) {
+        if ws_idx < self.workspaces.len() {
+            self.close_workspace_indices(vec![ws_idx]);
+        }
+    }
+
+    fn close_workspace_indices(&mut self, close_indices: Vec<usize>) {
+        self.selection = None;
+        self.selection_autoscroll = None;
+        self.mark_session_dirty();
 
         let mut terminal_ids = Vec::new();
         let mut pane_ids = Vec::new();
@@ -3391,11 +3413,18 @@ impl AppState {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
                 // Only a transition reaches here, so entering Blocked stamps a fresh
                 // wait and leaving it discards the old one.
-                terminal.blocked_since = (change.state == crate::detect::AgentState::Blocked)
-                    .then(std::time::Instant::now);
+                terminal.blocked_since =
+                    (change.state == crate::detect::AgentState::Blocked).then_some(now);
             }
         }
-        let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
+        let seen = self.apply_pane_state_change(
+            ws_idx,
+            pane_id,
+            &change,
+            previous_report.3,
+            report.3,
+            now,
+        )?;
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
@@ -3570,6 +3599,9 @@ impl AppState {
         ws_idx: usize,
         pane_id: PaneId,
         change: &EffectiveStateChange,
+        previous_stale: bool,
+        stale: bool,
+        now: std::time::Instant,
     ) -> Option<bool> {
         let is_active_tab = self.pane_is_active(ws_idx, pane_id);
         let suppress_active_tab_notifications =
@@ -3579,12 +3611,28 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
+        let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
+            change.previous_state,
+            pane.seen,
+            previous_stale,
+        );
         if change.state != AgentState::Idle {
             pane.seen = true;
         } else if is_completion_transition(change) {
             pane.seen = suppress_active_tab_notifications;
         }
         let seen = pane.seen;
+        let status =
+            crate::app::api_helpers::pane_agent_status_with_stale(change.state, seen, stale);
+        pane.done_since = if status == crate::api::schema::AgentStatus::Done {
+            if previous_status == crate::api::schema::AgentStatus::Done {
+                pane.done_since.or(Some(now))
+            } else {
+                Some(now)
+            }
+        } else {
+            None
+        };
 
         if let Some(delivery) = self.record_or_deliver_agent_notification(ws_idx, pane_id, change) {
             self.apply_agent_notification_delivery(&delivery);
@@ -5658,6 +5706,7 @@ mod tests {
         state.terminals.get_mut(&bg_terminal_id).unwrap().state = AgentState::Working;
 
         // Now transition to Idle while in background
+        let done_at = std::time::Instant::now();
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
@@ -5666,11 +5715,14 @@ mod tests {
             visible_working: false,
             usage_limited: false,
             process_exited: false,
-            observed_at: std::time::Instant::now(),
+            observed_at: done_at,
         });
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
         assert!(!pane.seen);
+        assert!(pane
+            .done_since
+            .is_some_and(|done_since| done_since >= done_at));
         assert!(matches!(
             state.toast.as_ref().map(|toast| toast.kind),
             Some(ToastKind::Finished)
@@ -5743,8 +5795,14 @@ mod tests {
         });
 
         assert!(!state.workspaces[0].panes[&hidden_pane_id].seen);
+        assert!(state.workspaces[0].panes[&hidden_pane_id]
+            .done_since
+            .is_some());
         state.focus_pane_in_workspace(0, hidden_pane_id);
         assert!(state.workspaces[0].panes[&hidden_pane_id].seen);
+        assert!(state.workspaces[0].panes[&hidden_pane_id]
+            .done_since
+            .is_none());
     }
 
     #[test]

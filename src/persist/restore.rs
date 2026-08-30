@@ -549,6 +549,10 @@ fn restore_tab(
         let imported_pane_seen = imported_runtime
             .as_ref()
             .and_then(|imported| imported.state.pane_seen);
+        #[cfg(unix)]
+        let imported_pane_done_for_ms = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.pane_done_for_ms);
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -723,6 +727,10 @@ fn restore_tab(
                     if let Some(seen) = imported_pane_seen {
                         pane.seen = seen;
                     }
+                    pane.done_since = imported_pane_done_for_ms.and_then(|done_for_ms| {
+                        std::time::Instant::now()
+                            .checked_sub(std::time::Duration::from_millis(done_for_ms))
+                    });
                     pane
                 };
                 panes.insert(*id, pane);

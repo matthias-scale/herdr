@@ -424,6 +424,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.
 # resume_agents_on_restore = true
+# Move Done panes into the collapsed Recently done section after this many minutes.
+# hide_done_after_minutes = 30
+# Close eligible Done panes after this many minutes. Default: 240 (4 hours).
+# reap_done_after_minutes = 240
+# Set false to disable automatic pane reaping entirely.
+# reap_done_panes = true
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
@@ -997,6 +1003,9 @@ mod tests {
             "[agent_detection]\n# Seconds a full-lifecycle hook report remains authoritative"
         ));
         assert!(DEFAULT_CONFIG.contains("# full_lifecycle_hook_authority_timeout_seconds = 600"));
+        assert!(DEFAULT_CONFIG.contains("# hide_done_after_minutes = 30"));
+        assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
+        assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
     }
 
     #[test]
