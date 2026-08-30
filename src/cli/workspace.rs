@@ -40,6 +40,9 @@ fn workspace_list(args: &[String]) -> std::io::Result<i32> {
 
 fn workspace_create(args: &[String]) -> std::io::Result<i32> {
     let mut cwd = None;
+    // Socket-API/CLI workspace creation must never steal the human's focus.
+    // Focus is strictly opt-in via `--focus`; interactive creation goes through
+    // `App::create_workspace_with_options(cwd, true)` instead.
     let mut focus = false;
     let mut label = None;
     let mut env = HashMap::new();

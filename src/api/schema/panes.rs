@@ -714,6 +714,9 @@ pub struct PaneMoveResult {
     pub closed_workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_tab_id: Option<String>,
+    /// Focused pane of the destination tab layout, not the session's focused
+    /// pane. A move made without `focus: true` leaves the session focus where
+    /// the user left it; read `session.snapshot.focused_pane_id` for that.
     pub focused_pane_id: String,
 }
 
