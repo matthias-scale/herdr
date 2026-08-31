@@ -4672,11 +4672,12 @@ impl HeadlessServer {
             false
         };
         changed |= self.app.handle_loop_receipt_fallback(now);
-        changed |= if self.app.status_metrics_visible {
-            self.app.schedule_status_metrics(now)
+        if self.app.status_metrics_visible {
+            changed |= self.app.schedule_status_metrics(now);
+            self.app.schedule_status_side_signals(now);
         } else {
-            self.app.discard_stale_status_metrics(now)
-        };
+            changed |= self.app.discard_stale_status_metrics(now);
+        }
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -7015,6 +7016,49 @@ next_tab = ""
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
         assert!(!server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn headless_status_side_signals_require_a_renderable_app_client() {
+        let mut detached = test_headless_server();
+        detached.app.status_metric_refresh_enabled = true;
+        detached.app.provider_usage_refreshed_at = None;
+        detached.app.connectivity_probed_at = None;
+        let detached_now = Instant::now();
+
+        detached.handle_scheduled_tasks_headless(detached_now, false);
+
+        assert_eq!(detached.app.provider_usage_refreshed_at, None);
+        assert!(!detached.app.provider_usage_in_flight);
+        assert_eq!(detached.app.connectivity_probed_at, None);
+        assert!(!detached.app.connectivity_probe_in_flight);
+
+        let mut attached = test_headless_server();
+        attached.app.status_metric_refresh_enabled = true;
+        attached.app.provider_usage_refreshed_at = None;
+        attached.app.connectivity_probed_at = None;
+        let now = Instant::now();
+        assert!(attached.app.status_metric_refresh.begin(now));
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(attached.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        attached.handle_scheduled_tasks_headless(now, false);
+
+        assert!(attached.app.status_metrics_visible);
+        assert_eq!(attached.app.provider_usage_refreshed_at, Some(now));
+        assert!(attached.app.provider_usage_in_flight);
+        assert_eq!(attached.app.connectivity_probed_at, Some(now));
+        assert!(attached.app.connectivity_probe_in_flight);
     }
 
     #[test]
