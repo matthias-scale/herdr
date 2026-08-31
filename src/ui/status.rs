@@ -143,8 +143,19 @@ fn focused_pane_title(app: &AppState) -> Option<String> {
     let title = terminal
         .terminal_title_stripped()
         .or_else(|| terminal.terminal_title.clone())?;
-    let title = title.trim();
+    let title = subject_of(title.trim());
     (!title.is_empty()).then(|| title.to_string())
+}
+
+/// Agents prefix their title with identity -- `cc · herdr · rename the pane`.
+/// The sidebar and the tab already name the agent and the workspace, so the
+/// status row keeps only the trailing subject: the one thing nothing else on
+/// screen says. A title without the separator is already its own subject.
+fn subject_of(title: &str) -> &str {
+    title
+        .rsplit(" · ")
+        .find(|part| !part.trim().is_empty())
+        .map_or(title, str::trim)
 }
 
 /// Left-aligned quick-access buttons. The status bar's own segments are
@@ -1813,5 +1824,19 @@ mod tests {
             ' ',
             "nothing may run into the title column: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn the_pane_title_drops_the_agent_and_workspace_prefix() {
+        assert_eq!(
+            subject_of("cc · herdr · rename the pane"),
+            "rename the pane"
+        );
+        // A trailing empty segment falls back to the last one that says something.
+        assert_eq!(subject_of("cc · herdr ·   "), "herdr");
+        assert_eq!(subject_of("Fix billing"), "Fix billing");
+        // A bare separator is not the agent prefix shape and must survive.
+        assert_eq!(subject_of("a·b"), "a·b");
+        assert_eq!(subject_of("修复 · 标题"), "标题");
     }
 }
