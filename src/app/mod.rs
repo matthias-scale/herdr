@@ -639,6 +639,7 @@ impl App {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            work_view: None,
             inbox: None,
             home: None,
             pending_human_drafts: std::collections::HashMap::new(),
@@ -1890,6 +1891,12 @@ impl App {
 
         if !invalid_section("work_index") {
             self.work_index_config = config.work_index.clone();
+            if let Some(view) = self.state.work_view.as_mut() {
+                view.enabled = self.work_index_config.enabled;
+                if !view.enabled {
+                    view.snapshot = None;
+                }
+            }
             if !self.work_index_config.enabled {
                 self.work_index_refresh_in_flight = None;
             }
@@ -1948,6 +1955,7 @@ impl App {
         // Full-frame overlays bypass ordinary pane context. The inbox routes keys
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
+            || self.state.work_view.is_some()
             || self.state.inbox.is_some()
             || self.state.home.is_some()
         {
@@ -2116,7 +2124,9 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
-                    if self.state.symphony_detail.is_some() || self.try_route_paste_to_popup(&text)
+                    if self.state.symphony_detail.is_some()
+                        || self.state.work_view.is_some()
+                        || self.try_route_paste_to_popup(&text)
                     {
                     } else if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
@@ -2144,13 +2154,13 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::OuterFocusGained => {
-                    if self.state.symphony_detail.is_none() {
+                    if self.state.symphony_detail.is_none() && self.state.work_view.is_none() {
                         self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
                     }
                 }
                 crate::raw_input::RawInputEvent::OuterFocusLost => {
                     self.release_input_source_headless(source_id);
-                    if self.state.symphony_detail.is_none() {
+                    if self.state.symphony_detail.is_none() && self.state.work_view.is_none() {
                         self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
                     }
                 }
@@ -2195,6 +2205,9 @@ impl App {
             return;
         }
         if self.handle_loop_run_history_key(key_event) {
+            return;
+        }
+        if self.handle_work_view_key(key_event) {
             return;
         }
         // Home was already settled in `route_client_events_from`, before the

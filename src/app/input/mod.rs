@@ -90,6 +90,9 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
+        if self.handle_work_view_key(key_event) {
+            return None;
+        }
         if self.state.home.is_some() && self.handle_home_key_event(key_event) {
             return None;
         }
@@ -465,6 +468,85 @@ impl App {
         true
     }
 
+    pub(crate) fn toggle_work_view(&mut self) {
+        let enabled = self.work_index_config.enabled;
+        let snapshot = enabled.then(|| self.work_index_snapshot.clone()).flatten();
+        self.state.toggle_work_view(enabled, snapshot);
+    }
+
+    pub(crate) fn handle_work_view_key(&mut self, key: KeyEvent) -> bool {
+        let Some(state) = self.state.work_view.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.state.clear_work_view();
+                self.state.mode = Mode::Terminal;
+            }
+            KeyCode::Left if key.modifiers.is_empty() => {
+                state.rotate(false);
+                state.hint = None;
+            }
+            KeyCode::Right if key.modifiers.is_empty() => {
+                state.rotate(true);
+                state.hint = None;
+            }
+            KeyCode::Up if key.modifiers.is_empty() => {
+                state.move_selection(-1);
+                state.hint = None;
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                state.move_selection(1);
+                state.hint = None;
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.focus_work_view_selected_pane();
+            }
+            KeyCode::Char('f') if key.modifiers.is_empty() => {
+                self.cycle_work_view_repo_filter();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn focus_work_view_selected_pane(&mut self) {
+        let Some(row) = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|state| state.selected_row())
+        else {
+            return;
+        };
+        let Some(pane_id) = row.owner_pane_id else {
+            if let Some(state) = self.state.work_view.as_mut() {
+                state.hint = Some(format!("no owning pane for #{}", row.number));
+            }
+            return;
+        };
+        if self.parse_pane_id(&pane_id).is_none() {
+            if let Some(state) = self.state.work_view.as_mut() {
+                state.hint = Some(format!("owning pane {pane_id} is no longer open"));
+            }
+            return;
+        }
+        self.runtime_pane_focus("tui.work_view.focus_owner", pane_id);
+        self.state.clear_work_view();
+        self.state.mode = Mode::Terminal;
+    }
+
+    fn cycle_work_view_repo_filter(&mut self) {
+        let Some(state) = self.state.work_view.as_mut() else {
+            return;
+        };
+        let next = state.cycle_repo_filter();
+        state.hint = Some(
+            next.map(|repo| format!("filter repo: {repo}"))
+                .unwrap_or_else(|| "showing all repos".into()),
+        );
+    }
+
     fn open_selected_symphony_workflow(&mut self) {
         let Some(workflow) = self
             .state
@@ -536,7 +618,8 @@ impl App {
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
-        if text.is_empty() || self.state.symphony_detail.is_some() {
+        if text.is_empty() || self.state.symphony_detail.is_some() || self.state.work_view.is_some()
+        {
             return;
         }
         if self.state.home.is_some() {
@@ -581,7 +664,8 @@ impl App {
     }
 
     pub(super) async fn handle_text_commit(&mut self, text: String) {
-        if text.is_empty() || self.state.symphony_detail.is_some() {
+        if text.is_empty() || self.state.symphony_detail.is_some() || self.state.work_view.is_some()
+        {
             return;
         }
         if self.state.home.is_some() {
@@ -629,7 +713,7 @@ impl App {
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
-        if self.state.symphony_detail.is_some() {
+        if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
             return;
         }
         if self.state.home.is_some() {
@@ -806,7 +890,7 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
-        if self.state.symphony_detail.is_some() {
+        if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
             return;
         }
         match mouse.kind {

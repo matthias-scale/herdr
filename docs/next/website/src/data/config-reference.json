@@ -674,6 +674,12 @@
           "description": "Open the read-only Symphony workflow dashboard."
         },
         {
+          "key": "keys.work",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+w\"",
+          "description": "Open the work projection view over the repo-wide work index."
+        },
+        {
           "key": "keys.inbox",
           "type": "keybinding",
           "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",

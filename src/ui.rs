@@ -42,6 +42,7 @@ mod tabs;
 mod text;
 mod widgets;
 mod work_link_picker;
+mod work_view;
 
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
@@ -97,6 +98,7 @@ pub(crate) use self::tab_surface::{
 };
 use self::tabs::render_tab_bar;
 use self::work_link_picker::render_work_link_picker;
+use self::work_view::render as render_work_view;
 
 pub(crate) use self::{
     dialogs::{
@@ -724,6 +726,8 @@ fn render_with_runtime_registry_inner(
             detail.observed_at,
             frame,
         );
+    } else if let Some(state) = app.work_view.as_ref() {
+        render_work_view(&app.palette, state, terminal_area, frame);
     } else if app.home.is_some() {
         let queue = app.blocked_agents();
         let counts = app.home_counts(&queue);

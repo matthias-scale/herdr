@@ -107,6 +107,7 @@ mod ui;
 mod update;
 mod work_context;
 mod work_index;
+mod work_projection;
 mod work_title;
 mod workspace;
 mod worktree;
@@ -245,6 +246,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # toggle_blocked_filter = "prefix+f"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
+# work = "prefix+ctrl+w"         # work projection view: PRs / tickets / agents / review
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

@@ -1617,6 +1617,9 @@ pub struct AppState {
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
+    /// Open work projection view. `Some` means the view owns the screen and the
+    /// keyboard, like the Symphony and loop-history details above it.
+    pub(crate) work_view: Option<WorkViewState>,
     /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
@@ -1917,6 +1920,77 @@ impl SymphonyDetail {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkProjection {
+    PullRequests,
+    Tickets,
+    Agents,
+    ReviewQueue,
+}
+
+impl WorkProjection {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PullRequests => "PRs",
+            Self::Tickets => "tickets",
+            Self::Agents => "agents",
+            Self::ReviewQueue => "review queue",
+        }
+    }
+
+    pub(crate) fn rotate_left(self) -> Self {
+        match self {
+            Self::PullRequests => Self::ReviewQueue,
+            Self::Tickets => Self::PullRequests,
+            Self::Agents => Self::Tickets,
+            Self::ReviewQueue => Self::Agents,
+        }
+    }
+
+    pub(crate) fn rotate_right(self) -> Self {
+        match self {
+            Self::PullRequests => Self::Tickets,
+            Self::Tickets => Self::Agents,
+            Self::Agents => Self::ReviewQueue,
+            Self::ReviewQueue => Self::PullRequests,
+        }
+    }
+}
+
+/// Stable identity of a projected work row. Selection is stored as this key,
+/// not an index, so it survives snapshot refreshes and projection rotations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkItemKey {
+    pub(crate) repo: String,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) pr_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkViewState {
+    pub(crate) projection: WorkProjection,
+    /// `None` means "no explicit selection yet" and resolves to the first row.
+    pub(crate) selected: Option<WorkItemKey>,
+    pub(crate) repo_filter: Option<String>,
+    pub(crate) enabled: bool,
+    /// `None` means the enabled index has not been collected yet.
+    pub(crate) snapshot: Option<crate::work_index::Snapshot>,
+    pub(crate) hint: Option<String>,
+}
+
+impl WorkViewState {
+    pub(crate) fn new(enabled: bool, snapshot: Option<crate::work_index::Snapshot>) -> Self {
+        Self {
+            projection: WorkProjection::PullRequests,
+            selected: None,
+            repo_filter: None,
+            enabled,
+            snapshot,
+            hint: None,
+        }
+    }
+}
+
 impl AppState {
     pub(crate) fn swap_symphony_detail(&mut self, other: &mut Option<SymphonyDetail>) {
         std::mem::swap(&mut self.symphony_detail, other);
@@ -1936,6 +2010,26 @@ impl AppState {
 
     pub(crate) fn clear_symphony(&mut self) {
         self.symphony_detail = None;
+    }
+
+    pub(crate) fn swap_work_view(&mut self, other: &mut Option<WorkViewState>) {
+        std::mem::swap(&mut self.work_view, other);
+    }
+
+    pub(crate) fn toggle_work_view(
+        &mut self,
+        enabled: bool,
+        snapshot: Option<crate::work_index::Snapshot>,
+    ) {
+        if self.work_view.is_some() {
+            self.work_view = None;
+            return;
+        }
+        self.work_view = Some(WorkViewState::new(enabled, snapshot));
+    }
+
+    pub(crate) fn clear_work_view(&mut self) {
+        self.work_view = None;
     }
 
     pub(crate) fn swap_loop_run_history_detail(
@@ -2346,6 +2440,7 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            work_view: None,
             inbox: None,
             home: None,
             pending_human_drafts: std::collections::HashMap::new(),

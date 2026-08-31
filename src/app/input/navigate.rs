@@ -519,6 +519,10 @@ impl App {
                 self.state.toggle_symphony();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenWorkView => {
+                self.toggle_work_view();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::OpenInbox => {
                 self.state.toggle_inbox();
                 leave_navigate_mode(&mut self.state);
@@ -1758,6 +1762,7 @@ pub(crate) enum NavigateAction {
     CopyWorkPreview,
     ToggleInfoPanel,
     OpenSymphony,
+    OpenWorkView,
     Detach,
     OpenNavigator,
 }
@@ -1919,6 +1924,7 @@ fn non_indexed_action_for_key(
         (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.symphony, NavigateAction::OpenSymphony),
+        (&kb.work, NavigateAction::OpenWorkView),
         (&kb.inbox, NavigateAction::OpenInbox),
         (&kb.home, NavigateAction::OpenHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -2301,6 +2307,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::OpenSymphony => {
             state.toggle_symphony();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenWorkView => {
+            state.toggle_work_view(false, None);
             leave_navigate_mode(state);
         }
         NavigateAction::OpenInbox => {
