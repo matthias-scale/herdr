@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width, display_width_u16};
+use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{
@@ -72,6 +72,7 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(seg.text.clone(), style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), area);
+    render_focused_pane_title(app, frame, area, used);
 
     for button in &app.view.status_buttons {
         let style = if button.active {
@@ -87,6 +88,63 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             button.rect,
         );
     }
+}
+
+/// The focused pane's terminal title, rendered in the status row's otherwise
+/// empty middle. It starts at the sidebar's right edge so the title lines up
+/// with the column the pane itself occupies below, and it yields to both the
+/// left-hand buttons and the right-aligned segments rather than overlapping.
+fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segments_used: usize) {
+    const MIN_TITLE_WIDTH: u16 = 8;
+
+    let Some(title) = focused_pane_title(app) else {
+        return;
+    };
+    let sidebar = app.view.sidebar_rect;
+    let buttons_end = app
+        .view
+        .status_buttons
+        .iter()
+        .map(|button| button.rect.x.saturating_add(button.rect.width))
+        .max()
+        .unwrap_or(area.x);
+    let start = sidebar
+        .x
+        .saturating_add(sidebar.width)
+        .max(area.x)
+        .max(buttons_end);
+    let segments_start = area
+        .x
+        .saturating_add(area.width)
+        .saturating_sub(u16::try_from(segments_used).unwrap_or(u16::MAX));
+    // One blank column before the segments keeps the title from reading as part
+    // of the quota block.
+    let Some(width) = segments_start.saturating_sub(1).checked_sub(start) else {
+        return;
+    };
+    if width < MIN_TITLE_WIDTH {
+        return;
+    }
+
+    let text = truncate_end(&title, usize::from(width));
+    let style = Style::default()
+        .fg(app.palette.subtext0)
+        .bg(app.palette.panel_bg);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, style))),
+        Rect::new(start, area.y, width, 1),
+    );
+}
+
+fn focused_pane_title(app: &AppState) -> Option<String> {
+    let workspace = app.active.and_then(|ws_idx| app.workspaces.get(ws_idx))?;
+    let pane_id = workspace.focused_pane_id()?;
+    let terminal = app.terminals.get(workspace.terminal_id(pane_id)?)?;
+    let title = terminal
+        .terminal_title_stripped()
+        .or_else(|| terminal.terminal_title.clone())?;
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_string())
 }
 
 /// Left-aligned quick-access buttons. The status bar's own segments are
@@ -1693,5 +1751,67 @@ mod tests {
     fn a_zero_width_status_bar_registers_no_buttons() {
         let app = AppState::test_new();
         assert!(status_buttons(&app, Rect::new(0, 0, 0, 0)).is_empty());
+    }
+
+    #[test]
+    fn focused_pane_title_starts_where_the_sidebar_ends() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        const WIDTH: u16 = 200;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_collapsed = false;
+        app.sidebar_width = 40;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .set_terminal_title(Some("Fix billing".into()));
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, WIDTH, 20),
+        );
+        let sidebar_end = usize::from(
+            app.view
+                .sidebar_rect
+                .x
+                .saturating_add(app.view.sidebar_rect.width),
+        );
+        assert!(sidebar_end > 0, "desktop layout must expose a sidebar");
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("status terminal");
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, WIDTH, 1)))
+            .expect("render status");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        // The buffer mixes multi-byte glyphs, so slice by column, not by byte.
+        let columns = rendered.chars().collect::<Vec<_>>();
+        let at_sidebar_edge = columns[sidebar_end..].iter().collect::<String>();
+        assert!(
+            at_sidebar_edge.starts_with("Fix billing"),
+            "title must start at the sidebar's right edge: {rendered:?}"
+        );
+        assert_eq!(
+            columns[sidebar_end - 1],
+            ' ',
+            "nothing may run into the title column: {rendered:?}"
+        );
     }
 }
