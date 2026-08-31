@@ -105,6 +105,10 @@ impl App {
                 observations,
                 cache_updates,
             } => self.handle_git_work_context_refreshed(generation, observations, cache_updates),
+            AppEvent::WorkIndexRefreshed {
+                generation,
+                snapshot,
+            } => self.handle_work_index_refreshed(generation, snapshot),
             AppEvent::ForegroundProcessesRefreshed {
                 generation,
                 observations,
@@ -258,6 +262,15 @@ impl App {
         } = ev
         {
             self.handle_git_work_context_refreshed(generation, observations, cache_updates);
+            return None;
+        }
+
+        if let AppEvent::WorkIndexRefreshed {
+            generation,
+            snapshot,
+        } = ev
+        {
+            self.handle_work_index_refreshed(generation, snapshot);
             return None;
         }
 

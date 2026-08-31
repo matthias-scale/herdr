@@ -18,7 +18,7 @@ fn valid_agent_name(name: &str) -> bool {
 }
 
 impl App {
-    pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
+    pub(crate) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
             .workspaces
             .iter()

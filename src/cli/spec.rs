@@ -31,6 +31,7 @@ pub(super) fn command() -> Command {
         .subcommand(status_command())
         .subcommand(config_command())
         .subcommand(fleet_command())
+        .subcommand(work_index_command())
         .subcommand(channel_command())
         .subcommand(server_command())
         .subcommand(api_command())
@@ -153,6 +154,16 @@ fn fleet_command() -> Command {
                 .arg(json_flag().help("Print structured rows as JSON"))
                 .arg(flag("blocked-only").help("Show only rows with blocked evidence"))
                 .arg(flag("watch").help("Emit each observed transition once as JSON Lines")),
+        )
+}
+
+fn work_index_command() -> Command {
+    Command::new("work-index")
+        .about("Inspect repo-wide GitHub, Linear, and agent work")
+        .subcommand(
+            Command::new("list")
+                .about("List indexed work items")
+                .arg(json_flag().help("Print structured rows as JSON")),
         )
 }
 

@@ -186,6 +186,11 @@ pub enum AppEvent {
             crate::app::work_context_git::GitWorkContextCacheEntry,
         )>,
     },
+    /// Background repo-wide GitHub, Linear, and pane work observations completed.
+    WorkIndexRefreshed {
+        generation: u64,
+        snapshot: crate::work_index::Snapshot,
+    },
     /// Background foreground-process observations completed for live panes.
     ForegroundProcessesRefreshed {
         generation: u64,

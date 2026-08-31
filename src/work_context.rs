@@ -895,7 +895,7 @@ pub(crate) fn hook_turn_context(
     })
 }
 
-fn normalize_ticket_id(ticket: &str) -> Result<String, String> {
+pub(crate) fn normalize_ticket_id(ticket: &str) -> Result<String, String> {
     let ticket = ticket.trim();
     let tickets = extract_ticket_ids(ticket);
     if tickets.len() == 1 && tickets[0].len() == ticket.len() {

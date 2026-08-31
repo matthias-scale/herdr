@@ -106,6 +106,7 @@ mod terminal_theme;
 mod ui;
 mod update;
 mod work_context;
+mod work_index;
 mod work_title;
 mod workspace;
 mod worktree;
@@ -169,6 +170,16 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Check herdr.dev for remote agent-detection manifest updates in the background.
 # manifest_check = true
+
+[work_index]
+# Enable repo-wide GitHub, Linear, and agent-pane work indexing.
+# enabled = false
+# Refresh interval in seconds.
+# refresh_interval_seconds = 300
+# Linear team key, for example "SCA".
+# linear_team = "SCA"
+# GitHub repositories to include, for example ["owner/repo"].
+# repos = []
 
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")

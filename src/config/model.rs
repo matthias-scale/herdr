@@ -347,6 +347,7 @@ pub struct Config {
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
+    pub work_index: WorkIndexConfig,
 }
 
 pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
@@ -1175,6 +1176,30 @@ impl Default for FleetConfig {
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
             hosts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WorkIndexConfig {
+    /// Enable repo-wide GitHub, Linear, and agent-pane work indexing. Default: false.
+    pub enabled: bool,
+    /// Refresh interval in seconds. Default: 300.
+    pub refresh_interval_seconds: u64,
+    /// Linear team key used for started-ticket discovery.
+    pub linear_team: Option<String>,
+    /// GitHub repositories to include as `owner/repo` values.
+    pub repos: Vec<String>,
+}
+
+impl Default for WorkIndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            refresh_interval_seconds: 300,
+            linear_team: None,
+            repos: Vec::new(),
         }
     }
 }
