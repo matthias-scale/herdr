@@ -545,6 +545,13 @@ impl App {
         {
             return;
         }
+        if cfg!(test) {
+            // Tests observe scheduling state without reading provider files or
+            // spawning the external Kimi helper.
+            self.provider_usage_in_flight = true;
+            self.provider_usage_refreshed_at = Some(now);
+            return;
+        }
         let tx = self.event_tx.clone();
         let spawned = std::thread::Builder::new()
             .name("herdr-provider-usage".into())
@@ -571,6 +578,12 @@ impl App {
                     .is_some_and(|elapsed| elapsed < crate::connectivity::PROBE_INTERVAL)
             })
         {
+            return;
+        }
+        if cfg!(test) {
+            // Tests record the probe cadence without opening a network socket.
+            self.connectivity_probe_in_flight = true;
+            self.connectivity_probed_at = Some(now);
             return;
         }
         let tx = self.event_tx.clone();
