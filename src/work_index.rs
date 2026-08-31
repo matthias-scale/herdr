@@ -721,6 +721,9 @@ impl crate::app::App {
         ) {
             tracing::warn!(error = %error, "failed to persist work index snapshot");
         }
+        if let Some(work_view) = self.state.work_view.as_mut() {
+            work_view.replace_snapshot(snapshot.clone());
+        }
         self.work_index_snapshot = Some(snapshot);
         true
     }
