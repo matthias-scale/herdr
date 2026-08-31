@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.08.26.1001"
+version = "2026.08.31.1001"
 min_engine_version = 2
-updated_at = "2026-08-26T00:00:00Z"
+updated_at = "2026-08-31T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -29,6 +29,40 @@ contains = ["↑/↓ to scroll", "pgup/pgdn to", "home/end to jump", "q to quit"
 any = [
   { contains = ["esc to edit prev"] },
   { contains = ["esc/← to edit prev"] },
+]
+
+[[rules]]
+# Codex renders terminal failures above a returned composer. These rules rank
+# above idle (100) but below screen working (500), so a new working spinner
+# clears a still-visible error without depending on OSC title updates.
+id = "auth_failure"
+state = "blocked"
+priority = 490
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+line_regex = ['^\s*›\s*$']
+any = [
+  { line_regex = ['^\s*■ Your access token could not be refreshed because your refresh token has expired\. Please log out and sign in again\.\s*$'] },
+  { line_regex = ['^\s*■ Your access token could not be refreshed because your refresh token was already used\. Please log out and sign in again\.\s*$'] },
+  { line_regex = ['^\s*■ Your access token could not be refreshed because your refresh token was revoked\. Please log out and sign in again\.\s*$'] },
+  { line_regex = ['^\s*■ Your access token could not be refreshed\. Please log out and sign in again\.\s*$'] },
+  { line_regex = ['^\s*■ Your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.\s*$'] },
+  { line_regex = ['^\s*■ Quota exceeded\. Check your plan and billing details\.\s*$'] },
+]
+
+[[rules]]
+id = "api_error"
+state = "blocked"
+priority = 490
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+line_regex = ['^\s*›\s*$']
+any = [
+  { line_regex = ['^\s*■ request timed out\s*$'] },
+  { line_regex = ['^\s*■ Connection failed: \S.*$'] },
+  { line_regex = ['^\s*■ Error while reading the server response: \S.*$'] },
+  { contains = ["■ We're currently experiencing high demand, which may cause temporary errors."] },
+  { line_regex = ['^\s*⚠ Selected model is at capacity\. Please try a different model\.\s*$'] },
 ]
 
 [[rules]]

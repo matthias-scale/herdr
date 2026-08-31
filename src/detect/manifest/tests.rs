@@ -50,6 +50,11 @@ fn bundled_explain(agent: Agent, screen: &str) -> DetectionExplain {
     with_bundled_manifests("bundled-explain", || explain(agent, screen))
 }
 
+fn fixture_with_banner(fixture: &str, banner: &str) -> String {
+    let (_, tail) = fixture.split_once('\n').unwrap();
+    format!("{banner}\n{tail}")
+}
+
 fn write_remote_codex(content: &str) {
     let path = crate::detect::manifest_update::remote_manifest_path(Agent::Codex);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -933,7 +938,7 @@ fn visible_blocker_overrides_fresh_hook_authority_priority_1100_working() {
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
-    assert_eq!(claude["version"].as_str(), Some("2026.08.26.1001"));
+    assert_eq!(claude["version"].as_str(), Some("2026.08.31.1001"));
     assert!(kimi["version"]
         .as_str()
         .is_some_and(|version| version > "2026.06.10.1"));
@@ -1279,6 +1284,153 @@ fn an_ordinary_claude_question_is_not_a_usage_blocker() {
     let result = osc_explain(Agent::Claude, screen, "", "");
 
     assert_eq!(result.state, AgentState::Blocked);
+    assert!(result.visible_blocker);
+    assert!(!result.usage_limited);
+}
+
+#[test]
+fn claude_auth_failure_over_live_prompt_is_blocked() {
+    let fixture =
+        include_str!("../../../tests/fixtures/agent-detection/claude-auth-failure-20260831.txt");
+    for banner in [
+        "Invalid API key · Please run /login",
+        "OAuth token expired · Please run /login",
+        "OAuth token revoked · Please run /login",
+        "Your session has expired. Please run /login to sign in again.",
+        "Credit balance is too low",
+        "Your account does not have access to Claude. Please login again or contact your administrator.",
+    ] {
+        let screen = fixture_with_banner(fixture, banner);
+        let result = bundled_explain(Agent::Claude, &screen);
+
+        assert_eq!(result.state, AgentState::Blocked, "{banner}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("auth_failure"),
+            "{banner}"
+        );
+        assert!(result.visible_blocker, "{banner}");
+        assert!(!result.usage_limited, "{banner}");
+    }
+}
+
+#[test]
+fn claude_api_error_over_live_prompt_is_blocked() {
+    let fixture =
+        include_str!("../../../tests/fixtures/agent-detection/claude-api-error-20260831.txt");
+    for banner in [
+        "API Error: 500",
+        "API Error (Connection error)",
+        "Request timed out",
+        "API Error: fetch failed",
+        "API Error: 529 {\"type\":\"overloaded_error\"}",
+    ] {
+        let screen = fixture_with_banner(fixture, banner);
+        let result = bundled_explain(Agent::Claude, &screen);
+
+        assert_eq!(result.state, AgentState::Blocked, "{banner}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("api_error"),
+            "{banner}"
+        );
+        assert!(result.visible_blocker, "{banner}");
+        assert!(!result.usage_limited, "{banner}");
+    }
+}
+
+#[test]
+fn claude_working_spinner_clears_a_visible_api_error() {
+    let screen =
+        include_str!("../../../tests/fixtures/agent-detection/claude-api-error-20260831.txt");
+    let result = osc_explain(Agent::Claude, screen, "⠋ Claude Code", "");
+
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn codex_auth_failure_over_live_prompt_is_blocked() {
+    let fixture =
+        include_str!("../../../tests/fixtures/agent-detection/codex-auth-failure-20260831.txt");
+    for banner in [
+        "■ Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+        "■ Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+        "■ Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+        "■ Your access token could not be refreshed. Please log out and sign in again.",
+        "■ Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+        "■ Quota exceeded. Check your plan and billing details.",
+    ] {
+        let screen = fixture_with_banner(fixture, banner);
+        let result = bundled_explain(Agent::Codex, &screen);
+
+        assert_eq!(result.state, AgentState::Blocked, "{banner}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("auth_failure"),
+            "{banner}"
+        );
+        assert!(result.visible_blocker, "{banner}");
+        assert!(!result.usage_limited, "{banner}");
+    }
+}
+
+#[test]
+fn codex_api_error_over_live_prompt_is_blocked() {
+    let fixture =
+        include_str!("../../../tests/fixtures/agent-detection/codex-api-error-20260831.txt");
+    for banner in [
+        "■ request timed out",
+        "■ Connection failed: connection reset by peer",
+        "■ Error while reading the server response: connection closed",
+        "■ We're currently experiencing high demand, which may cause temporary errors.",
+        "⚠ Selected model is at capacity. Please try a different model.",
+    ] {
+        let screen = fixture_with_banner(fixture, banner);
+        let result = bundled_explain(Agent::Codex, &screen);
+
+        assert_eq!(result.state, AgentState::Blocked, "{banner}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("api_error"),
+            "{banner}"
+        );
+        assert!(result.visible_blocker, "{banner}");
+        assert!(!result.usage_limited, "{banner}");
+    }
+}
+
+#[test]
+fn codex_working_spinner_clears_a_visible_api_error() {
+    let error =
+        include_str!("../../../tests/fixtures/agent-detection/codex-api-error-20260831.txt");
+    let screen = format!("{error}Working (1s • esc to interrupt)\n");
+    let result = bundled_explain(Agent::Codex, &screen);
+
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("screen_working_fallback")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn ordinary_claude_permission_prompt_keeps_its_existing_rule() {
+    let screen = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
+    );
+    let result = bundled_explain(Agent::Claude, screen);
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("generic_permission_prompt")
+    );
     assert!(result.visible_blocker);
     assert!(!result.usage_limited);
 }
