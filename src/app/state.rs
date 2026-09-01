@@ -1791,9 +1791,9 @@ pub struct AppState {
     /// Client-local selection decides which entry is rendered, but never owns
     /// or duplicates the fetched data.
     pub(crate) work_item_detail_cache: crate::work_index::WorkItemDetailCache,
-    /// The one detail request currently running. This is runtime observation
-    /// state, not a client-local loading flag inferred by the renderer.
-    pub(crate) work_item_detail_loading: Option<WorkItemKey>,
+    /// Detail keys in the one bounded batch currently running. This is runtime
+    /// observation state, not a client-local loading flag inferred by render.
+    pub(crate) work_item_detail_loading: std::collections::HashSet<WorkItemKey>,
     /// Whether the work index is configured on. Mirrored so the dock home can
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
@@ -2641,7 +2641,7 @@ impl AppState {
             dock_home_focused: false,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
-            work_item_detail_loading: None,
+            work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),

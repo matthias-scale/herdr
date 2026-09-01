@@ -793,7 +793,7 @@ impl App {
             dock_home_focused: false,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
-            work_item_detail_loading: None,
+            work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
             work_index_linear_team_configured: config
                 .work_index

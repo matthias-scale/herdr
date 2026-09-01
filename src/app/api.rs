@@ -111,9 +111,8 @@ impl App {
             } => self.handle_work_index_refreshed(generation, snapshot),
             AppEvent::WorkItemDetailRefreshed {
                 generation,
-                key,
-                detail,
-            } => self.handle_work_item_detail_refreshed(generation, key, *detail),
+                details,
+            } => self.handle_work_item_detail_refreshed(generation, *details),
             AppEvent::ForegroundProcessesRefreshed {
                 generation,
                 observations,
@@ -281,11 +280,10 @@ impl App {
 
         if let AppEvent::WorkItemDetailRefreshed {
             generation,
-            key,
-            detail,
+            details,
         } = ev
         {
-            self.handle_work_item_detail_refreshed(generation, key, *detail);
+            self.handle_work_item_detail_refreshed(generation, *details);
             return None;
         }
 

@@ -25,7 +25,7 @@ pub(crate) struct WorkIndexRefreshInFlight {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkItemDetailRefreshInFlight {
-    pub(crate) key: crate::app::state::WorkItemKey,
+    pub(crate) keys: Vec<crate::app::state::WorkItemKey>,
     pub(crate) generation: u64,
     pub(crate) deadline: Instant,
 }
@@ -100,6 +100,11 @@ impl WorkItemDetailCache {
 
     pub(crate) fn insert(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
         self.insert_at(key, detail, Instant::now());
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
     }
 
     fn insert_at(
@@ -1109,12 +1114,26 @@ impl crate::app::App {
         }
         self.state.work_index_snapshot = Some(snapshot.clone());
         self.work_index_snapshot = Some(snapshot);
+        self.invalidate_work_item_details();
         true
+    }
+
+    fn invalidate_work_item_details(&mut self) {
+        if let Some(refresh) = self.work_item_detail_refresh_in_flight.take() {
+            for key in refresh.keys {
+                self.state.work_item_detail_loading.remove(&key);
+            }
+        }
+        self.last_work_item_detail_refresh_generation = self
+            .last_work_item_detail_refresh_generation
+            .wrapping_add(1);
+        self.state.work_item_detail_cache.clear();
     }
 
     pub(crate) fn start_work_item_detail_refresh_if_due(
         &mut self,
         now: Instant,
+        section: crate::app::state::DockHomeSection,
         selection: Option<crate::app::state::WorkItemKey>,
         detail_visible: bool,
     ) {
@@ -1126,37 +1145,33 @@ impl crate::app::App {
             .as_ref()
             .is_some_and(|refresh| now >= refresh.deadline)
         {
-            self.work_item_detail_refresh_in_flight = None;
-            self.state.work_item_detail_loading = None;
+            if let Some(refresh) = self.work_item_detail_refresh_in_flight.take() {
+                for key in refresh.keys {
+                    self.state.work_item_detail_loading.remove(&key);
+                }
+            }
         }
         if self.work_item_detail_refresh_in_flight.is_some() {
             return;
         }
-        let projection = self.state.dock_home_projection();
-        let key = selection
-            .and_then(|selection| {
-                projection
-                    .rows
-                    .iter()
-                    .find(|row| row.key == selection)
-                    .map(|row| row.key.clone())
-            })
-            .or_else(|| projection.rows.first().map(|row| row.key.clone()));
-        let Some(key) = key else {
-            return;
-        };
-        let Some(number) = key.pr_number else {
-            return;
-        };
-        if key.repo.is_empty() {
-            return;
+        let mut keys = self.state.dock_home_keys_for_section(section);
+        if let Some(selection) = selection {
+            if let Some(index) = keys.iter().position(|key| key == &selection) {
+                let selection = keys.remove(index);
+                keys.insert(0, selection);
+            }
         }
         let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
-        if self
-            .state
-            .work_item_detail_cache
-            .is_fresh(&key, now, interval)
-        {
+        keys.retain(|key| {
+            key.pr_number.is_some()
+                && !key.repo.is_empty()
+                && !self
+                    .state
+                    .work_item_detail_cache
+                    .is_fresh(key, now, interval)
+        });
+        keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
+        if keys.is_empty() {
             return;
         }
 
@@ -1164,31 +1179,60 @@ impl crate::app::App {
             .last_work_item_detail_refresh_generation
             .wrapping_add(1);
         let generation = self.last_work_item_detail_refresh_generation;
-        let deadline = now + WORK_INDEX_TARGET_TIMEOUT;
+        let deadline = now + WORK_INDEX_BATCH_TIMEOUT;
         self.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
-            key: key.clone(),
+            keys: keys.clone(),
             generation,
             deadline,
         });
-        self.state.work_item_detail_loading = Some(key.clone());
+        self.state
+            .work_item_detail_loading
+            .extend(keys.iter().cloned());
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
-        let repo = key.repo.clone();
         let _ = std::thread::Builder::new()
-            .name("herdr-work-item-detail".into())
+            .name("herdr-work-item-details".into())
             .spawn(move || {
-                let detail =
-                    match fetch_github_pull_request_detail(&repo, number, &gh_program, deadline) {
-                        Ok(detail) => detail,
-                        Err(RefreshError::TimedOut) => {
-                            WorkItemDetail::unavailable("GitHub PR detail observation timed out")
+                let mut details = Vec::with_capacity(keys.len());
+                for chunk in keys.chunks(8) {
+                    std::thread::scope(|scope| {
+                        let handles = chunk
+                            .iter()
+                            .map(|key| {
+                                let key = key.clone();
+                                let gh_program = gh_program.clone();
+                                scope.spawn(move || {
+                                    let detail = match fetch_github_pull_request_detail(
+                                        &key.repo,
+                                        key.pr_number.unwrap_or_default(),
+                                        &gh_program,
+                                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
+                                    ) {
+                                        Ok(detail) => detail,
+                                        Err(RefreshError::TimedOut) => WorkItemDetail::unavailable(
+                                            "GitHub PR detail observation timed out",
+                                        ),
+                                        Err(RefreshError::Failed(message)) => {
+                                            WorkItemDetail::unavailable(message)
+                                        }
+                                    };
+                                    (key, detail)
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        for handle in handles {
+                            if let Ok(detail) = handle.join() {
+                                details.push(detail);
+                            }
                         }
-                        Err(RefreshError::Failed(message)) => WorkItemDetail::unavailable(message),
-                    };
+                    });
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkItemDetailRefreshed {
                     generation,
-                    key,
-                    detail: Box::new(detail),
+                    details: Box::new(details),
                 });
             });
     }
@@ -1196,25 +1240,36 @@ impl crate::app::App {
     pub(crate) fn handle_work_item_detail_refreshed(
         &mut self,
         generation: u64,
-        key: crate::app::state::WorkItemKey,
-        detail: WorkItemDetail,
+        details: Vec<(crate::app::state::WorkItemKey, WorkItemDetail)>,
     ) -> bool {
         let matches_in_flight = self
             .work_item_detail_refresh_in_flight
             .as_ref()
-            .is_some_and(|refresh| refresh.generation == generation && refresh.key == key);
+            .is_some_and(|refresh| {
+                refresh.generation == generation
+                    && refresh.keys.len() == details.len()
+                    && refresh
+                        .keys
+                        .iter()
+                        .zip(&details)
+                        .all(|(expected, (actual, _))| expected == actual)
+            });
         if !matches_in_flight
             || generation <= self.last_applied_work_item_detail_refresh_generation
             || generation != self.last_work_item_detail_refresh_generation
         {
             return false;
         }
-        self.work_item_detail_refresh_in_flight = None;
+        let refresh = self.work_item_detail_refresh_in_flight.take();
         self.last_applied_work_item_detail_refresh_generation = generation;
-        if self.state.work_item_detail_loading.as_ref() == Some(&key) {
-            self.state.work_item_detail_loading = None;
+        if let Some(refresh) = refresh {
+            for key in refresh.keys {
+                self.state.work_item_detail_loading.remove(&key);
+            }
         }
-        self.state.work_item_detail_cache.insert(key, detail);
+        for (key, detail) in details {
+            self.state.work_item_detail_cache.insert(key, detail);
+        }
         true
     }
 }
@@ -1461,27 +1516,53 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         app.last_work_item_detail_refresh_generation = 2;
         app.last_applied_work_item_detail_refresh_generation = 0;
         app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
-            key: current_key.clone(),
+            keys: vec![current_key.clone()],
             generation: 2,
             deadline: Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
         });
-        app.state.work_item_detail_loading = Some(current_key.clone());
+        app.state
+            .work_item_detail_loading
+            .insert(current_key.clone());
 
         assert!(!app.handle_work_item_detail_refreshed(
             1,
-            work_item_key(7),
-            unavailable_detail(SystemTime::UNIX_EPOCH),
+            vec![(work_item_key(7), unavailable_detail(SystemTime::UNIX_EPOCH),)],
         ));
         assert!(app
             .state
             .work_item_detail_cache
             .get(&work_item_key(7))
             .is_none());
-        assert_eq!(app.state.work_item_detail_loading, Some(current_key));
+        assert!(app.state.work_item_detail_loading.contains(&current_key));
     }
 
     #[test]
-    fn uncached_selected_pull_request_starts_one_detail_fetch() {
+    fn work_index_refresh_invalidates_detail_cache_and_in_flight_generation() {
+        let mut app = test_app_with_work_index();
+        let key = work_item_key(8);
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), unavailable_detail(SystemTime::UNIX_EPOCH));
+        app.state.work_item_detail_loading.insert(key.clone());
+        app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            keys: vec![key.clone()],
+            generation: 4,
+            deadline: Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+        });
+        app.last_work_item_detail_refresh_generation = 4;
+        app.invalidate_work_item_details();
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+        assert!(!app.state.work_item_detail_loading.contains(&key));
+        assert!(app.state.work_item_detail_cache.get(&key).is_none());
+        assert_eq!(app.last_work_item_detail_refresh_generation, 5);
+        assert!(!app.handle_work_item_detail_refreshed(
+            4,
+            vec![(key, unavailable_detail(SystemTime::UNIX_EPOCH))],
+        ));
+    }
+
+    #[test]
+    fn one_bounded_batch_prefetches_the_active_pr_section_selected_first() {
         let mut app = test_app_with_work_index();
         app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
         app.state.workspaces = vec![
@@ -1517,15 +1598,73 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         assert_eq!(key.pr_number, Some(8));
         let now = Instant::now();
 
-        app.start_work_item_detail_refresh_if_due(now, Some(key.clone()), true);
-        app.start_work_item_detail_refresh_if_due(now, Some(key.clone()), true);
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
 
         assert_eq!(app.last_work_item_detail_refresh_generation, 1);
+        let refresh = app
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .expect("detail batch");
+        assert_eq!(refresh.generation, 1, "second call must not start a batch");
+        assert_eq!(refresh.keys.len(), 2);
+        assert_eq!(refresh.keys.first(), Some(&key));
+        assert!(refresh
+            .keys
+            .iter()
+            .all(|key| app.state.work_item_detail_loading.contains(key)));
+    }
+
+    #[test]
+    fn detail_prefetch_batch_is_capped_at_cache_capacity() {
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        app.state.workspaces = (1_u64..=20)
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for (workspace_index, number) in (1_u64..=20).enumerate() {
+            let pane_id = app.state.workspaces[workspace_index].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+
+        app.start_work_item_detail_refresh_if_due(
+            Instant::now(),
+            crate::app::state::DockHomeSection::Prs,
+            None,
+            true,
+        );
+
         assert_eq!(
             app.work_item_detail_refresh_in_flight
                 .as_ref()
-                .map(|refresh| (refresh.generation, refresh.key.clone())),
-            Some((1, key))
+                .expect("detail batch")
+                .keys
+                .len(),
+            WORK_ITEM_DETAIL_CACHE_CAPACITY
         );
     }
 

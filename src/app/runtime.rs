@@ -411,7 +411,8 @@ impl App {
             !self.state.dock_collapsed && self.state.dock_tab == crate::app::DockTab::Home;
         self.start_work_item_detail_refresh_if_due(
             now,
-            self.state.dock_home_selection.clone(),
+            self.state.dock_home_section,
+            self.state.dock_home_active_selection(),
             detail_visible,
         );
         self.start_foreground_process_refresh_if_due(now);

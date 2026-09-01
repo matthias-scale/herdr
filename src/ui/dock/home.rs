@@ -323,7 +323,7 @@ fn loaded_detail_lines(
 }
 
 fn detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<String> {
-    if app.work_item_detail_loading.as_ref() == Some(&row.key) {
+    if app.work_item_detail_loading.contains(&row.key) {
         return vec!["loading…".to_string()];
     }
     app.work_item_detail_cache
@@ -817,7 +817,9 @@ mod tests {
         app.dock_home_selection = Some(key.clone());
         match detail {
             Some(detail) => app.work_item_detail_cache.insert(key, detail),
-            None => app.work_item_detail_loading = Some(key),
+            None => {
+                app.work_item_detail_loading.insert(key);
+            }
         }
         app
     }
@@ -1046,6 +1048,15 @@ mod tests {
         let terminal = render(&app, Rect::new(0, 0, 30, 12));
 
         assert!(text(&terminal).contains("loading…"));
+    }
+
+    #[test]
+    fn prefetched_entry_renders_immediately_without_loading() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let rendered = text(&render(&app, Rect::new(0, 0, 60, 40)));
+
+        assert!(rendered.contains("#125  overview"), "{rendered:?}");
+        assert!(!rendered.contains("loading…"), "{rendered:?}");
     }
 
     #[test]

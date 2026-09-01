@@ -760,9 +760,12 @@ impl crate::app::state::AppState {
         self.dock_scroll = 0;
     }
 
-    pub(crate) fn dock_home_active_keys(&self) -> Vec<WorkItemKey> {
+    pub(crate) fn dock_home_keys_for_section(
+        &self,
+        section: crate::app::state::DockHomeSection,
+    ) -> Vec<WorkItemKey> {
         let projection = self.dock_home_projection();
-        match self.dock_home_section {
+        match section {
             crate::app::state::DockHomeSection::Prs => {
                 projection.rows.into_iter().map(|row| row.key).collect()
             }

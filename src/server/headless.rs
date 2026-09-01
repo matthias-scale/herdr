@@ -4864,13 +4864,21 @@ impl HeadlessServer {
             .map(|client| {
                 let presentation = &client.dock_presentation;
                 (
-                    presentation.home_selection.clone(),
+                    presentation.home_section,
+                    match presentation.home_section {
+                        crate::app::state::DockHomeSection::Prs => {
+                            presentation.home_selection.clone()
+                        }
+                        crate::app::state::DockHomeSection::Tickets => {
+                            presentation.home_ticket_selection.clone()
+                        }
+                    },
                     !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
                 )
             });
-        if let Some((selection, detail_visible)) = detail_request {
+        if let Some((section, selection, detail_visible)) = detail_request {
             self.app
-                .start_work_item_detail_refresh_if_due(now, selection, detail_visible);
+                .start_work_item_detail_refresh_if_due(now, section, selection, detail_visible);
         }
 
         if self
