@@ -791,6 +791,7 @@ impl App {
             dock_home_ticket_selection: None,
             dock_home_section: state::DockHomeSection::Prs,
             dock_home_focused: false,
+            dock_home_followed_pane: None,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),

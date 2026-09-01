@@ -700,6 +700,59 @@ impl crate::app::state::AppState {
         )
     }
 
+    /// Follow a changed pane focus to its bound PR without repeatedly
+    /// overwriting an attach-local explicit selection for the same pane.
+    pub(crate) fn reconcile_dock_home_with_focused_pane(&mut self) {
+        let focused = self.current_pane_focus_target();
+        if self.dock_home_followed_pane == focused {
+            return;
+        }
+        self.dock_home_followed_pane = focused.clone();
+
+        let Some(focused) = focused else {
+            return;
+        };
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == focused.workspace_id)
+        else {
+            return;
+        };
+        let Some(pr_url) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(focused.pane_id))
+            .and_then(|terminal_id| self.terminals.get(terminal_id))
+            .and_then(|terminal| {
+                terminal
+                    .effective_work_context()
+                    .primary_pr()
+                    .map(str::to_string)
+            })
+        else {
+            return;
+        };
+        let Some(key) = self
+            .dock_home_projection()
+            .rows
+            .into_iter()
+            .find(|row| {
+                row.key
+                    .pr_url
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&pr_url))
+            })
+            .map(|row| row.key)
+        else {
+            return;
+        };
+
+        self.dock_home_selection = Some(key);
+        self.dock_home_section = crate::app::state::DockHomeSection::Prs;
+        self.dock_scroll = 0;
+    }
+
     /// Index of the selected home row, defaulting to the first row; `None`
     /// when nothing is bound.
     pub(crate) fn dock_home_selected_index(

@@ -2922,6 +2922,7 @@ impl HeadlessServer {
         }
         if let Some(presentation) = &mut dock_presentation {
             self.app.state.swap_dock_presentation(presentation);
+            self.app.state.reconcile_dock_home_with_focused_pane();
         }
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
@@ -4398,6 +4399,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    self.app.state.reconcile_dock_home_with_focused_pane();
                     self.app.state.reconcile_sidebar_presentation();
                     self.app
                         .state
@@ -6001,6 +6003,7 @@ mod tests {
                 home_ticket_selection: None,
                 home_section: crate::app::state::DockHomeSection::Prs,
                 home_focused: false,
+                home_followed_pane: None,
             };
             server.clients.insert(client_id, client);
         }
