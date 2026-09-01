@@ -127,29 +127,98 @@ fn elapsed_from(timestamp: Option<SystemTime>, now: SystemTime) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
-fn status_line(detail: &WorkItemDetail) -> String {
+fn status_line(app: &AppState, detail: &WorkItemDetail) -> Line<'static> {
     let mut values = Vec::new();
     if detail.is_draft == Some(true) {
-        values.push("draft".to_string());
+        values.push(Span::styled(
+            "draft",
+            Style::default().fg(app.palette.overlay0),
+        ));
     }
     if let Some(review) = detail
         .review_decision
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        values.push(review.to_ascii_lowercase().replace('_', " "));
+        if !values.is_empty() {
+            values.push(Span::styled(
+                " · ",
+                Style::default().fg(app.palette.overlay0),
+            ));
+        }
+        let color = match review {
+            "REVIEW_REQUIRED" => app.palette.peach,
+            "APPROVED" => app.palette.green,
+            "CHANGES_REQUESTED" => app.palette.red,
+            _ => app.palette.text,
+        };
+        let token = match review {
+            "REVIEW_REQUIRED" => "RR".to_string(),
+            "APPROVED" => "approved".to_string(),
+            "CHANGES_REQUESTED" => "changes requested".to_string(),
+            _ => review.to_ascii_lowercase().replace('_', " "),
+        };
+        values.push(Span::styled(token, Style::default().fg(color)));
     }
-    values.extend(
-        detail
-            .labels
-            .iter()
-            .filter(|label| !label.is_empty())
-            .cloned(),
-    );
+    for label in detail.labels.iter().filter(|label| !label.is_empty()) {
+        if !values.is_empty() {
+            values.push(Span::styled(
+                " · ",
+                Style::default().fg(app.palette.overlay0),
+            ));
+        }
+        values.push(Span::styled(
+            label.clone(),
+            Style::default().fg(app.palette.text),
+        ));
+    }
     if values.is_empty() {
-        "—".to_string()
+        Line::from(Span::styled("—", Style::default().fg(app.palette.text)))
     } else {
-        values.join(" · ")
+        Line::from(values)
+    }
+}
+
+fn heading(app: &AppState, text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default().fg(app.palette.overlay0),
+    ))
+}
+
+fn value_line(app: &AppState, text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default().fg(app.palette.text),
+    ))
+}
+
+fn field_line(
+    app: &AppState,
+    fields: impl IntoIterator<Item = (String, String, ratatui::style::Color)>,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (label, value, color)) in fields.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(app.palette.overlay0),
+            ));
+        }
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(app.palette.overlay0),
+        ));
+        spans.push(Span::styled(value, Style::default().fg(color)));
+    }
+    Line::from(spans)
+}
+
+fn link_color(app: &AppState, value: &str) -> ratatui::style::Color {
+    if value == "—" {
+        app.palette.text
+    } else {
+        app.palette.blue
     }
 }
 
@@ -249,9 +318,9 @@ fn loaded_detail_lines(
     row: &DockHomeRow,
     detail: &WorkItemDetail,
     width: usize,
-) -> Vec<String> {
+) -> Vec<Line<'static>> {
     if let Some(reason) = detail.unavailable.as_deref() {
-        return vec![format!("unavailable: {reason}")];
+        return vec![value_line(app, format!("unavailable: {reason}"))];
     }
     let item = work_item_for_key(app, &row.key);
     let now = SystemTime::now();
@@ -283,24 +352,60 @@ fn loaded_detail_lines(
         .map(|checks| format!("{} failing of {}", checks.failing, checks.total))
         .unwrap_or_else(|| "—".to_string());
     let mut lines = vec![
-        format!("#{number}  overview"),
-        status_line(detail),
-        missing(detail.title.as_deref()).to_string(),
-        format!("{ticket} · {author} · opened {opened} · updated {updated}"),
-        missing(detail.head_ref_name.as_deref()).to_string(),
-        format!("  → {}", missing(detail.base_ref_name.as_deref())),
-        String::new(),
-        "links".to_string(),
-        format!(" preview   {preview}"),
-        format!(" pr        {pr_url}"),
-        String::new(),
-        "what it does".to_string(),
+        Line::from(Span::styled(
+            format!("#{number}  overview"),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        status_line(app, detail),
+        value_line(app, missing(detail.title.as_deref())),
+        field_line(
+            app,
+            [
+                ("ticket ".into(), ticket, app.palette.text),
+                ("author ".into(), author.into(), app.palette.text),
+                ("opened ".into(), opened, app.palette.text),
+                ("updated ".into(), updated, app.palette.text),
+            ],
+        ),
+        Line::from(Span::styled(
+            missing(detail.head_ref_name.as_deref()).to_string(),
+            Style::default().fg(app.palette.mauve),
+        )),
+        Line::from(vec![
+            Span::styled("  → ", Style::default().fg(app.palette.overlay0)),
+            Span::styled(
+                missing(detail.base_ref_name.as_deref()).to_string(),
+                Style::default().fg(app.palette.mauve),
+            ),
+        ]),
+        Line::default(),
+        heading(app, "links"),
+        field_line(
+            app,
+            [(
+                " preview   ".into(),
+                preview.into(),
+                link_color(app, preview),
+            )],
+        ),
+        field_line(
+            app,
+            [(" pr        ".into(), pr_url.into(), link_color(app, pr_url))],
+        ),
+        Line::default(),
+        heading(app, "what it does"),
     ];
-    lines.extend(body_lines(detail.body.as_deref(), width));
-    lines.push(String::new());
-    lines.push("tickets".to_string());
+    lines.extend(
+        body_lines(detail.body.as_deref(), width)
+            .into_iter()
+            .map(|line| value_line(app, line)),
+    );
+    lines.push(Line::default());
+    lines.push(heading(app, "tickets"));
     match row.ticket_ids.as_slice() {
-        [] => lines.push(" —".to_string()),
+        [] => lines.push(value_line(app, " —")),
         ticket_ids => {
             for ticket_id in ticket_ids {
                 let title = if ticket_ids.len() == 1 {
@@ -309,30 +414,48 @@ fn loaded_detail_lines(
                 } else {
                     "—"
                 };
-                lines.push(format!(" {ticket_id}  {title}"));
+                lines.push(value_line(app, format!(" {ticket_id}  {title}")));
             }
         }
     }
-    lines.push(String::new());
-    lines.push(format!("● review threads  {review_threads}"));
-    lines.push(format!("● checks  {checks}"));
+    lines.push(Line::default());
+    lines.push(field_line(
+        app,
+        [(
+            "● review threads  ".into(),
+            review_threads,
+            app.palette.text,
+        )],
+    ));
+    let check_color = detail.checks.as_ref().map_or(app.palette.text, |summary| {
+        if summary.failing == 0 {
+            app.palette.green
+        } else {
+            app.palette.red
+        }
+    });
+    lines.push(field_line(
+        app,
+        [("● checks  ".into(), checks, check_color)],
+    ));
     lines
-        .into_iter()
-        .map(|line| truncate_end(&line, width))
-        .collect()
 }
 
-fn detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<String> {
+fn detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<Line<'static>> {
     if app.work_item_detail_loading.contains(&row.key) {
-        return vec!["loading…".to_string()];
+        return vec![value_line(app, "loading…")];
     }
     app.work_item_detail_cache
         .get(&row.key)
         .map(|detail| loaded_detail_lines(app, row, detail, width))
-        .unwrap_or_else(|| vec!["loading…".to_string()])
+        .unwrap_or_else(|| vec![value_line(app, "loading…")])
 }
 
-fn ticket_detail_lines(row: &DockHomeTicketRow, width: usize) -> Vec<String> {
+fn ticket_detail_lines(
+    app: &AppState,
+    row: &DockHomeTicketRow,
+    width: usize,
+) -> Vec<Line<'static>> {
     let ticket = &row.ticket;
     let now = SystemTime::now();
     let labels = if ticket.labels.is_empty() {
@@ -340,45 +463,87 @@ fn ticket_detail_lines(row: &DockHomeTicketRow, width: usize) -> Vec<String> {
     } else {
         ticket.labels.join(" · ")
     };
+    let linear_url = missing(ticket.url.as_deref());
+    let pr_url = missing(row.linked_pr_url.as_deref());
     let mut lines = vec![
-        format!("{}  overview", ticket.identifier),
-        labels,
-        missing(ticket.title.as_deref()).to_string(),
-        format!(
-            "{} · {} · opened {} · updated {}",
-            missing(ticket.state.as_deref()),
-            missing(ticket.assignee.as_deref()),
-            elapsed_from(ticket.created_at, now),
-            elapsed_from(ticket.updated_at, now),
+        Line::from(Span::styled(
+            format!("{}  overview", ticket.identifier),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        value_line(app, labels),
+        value_line(app, missing(ticket.title.as_deref())),
+        field_line(
+            app,
+            [
+                (
+                    "state ".into(),
+                    missing(ticket.state.as_deref()).into(),
+                    app.palette.text,
+                ),
+                (
+                    "assignee ".into(),
+                    missing(ticket.assignee.as_deref()).into(),
+                    app.palette.text,
+                ),
+                (
+                    "opened ".into(),
+                    elapsed_from(ticket.created_at, now),
+                    app.palette.text,
+                ),
+                (
+                    "updated ".into(),
+                    elapsed_from(ticket.updated_at, now),
+                    app.palette.text,
+                ),
+            ],
         ),
-        missing(ticket.branch.as_deref()).to_string(),
-        String::new(),
-        "links".to_string(),
-        format!(" linear    {}", missing(ticket.url.as_deref())),
-        format!(" pr        {}", missing(row.linked_pr_url.as_deref())),
-        String::new(),
-        "what it does".to_string(),
+        Line::from(Span::styled(
+            missing(ticket.branch.as_deref()).to_string(),
+            Style::default().fg(app.palette.mauve),
+        )),
+        Line::default(),
+        heading(app, "links"),
+        field_line(
+            app,
+            [(
+                " linear    ".into(),
+                linear_url.into(),
+                link_color(app, linear_url),
+            )],
+        ),
+        field_line(
+            app,
+            [(" pr        ".into(), pr_url.into(), link_color(app, pr_url))],
+        ),
+        Line::default(),
+        heading(app, "what it does"),
     ];
-    lines.extend(body_lines(ticket.description.as_deref(), width));
-    lines.push(String::new());
-    lines.push("parent".to_string());
-    lines.push(format!(" {}", missing(ticket.parent.as_deref())));
-    lines.push(String::new());
-    lines.push("relations".to_string());
+    lines.extend(
+        body_lines(ticket.description.as_deref(), width)
+            .into_iter()
+            .map(|line| value_line(app, line)),
+    );
+    lines.push(Line::default());
+    lines.push(heading(app, "parent"));
+    lines.push(value_line(
+        app,
+        format!(" {}", missing(ticket.parent.as_deref())),
+    ));
+    lines.push(Line::default());
+    lines.push(heading(app, "relations"));
     if ticket.relations.is_empty() {
-        lines.push(" —".to_string());
+        lines.push(value_line(app, " —"));
     } else {
         lines.extend(
             ticket
                 .relations
                 .iter()
-                .map(|relation| format!(" {relation}")),
+                .map(|relation| value_line(app, format!(" {relation}"))),
         );
     }
     lines
-        .into_iter()
-        .map(|line| truncate_end(&line, width))
-        .collect()
 }
 
 fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
@@ -572,7 +737,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             .map(|row| detail_lines(app, row, usize::from(area.width))),
         DockHomeSection::Tickets => selected_ticket
             .and_then(|index| projection.ticket_rows.get(index))
-            .map(|row| ticket_detail_lines(row, usize::from(area.width))),
+            .map(|row| ticket_detail_lines(app, row, usize::from(area.width))),
     };
     if let Some(lines) = lines {
         let max_scroll = lines.len().saturating_sub(usize::from(detail_height));
@@ -583,12 +748,14 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             .take(usize::from(detail_height))
             .enumerate()
         {
-            render_line(
-                frame,
-                area,
-                detail_y.saturating_add(offset as u16),
-                line,
-                Style::default().fg(app.palette.subtext0),
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(
+                    area.x,
+                    detail_y.saturating_add(offset as u16),
+                    area.width,
+                    1,
+                ),
             );
         }
     }
@@ -850,6 +1017,18 @@ mod tests {
             .collect()
     }
 
+    fn text_position(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+        let area = terminal.backend().buffer().area;
+        for y in 0..area.height {
+            let line = line_text(terminal, y);
+            if let Some(byte_offset) = line.find(needle) {
+                let x = display_width(&line[..byte_offset]) as u16;
+                return (x, y);
+            }
+        }
+        panic!("missing {needle:?}");
+    }
+
     #[test]
     fn renders_the_empty_state_and_bind_hint() {
         let terminal = render(&AppState::test_new(), Rect::new(0, 0, 30, 10));
@@ -874,7 +1053,7 @@ mod tests {
             "SCA-3084  overview",
             "fleet",
             "ticket detail in the dock",
-            "In Progress · Matthias",
+            "state In Progress · assignee Matthias",
             "sca-3084-dock-ticket",
             "https://linear.app/scalable/issue/SCA-3084",
             "https://github.com/owner/repo/pull/42",
@@ -893,7 +1072,7 @@ mod tests {
     fn absent_ticket_fields_render_explicit_dashes_without_panicking() {
         let rendered = text(&render(&ticket_app(false), Rect::new(0, 0, 50, 40)));
         assert!(
-            rendered.contains("— · — · opened — · updated —"),
+            rendered.contains("state — · assignee — · opened — · updated —"),
             "{rendered:?}"
         );
         assert!(rendered.contains("linear    —"), "{rendered:?}");
@@ -989,6 +1168,27 @@ mod tests {
         assert_eq!(cell.fg, app.palette.accent);
         assert!(cell.modifier.contains(Modifier::BOLD));
         assert_eq!(cell.bg, Color::Reset);
+    }
+
+    #[test]
+    fn detail_hierarchy_uses_palette_roles_and_keeps_check_text() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let terminal = render(&app, Rect::new(0, 0, 100, 40));
+        let buffer = terminal.backend().buffer();
+
+        let header = text_position(&terminal, "#125  overview");
+        assert_eq!(buffer[header].fg, app.palette.accent);
+        assert!(buffer[header].modifier.contains(Modifier::BOLD));
+
+        let heading = text_position(&terminal, "links");
+        assert_eq!(buffer[heading].fg, app.palette.overlay0);
+
+        let url = text_position(&terminal, "https://github.com/herdrdev/herdr/pull/125");
+        assert_eq!(buffer[url].fg, app.palette.blue);
+
+        let checks = text_position(&terminal, "2 failing of 8");
+        assert_eq!(buffer[checks].fg, app.palette.red);
+        assert!(line_text(&terminal, checks.1).contains("● checks  2 failing of 8"));
     }
 
     #[test]
