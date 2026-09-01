@@ -25,6 +25,10 @@ pub(crate) struct WorkIndexRefreshInFlight {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkItemPane {
     pub pane_id: String,
+    /// Human-facing agent label (`cc·opus·high`), not the pane id: the PR
+    /// projection shows who owns the work, and a pane id names nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
     pub workspace_id: String,
     pub tab_id: String,
     pub role: Option<PaneWorkRole>,
@@ -612,6 +616,11 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
             item.source.pane = true;
             item.panes.push(WorkItemPane {
                 pane_id: pane.pane_id.clone(),
+                agent_label: pane
+                    .display_agent
+                    .clone()
+                    .or_else(|| pane.agent.clone())
+                    .or_else(|| pane.name.clone()),
                 workspace_id: pane.workspace_id.clone(),
                 tab_id: pane.tab_id.clone(),
                 role: pane.work_context.role,

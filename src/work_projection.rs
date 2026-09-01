@@ -104,7 +104,11 @@ fn project_row(item: &WorkItem) -> WorkPrRow {
             .pr_title
             .clone()
             .unwrap_or_else(|| "(untitled PR)".to_string()),
-        owner: owner.map(|pane| pane.pane_id.clone()),
+        owner: owner.map(|pane| {
+            pane.agent_label
+                .clone()
+                .unwrap_or_else(|| pane.pane_id.clone())
+        }),
         extra_panes,
         ticket,
         review: review.to_string(),
@@ -300,6 +304,7 @@ mod tests {
                 .iter()
                 .map(|(pane_id, active_owner)| WorkItemPane {
                     pane_id: pane_id.to_string(),
+                    agent_label: None,
                     workspace_id: "ws".to_string(),
                     tab_id: "tab".to_string(),
                     role: None,
@@ -392,6 +397,25 @@ mod tests {
         assert_eq!(row(2).owner_pane_id, None);
         assert_eq!(row(3).owner, None);
         assert_eq!(row(3).extra_panes, 0);
+    }
+
+    #[test]
+    fn owner_cell_prefers_the_agent_label_over_the_pane_id() {
+        // The approved layout shows who owns the work (`cc·opus·high`);
+        // a pane id names nobody, so it is only the fallback.
+        let mut labelled = item("owner/repo", 1, "owned", &["SCA-1"], &[("pane-a", true)]);
+        labelled.panes[0].agent_label = Some("cc·opus·high".to_string());
+        let unlabelled = item("owner/repo", 2, "owned", &["SCA-2"], &[("pane-b", true)]);
+        let projection = project_pull_requests(&snapshot(vec![labelled, unlabelled]), None);
+        let row = |number| {
+            projection
+                .flat_rows()
+                .find(|row| row.key.pr_number == Some(number))
+                .expect("projected row")
+        };
+        assert_eq!(row(1).owner.as_deref(), Some("cc·opus·high"));
+        assert_eq!(row(1).owner_pane_id.as_deref(), Some("pane-a"));
+        assert_eq!(row(2).owner.as_deref(), Some("pane-b"));
     }
 
     #[test]
