@@ -51,6 +51,22 @@ impl AppState {
             })
     }
 
+    pub(crate) fn dock_home_detail_tab_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::DockHomeDetailTab> {
+        self.view
+            .dock_home_detail_tab_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+            .and_then(|index| {
+                crate::app::state::DockHomeDetailTab::ALL
+                    .get(index)
+                    .copied()
+            })
+    }
+
     pub(crate) fn set_manual_dock_width(&mut self, divider_col: u16) {
         let screen = self.screen_rect();
         let right = screen.x.saturating_add(screen.width);
@@ -82,5 +98,22 @@ mod tests {
         assert_eq!(app.dock_home_tab_at(90, 2), Some(1));
         assert_eq!(app.dock_home_tab_at(81, 3), None);
         assert_eq!(app.dock_home_tab_at(79, 2), None);
+    }
+
+    #[test]
+    fn dock_home_detail_tab_at_maps_the_sub_tab_row() {
+        let mut app = AppState::test_new();
+        app.view.dock_home_detail_tab_hit_areas =
+            vec![Rect::new(80, 4, 8, 1), Rect::new(88, 4, 9, 1)];
+
+        assert_eq!(
+            app.dock_home_detail_tab_at(81, 4),
+            Some(crate::app::state::DockHomeDetailTab::Overview)
+        );
+        assert_eq!(
+            app.dock_home_detail_tab_at(90, 4),
+            Some(crate::app::state::DockHomeDetailTab::Comments)
+        );
+        assert_eq!(app.dock_home_detail_tab_at(81, 5), None);
     }
 }
