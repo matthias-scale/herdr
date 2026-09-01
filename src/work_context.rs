@@ -298,6 +298,8 @@ pub enum PaneWorkContextField {
     Branch,
     Repo,
     WorkTitle,
+    Role,
+    ActiveOwner,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -312,6 +314,10 @@ pub struct PaneWorkContextPatch {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PaneWorkRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_owner: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clear_fields: Vec<PaneWorkContextField>,
 }
@@ -323,6 +329,8 @@ impl PaneWorkContextPatch {
             && self.branch.is_none()
             && self.repo.is_none()
             && self.work_title.is_none()
+            && self.role.is_none()
+            && self.active_owner.is_none()
             && self.clear_fields.is_empty()
     }
 
@@ -334,6 +342,11 @@ impl PaneWorkContextPatch {
             (PaneWorkContextField::Branch, self.branch.is_some()),
             (PaneWorkContextField::Repo, self.repo.is_some()),
             (PaneWorkContextField::WorkTitle, self.work_title.is_some()),
+            (PaneWorkContextField::Role, self.role.is_some()),
+            (
+                PaneWorkContextField::ActiveOwner,
+                self.active_owner.is_some(),
+            ),
         ] {
             if supplied && cleared.contains(&field) {
                 return Err(format!(
@@ -354,6 +367,8 @@ impl PaneWorkContextField {
             Self::Branch => "branch",
             Self::Repo => "repo",
             Self::WorkTitle => "work_title",
+            Self::Role => "role",
+            Self::ActiveOwner => "active_owner",
         }
     }
 }
@@ -434,6 +449,8 @@ impl PaneWorkContextState {
         // unrelated `--title` edit could relocate the pane.
         let imply_repo_from_pull_request =
             patch.pr_urls.is_some() && !patch.clear_fields.contains(&PaneWorkContextField::Repo);
+        let patched_role = patch.role;
+        let patched_active_owner = patch.active_owner;
 
         let mut candidate = self.manual.clone();
         if let Some(ticket_ids) = patch.ticket_ids {
@@ -458,11 +475,22 @@ impl PaneWorkContextState {
                 PaneWorkContextField::Branch => candidate.branch = None,
                 PaneWorkContextField::Repo => candidate.repo = None,
                 PaneWorkContextField::WorkTitle => candidate.work_title = None,
+                PaneWorkContextField::Role => {
+                    candidate.role = None;
+                    candidate.active_owner = false;
+                }
+                PaneWorkContextField::ActiveOwner => candidate.active_owner = false,
             }
         }
         if pr_binding_replaced || candidate.pr_urls.is_empty() {
             candidate.role = None;
             candidate.active_owner = false;
+        }
+        if let Some(role) = patched_role {
+            candidate.role = Some(role);
+        }
+        if let Some(active_owner) = patched_active_owner {
+            candidate.active_owner = active_owner;
         }
         let mut candidate = candidate.normalized()?;
         if imply_repo_from_pull_request {
@@ -2195,5 +2223,101 @@ mod tests {
             })
             .is_err());
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn manual_patch_registers_pr_role_and_active_owner_atomically() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .expect("live registration");
+
+        assert_eq!(state.effective().role, Some(PaneWorkRole::Ship));
+        assert!(state.effective().active_owner);
+        assert_eq!(
+            state.effective().primary_pr(),
+            Some("https://github.com/o/r/pull/42")
+        );
+    }
+
+    #[test]
+    fn manual_patch_rejects_active_owner_without_role() {
+        let mut state = PaneWorkContextState::default();
+        let error = state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap_err();
+
+        assert_eq!(error, "active pull-request ownership requires a work role");
+    }
+
+    #[test]
+    fn manual_patch_rejects_role_without_pull_request() {
+        let mut state = PaneWorkContextState::default();
+        let error = state
+            .apply_manual_patch(PaneWorkContextPatch {
+                role: Some(PaneWorkRole::Repair),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap_err();
+
+        assert_eq!(error, "a work role requires a pull request");
+    }
+
+    #[test]
+    fn clearing_pull_requests_also_clears_role_and_owner() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::PrUrls],
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert!(state.effective().pr_urls.is_empty());
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+    }
+
+    #[test]
+    fn clearing_role_also_clears_active_owner() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(PaneWorkRole::Ship),
+                active_owner: Some(true),
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::Role],
+                ..PaneWorkContextPatch::default()
+            })
+            .unwrap();
+
+        assert_eq!(state.effective().role, None);
+        assert!(!state.effective().active_owner);
+        assert_eq!(
+            state.effective().primary_pr(),
+            Some("https://github.com/o/r/pull/42")
+        );
     }
 }

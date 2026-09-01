@@ -585,6 +585,27 @@ fn pane_command() -> Command {
                 .arg(flag("clear")),
         )
         .subcommand(
+            Command::new("work-context")
+                .about("Inspect or update pane work context")
+                .subcommand(id_command("get", "pane_id", "Show pane work context"))
+                .subcommand(
+                    Command::new("set")
+                        .about("Update pane work context")
+                        .arg(required("pane_id", "PANE_ID"))
+                        .arg(repeatable_option("ticket", "ID"))
+                        .arg(repeatable_option("pr", "URL"))
+                        .arg(option("branch", "BRANCH"))
+                        .arg(option("repo", "OWNER/REPO"))
+                        .arg(option("title", "TITLE"))
+                        .arg(
+                            option("role", "ROLE")
+                                .value_parser(["baseline", "repair", "ship", "review"]),
+                        )
+                        .arg(flag("active-owner").requires("role"))
+                        .arg(repeatable_option("clear", "FIELD")),
+                ),
+        )
+        .subcommand(
             Command::new("split")
                 .about("Split a pane")
                 .arg(Arg::new("pane_id").value_name("PANE_ID"))
@@ -1252,6 +1273,37 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn pane_work_context_active_owner_requires_role() {
+        let error = super::command()
+            .try_get_matches_from([
+                "herdr",
+                "pane",
+                "work-context",
+                "set",
+                "1-1",
+                "--active-owner",
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(super::command()
+            .try_get_matches_from([
+                "herdr",
+                "pane",
+                "work-context",
+                "set",
+                "1-1",
+                "--role",
+                "review",
+                "--active-owner",
+            ])
+            .is_ok());
     }
 
     #[test]
