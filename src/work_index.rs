@@ -120,6 +120,7 @@ pub(crate) fn refresh_work_index(
         .iter()
         .filter_map(|repo| normalize_repo_slug(repo).ok())
         .collect::<Vec<_>>();
+    let mut degraded: Option<String> = None;
     let mut github = Vec::new();
     for repo in repos {
         match fetch_github_pull_requests(
@@ -143,7 +144,12 @@ pub(crate) fn refresh_work_index(
         ) {
             Ok(tickets) => tickets,
             Err(RefreshError::TimedOut) => Vec::new(),
-            Err(RefreshError::Failed(message)) => return unavailable_snapshot(message),
+            // A dead Linear half must not throw away a live GitHub half: 74
+            // pull requests with no ticket edge still beat an empty index.
+            Err(RefreshError::Failed(message)) => {
+                degraded = Some(message);
+                Vec::new()
+            }
         },
         _ => Vec::new(),
     };
@@ -269,7 +275,7 @@ pub(crate) fn refresh_work_index(
     let _ = now;
     Snapshot {
         items,
-        unavailable: None,
+        unavailable: degraded,
         observed_at: SystemTime::now(),
     }
 }
@@ -278,9 +284,19 @@ fn exit_detail(label: &str, output: &std::process::Output) -> String {
     // Keep the child's own words: a bare "exited unsuccessfully" is
     // undiagnosable in the field, which is exactly where these tools fail.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let detail = stderr.lines().find(|line| !line.trim().is_empty());
+    // These tools report failures as pretty-printed JSON, whose first line is
+    // a bare "{". Collapse to one line and keep it bounded.
+    let collapsed = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail = (!collapsed.is_empty()).then(|| {
+        if collapsed.chars().count() > 200 {
+            collapsed.chars().take(200).collect::<String>()
+        } else {
+            collapsed.clone()
+        }
+    });
+    let detail = detail.as_deref();
     match detail {
-        Some(detail) => format!("{label} exited unsuccessfully: {}", detail.trim()),
+        Some(detail) => format!("{label} exited unsuccessfully: {detail}"),
         None => format!("{label} exited unsuccessfully"),
     }
 }
@@ -849,6 +865,35 @@ esac
         assert_eq!(item.pr_title.as_deref(), Some("Titled from attachment"));
         assert_eq!(item.pr_state.as_deref(), Some("merged"));
         assert_eq!(item.ticket_ids, vec!["SCA-9"]);
+    }
+
+    #[test]
+    fn linear_failure_keeps_the_github_half() {
+        // A dead Linear half must degrade, not erase: the pull requests are
+        // still real work and still worth showing.
+        let dir = fixture_dir("linear-down");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7"}]'
+"#,
+            "#!/bin/sh\nprintf '%s' '{\n  \"error\": \"No API token found.\"\n}' >&2\nexit 1\n",
+        );
+        let snapshot = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].pr_number, Some(7));
+        let unavailable = snapshot.unavailable.expect("degraded message");
+        // Collapsed to one line, so the cause is legible rather than "{".
+        assert!(unavailable.contains("No API token found"), "{unavailable}");
+        assert!(!unavailable.contains('\n'));
     }
 
     #[test]
