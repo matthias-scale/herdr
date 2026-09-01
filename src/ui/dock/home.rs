@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use ratatui::{
     layout::Rect,
@@ -11,11 +11,11 @@ use ratatui::{
 use super::super::text::truncate_end;
 use crate::{
     app::AppState,
-    work_projection::{DockHomeProjection, DockHomeRow},
+    work_projection::{compact_elapsed, DockHomeProjection, DockHomeRow},
 };
 
 const HEADER_ROWS: u16 = 1;
-const FOOTER_ROWS: u16 = 3;
+const FOOTER_ROWS: u16 = 4;
 const ROW_HEIGHT: u16 = 2;
 
 fn row_rects(projection: &DockHomeProjection, area: Rect) -> Vec<Rect> {
@@ -56,6 +56,37 @@ fn owner_cell(row: &DockHomeRow) -> String {
     owner
 }
 
+fn fixed_cell(value: &str, width: usize) -> String {
+    let cell = truncate_end(value, width);
+    let padding = width.saturating_sub(super::super::text::display_width(&cell));
+    format!("{cell}{}", " ".repeat(padding))
+}
+
+fn metadata_widths(width: usize) -> (usize, usize, usize, usize, usize) {
+    const CELL_MAX: usize = 12;
+    let indent: usize = if width >= 38 { 5 } else { 3 };
+    let available = width.saturating_sub(indent.saturating_add(3));
+    let review = available.min(2);
+    let mut remaining = available.saturating_sub(review);
+    let mut owner = remaining.min(3);
+    remaining = remaining.saturating_sub(owner);
+    let mut ticket = remaining.min(3);
+    remaining = remaining.saturating_sub(ticket);
+    let age = remaining.min(4);
+    remaining = remaining.saturating_sub(age);
+    while remaining > 0 && (owner < CELL_MAX || ticket < CELL_MAX) {
+        if owner < CELL_MAX {
+            owner += 1;
+            remaining -= 1;
+        }
+        if remaining > 0 && ticket < CELL_MAX {
+            ticket += 1;
+            remaining -= 1;
+        }
+    }
+    (indent, review, owner, ticket, age)
+}
+
 fn row_lines(row: &DockHomeRow, width: usize) -> [String; 2] {
     let prefix = format!("{} #{} ", row.glyph, row.number);
     let title_width = width.saturating_sub(super::super::text::display_width(&prefix));
@@ -65,23 +96,22 @@ fn row_lines(row: &DockHomeRow, width: usize) -> [String; 2] {
     } else {
         "?"
     };
+    let (indent_width, review_width, owner_width, ticket_width, age_width) = metadata_widths(width);
+    let metadata = format!(
+        "{}{}{}{}{}{}{}{}",
+        " ".repeat(indent_width),
+        fixed_cell(review, review_width),
+        "·",
+        fixed_cell(&owner_cell(row), owner_width),
+        "·",
+        fixed_cell(&row.ticket, ticket_width),
+        "·",
+        fixed_cell(&row.age, age_width),
+    );
     [
         truncate_end(&format!("{prefix}{title}"), width),
-        truncate_end(&format!("     {review}  {}", owner_cell(row)), width),
+        truncate_end(&metadata, width),
     ]
-}
-
-fn compact_elapsed(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 60 * 60 {
-        format!("{}m", seconds / 60)
-    } else if seconds < 24 * 60 * 60 {
-        format!("{}h", seconds / (60 * 60))
-    } else {
-        format!("{}d", (seconds / (24 * 60 * 60)).min(999))
-    }
 }
 
 fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
@@ -153,6 +183,13 @@ fn render_footer(
         observed_line(projection, SystemTime::now()),
         style,
     );
+    render_line(
+        frame,
+        area,
+        start_y.saturating_add(3),
+        "age=pr open · rv=?/—/D/RR/✓/✗".to_string(),
+        style,
+    );
 }
 
 pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -220,6 +257,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, style::Color, Terminal};
+    use std::time::Duration;
 
     fn bound_app(fetched: bool) -> AppState {
         let mut app = AppState::test_new();
@@ -237,6 +275,7 @@ mod tests {
         terminal
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
                 pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/125".into()]),
+                ticket_ids: Some(vec!["MAT-124".into()]),
                 work_title: Some("work view pr projection".into()),
                 role: Some(crate::work_context::PaneWorkRole::Review),
                 active_owner: Some(true),
@@ -253,7 +292,8 @@ mod tests {
                     pr_state: Some("open".into()),
                     draft: false,
                     review_decision: Some("REVIEW_REQUIRED".into()),
-                    ticket_ids: Vec::new(),
+                    created_at: SystemTime::now().checked_sub(Duration::from_secs(241)),
+                    ticket_ids: vec!["MAT-125".into()],
                     ticket_title: None,
                     ticket_state: None,
                     branch: None,
@@ -295,6 +335,13 @@ mod tests {
             .collect()
     }
 
+    fn line_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
     #[test]
     fn renders_the_empty_state_and_bind_hint() {
         let terminal = render(&AppState::test_new(), Rect::new(0, 0, 30, 10));
@@ -305,17 +352,28 @@ mod tests {
 
     #[test]
     fn renders_one_bound_row_with_review_and_owner() {
-        let terminal = render(&bound_app(true), Rect::new(0, 0, 30, 10));
-        let text = text(&terminal);
-        assert!(text.contains("● #125 work view pr projection"), "{text:?}");
-        assert!(text.contains("RR  codex"), "{text:?}");
+        let terminal = render(&bound_app(true), Rect::new(0, 0, 60, 10));
+        let first = line_text(&terminal, 1);
+        let second = line_text(&terminal, 2);
+        assert!(
+            first.contains("● #125 work view pr projection"),
+            "{first:?}"
+        );
+        let review = second.find("RR").expect("review cell");
+        let owner = second.find("codex").expect("agent cell");
+        let ticket = second.find("MAT-125").expect("ticket cell");
+        let age = second.find("4m").expect("age cell");
+        assert!(
+            review < owner && owner < ticket && ticket < age,
+            "{second:?}"
+        );
     }
 
     #[test]
     fn unfetched_binding_renders_question_mark_review() {
         let terminal = render(&bound_app(false), Rect::new(0, 0, 30, 10));
         let text = text(&terminal);
-        assert!(text.contains("?  codex"), "{text:?}");
+        assert!(text.contains("? ·codex"), "{text:?}");
     }
 
     #[test]
@@ -330,6 +388,18 @@ mod tests {
         let text = text(&terminal);
         assert!(text.contains("unavailable: github timed out"), "{text:?}");
         assert!(!text.contains("observed"), "{text:?}");
+    }
+
+    #[test]
+    fn footer_names_pr_open_age_and_review_codes() {
+        let body_width = crate::ui::DOCK_DEFAULT_WIDTH.saturating_sub(2);
+        let terminal = render(&AppState::test_new(), Rect::new(0, 0, body_width, 10));
+        let legend = line_text(&terminal, 6);
+        assert_eq!(
+            legend.trim_end(),
+            "age=pr open · rv=?/—/D/RR/✓/✗",
+            "{legend:?}"
+        );
     }
 
     #[test]
@@ -371,13 +441,41 @@ mod tests {
     #[test]
     fn minimum_dock_width_truncates_both_row_lines_without_wrapping() {
         let app = bound_app(true);
-        let projection = app.dock_home_projection();
         // The dock's divider and handle consume two columns at DOCK_MIN_WIDTH.
-        let body_width = usize::from(crate::ui::DOCK_MIN_WIDTH.saturating_sub(2));
-        let [first, second] = row_lines(&projection.rows[0], body_width);
+        let body_width = crate::ui::DOCK_MIN_WIDTH.saturating_sub(2);
+        let terminal = render(&app, Rect::new(0, 0, body_width, 10));
+        let first = line_text(&terminal, 1);
+        let second = line_text(&terminal, 2);
+        let footer = line_text(&terminal, 3);
+        let legend = line_text(&terminal, 6);
 
-        assert!(super::super::super::text::display_width(&first) <= body_width);
-        assert!(super::super::super::text::display_width(&second) <= body_width);
+        assert_eq!(
+            super::super::super::text::display_width(&first),
+            usize::from(body_width)
+        );
+        assert_eq!(
+            super::super::super::text::display_width(&second),
+            usize::from(body_width)
+        );
         assert!(first.ends_with('…'), "first line: {first:?}");
+        assert_eq!(second, "   RR·co…·MA…·4m", "second line: {second:?}");
+        assert_eq!(footer, "─".repeat(usize::from(body_width)));
+        assert!(legend.starts_with("age=pr open"), "legend: {legend:?}");
+    }
+
+    #[test]
+    fn metadata_columns_never_shrink_as_the_dock_grows() {
+        let mut previous =
+            metadata_widths(usize::from(crate::ui::DOCK_MIN_WIDTH.saturating_sub(2)));
+        for width in usize::from(crate::ui::DOCK_MIN_WIDTH.saturating_sub(1))
+            ..=usize::from(crate::ui::DOCK_MAX_WIDTH.saturating_sub(2))
+        {
+            let current = metadata_widths(width);
+            assert!(current.1 >= previous.1, "review shrank at {width}");
+            assert!(current.2 >= previous.2, "agent shrank at {width}");
+            assert!(current.3 >= previous.3, "ticket shrank at {width}");
+            assert!(current.4 >= previous.4, "age shrank at {width}");
+            previous = current;
+        }
     }
 }

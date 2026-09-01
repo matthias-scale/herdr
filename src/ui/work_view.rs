@@ -214,6 +214,7 @@ mod tests {
             pr_state: Some("open".to_string()),
             draft: false,
             review_decision: Some("REVIEW_REQUIRED".to_string()),
+            created_at: None,
             ticket_ids: tickets.iter().map(|ticket| (*ticket).to_string()).collect(),
             ticket_title: None,
             ticket_state: None,

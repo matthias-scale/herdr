@@ -8,6 +8,7 @@
 use crate::app::state::{WorkItemKey, WorkProjection, WorkViewState};
 use crate::work_context::repo_slugs_match;
 use crate::work_index::{Snapshot, WorkItem};
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkPrRow {
@@ -293,6 +294,7 @@ pub(crate) struct DockHomeBinding {
     pub(crate) role: Option<crate::work_context::PaneWorkRole>,
     pub(crate) active_owner: bool,
     pub(crate) work_title: Option<String>,
+    pub(crate) ticket_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +309,10 @@ pub(crate) struct DockHomeRow {
     /// Review cell from the snapshot, or "?" when the row is a declared
     /// binding that no fetch has ever confirmed.
     pub(crate) review: String,
+    pub(crate) ticket: String,
+    /// Time since the PR was opened, or "—" when GitHub did not provide a
+    /// trustworthy creation time.
+    pub(crate) age: String,
     pub(crate) fetched: bool,
     pub(crate) extra_panes: usize,
     /// Jump target: the owning pane, else the first registered pane.
@@ -335,6 +341,15 @@ pub(crate) fn project_dock_home(
     snapshot: Option<&Snapshot>,
     index_enabled: bool,
 ) -> DockHomeProjection {
+    project_dock_home_at(bindings, snapshot, index_enabled, SystemTime::now())
+}
+
+fn project_dock_home_at(
+    bindings: &[DockHomeBinding],
+    snapshot: Option<&Snapshot>,
+    index_enabled: bool,
+    now: SystemTime,
+) -> DockHomeProjection {
     let mut rows: Vec<DockHomeRow> = Vec::new();
     for binding in bindings {
         if let Some(row) = rows
@@ -342,6 +357,9 @@ pub(crate) fn project_dock_home(
             .find(|row| row.key.pr_url.as_deref() == Some(binding.pr_url.as_str()))
         {
             row.extra_panes += 1;
+            if row.ticket == "no ticket" && !binding.ticket_ids.is_empty() {
+                row.ticket = ticket_cell(&binding.ticket_ids);
+            }
             if binding.active_owner && row.owner.is_none() {
                 row.owner = binding.agent_label.clone();
                 row.glyph = dock_home_glyph(binding.agent_state);
@@ -368,6 +386,15 @@ pub(crate) fn project_dock_home(
             .map(|item| item.repo.clone())
             .or_else(|| binding.repo_slug())
             .unwrap_or_default();
+        let ticket_ids = item
+            .map(|item| item.ticket_ids.as_slice())
+            .filter(|ticket_ids| !ticket_ids.is_empty())
+            .unwrap_or(binding.ticket_ids.as_slice());
+        let age = item
+            .and_then(|item| item.created_at)
+            .and_then(|created_at| now.duration_since(created_at).ok())
+            .map(compact_elapsed)
+            .unwrap_or_else(|| "—".to_string());
         rows.push(DockHomeRow {
             key: WorkItemKey {
                 repo,
@@ -388,6 +415,8 @@ pub(crate) fn project_dock_home(
                 .flatten(),
             glyph: dock_home_glyph(binding.agent_state),
             review,
+            ticket: ticket_cell(ticket_ids),
+            age,
             fetched,
             extra_panes: 0,
             ws_idx: binding.ws_idx,
@@ -414,6 +443,27 @@ pub(crate) fn project_dock_home(
         observed_at: snapshot.map(|snapshot| snapshot.observed_at),
         unavailable: snapshot.and_then(|snapshot| snapshot.unavailable.clone()),
         index_enabled,
+    }
+}
+
+fn ticket_cell(ticket_ids: &[String]) -> String {
+    match ticket_ids {
+        [] => "no ticket".to_string(),
+        [ticket] => ticket.clone(),
+        tickets => format!("{} tickets", tickets.len()),
+    }
+}
+
+pub(crate) fn compact_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 24 * 60 * 60 {
+        format!("{}h", seconds / (60 * 60))
+    } else {
+        format!("{}d", (seconds / (24 * 60 * 60)).min(999))
     }
 }
 
@@ -475,6 +525,7 @@ impl crate::app::state::AppState {
                     role: context.role,
                     active_owner: context.active_owner,
                     work_title: context.work_title.clone(),
+                    ticket_ids: context.ticket_ids.clone(),
                 });
             }
         }
@@ -561,6 +612,7 @@ mod tests {
             pr_state: Some("open".to_string()),
             draft: false,
             review_decision: None,
+            created_at: None,
             ticket_ids: tickets.iter().map(|ticket| ticket.to_string()).collect(),
             ticket_title: None,
             ticket_state: None,
@@ -608,6 +660,7 @@ mod tests {
             role: None,
             active_owner: true,
             work_title: Some(format!("binding {pr_number}")),
+            ticket_ids: Vec::new(),
         }
     }
 
@@ -683,6 +736,45 @@ mod tests {
         assert_eq!(projection.rows[1].title, "snapshot title");
         assert_eq!(projection.rows[1].review, "✓");
         assert!(projection.rows[1].fetched);
+    }
+
+    #[test]
+    fn dock_home_ticket_precedence_and_missing_age_are_explicit() {
+        let mut indexed_binding = home_binding(0, 10, crate::detect::AgentState::Working);
+        indexed_binding.ticket_ids = vec!["MAT-10".to_string()];
+        let mut fallback_binding = home_binding(1, 20, crate::detect::AgentState::Working);
+        fallback_binding.ticket_ids = vec!["MAT-20".to_string(), "SCA-20".to_string()];
+        let empty_binding = home_binding(2, 30, crate::detect::AgentState::Idle);
+        let indexed_item = item("owner/repo", 10, "indexed", &["SCA-10"], &[]);
+        let fallback_item = item("owner/repo", 20, "fallback", &[], &[]);
+
+        let projection = project_dock_home_at(
+            &[indexed_binding, fallback_binding, empty_binding],
+            Some(&snapshot(vec![indexed_item, fallback_item])),
+            true,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(300),
+        );
+
+        assert_eq!(projection.rows[0].ticket, "SCA-10");
+        assert_eq!(projection.rows[1].ticket, "2 tickets");
+        assert_eq!(projection.rows[2].ticket, "no ticket");
+        assert!(projection.rows.iter().all(|row| row.age == "—"));
+    }
+
+    #[test]
+    fn dock_home_age_is_time_since_pull_request_opened() {
+        let binding = home_binding(0, 10, crate::detect::AgentState::Working);
+        let mut indexed_item = item("owner/repo", 10, "indexed", &[], &[]);
+        indexed_item.created_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(120));
+
+        let projection = project_dock_home_at(
+            &[binding],
+            Some(&snapshot(vec![indexed_item])),
+            true,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(300),
+        );
+
+        assert_eq!(projection.rows[0].age, "3m");
     }
 
     #[test]

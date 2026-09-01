@@ -52,6 +52,8 @@ pub(crate) struct WorkItem {
     pub pr_state: Option<String>,
     pub draft: bool,
     pub review_decision: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<SystemTime>,
     pub ticket_ids: Vec<String>,
     pub ticket_title: Option<String>,
     pub ticket_state: Option<String>,
@@ -77,6 +79,7 @@ struct GithubPullRequest {
     branch: String,
     draft: bool,
     review_decision: Option<String>,
+    created_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +166,7 @@ pub(crate) fn refresh_work_index(
             pr_state: Some("open".into()),
             draft: pr.draft,
             review_decision: pr.review_decision,
+            created_at: pr.created_at,
             ticket_ids: Vec::new(),
             ticket_title: None,
             ticket_state: None,
@@ -197,6 +201,7 @@ pub(crate) fn refresh_work_index(
                 pr_state: attachment.state.clone(),
                 draft: attachment.draft,
                 review_decision: None,
+                created_at: None,
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
@@ -250,6 +255,7 @@ pub(crate) fn refresh_work_index(
             pr_state: None,
             draft: false,
             review_decision: None,
+            created_at: None,
             ticket_ids: vec![ticket.id.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
@@ -317,7 +323,7 @@ fn fetch_github_pull_requests(
         "--limit",
         "200",
         "--json",
-        "number,title,headRefName,isDraft,reviewDecision,url",
+        "number,title,headRefName,isDraft,reviewDecision,url,createdAt",
     ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
@@ -355,9 +361,77 @@ fn fetch_github_pull_requests(
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string),
+                created_at: value
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
             })
         })
         .collect())
+}
+
+fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let year = parse_decimal(bytes.get(0..4)?)?;
+    let month = parse_decimal(bytes.get(5..7)?)?;
+    let day = parse_decimal(bytes.get(8..10)?)?;
+    let hour = parse_decimal(bytes.get(11..13)?)?;
+    let minute = parse_decimal(bytes.get(14..16)?)?;
+    let second = parse_decimal(bytes.get(17..19)?)?;
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if year < 1970 || day == 0 || day > month_days || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let seconds = days_since_unix_epoch(year, month, day)
+        .checked_mul(24 * 60 * 60)?
+        .checked_add(u64::from(hour) * 60 * 60)?
+        .checked_add(u64::from(minute) * 60)?
+        .checked_add(u64::from(second))?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+}
+
+fn parse_decimal(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        if byte.is_ascii_digit() {
+            Some(value * 10 + u32::from(*byte - b'0'))
+        } else {
+            None
+        }
+    })
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> u64 {
+    let adjusted_year = i64::from(year) - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year / 400
+    } else {
+        (adjusted_year - 399) / 400
+    };
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    (era * 146_097 + day_of_era - 719_468) as u64
 }
 
 fn fetch_linear_tickets(
@@ -592,6 +666,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 pr_state: None,
                 draft: false,
                 review_decision: None,
+                created_at: None,
                 ticket_ids: {
                     // Sorted so the snapshot is byte-stable across refreshes:
                     // it is consumed as JSON by ghx and diffed by hand.
@@ -788,12 +863,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_normal_rfc3339_timestamp() {
+        assert_eq!(
+            parse_rfc3339_system_time("2026-08-30T11:22:33Z"),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_788_088_953))
+        );
+    }
+
+    #[test]
+    fn parses_leap_year_rfc3339_timestamp() {
+        assert_eq!(
+            parse_rfc3339_system_time("2024-02-29T00:00:00Z"),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_709_164_800))
+        );
+    }
+
+    #[test]
+    fn malformed_rfc3339_timestamp_is_unknown() {
+        assert_eq!(parse_rfc3339_system_time("2023-02-29T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn older_work_item_json_defaults_created_at_to_unknown() {
+        let item: WorkItem = serde_json::from_str(
+            r#"{"repo":"owner/repo","pr_number":7,"pr_url":null,"pr_title":null,"pr_state":null,"draft":false,"review_decision":null,"ticket_ids":[],"ticket_title":null,"ticket_state":null,"branch":null,"preview_urls":[],"panes":[],"source":{"github":true,"linear":false,"pane":false}}"#,
+        )
+        .expect("older work item JSON");
+
+        assert_eq!(item.created_at, None);
+    }
+
+    #[test]
+    fn github_pull_request_fetch_requests_created_at() {
+        let dir = fixture_dir("github-created-at");
+        let (gh, _linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,headRefName,isDraft,reviewDecision,url,createdAt" || exit 42
+printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z"}]'
+"#,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+        );
+
+        let pull_requests = fetch_github_pull_requests(
+            "owner/repo",
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .unwrap_or_else(|_| panic!("GitHub pull request fetch failed"));
+
+        assert_eq!(pull_requests.len(), 1);
+        assert_eq!(
+            pull_requests[0].created_at,
+            parse_rfc3339_system_time("2026-08-30T11:22:33Z")
+        );
+    }
+
+    #[test]
     fn attachment_join_keeps_orphan_buckets_and_ignores_branch_names() {
         let dir = fixture_dir("join");
         let (gh, linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-printf '%s' '[{"number":7,"title":"Attached PR","headRefName":"plain-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"No ticket PR","headRefName":"other-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/8"}]'
+printf '%s' '[{"number":7,"title":"Attached PR","headRefName":"plain-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z"},{"number":8,"title":"No ticket PR","headRefName":"other-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/8"}]'
 "#,
             r#"#!/bin/sh
 case "$*" in
@@ -819,6 +951,10 @@ esac
             .expect("joined PR");
         assert_eq!(joined.ticket_ids, vec!["SCA-2"]);
         assert_eq!(joined.branch.as_deref(), Some("plain-branch"));
+        assert_eq!(
+            joined.created_at,
+            parse_rfc3339_system_time("2026-08-30T11:22:33Z")
+        );
         assert!(snapshot
             .items
             .iter()
