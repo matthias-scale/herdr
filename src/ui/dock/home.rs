@@ -27,6 +27,20 @@ fn tab_label(row: &DockHomeRow) -> String {
     format!("{} #{}", row.glyph, row.number)
 }
 
+/// A tab keeps one trailing column so neighbouring labels always show a gap:
+/// the equal-share allocator can hand a tab exactly its label width, which
+/// renders `SCA-2456SCA-2577` with nothing between the two identifiers. At the
+/// legibility floor there is no column to spare, and labels are already elided
+/// to `●…`, so the ellipsis does the separating instead.
+fn label_width(tab_area: Rect) -> usize {
+    let width = usize::from(tab_area.width);
+    if tab_area.width > MIN_LEGIBLE_TAB_WIDTH {
+        width.saturating_sub(1)
+    } else {
+        width
+    }
+}
+
 /// The PR strip uses the dock tab bar's natural-width/equal-share allocator.
 /// If equal shares would lose the state glyph or PR-number suffix, it shows a
 /// selection-following window instead; hidden tabs remain reachable by keys.
@@ -707,7 +721,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                 } else {
                     Style::default().fg(app.palette.overlay0)
                 };
-                let label = middle_elide(&tab_label(row), usize::from(tab_area.width));
+                let label = middle_elide(&tab_label(row), label_width(tab_area));
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(label, style))),
                     tab_area,
@@ -724,7 +738,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                 } else {
                     Style::default().fg(app.palette.overlay0)
                 };
-                let label = middle_elide(&row.ticket.identifier, usize::from(tab_area.width));
+                let label = middle_elide(&row.ticket.identifier, label_width(tab_area));
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(label, style))),
                     tab_area,
@@ -1447,7 +1461,7 @@ mod tests {
             let actual = (tab_area.x..tab_area.right())
                 .map(|x| terminal.backend().buffer()[(x, tab_area.y)].symbol())
                 .collect::<String>();
-            let expected = middle_elide(&tab_label(row), usize::from(tab_area.width));
+            let expected = middle_elide(&tab_label(row), label_width(tab_area));
             assert_eq!(actual.trim_end(), expected, "tab #{}", row.number);
             assert_eq!(actual.chars().next(), row.glyph.chars().next());
             assert!(actual.contains('…'));
