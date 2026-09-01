@@ -347,9 +347,10 @@ pub(crate) fn project_dock_home(
             continue;
         }
         let item = snapshot.and_then(|snapshot| {
-            snapshot.items.iter().find(|item| {
-                item.pr_url.as_deref() == Some(binding.pr_url.as_str())
-            })
+            snapshot
+                .items
+                .iter()
+                .find(|item| item.pr_url.as_deref() == Some(binding.pr_url.as_str()))
         });
         let fetched = item.is_some();
         let review = item
@@ -456,8 +457,7 @@ impl crate::app::state::AppState {
                 bindings.push(DockHomeBinding {
                     ws_idx,
                     pane_id: detail.pane_id,
-                    agent_label: Some(detail.agent_label.clone())
-                        .filter(|label| !label.is_empty()),
+                    agent_label: Some(detail.agent_label.clone()).filter(|label| !label.is_empty()),
                     agent_state: detail.state,
                     pr_url: pr_url.to_string(),
                     role: context.role,
@@ -478,7 +478,10 @@ impl crate::app::state::AppState {
 
     /// Index of the selected home row, defaulting to the first row; `None`
     /// when nothing is bound.
-    pub(crate) fn dock_home_selected_index(&self, projection: &DockHomeProjection) -> Option<usize> {
+    pub(crate) fn dock_home_selected_index(
+        &self,
+        projection: &DockHomeProjection,
+    ) -> Option<usize> {
         if projection.rows.is_empty() {
             return None;
         }
@@ -510,10 +513,11 @@ impl crate::app::state::AppState {
         let Some(row) = self.dock_home_selected_row() else {
             return false;
         };
-        let exists = self
-            .workspaces
-            .get(row.ws_idx)
-            .is_some_and(|ws| ws.tabs.iter().any(|tab| tab.panes.contains_key(&row.pane_id)));
+        let exists = self.workspaces.get(row.ws_idx).is_some_and(|ws| {
+            ws.tabs
+                .iter()
+                .any(|tab| tab.panes.contains_key(&row.pane_id))
+        });
         if !exists {
             return false;
         }
@@ -575,6 +579,192 @@ mod tests {
 
     fn view(items: Vec<WorkItem>) -> WorkViewState {
         WorkViewState::new(true, Some(snapshot(items)))
+    }
+
+    fn home_binding(
+        ws_idx: usize,
+        pr_number: u64,
+        agent_state: crate::detect::AgentState,
+    ) -> DockHomeBinding {
+        DockHomeBinding {
+            ws_idx,
+            pane_id: crate::layout::PaneId::alloc(),
+            agent_label: Some(format!("agent-{ws_idx}")),
+            agent_state,
+            pr_url: format!("https://github.com/owner/repo/pull/{pr_number}"),
+            role: None,
+            active_owner: true,
+            work_title: Some(format!("binding {pr_number}")),
+        }
+    }
+
+    fn state_with_bound_prs(pr_numbers: &[u64]) -> crate::app::state::AppState {
+        let mut state = crate::app::state::AppState::test_new();
+        state.workspaces = pr_numbers
+            .iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        state.active = (!state.workspaces.is_empty()).then_some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        for (ws_idx, number) in pr_numbers.iter().enumerate() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        state
+    }
+
+    #[test]
+    fn dock_home_row_order_follows_bindings_across_lifecycle_changes() {
+        let mut bindings = vec![
+            home_binding(0, 10, crate::detect::AgentState::Working),
+            home_binding(1, 20, crate::detect::AgentState::Blocked),
+        ];
+        let before = project_dock_home(&bindings, None);
+        bindings[0].agent_state = crate::detect::AgentState::Idle;
+        bindings[1].agent_state = crate::detect::AgentState::Working;
+        let after = project_dock_home(&bindings, None);
+
+        let keys = |projection: &DockHomeProjection| {
+            projection
+                .rows
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&before), keys(&after));
+        assert_eq!(before.rows[0].glyph, "●");
+        assert_eq!(after.rows[0].glyph, "○");
+    }
+
+    #[test]
+    fn dock_home_rows_distinguish_missing_and_fetched_pull_requests() {
+        let missing = home_binding(0, 10, crate::detect::AgentState::Idle);
+        let fetched = home_binding(1, 20, crate::detect::AgentState::Working);
+        let mut fetched_item = item("owner/repo", 20, "snapshot title", &[], &[]);
+        fetched_item.review_decision = Some("APPROVED".to_string());
+
+        let projection =
+            project_dock_home(&[missing, fetched], Some(&snapshot(vec![fetched_item])));
+
+        assert_eq!(projection.rows[0].key.repo, "owner/repo");
+        assert_eq!(projection.rows[0].number, "10");
+        assert_eq!(projection.rows[0].review, "?");
+        assert!(!projection.rows[0].fetched);
+        assert_eq!(projection.rows[1].number, "20");
+        assert_eq!(projection.rows[1].title, "snapshot title");
+        assert_eq!(projection.rows[1].review, "✓");
+        assert!(projection.rows[1].fetched);
+    }
+
+    #[test]
+    fn dock_home_review_cell_prefers_draft_to_review_required() {
+        let binding = home_binding(0, 10, crate::detect::AgentState::Idle);
+        let mut draft = item("owner/repo", 10, "draft", &[], &[]);
+        draft.draft = true;
+        draft.review_decision = Some("REVIEW_REQUIRED".to_string());
+
+        let projection = project_dock_home(&[binding], Some(&snapshot(vec![draft])));
+
+        assert_eq!(projection.rows[0].review, "D");
+    }
+
+    #[test]
+    fn dock_home_unbound_counts_ignore_items_with_panes_and_none_without_snapshot() {
+        let bound_pr = item("owner/repo", 1, "bound pr", &[], &[("pane-a", true)]);
+        let unbound_pr = item("owner/repo", 2, "unbound pr", &[], &[]);
+        let mut bound_ticket = item(
+            "owner/repo",
+            3,
+            "bound ticket",
+            &["SCA-3"],
+            &[("pane-b", true)],
+        );
+        bound_ticket.pr_number = None;
+        bound_ticket.pr_url = None;
+        bound_ticket.pr_title = None;
+        let mut unbound_ticket = item("owner/repo", 4, "unbound ticket", &["SCA-4"], &[]);
+        unbound_ticket.pr_number = None;
+        unbound_ticket.pr_url = None;
+        unbound_ticket.pr_title = None;
+
+        let projection = project_dock_home(
+            &[],
+            Some(&snapshot(vec![
+                bound_pr,
+                unbound_pr,
+                bound_ticket,
+                unbound_ticket,
+            ])),
+        );
+        assert_eq!(projection.unbound_prs, Some(1));
+        assert_eq!(projection.unbound_tickets, Some(1));
+
+        let unknown = project_dock_home(&[], None);
+        assert_eq!(unknown.unbound_prs, None);
+        assert_eq!(unknown.unbound_tickets, None);
+    }
+
+    #[test]
+    fn dock_home_selection_tracks_keys_and_clamps_at_both_ends() {
+        let mut state = state_with_bound_prs(&[10, 20, 30]);
+        let initial = state.dock_home_projection();
+        state.dock_home_selection = Some(initial.rows[1].key.clone());
+        assert_eq!(state.dock_home_selected_index(&initial), Some(1));
+
+        state.workspaces.swap(0, 1);
+        let reordered = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_index(&reordered), Some(0));
+
+        state.workspaces.remove(0);
+        let selected_gone = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_index(&selected_gone), Some(0));
+
+        let mut clamped = state_with_bound_prs(&[40, 50]);
+        clamped.move_dock_home_selection(-1);
+        assert_eq!(
+            clamped.dock_home_selected_row().expect("top row").number,
+            "40"
+        );
+        clamped.move_dock_home_selection(10);
+        assert_eq!(
+            clamped.dock_home_selected_row().expect("bottom row").number,
+            "50"
+        );
+        clamped.move_dock_home_selection(1);
+        assert_eq!(
+            clamped
+                .dock_home_selected_row()
+                .expect("clamped bottom")
+                .number,
+            "50"
+        );
+    }
+
+    #[test]
+    fn dock_home_jump_is_a_noop_after_the_target_pane_disappears() {
+        let mut state = state_with_bound_prs(&[10]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        state.dock_home_selection = state.dock_home_selected_row().map(|row| row.key);
+        let active_before = state.active;
+        let focused_before = state.workspaces[0].focused_pane_id();
+        state.workspaces[0].tabs[0].panes.remove(&pane_id);
+
+        assert!(!state.jump_to_dock_home_selection());
+        assert_eq!(state.active, active_before);
+        assert_eq!(state.workspaces[0].focused_pane_id(), focused_before);
     }
 
     #[test]
