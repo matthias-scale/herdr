@@ -57,6 +57,7 @@ type ScheduledController = unknown;
 
 export type Env = {
   PLUGIN_MARKETPLACE_BUCKET: R2Bucket;
+  PLUGIN_MARKETPLACE_BACKUP_BUCKET: R2Bucket;
   PLUGIN_MARKETPLACE_BLACKLIST?: KVNamespace;
   GITHUB_TOKEN?: string;
 };

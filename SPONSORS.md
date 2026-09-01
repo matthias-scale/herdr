@@ -7,6 +7,8 @@ This file is the permanent record of everyone who backed herdr — thank you.
 
 ## Gold
 
+<a href="https://terminaltrove.com/"><img src="assets/sponsors/terminal-trove.png" alt="Terminal Trove" width="200" /></a>
+
 - [Terminal Trove](https://terminaltrove.com/)
 - [Joel (Moshi)](https://getmoshi.app/)
 

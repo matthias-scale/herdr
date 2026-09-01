@@ -8,6 +8,7 @@ pub(crate) mod actions;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
+pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
 pub(crate) use api_helpers::read_terminal_snapshot;
@@ -21,14 +22,17 @@ mod ids;
 pub(crate) mod inbox;
 mod input;
 mod pane_lifecycle;
+pub(crate) mod pane_graphics;
 mod popup;
 mod repo_routing;
 mod runtime;
 mod runtime_mutations;
 mod session;
 pub mod state;
+mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
+mod window_title;
 mod theme_sync;
 pub(crate) mod work_context_git;
 mod worktrees;
@@ -111,6 +115,10 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    pub(crate) pane_graphics: pane_graphics::Runtime,
+    pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
+    pub(crate) direct_graphics_available: bool,
+    pub(crate) pixel_mouse_available: bool,
     pub(crate) status_metric_refresh: crate::platform::status_metrics::StatusMetricRefresh,
     pub(crate) status_metric_sampler:
         Arc<std::sync::Mutex<crate::platform::status_metrics::StatusMetricSampler>>,
@@ -205,8 +213,18 @@ pub struct App {
     pub(crate) session_save_failures: u32,
     pub(crate) session_save_retry_deadline: Option<Instant>,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
+    pub(crate) detached_process_children: Vec<std::process::Child>,
+    pub(crate) tab_bar_status_generation: u64,
+    pub(crate) tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
+    pub(crate) tab_bar_commands: Vec<tab_bar_status::TabBarCommandRuntime>,
+    pub(crate) next_tab_bar_datetime_refresh: Option<Instant>,
+    /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
+    pub(crate) window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
+    /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
+    /// Last attempt that could update a connected presentation surface.
+    pub(crate) last_presentation_at: Option<Instant>,
     pub(crate) input_leases: input::InputLeaseTable,
     pub render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
@@ -744,8 +762,8 @@ impl App {
                 status_buttons: Vec::new(),
             },
             drag: None,
-            workspace_press: None,
-            tab_press: None,
+            workspace_presses: HashMap::new(),
+            tab_presses: HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -760,6 +778,7 @@ impl App {
             outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
+            headless_size: config.headless_size(),
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
             sidebar_min_width,
@@ -799,6 +818,7 @@ impl App {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
+            pane_outer_borders: config.ui.pane_outer_borders,
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
@@ -810,6 +830,8 @@ impl App {
             connectivity: crate::connectivity::Connectivity::default(),
             status_disk_visible: false,
             tab_bar_position: config.ui.tab_bar_position,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: String::new(),
             pane_history_persistence: config.experimental.pane_history,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
@@ -845,9 +867,6 @@ impl App {
             integration_install_messages: Vec::new(),
             installed_plugins: load_plugin_registry(no_session),
             plugin_panes: std::collections::HashMap::new(),
-            pane_graphics_layers: std::collections::HashMap::new(),
-            pane_graphics_streams: std::collections::HashMap::new(),
-            pane_graphics_revision: 0,
             popup_pane: None,
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
@@ -855,6 +874,7 @@ impl App {
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
+            host_mouse_pixels: None,
             session_dirty: false,
             session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
@@ -895,12 +915,16 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
 
-        Self {
+        let mut app = Self {
             config_diagnostic_deadline: None,
             toast_deadline: None,
             copy_feedback_deadline: None,
             last_api_notification_at: None,
             state,
+            pane_graphics: pane_graphics::Runtime::default(),
+            pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
+            direct_graphics_available: false,
+            pixel_mouse_available: false,
             status_metric_refresh: crate::platform::status_metrics::StatusMetricRefresh::immediate(
                 Instant::now(),
             ),
@@ -978,10 +1002,17 @@ impl App {
             session_save_failures: 0,
             session_save_retry_deadline: None,
             detached_custom_command_children: Vec::new(),
+            detached_process_children: Vec::new(),
+            tab_bar_status_generation: 0,
+            tab_bar_datetimes: Vec::new(),
+            tab_bar_commands: Vec::new(),
+            next_tab_bar_datetime_refresh: None,
+            window_title_template: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
+            last_presentation_at: None,
             input_leases: input::InputLeaseTable::default(),
             api_rx,
             event_hub,
@@ -998,7 +1029,10 @@ impl App {
             local_input_source_switch: true,
             config_reloaded_from_disk: false,
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
-        }
+        };
+        app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
+        app.configure_window_title(&config.ui.window_title);
+        app
     }
 
     #[cfg(unix)]
@@ -1173,11 +1207,12 @@ impl App {
         self.query_host_terminal_theme();
 
         let mut needs_render = true;
+        let mut sent_window_title: Option<Option<String>> = None;
         let mut host_mouse_capture_active = self.state.mouse_capture;
         let mut host_keyboard_report_all_active = false;
 
         while !self.state.should_quit {
-            self.reap_finished_custom_commands();
+            self.reap_finished_detached_processes();
             if self.render_dirty.is_pending() {
                 needs_render = true;
             }
@@ -1308,7 +1343,13 @@ impl App {
                 needs_render = true;
             }
 
+            if self.pane_graphics.retain_live_panes(&self.state) {
+                needs_render = true;
+            }
+
             let now = Instant::now();
+            self.render_dirty
+                .set_immediate_pty_sources(self.state.app_surface_pane_ids());
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
             if let Some(width) = self.state.take_dock_width_persistence_request() {
@@ -1327,18 +1368,19 @@ impl App {
                     terminal.swap_buffers();
                     self.full_redraw_pending = false;
                 }
-                let mut cell_size = crate::kitty_graphics::HostCellSize::default();
+                let mut cell_size = self.state.host_cell_size;
                 terminal.draw(|frame| {
                     let area = frame.area();
                     if kitty_graphics_enabled {
-                        let observed_cell_size =
-                            crate::kitty_graphics::HostCellSize::try_from_terminal(area);
-                        if let Some(observed_cell_size) = observed_cell_size {
+                        if let Some(observed_cell_size) =
+                            crate::kitty_graphics::HostCellSize::try_from_terminal(area)
+                        {
                             self.state.host_cell_size = observed_cell_size;
+                            cell_size = observed_cell_size;
+                        } else if !cell_size.is_known() {
+                            cell_size =
+                                crate::kitty_graphics::HostCellSize::fallback_for_area(area);
                         }
-                        cell_size = observed_cell_size.unwrap_or_else(|| {
-                            crate::kitty_graphics::HostCellSize::fallback_for_area(area)
-                        });
                         crate::ui::compute_view_with_cell_size(
                             &mut self.state,
                             &self.terminal_runtimes,
@@ -1368,6 +1410,7 @@ impl App {
                 if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(
                         &self.state,
+                        &self.pane_graphics,
                         &self.terminal_runtimes,
                         cell_size,
                     )?;
@@ -1720,6 +1763,12 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
+                diagnostics.extend(crate::config::tab_bar_right_diagnostics(
+                    &config.ui.tab_bar_right,
+                ));
+                diagnostics.extend(crate::config::window_title_diagnostics(
+                    &config.ui.window_title,
+                ));
 
                 self.state.default_sidebar_width = config.ui.sidebar_width;
                 if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
@@ -1802,8 +1851,7 @@ impl App {
             crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
             if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
-                self.state.pane_graphics_layers.clear();
-                self.state.pane_graphics_streams.clear();
+                self.pane_graphics.clear();
                 self.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
             }
             self.state.reveal_hidden_cursor_for_cjk_ime =
@@ -1819,6 +1867,14 @@ impl App {
             self.state.pane_history_persistence = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();
+            }
+        }
+
+        if !invalid_section("server") {
+            if let Some(diagnostic) = config.invalid_headless_size_diagnostic() {
+                diagnostics.push(format!("{diagnostic}; keeping current [server] settings"));
+            } else {
+                self.state.headless_size = config.headless_size();
             }
         }
 
@@ -2002,6 +2058,31 @@ impl App {
     pub(crate) fn route_client_input(&mut self, data: Vec<u8>) {
         let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
         self.route_client_events(events, true);
+    }
+
+    pub(crate) fn route_client_pixel_mouse(
+        &mut self,
+        source_id: InputSourceId,
+        data: &[u8],
+        geometry: crate::input::mouse::HostGeometry,
+    ) -> bool {
+        let Some((x, y)) = crate::input::mouse::parse_report(data) else {
+            return false;
+        };
+        let Some((column, row)) = geometry.cell(x, y) else {
+            return false;
+        };
+        let Some(cell_report) = crate::input::mouse::report_at_cell(data, column, row) else {
+            return false;
+        };
+        let mut events = crate::raw_input::parse_raw_input_bytes_sync(&cell_report);
+        if events.len() != 1 || !matches!(events[0], crate::raw_input::RawInputEvent::Mouse(_)) {
+            return false;
+        }
+        self.state.host_mouse_pixels = Some(crate::input::mouse::HostPixels { x, y, geometry });
+        self.route_client_events_from(source_id, std::mem::take(&mut events), false);
+        self.state.host_mouse_pixels = None;
+        true
     }
 
     pub(crate) fn route_client_events(
@@ -2839,6 +2920,37 @@ mod tests {
     }
 
     #[test]
+    fn tab_bar_command_events_render_only_when_visible_output_changes() {
+        if !crate::platform::status_commands_supported() {
+            return;
+        }
+
+        let mut app = test_app();
+        app.configure_tab_bar_status(
+            &[crate::config::TabBarRightEntryConfig::Command {
+                command: "status".into(),
+                interval_seconds: 5,
+                timeout_seconds: 2,
+            }],
+            " ",
+        );
+        let generation = app.tab_bar_status_generation;
+        let event = |generation, output: Option<&str>| AppEvent::TabBarCommandFinished {
+            generation,
+            segment_index: 0,
+            result: Ok(output.map(str::to_string)),
+        };
+
+        assert!(!app.handle_internal_event_with_prefix_sync(event(generation, None)));
+        assert!(app.handle_internal_event_with_prefix_sync(event(generation, Some("ready"))));
+        assert!(!app.handle_internal_event_with_prefix_sync(event(generation, Some("ready"))));
+        assert!(!app.handle_internal_event_with_prefix_sync(event(
+            generation.wrapping_add(1),
+            Some("stale"),
+        )));
+    }
+
+    #[test]
     fn git_status_event_clears_in_flight_refresh() {
         let mut app = test_app();
         app.test_begin_git_refresh(1);
@@ -3495,7 +3607,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\nprompt_new_workspace_name = true\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -3529,6 +3641,7 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.headless_size, (160, 50));
         assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
         assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
         assert!(app
@@ -5190,6 +5303,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
             }),
@@ -5271,6 +5385,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
             }),
@@ -5318,6 +5433,7 @@ mod tests {
                 ratio: Some(0.333),
                 cwd: None,
                 focus: false,
+                right_click: crate::api::schema::PaneRightClickTarget::Pane,
                 env: Default::default(),
                 work_context: None,
             }),
@@ -5330,6 +5446,14 @@ mod tests {
             .splits(ratatui::layout::Rect::new(0, 0, 100, 20));
         assert_eq!(splits.len(), 1);
         assert!((splits[0].ratio - 0.333).abs() < f32::EPSILON);
+        let response_pane_id = response["result"]["pane"]["pane_id"].as_str().unwrap();
+        let (_, response_pane_id) = app.parse_pane_id(response_pane_id).unwrap();
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(response_pane_id)
+                .unwrap()
+                .right_click_passthrough
+        );
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
         for (_terminal_id, runtime) in runtimes {
@@ -5365,6 +5489,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
             }),

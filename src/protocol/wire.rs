@@ -57,6 +57,8 @@ pub enum ClientKeybindings {
 pub enum ClientLaunchMode {
     /// Full app client.
     App,
+    /// Full app client eligible for audited local direct graphics.
+    AppDirectGraphics,
     /// Direct terminal attach client.
     TerminalAttach,
 }
@@ -434,6 +436,25 @@ pub enum ClientMessage {
         /// Dock width in terminal columns.
         width: u16,
     },
+
+    /// Result of the one armed Herdr-owned direct Kitty transmission.
+    GraphicsTransmissionResult {
+        transfer_id: u64,
+        image_id: u32,
+        success: bool,
+    },
+
+    /// One confirmed SGR 1016 mouse report with read-time host geometry.
+    InputPixels {
+        data: Vec<u8>,
+        cols: u16,
+        rows: u16,
+        width_px: u32,
+        height_px: u32,
+    },
+
+    /// The direct command was written and flushed; terminal response timing starts now.
+    GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -702,6 +723,8 @@ pub enum ServerMessage {
     MouseCapture {
         /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
         enabled: bool,
+        /// True only while the focused pane requests DEC SGR pixel mode 1016.
+        sgr_pixels: bool,
     },
 
     /// Whether the focused terminal requests Kitty report-all keyboard input.
@@ -723,6 +746,22 @@ pub enum ServerMessage {
         /// Dock width in terminal columns.
         width: u16,
     },
+
+    /// A pane emitted a terminal bell.
+    TerminalBell { count: u16 },
+
+    /// A file-backed Kitty graphics payload for the client host terminal.
+    GraphicsFile {
+        path: String,
+        expected_len: u64,
+        image_id: u32,
+        transfer_id: u64,
+        leading: Vec<u8>,
+        control: String,
+    },
+
+    /// The server no longer needs the client's direct graphics transmission.
+    GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,7 +1588,10 @@ mod tests {
 
     #[test]
     fn server_mouse_capture_roundtrip() {
-        let msg = ServerMessage::MouseCapture { enabled: true };
+        let msg = ServerMessage::MouseCapture {
+            enabled: true,
+            sgr_pixels: true,
+        };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
@@ -1563,6 +1605,44 @@ mod tests {
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn direct_graphics_messages_roundtrip() {
+        let client = ClientMessage::GraphicsTransmissionResult {
+            transfer_id: 7,
+            image_id: 42,
+            success: false,
+        };
+        let encoded = bincode::serde::encode_to_vec(&client, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(client, decoded);
+
+        let server = ServerMessage::GraphicsFile {
+            path: "/run/user/1000/herdr/source/frame".into(),
+            expected_len: 4,
+            image_id: 42,
+            transfer_id: 7,
+            leading: b"\x1b[2;3H".to_vec(),
+            control: "a=T,f=32,i=42,q=0".into(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&server, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(server, decoded);
+
+        let pixels = ClientMessage::InputPixels {
+            data: b"\x1b[<35;321;241M".to_vec(),
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        };
+        let encoded = bincode::serde::encode_to_vec(&pixels, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(pixels, decoded);
     }
 
     #[test]

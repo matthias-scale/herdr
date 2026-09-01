@@ -705,8 +705,10 @@ fn manifest_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::api::schema::PaneListParams;
     use crate::api::schema::{
-        Method, PaneListParams, PluginSourceInfo, PluginSourceKind, Request, SuccessResponse,
+        Method, PluginSourceInfo, PluginSourceKind, Request, SuccessResponse,
     };
 
     fn test_app() -> App {

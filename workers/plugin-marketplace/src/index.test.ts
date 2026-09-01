@@ -20,6 +20,8 @@ type TreeFixture = {
 class MemoryR2 {
   objects = new Map<string, { value: string; options: unknown }>();
   async put(key: string, value: string, options?: unknown): Promise<void> {
+    if (this.failPuts) throw new Error("simulated R2 put failure");
+    this.putCount += 1;
     this.objects.set(key, { value, options });
   }
 
@@ -87,6 +89,7 @@ ${overrides}`;
 function env(bucket = new MemoryR2(), blacklist?: MemoryKV): Env {
   return {
     PLUGIN_MARKETPLACE_BUCKET: bucket,
+    PLUGIN_MARKETPLACE_BACKUP_BUCKET: backupBucket,
     PLUGIN_MARKETPLACE_BLACKLIST: blacklist,
     GITHUB_TOKEN: "token",
   };
@@ -652,6 +655,95 @@ describe("refreshPlugins", () => {
     expect(recovered.snapshot.source.skippedRepositoryCount).toBe(0);
     expect(recovered.snapshot.repositoryCount).toBe(50);
   });
+
+  test("prunes aged samples and keeps history for delisted repositories", async () => {
+    const bucket = new MemoryR2();
+    await bucket.put(
+      "plugins/star-history.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        entries: [
+          {
+            repositoryId: 1,
+            fullName: "ogulcancelik/herdr-plugin-example",
+            firstSeenAt: "2026-01-01T00:00:00.000Z",
+            samples: [
+              { date: "2026-01-01", stars: 1 },
+              { date: "2026-06-19", stars: 4 },
+            ],
+          },
+          {
+            repositoryId: 2,
+            fullName: "example/delisted-recently",
+            firstSeenAt: "2026-01-01T00:00:00.000Z",
+            samples: [
+              { date: "2026-01-05", stars: 5 },
+              { date: "2026-06-01", stars: 7 },
+            ],
+          },
+          {
+            repositoryId: 3,
+            fullName: "example/delisted-long-ago",
+            firstSeenAt: "2026-01-01T00:00:00.000Z",
+            samples: [{ date: "2026-01-05", stars: 3 }],
+          },
+        ],
+      }),
+    );
+
+    const result = await refreshPlugins(env(bucket), {
+      fetch: repositoryFetch({ repositories: [repo()] }),
+      now: new Date("2026-06-20T12:00:00.000Z"),
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(true);
+    const history = JSON.parse(bucket.objects.get("plugins/star-history.json")?.value ?? "");
+    expect(history.entries.map((entry: { repositoryId: number }) => entry.repositoryId)).toEqual([
+      1, 2,
+    ]);
+    expect(history.entries[0].samples.map((sample: { date: string }) => sample.date)).toEqual([
+      "2026-06-19",
+      "2026-06-20",
+    ]);
+    expect(history.entries[1].samples).toEqual([{ date: "2026-06-01", stars: 7 }]);
+  });
+
+  for (const { name, record } of [
+    { name: "malformed JSON", record: "broken" },
+    { name: "an unsupported shape", record: '{"schemaVersion":2,"entries":[]}' },
+    {
+      name: "an invalid entry",
+      record: JSON.stringify({
+        schemaVersion: 1,
+        entries: [{ repositoryId: -5, samples: "broken" }],
+      }),
+    },
+  ]) {
+    test(`fails the refresh without overwriting anything when star history has ${name}`, async () => {
+      const bucket = new MemoryR2();
+      await bucket.put("plugins/index.json", '{"schemaVersion":1,"plugins":[{"id":1}]}');
+      await bucket.put("plugins/star-history.json", record);
+      const backupBucket = new MemoryR2();
+      const errors: string[] = [];
+
+      const result = await refreshPlugins(env(bucket, undefined, backupBucket), {
+        fetch: repositoryFetch({ repositories: [repo()] }),
+        now: new Date("2026-06-20T12:00:00.000Z"),
+        logger: { error(message: unknown) { errors.push(String(message)); } },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(errors[0]).toContain("invalid plugin marketplace star history");
+      expect(bucket.objects.get("plugins/star-history.json")?.value).toBe(record);
+      expect(bucket.objects.get("plugins/index.json")?.value).toBe(
+        '{"schemaVersion":1,"plugins":[{"id":1}]}',
+      );
+      expect(bucket.objects.has("plugins/scan-cache.json")).toBe(false);
+      // Broken history must never be preserved as a "backup".
+      expect(backupBucket.objects.size).toBe(0);
+    });
+  }
 
   for (const { name, fetch } of [
     {

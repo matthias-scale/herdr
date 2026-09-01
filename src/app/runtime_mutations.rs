@@ -1,5 +1,6 @@
 use crate::api::schema::{
-    EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneRenameParams,
+    EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
+    PaneRenameParams,
     PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, TabCreateParams,
     TabMoveParams, TabPinParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
     WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget,
@@ -119,6 +120,14 @@ impl App {
         params: PaneRenameParams,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::PaneRename(params))
+    }
+
+    pub(crate) fn runtime_pane_input_set(
+        &mut self,
+        id: &'static str,
+        params: PaneInputSetParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::PaneInputSet(params))
     }
 
     pub(crate) fn runtime_pane_focus_direction(

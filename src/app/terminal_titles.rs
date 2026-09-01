@@ -1,5 +1,11 @@
 use super::App;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TerminalTitleChanges {
+    pub(crate) raw_changed: bool,
+    pub(crate) stripped_changed: bool,
+}
+
 const RESTORED_AGENT_TITLE_LABEL_LIMIT: usize = 44;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,6 +42,19 @@ impl App {
                     crate::config::AgentSidebarToken::TerminalTitle
                         | crate::config::AgentSidebarToken::TerminalTitleStripped
                 )
+            })
+    }
+
+    pub(crate) fn terminal_title_sidebar_changed(&self, changes: &TerminalTitleChanges) -> bool {
+        let config = &self.state.sidebar_agents;
+        std::iter::once(&config.rows)
+            .chain(config.rows_by_agent.values())
+            .flatten()
+            .flatten()
+            .any(|token| match token.parts().0 {
+                crate::config::AgentSidebarToken::TerminalTitle => changes.raw_changed,
+                crate::config::AgentSidebarToken::TerminalTitleStripped => changes.stripped_changed,
+                _ => false,
             })
     }
 
@@ -77,7 +96,6 @@ impl App {
             sync_change.raw_changed |= change.raw_changed;
             if change.stripped_changed {
                 let current_title = terminal.terminal_title_stripped();
-                sync_change.chrome_changed = true;
                 if pane_label_tracks_title {
                     copied_label_changed = true;
                     match current_title.as_ref() {
@@ -86,6 +104,7 @@ impl App {
                     }
                 }
                 if agent_title_changed {
+                    sync_change.chrome_changed = true;
                     tab_updates.push((ws_idx, pane_id, previous_title, current_title));
                 }
                 publish.push((ws_idx, pane_id));
@@ -137,6 +156,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
@@ -147,6 +167,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
         app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
         app.state.ensure_test_terminals();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
@@ -158,6 +179,7 @@ mod tests {
         let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
         runtime.test_process_pty_bytes("\x1b]0;⠋ 修复🙂标题\x07".as_bytes());
         app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let sources = HashSet::from([pane_id]);
 
         let change = app.sync_terminal_titles();
         assert!(change.raw_changed);
@@ -323,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn override_only_terminal_title_token_requests_sidebar_redraws() {
+    fn sidebar_redraws_only_for_the_configured_title_form() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
@@ -335,7 +357,21 @@ mod tests {
             ]],
         );
 
-        assert!(app.terminal_title_sidebar_configured());
+        let spinner_only = TerminalTitleChanges {
+            raw_changed: true,
+            ..TerminalTitleChanges::default()
+        };
+        assert!(!app.terminal_title_sidebar_changed(&spinner_only));
+        assert!(app.terminal_title_sidebar_changed(&TerminalTitleChanges {
+            stripped_changed: true,
+            ..TerminalTitleChanges::default()
+        }));
+
+        app.state.sidebar_agents.rows_by_agent.insert(
+            "claude".into(),
+            vec![vec![crate::config::AgentSidebarToken::TerminalTitle]],
+        );
+        assert!(app.terminal_title_sidebar_changed(&spinner_only));
     }
 
     fn pane_updated_events(event_hub: &crate::api::EventHub) -> usize {

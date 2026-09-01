@@ -1,5 +1,7 @@
 //! Integration tests for thin client mode.
 
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;
@@ -114,21 +116,73 @@ fn spawn_client_process(
     }
 }
 
+fn spawn_no_session_process(config_home: &PathBuf, runtime_dir: &PathBuf) -> SpawnedHerdr {
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    register_runtime_dir(runtime_dir);
+    fs::write(
+        config_home.join(app_dir_name()).join("config.toml"),
+        "onboarding = false\n[ui]\nwindow_title = \"monolithic\"\n",
+    )
+    .unwrap();
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("--no-session");
+    cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_SOCKET_PATH");
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env_remove("HERDR_SESSION");
+    cmd.env_remove("HERDR_WORKSPACE_ID");
+    cmd.env_remove("HERDR_TAB_ID");
+    cmd.env_remove("HERDR_PANE_ID");
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
+    drop(pair.slave);
+
+    SpawnedHerdr {
+        _master: Some(pair.master),
+        child,
+    }
+}
+
 fn spawn_server(
     config_home: &PathBuf,
     runtime_dir: &PathBuf,
     api_socket_path: &PathBuf,
-    _client_socket_path: &PathBuf,
+    client_socket_path: &PathBuf,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    spawn_server_with_config(
+        config_home,
+        runtime_dir,
+        api_socket_path,
+        client_socket_path,
+        "onboarding = false\n",
+    )
+}
+
+fn spawn_server_with_config(
+    config_home: &PathBuf,
+    runtime_dir: &PathBuf,
+    api_socket_path: &PathBuf,
+    _client_socket_path: &PathBuf,
+    config: &str,
+) -> SpawnedHerdr {
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
-    let config_path = config_home.join("herdr/config.toml");
-    fs::write(
-        &config_path,
-        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
-    )
-    .unwrap();
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
+    fs::write(config_home.join(app_dir_name()).join("config.toml"), config).unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {

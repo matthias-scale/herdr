@@ -337,6 +337,8 @@ pub struct Keybinds {
     pub toggle_prio_panel: ActionKeybinds,
     pub previous_tab: ActionKeybinds,
     pub next_tab: ActionKeybinds,
+    pub move_tab_previous: ActionKeybinds,
+    pub move_tab_next: ActionKeybinds,
     pub previous_window: ActionKeybinds,
     pub next_window: ActionKeybinds,
     pub next_blocked_window: ActionKeybinds,
@@ -365,6 +367,10 @@ pub struct Keybinds {
     pub zoom: ActionKeybinds,
     pub toggle_pin_tab: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
+    pub resize_pane_left: ActionKeybinds,
+    pub resize_pane_down: ActionKeybinds,
+    pub resize_pane_up: ActionKeybinds,
+    pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub toggle_blocked_filter: ActionKeybinds,
     pub toggle_dock: ActionKeybinds,
@@ -525,6 +531,8 @@ impl Config {
             toggle_prio_panel: empty_action!(),
             previous_tab: empty_action!(),
             next_tab: empty_action!(),
+            move_tab_previous: empty_action!(),
+            move_tab_next: empty_action!(),
             previous_window: empty_action!(),
             next_window: empty_action!(),
             next_blocked_window: empty_action!(),
@@ -553,6 +561,10 @@ impl Config {
             zoom: empty_action!(),
             toggle_pin_tab: empty_action!(),
             resize_mode: empty_action!(),
+            resize_pane_left: empty_action!(),
+            resize_pane_down: empty_action!(),
+            resize_pane_up: empty_action!(),
+            resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
             toggle_blocked_filter: empty_action!(),
             toggle_dock: empty_action!(),
@@ -682,6 +694,8 @@ impl Config {
             apply_action!(keybinds.toggle_prio_panel, toggle_prio_panel, source);
             apply_action!(keybinds.previous_tab, previous_tab, source);
             apply_action!(keybinds.next_tab, next_tab, source);
+            apply_action!(keybinds.move_tab_previous, move_tab_previous, source);
+            apply_action!(keybinds.move_tab_next, move_tab_next, source);
             apply_action!(keybinds.previous_window, previous_window, source);
             apply_action!(keybinds.next_window, next_window, source);
             apply_action!(keybinds.next_blocked_window, next_blocked_window, source);
@@ -720,6 +734,10 @@ impl Config {
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.toggle_pin_tab, toggle_pin_tab, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
+            apply_action!(keybinds.resize_pane_left, resize_pane_left, source);
+            apply_action!(keybinds.resize_pane_down, resize_pane_down, source);
+            apply_action!(keybinds.resize_pane_up, resize_pane_up, source);
+            apply_action!(keybinds.resize_pane_right, resize_pane_right, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
             apply_action!(
                 keybinds.toggle_blocked_filter,
@@ -1542,8 +1560,8 @@ fn shifted_char_matches_expected(
     let KeyCode::Char(expected) = expected_code else {
         return false;
     };
-    if shifted_codepoint.and_then(char::from_u32) == Some(expected) {
-        return true;
+    if let Some(shifted) = shifted_codepoint.and_then(char::from_u32) {
+        return shifted == expected;
     }
     matches!(actual_code, KeyCode::Char(actual) if actual == expected && is_shifted_punctuation(expected))
 }

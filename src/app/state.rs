@@ -13,47 +13,10 @@ use crate::selection::Selection;
 
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PluginPaneRecord {
     pub plugin_id: String,
     pub entrypoint: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PaneGraphicsLayer {
-    pub format: crate::api::schema::PaneGraphicsFormat,
-    pub image_width: u32,
-    pub image_height: u32,
-    pub data: Vec<u8>,
-    pub data_fingerprint: u64,
-    pub render: crate::api::schema::PaneGraphicsPlacementParams,
-}
-
-impl PaneGraphicsLayer {
-    pub(crate) fn new(
-        format: crate::api::schema::PaneGraphicsFormat,
-        image_width: u32,
-        image_height: u32,
-        data: Vec<u8>,
-        render: crate::api::schema::PaneGraphicsPlacementParams,
-    ) -> Self {
-        let data_fingerprint = pane_graphics_data_fingerprint(&data);
-        Self {
-            format,
-            image_width,
-            image_height,
-            data,
-            data_fingerprint,
-            render,
-        }
-    }
-}
-
-fn pane_graphics_data_fingerprint(data: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,6 +81,10 @@ pub struct Palette {
     pub panel_bg: Color,
     /// Optional desktop sidebar background. Reset preserves the terminal background.
     pub sidebar_bg: Color,
+    /// Background for the active workspace and focused agent rows.
+    pub active_row_bg: Color,
+    /// Background for the Navigate-mode cursor row in the sidebar.
+    pub selection_bg: Color,
     /// Subtle surface background for selected/focused items.
     pub surface0: Color,
     /// Slightly lighter surface for hover/active states.
@@ -155,6 +122,8 @@ impl Palette {
             accent: Color::Rgb(137, 180, 250), // blue
             panel_bg: Color::Rgb(24, 24, 37),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(30, 30, 46),
+            selection_bg: Color::Rgb(49, 50, 68),
             surface0: Color::Rgb(49, 50, 68),
             surface1: Color::Rgb(69, 71, 90),
             surface_dim: Color::Rgb(30, 30, 46),
@@ -178,6 +147,8 @@ impl Palette {
             accent: Color::Rgb(30, 102, 245),
             panel_bg: Color::Rgb(239, 241, 245),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(230, 233, 239),
+            selection_bg: Color::Rgb(189, 208, 245),
             surface0: Color::Rgb(204, 208, 218),
             surface1: Color::Rgb(188, 192, 204),
             surface_dim: Color::Rgb(230, 233, 239),
@@ -201,6 +172,8 @@ impl Palette {
             accent: Color::Blue,
             panel_bg: Color::Reset,
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::DarkGray,
+            selection_bg: Color::Reset,
             surface0: Color::Reset,
             surface1: Color::DarkGray,
             surface_dim: Color::DarkGray,
@@ -224,6 +197,8 @@ impl Palette {
             accent: Color::Rgb(122, 162, 247), // blue
             panel_bg: Color::Rgb(26, 27, 38),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(35, 38, 54),
+            selection_bg: Color::Rgb(45, 54, 80),
             surface0: Color::Rgb(36, 40, 59),
             surface1: Color::Rgb(65, 72, 104),
             surface_dim: Color::Rgb(26, 27, 38),
@@ -247,6 +222,8 @@ impl Palette {
             accent: Color::Rgb(46, 125, 233),
             panel_bg: Color::Rgb(225, 226, 231),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(210, 211, 218),
+            selection_bg: Color::Rgb(182, 202, 231),
             surface0: Color::Rgb(196, 200, 218),
             surface1: Color::Rgb(168, 174, 203),
             surface_dim: Color::Rgb(210, 211, 218),
@@ -270,6 +247,8 @@ impl Palette {
             accent: Color::Rgb(189, 147, 249), // purple
             panel_bg: Color::Rgb(40, 42, 54),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(55, 60, 82),
+            selection_bg: Color::Rgb(70, 63, 93),
             surface0: Color::Rgb(68, 71, 90),
             surface1: Color::Rgb(98, 114, 164),
             surface_dim: Color::Rgb(40, 42, 54),
@@ -293,6 +272,8 @@ impl Palette {
             accent: Color::Rgb(136, 192, 208), // frost
             panel_bg: Color::Rgb(46, 52, 64),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(67, 76, 94),
+            selection_bg: Color::Rgb(64, 80, 93),
             surface0: Color::Rgb(59, 66, 82),
             surface1: Color::Rgb(67, 76, 94),
             surface_dim: Color::Rgb(46, 52, 64),
@@ -316,6 +297,8 @@ impl Palette {
             accent: Color::Rgb(215, 153, 33), // yellow
             panel_bg: Color::Rgb(40, 40, 40),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(50, 49, 48),
+            selection_bg: Color::Rgb(75, 63, 39),
             surface0: Color::Rgb(60, 56, 54),
             surface1: Color::Rgb(80, 73, 69),
             surface_dim: Color::Rgb(40, 40, 40),
@@ -339,6 +322,8 @@ impl Palette {
             accent: Color::Rgb(7, 102, 120),
             panel_bg: Color::Rgb(251, 241, 199),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(242, 229, 188),
+            selection_bg: Color::Rgb(235, 219, 178),
             surface0: Color::Rgb(235, 219, 178),
             surface1: Color::Rgb(213, 196, 161),
             surface_dim: Color::Rgb(242, 229, 188),
@@ -362,6 +347,8 @@ impl Palette {
             accent: Color::Rgb(97, 175, 239), // blue
             panel_bg: Color::Rgb(40, 44, 52),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(49, 54, 64),
+            selection_bg: Color::Rgb(51, 70, 89),
             surface0: Color::Rgb(44, 49, 58),
             surface1: Color::Rgb(62, 68, 81),
             surface_dim: Color::Rgb(40, 44, 52),
@@ -385,6 +372,8 @@ impl Palette {
             accent: Color::Rgb(64, 120, 242),
             panel_bg: Color::Rgb(250, 250, 250),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(216, 219, 226),
+            selection_bg: Color::Rgb(205, 219, 248),
             surface0: Color::Rgb(240, 240, 241),
             surface1: Color::Rgb(229, 229, 230),
             surface_dim: Color::Rgb(245, 245, 246),
@@ -408,6 +397,8 @@ impl Palette {
             accent: Color::Rgb(38, 139, 210), // blue
             panel_bg: Color::Rgb(0, 43, 54),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(22, 75, 87),
+            selection_bg: Color::Rgb(8, 62, 85),
             surface0: Color::Rgb(7, 54, 66),
             surface1: Color::Rgb(88, 110, 117),
             surface_dim: Color::Rgb(0, 43, 54),
@@ -431,6 +422,8 @@ impl Palette {
             accent: Color::Rgb(38, 139, 210),
             panel_bg: Color::Rgb(253, 246, 227),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(238, 232, 213),
+            selection_bg: Color::Rgb(201, 220, 223),
             surface0: Color::Rgb(238, 232, 213),
             surface1: Color::Rgb(147, 161, 161),
             surface_dim: Color::Rgb(238, 232, 213),
@@ -454,6 +447,8 @@ impl Palette {
             accent: Color::Rgb(126, 156, 216), // blue
             panel_bg: Color::Rgb(31, 31, 40),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(54, 54, 70),
+            selection_bg: Color::Rgb(50, 56, 75),
             surface0: Color::Rgb(42, 42, 55),
             surface1: Color::Rgb(54, 54, 70),
             surface_dim: Color::Rgb(31, 31, 40),
@@ -477,6 +472,8 @@ impl Palette {
             accent: Color::Rgb(77, 105, 155),
             panel_bg: Color::Rgb(242, 236, 188),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(213, 206, 163),
+            selection_bg: Color::Rgb(220, 213, 172),
             surface0: Color::Rgb(220, 213, 172),
             surface1: Color::Rgb(201, 203, 209),
             surface_dim: Color::Rgb(213, 206, 163),
@@ -500,6 +497,8 @@ impl Palette {
             accent: Color::Rgb(196, 167, 231), // iris
             panel_bg: Color::Rgb(25, 23, 36),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(38, 35, 58),
+            selection_bg: Color::Rgb(59, 52, 75),
             surface0: Color::Rgb(31, 29, 46),
             surface1: Color::Rgb(38, 35, 58),
             surface_dim: Color::Rgb(38, 35, 58),
@@ -523,6 +522,8 @@ impl Palette {
             accent: Color::Rgb(144, 122, 169),
             panel_bg: Color::Rgb(250, 244, 237),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(227, 217, 207),
+            selection_bg: Color::Rgb(242, 233, 225),
             surface0: Color::Rgb(242, 233, 225),
             surface1: Color::Rgb(255, 250, 243),
             surface_dim: Color::Rgb(242, 233, 225),
@@ -546,6 +547,8 @@ impl Palette {
             accent: Color::Rgb(255, 199, 153),
             panel_bg: Color::Rgb(26, 26, 26),
             sidebar_bg: Color::Reset,
+            active_row_bg: Color::Rgb(16, 16, 16),
+            selection_bg: Color::Rgb(35, 35, 35),
             surface0: Color::Rgb(35, 35, 35),
             surface1: Color::Rgb(40, 40, 40),
             surface_dim: Color::Rgb(16, 16, 16),
@@ -565,24 +568,24 @@ impl Palette {
 
     /// Resolve a theme by name. Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().replace([' ', '_'], "-").as_str() {
-            "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
-            "catppuccin-latte" | "latte" | "light" => Some(Self::catppuccin_latte()),
+        match crate::config::canonical_theme_name(name)? {
+            "catppuccin" => Some(Self::catppuccin()),
+            "catppuccin-latte" => Some(Self::catppuccin_latte()),
             "terminal" => Some(Self::terminal()),
-            "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
-            "tokyo-night-day" | "tokyo-day" | "tokyonight-day" => Some(Self::tokyo_night_day()),
+            "tokyo-night" => Some(Self::tokyo_night()),
+            "tokyo-night-day" => Some(Self::tokyo_night_day()),
             "dracula" => Some(Self::dracula()),
             "nord" => Some(Self::nord()),
-            "gruvbox" | "gruvbox-dark" => Some(Self::gruvbox()),
+            "gruvbox" => Some(Self::gruvbox()),
             "gruvbox-light" => Some(Self::gruvbox_light()),
-            "one-dark" | "onedark" => Some(Self::one_dark()),
-            "one-light" | "onelight" => Some(Self::one_light()),
-            "solarized" | "solarized-dark" => Some(Self::solarized()),
+            "one-dark" => Some(Self::one_dark()),
+            "one-light" => Some(Self::one_light()),
+            "solarized" => Some(Self::solarized()),
             "solarized-light" => Some(Self::solarized_light()),
             "kanagawa" => Some(Self::kanagawa()),
-            "kanagawa-lotus" | "lotus" => Some(Self::kanagawa_lotus()),
-            "rose-pine" | "rosepine" => Some(Self::rose_pine()),
-            "rose-pine-dawn" | "rosepine-dawn" | "dawn" => Some(Self::rose_pine_dawn()),
+            "kanagawa-lotus" => Some(Self::kanagawa_lotus()),
+            "rose-pine" => Some(Self::rose_pine()),
+            "rose-pine-dawn" => Some(Self::rose_pine_dawn()),
             "vesper" => Some(Self::vesper()),
             _ => None,
         }
@@ -599,6 +602,12 @@ impl Palette {
         }
         if let Some(c) = &custom.sidebar_bg {
             self.sidebar_bg = parse_color(c);
+        }
+        if let Some(c) = &custom.active_row_bg {
+            self.active_row_bg = parse_color(c);
+        }
+        if let Some(c) = &custom.selection_bg {
+            self.selection_bg = parse_color(c);
         }
         if let Some(c) = &custom.surface0 {
             self.surface0 = parse_color(c);
@@ -1241,26 +1250,7 @@ impl SettingsSection {
 }
 
 /// All built-in theme names in display order.
-pub const THEME_NAMES: &[&str] = &[
-    "catppuccin",
-    "catppuccin-latte",
-    "terminal",
-    "tokyo-night",
-    "tokyo-night-day",
-    "dracula",
-    "nord",
-    "gruvbox",
-    "gruvbox-light",
-    "one-dark",
-    "one-light",
-    "solarized",
-    "solarized-light",
-    "kanagawa",
-    "kanagawa-lotus",
-    "rose-pine",
-    "rose-pine-dawn",
-    "vesper",
-];
+pub const THEME_NAMES: &[&str] = crate::config::THEME_NAMES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuListState {
@@ -1343,10 +1333,12 @@ pub(crate) enum WorkspaceDropTarget {
 
 pub(crate) enum DragTarget {
     WorkspaceReorder {
+        source_id: crate::app::InputSourceId,
         source_ws_idx: usize,
         drop_target: Option<WorkspaceDropTarget>,
     },
     TabReorder {
+        source_id: crate::app::InputSourceId,
         ws_idx: usize,
         source_tab_idx: usize,
         insert_idx: Option<usize>,
@@ -1416,6 +1408,7 @@ pub enum ContextMenuKind {
         pane_id: PaneId,
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
+        right_click_passthrough: bool,
     },
 }
 
@@ -1428,91 +1421,53 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> &'static [&'static str] {
+    pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => &["Rename", "Close", "Delete worktree checkout..."],
+            } => vec!["Rename", "Close", "Delete worktree checkout..."],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
-                collapsed: true,
+                collapsed,
                 ..
-            } => &[
+            } => vec![
                 "Rename",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
-                "Expand",
+                if collapsed { "Expand" } else { "Collapse" },
             ],
-            ContextMenuKind::GitWorkspace {
-                is_linked_worktree: false,
-                has_worktree_children: true,
-                collapsed: false,
-                ..
-            } => &[
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Collapse",
-            ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
+            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
-                has_manual_label: true,
-                source_pane_id: Some(_),
+                source_pane_id,
+                has_manual_label,
+                right_click_passthrough,
                 ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Swap with focused pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: false,
-                source_pane_id: Some(_),
-                ..
-            } => &[
-                "Rename pane",
-                "Swap with focused pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: true,
-                source_pane_id: None,
-                ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: false,
-                source_pane_id: None,
-                ..
-            } => &[
-                "Rename pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
+            } => {
+                let mut items = vec!["Rename pane"];
+                if has_manual_label {
+                    items.push("Clear pane name");
+                }
+                if source_pane_id.is_some() {
+                    items.push("Swap with focused pane");
+                }
+                items.extend(["Split right", "Split down", "Zoom"]);
+                items.push(if right_click_passthrough {
+                    "Use Herdr right-click menu"
+                } else {
+                    "Send right-clicks to pane"
+                });
+                items.push("Close pane");
+                items
+            }
         }
     }
 }
@@ -1605,6 +1560,12 @@ pub(crate) struct PaneFocusTarget {
 
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabBarStatusSegment {
+    Zoom,
+    Text(Option<String>),
+}
+
 pub struct AppState {
     /// Clock snapshot captured during `compute_view`; renderers consume it
     /// without reading the clock or mutating shared runtime state.
@@ -1730,8 +1691,9 @@ pub struct AppState {
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
-    pub(crate) workspace_press: Option<WorkspacePressState>,
-    pub(crate) tab_press: Option<TabPressState>,
+    pub(crate) workspace_presses:
+        std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
+    pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -1750,6 +1712,8 @@ pub struct AppState {
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
+    /// Virtual terminal size (columns, rows) used when no client is attached.
+    pub(crate) headless_size: (u16, u16),
     pub default_sidebar_width: u16,
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
@@ -1797,12 +1761,15 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
+    pub pane_outer_borders: bool,
     pub pane_scrollbars: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
     pub show_subscription_usage: bool,
     pub tab_bar_position: TabBarPositionConfig,
+    pub tab_bar_right: Vec<TabBarStatusSegment>,
+    pub tab_bar_right_separator: String,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1853,12 +1820,6 @@ pub struct AppState {
     pub(crate) installed_plugins: InstalledPluginRegistry,
     /// Pane ids opened through the plugin pane API.
     pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
-    /// Runtime image layers owned by API clients and composited over panes.
-    pub(crate) pane_graphics_layers: std::collections::HashMap<PaneId, PaneGraphicsLayer>,
-    /// Active streaming graphics owner token by pane id.
-    pub(crate) pane_graphics_streams: std::collections::HashMap<PaneId, String>,
-    /// Monotonic marker for accepted pane graphics mutations.
-    pub(crate) pane_graphics_revision: u64,
     /// Session-modal terminal popup. This is intentionally outside workspace layouts.
     pub(crate) popup_pane: Option<PopupPaneState>,
     /// Recent plugin action/event command executions.
@@ -1871,6 +1832,8 @@ pub struct AppState {
     pub host_terminal_theme: TerminalTheme,
     /// Last known foreground host terminal cell size in pixels.
     pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
+    /// Exact pixel provenance only while one confirmed SGR report is dispatched.
+    pub(crate) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
     /// Monotonic revision used to avoid clearing mutations made during a save.
@@ -2208,6 +2171,26 @@ impl AppState {
         section == SettingsSection::Integrations && self.integration_updates_available()
     }
 
+    pub(crate) fn app_surface_pane_ids(&self) -> std::collections::HashSet<PaneId> {
+        let mut pane_ids = std::collections::HashSet::new();
+        if let Some(popup) = &self.popup_pane {
+            pane_ids.insert(popup.pane_id);
+        }
+        let Some(tab) = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(crate::workspace::Workspace::active_tab)
+        else {
+            return pane_ids;
+        };
+        if tab.zoomed {
+            pane_ids.insert(tab.layout.focused());
+        } else {
+            pane_ids.extend(tab.panes.keys().copied());
+        }
+        pane_ids
+    }
+
     pub(crate) fn focused_pane_requests_mouse_capture_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -2216,8 +2199,7 @@ impl AppState {
             && self
                 .active
                 .and_then(|idx| self.focused_runtime_in_workspace(terminal_runtimes, idx))
-                .and_then(crate::terminal::TerminalRuntime::input_state)
-                .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
+                .is_some_and(crate::terminal::TerminalRuntime::mouse_reporting_enabled)
     }
 
     pub(crate) fn should_capture_host_mouse_from(
@@ -2237,7 +2219,7 @@ impl AppState {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)
         } else {
-            (24, 80)
+            (self.headless_size.1, self.headless_size.0)
         }
     }
 
@@ -2460,8 +2442,8 @@ impl AppState {
                 status_buttons: Vec::new(),
             },
             drag: None,
-            workspace_press: None,
-            tab_press: None,
+            workspace_presses: std::collections::HashMap::new(),
+            tab_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -2476,6 +2458,10 @@ impl AppState {
             outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
+            headless_size: (
+                crate::config::DEFAULT_HEADLESS_COLS,
+                crate::config::DEFAULT_HEADLESS_ROWS,
+            ),
             default_sidebar_width: 26,
             sidebar_width: 26,
             sidebar_min_width: 18,
@@ -2515,6 +2501,7 @@ impl AppState {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
+            pane_outer_borders: true,
             pane_scrollbars: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
@@ -2523,6 +2510,8 @@ impl AppState {
             // Deliberately not the shipped default (`Hidden`): the UI tests that
             // exercise tab-row geometry need a tab row to measure.
             tab_bar_position: TabBarPositionConfig::Top,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: " ".into(),
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
@@ -2567,9 +2556,6 @@ impl AppState {
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
-            pane_graphics_layers: std::collections::HashMap::new(),
-            pane_graphics_streams: std::collections::HashMap::new(),
-            pane_graphics_revision: 0,
             popup_pane: None,
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
@@ -2577,6 +2563,7 @@ impl AppState {
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
+            host_mouse_pixels: None,
             session_dirty: false,
             session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
@@ -2673,16 +2660,20 @@ impl AppState {
                 "empty app state must not keep drag state"
             );
             assert!(
-                self.workspace_press.is_none(),
+                self.workspace_presses.is_empty(),
                 "empty app state must not keep workspace press state"
             );
             assert!(
-                self.tab_press.is_none(),
+                self.tab_presses.is_empty(),
                 "empty app state must not keep tab press state"
             );
             assert!(
                 self.context_menu.is_none(),
                 "empty app state must not keep context menu"
+            );
+            assert!(
+                self.host_mouse_pixels.is_none(),
+                "empty app state must not keep host mouse pixel provenance"
             );
             return;
         }
@@ -2840,6 +2831,7 @@ impl AppState {
                 DragTarget::WorkspaceReorder {
                     source_ws_idx,
                     drop_target,
+                    ..
                 } => {
                     assert_workspace_index(*source_ws_idx, "workspace drag source");
                     if let Some(WorkspaceDropTarget::Before(ws_idx)) = drop_target {
@@ -2850,6 +2842,7 @@ impl AppState {
                     ws_idx,
                     source_tab_idx,
                     insert_idx,
+                    ..
                 } => {
                     assert_tab_index(*ws_idx, *source_tab_idx, "tab drag source");
                     if let Some(insert_idx) = insert_idx {
@@ -2868,10 +2861,10 @@ impl AppState {
                 _ => {}
             }
         }
-        if let Some(press) = &self.workspace_press {
+        for press in self.workspace_presses.values() {
             assert_workspace_index(press.ws_idx, "workspace press");
         }
-        if let Some(press) = &self.tab_press {
+        for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
         if let Some(menu) = &self.context_menu {
@@ -3082,6 +3075,30 @@ mod tests {
         // Line 2 is the spacer before the second workspace.
         assert_eq!(navigator_first_row_at_or_after(&lines, 2), Some(2));
         assert_eq!(navigator_first_row_at_or_after(&lines, 4), None);
+    }
+
+    fn rgb_luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("expected RGB color, got {color:?}");
+        };
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast_ratio(a: Color, b: Color) -> f64 {
+        let (lighter, darker) = {
+            let a = rgb_luminance(a);
+            let b = rgb_luminance(b);
+            (a.max(b), a.min(b))
+        };
+        (lighter + 0.05) / (darker + 0.05)
     }
 
     #[test]

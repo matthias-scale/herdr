@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::workspace::{GitSpaceMetadata, WorkspaceGitStatusSnapshot};
 
 use super::{
-    config::{read_branch_config, upstream_full_ref},
+    config::{deps_current, read_config, stamp, upstream_full_ref, ConfigCtx, FileDep},
     discovery::{
         automatic_workspace_label, canonicalize_best_effort_path, fallback_label_from_cwd,
         git_ref_storage_is_reftable, git_space_metadata_from_info, git_worktree_info, read_ref_oid,
@@ -39,10 +39,25 @@ pub struct GitStatusCacheEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStatusFingerprint {
-    pub git_dir: PathBuf,
-    pub git_common_dir: PathBuf,
     pub head: GitHeadIdentity,
     pub upstream: Option<GitUpstreamIdentity>,
+    repository_context: RepoContext,
+}
+
+type RepoContext = (GitWorktreeInfo, bool, Vec<FileDep>, Option<ConfigCtx>);
+
+fn repo_context(cwd: &Path) -> Option<RepoContext> {
+    let info = git_worktree_info(cwd)?;
+    let reftable = git_ref_storage_is_reftable(&info.git_common_dir);
+    let mut paths = vec![info.repo_root.join(".git"), info.git_dir.join("commondir")];
+    paths.push(info.git_dir.join("HEAD"));
+    paths.push(info.git_common_dir.join("config"));
+    paths.extend((info.git_dir != info.git_common_dir).then(|| info.git_dir.join("config")));
+    let mut deps: Vec<_> = paths.into_iter().map(|path| stamp(path, None)).collect();
+    deps[0].2 &= git_worktree_info(cwd).as_ref() == Some(&info)
+        && git_ref_storage_is_reftable(&info.git_common_dir) == reftable
+        && deps_current(&deps);
+    Some((info, reftable, deps, None))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +133,12 @@ pub(crate) fn git_status_snapshot_for_cwd_with_demand_and_program(
         return (cached.snapshot.clone(), Some(cached.clone()));
     }
 
-    let Some(info) = git_worktree_info(cwd) else {
+    let repository_context = cached
+        .and_then(|entry| entry.fingerprint.as_ref())
+        .map(|fingerprint| fingerprint.repository_context.clone())
+        .filter(|context| deps_current(&context.2))
+        .or_else(|| repo_context(cwd));
+    let Some(repository_context) = repository_context else {
         let snapshot = WorkspaceGitStatusSnapshot {
             auto_label: fallback_label_from_cwd(cwd),
             branch: None,
@@ -134,31 +154,32 @@ pub(crate) fn git_status_snapshot_for_cwd_with_demand_and_program(
             }),
         );
     };
-    let auto_label = automatic_workspace_label(cwd, &info.repo_root);
-    let space = git_space_metadata_from_info(&info);
+    let auto_label = automatic_workspace_label(cwd, &repository_context.0.repo_root);
+    let space = git_space_metadata_from_info(&repository_context.0);
 
     if !demand.ahead_behind {
+        let fingerprint = fingerprint(repository_context, false, deadline, git_program);
         let branch = demand
             .branch
-            .then(|| {
-                read_head_identity(&info, deadline, git_program).and_then(|head| match head {
-                    GitHeadIdentity::Branch { short_name, .. } => Some(short_name),
-                    GitHeadIdentity::Detached { .. } => None,
-                })
-            })
+            .then(|| fingerprint.as_ref().and_then(GitStatusFingerprint::branch_name))
             .flatten();
+        let snapshot = WorkspaceGitStatusSnapshot {
+            auto_label,
+            branch: branch.map(str::to_string),
+            ahead_behind: None,
+            space: Some(space),
+        };
         return (
-            WorkspaceGitStatusSnapshot {
-                auto_label,
-                branch,
-                ahead_behind: None,
-                space: Some(space),
-            },
-            None,
+            snapshot.clone(),
+            fingerprint.map(|fingerprint| GitStatusCacheEntry {
+                fingerprint: Some(fingerprint),
+                retry_after: None,
+                snapshot,
+            }),
         );
     }
 
-    let Some(fingerprint) = git_status_fingerprint_from_info(&info, deadline, git_program) else {
+    let Some(fingerprint) = fingerprint(repository_context, true, deadline, git_program) else {
         return (
             WorkspaceGitStatusSnapshot {
                 auto_label,
@@ -212,32 +233,33 @@ pub(crate) fn git_status_snapshot_for_cwd_with_demand_and_program(
 
 #[cfg(test)]
 pub(super) fn git_status_fingerprint(cwd: &Path) -> Option<GitStatusFingerprint> {
-    let info = git_worktree_info(cwd)?;
-    git_status_fingerprint_from_info(
-        &info,
+    fingerprint(
+        repo_context(cwd)?,
+        true,
         Instant::now() + Duration::from_secs(2),
         Path::new("git"),
     )
 }
 
-fn git_status_fingerprint_from_info(
-    info: &GitWorktreeInfo,
+fn fingerprint(
+    mut repo: RepoContext,
+    include_upstream: bool,
     deadline: Instant,
     git_program: &Path,
 ) -> Option<GitStatusFingerprint> {
-    let head = read_head_identity(info, deadline, git_program)?;
+    let head = read_head_identity(&repo.0, deadline, git_program)?;
     let upstream = match &head {
-        GitHeadIdentity::Branch { short_name, .. } => {
-            read_upstream_identity(info, short_name, deadline, git_program)
+        GitHeadIdentity::Branch { short_name, .. } if include_upstream => {
+            read_upstream_identity(&mut repo, short_name, deadline, git_program)
         }
         GitHeadIdentity::Detached { .. } => None,
+        _ => None,
     };
 
     Some(GitStatusFingerprint {
-        git_dir: canonicalize_best_effort_path(&info.git_dir),
-        git_common_dir: canonicalize_best_effort_path(&info.git_common_dir),
         head,
         upstream,
+        repository_context: repo,
     })
 }
 
@@ -327,22 +349,29 @@ fn read_head_identity_from_files(info: &GitWorktreeInfo) -> Option<GitHeadIdenti
 }
 
 fn read_upstream_identity(
-    info: &GitWorktreeInfo,
+    repo: &mut RepoContext,
     branch: &str,
     deadline: Instant,
     git_program: &Path,
 ) -> Option<GitUpstreamIdentity> {
-    let config = read_branch_config(info, branch)?;
+    if repo
+        .3
+        .as_ref()
+        .is_none_or(|context| context.0 != branch || !deps_current(&context.2))
+    {
+        repo.3 = Some(read_config(&repo.0, branch));
+    }
+    let config = repo.3.as_ref()?.1.clone()?;
     let full_ref = upstream_full_ref(&config)?;
-    let oid = if git_ref_storage_is_reftable(&info.git_common_dir) {
+    let oid = if repo.1 {
         super::discovery::git_rev_parse_verify_with_program(
-            &info.repo_root,
+            &repo.0.repo_root,
             &full_ref,
             deadline,
             git_program,
         )
     } else {
-        read_ref_oid(&info.git_common_dir, &full_ref)
+        read_ref_oid(&repo.0.git_common_dir, &full_ref)
     };
     Some(GitUpstreamIdentity {
         remote: config.remote,
@@ -477,6 +506,19 @@ mod tests {
     }
 
     #[test]
+    fn cached_repo_identity_clears_when_head_disappears() {
+        let root = temp_test_dir("missing-head");
+        write_fake_tracked_repo(&root);
+        let (_, cached) = git_status_snapshot_for_cwd(&root, None);
+        std::fs::remove_file(root.join(".git/HEAD")).unwrap();
+
+        let (snapshot, _) = git_status_snapshot_for_cwd(&root, cached.as_ref());
+
+        assert_eq!(snapshot.space, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn branch_only_refresh_skips_ahead_behind_cache_work() {
         let root = temp_test_dir("branch-only");
         write_fake_tracked_repo(&root);
@@ -493,7 +535,7 @@ mod tests {
 
         assert_eq!(snapshot.branch.as_deref(), Some("main"));
         assert_eq!(snapshot.ahead_behind, None);
-        assert_eq!(update, None);
+        assert!(update.is_some_and(|entry| entry.fingerprint.is_some()));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -580,6 +622,29 @@ mod tests {
         assert_eq!(snapshot.branch.as_deref(), Some("main"));
         assert_eq!(snapshot.ahead_behind, None);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_status_rebuilds_config_when_missing_include_appears() {
+        let root = temp_test_dir("include-appears");
+        write_fake_tracked_repo(&root);
+        std::fs::write(
+            root.join(".git/config"),
+            "[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n[include]\n\tpath = branch.cfg\n",
+        )
+        .unwrap();
+        let (_, cached) = git_status_snapshot_for_cwd(&root, None);
+        std::fs::write(
+            root.join(".git/branch.cfg"),
+            "[branch \"main\"]\n\tremote = fork\n\tmerge = refs/heads/main\n",
+        )
+        .unwrap();
+
+        let (_, updated) = git_status_snapshot_for_cwd(&root, cached.as_ref());
+
+        let upstream = updated.unwrap().fingerprint.unwrap().upstream.unwrap();
+        assert_eq!(upstream.remote, "fork");
         std::fs::remove_dir_all(root).unwrap();
     }
 

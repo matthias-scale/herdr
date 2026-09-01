@@ -286,6 +286,7 @@ fn deduplicate_git_refresh_items(
     let mut jobs = Vec::<WorkspaceGitRefreshJob>::new();
 
     for item in items {
+        let reconcile = item.cache_key_hint.is_none();
         let cache_key = item.cache_key_hint.unwrap_or_else(|| {
             crate::workspace::git_status_cache_key(&item.resolved_identity_cwd)
                 .unwrap_or_else(|| item.resolved_identity_cwd.clone())
@@ -297,13 +298,14 @@ fn deduplicate_git_refresh_items(
             updates_workspace_identity: item.updates_workspace_identity,
         };
         if let Some(&index) = indexes.get(&cache_key) {
+            jobs[index].cached = jobs[index].cached.take().filter(|_| !reconcile);
             jobs[index].targets.push(target);
             jobs[index].demand.branch |= item.demand.branch;
             jobs[index].demand.ahead_behind |= item.demand.ahead_behind;
             continue;
         }
 
-        let cached = cache.get(&cache_key).cloned();
+        let cached = cache.get(&cache_key).filter(|_| !reconcile).cloned();
         indexes.insert(cache_key.clone(), jobs.len());
         jobs.push(WorkspaceGitRefreshJob {
             cache_key,
@@ -352,6 +354,20 @@ fn refresh_workspace_git_statuses(
         results,
         cache_updates,
     }
+}
+
+#[cfg(test)]
+fn refresh_workspace_git_statuses_with_cache_and_demand(
+    items: Vec<WorkspaceGitRefreshItem>,
+    cache: &HashMap<PathBuf, GitStatusCacheEntry>,
+    demand: GitStatusRefreshDemand,
+) -> WorkspaceGitRefreshOutput {
+    refresh_workspace_git_statuses(
+        items,
+        cache,
+        Instant::now() + GIT_REFRESH_TIMEOUT,
+        std::path::Path::new("git"),
+    )
 }
 
 #[cfg(test)]
@@ -491,6 +507,50 @@ mod tests {
     }
 
     #[test]
+    fn shared_root_repo_refresh_keeps_workspace_specific_fallback_labels() {
+        let cache_key = PathBuf::from("/");
+        let cached = GitStatusCacheEntry {
+            fingerprint: None,
+            retry_after: Some(Instant::now() + std::time::Duration::from_secs(30)),
+            snapshot: crate::workspace::WorkspaceGitStatusSnapshot {
+                auto_label: "/".into(),
+                branch: Some("main".into()),
+                ahead_behind: None,
+                space: Some(crate::workspace::GitSpaceMetadata {
+                    key: "/.git".into(),
+                    checkout_key: "/".into(),
+                    repo_name: "repo".into(),
+                    repo_root: cache_key.clone(),
+                    is_linked_worktree: false,
+                }),
+            },
+        };
+        let items = ["alpha", "beta"]
+            .into_iter()
+            .map(|name| WorkspaceGitRefreshItem {
+                workspace_id: name.into(),
+                resolved_identity_cwd: cache_key.join(name),
+                cache_key_hint: Some(cache_key.clone()),
+                demand: GitStatusRefreshDemand::ALL,
+                updates_workspace_identity: true,
+            })
+            .collect();
+
+        let output = refresh_workspace_git_statuses_with_cache_and_demand(
+            items,
+            &HashMap::from([(cache_key, cached)]),
+            GitStatusRefreshDemand::ALL,
+        );
+
+        assert_eq!(output.cache_updates.len(), 1);
+        assert_eq!(output.results.len(), 2);
+        assert_eq!(output.results[0].auto_label, "alpha");
+        assert_eq!(output.results[1].auto_label, "beta");
+        assert_eq!(output.results[0].branch.as_deref(), Some("main"));
+        assert_eq!(output.results[1].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
     fn git_refresh_item_collection_does_not_discover_uncached_cwd() {
         let mut app = test_app(&config_with_sidebar_branch());
         let cwd = std::env::temp_dir().join(format!("herdr-uncached-cwd-{}", std::process::id()));
@@ -539,6 +599,20 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].cache_key_hint, None);
+        let cache_key = items[0].resolved_identity_cwd.clone();
+        let cached = GitStatusCacheEntry {
+            fingerprint: None,
+            retry_after: None,
+            snapshot: crate::workspace::WorkspaceGitStatusSnapshot {
+                auto_label: "stale".into(),
+                branch: None,
+                ahead_behind: None,
+                space: None,
+            },
+        };
+        let jobs = deduplicate_git_refresh_items(items, &HashMap::from([(cache_key, cached)]));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].cached, None);
     }
 
     #[test]

@@ -5,8 +5,8 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
     ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind, Keybinds, SidebarConfig,
-    SoundConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD, DEFAULT_MOUSE_SCROLL_LINES,
-    DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    SoundConfig, TabBarRightEntryConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
+    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
 };
 
 pub const MAX_TOAST_DELAY_SECONDS: u64 = 3600;
@@ -47,7 +47,11 @@ impl Default for UpdateConfig {
 }
 
 fn default_update_channel() -> UpdateChannelConfig {
-    if cfg!(windows) {
+    default_update_channel_for_build(cfg!(windows), crate::build_info::is_preview())
+}
+
+fn default_update_channel_for_build(is_windows: bool, is_preview: bool) -> UpdateChannelConfig {
+    if is_windows && is_preview {
         UpdateChannelConfig::Preview
     } else {
         UpdateChannelConfig::Stable
@@ -339,6 +343,7 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub terminal: TerminalConfig,
     pub session: SessionConfig,
+    pub server: ServerConfig,
     pub update: UpdateConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
@@ -483,6 +488,10 @@ pub struct KeysConfig {
     pub previous_tab: BindingConfig,
     /// Select the next tab in the active workspace. Default: "prefix+ctrl+n".
     pub next_tab: BindingConfig,
+    /// Move the active tab one position toward the front. Unset by default.
+    pub move_tab_previous: BindingConfig,
+    /// Move the active tab one position toward the back. Unset by default.
+    pub move_tab_next: BindingConfig,
     /// Focus the previous tab across all workspaces. Default: "prefix+p".
     pub previous_window: BindingConfig,
     /// Focus the next tab across all workspaces. Default: "prefix+n".
@@ -541,6 +550,14 @@ pub struct KeysConfig {
     pub toggle_pin_tab: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
+    /// Resize the focused pane toward the left. Unset by default.
+    pub resize_pane_left: BindingConfig,
+    /// Resize the focused pane downward. Unset by default.
+    pub resize_pane_down: BindingConfig,
+    /// Resize the focused pane upward. Unset by default.
+    pub resize_pane_up: BindingConfig,
+    /// Resize the focused pane toward the right. Unset by default.
+    pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
     /// Toggle the sidebar blocked filter. Default: "prefix+f".
@@ -655,6 +672,10 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_previous: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_next: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     previous_window: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_window: Option<BindingConfig>,
@@ -709,6 +730,14 @@ pub(crate) struct KeysConfigOverlay {
     toggle_pin_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resize_mode: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_left: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_down: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_up: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resize_pane_right: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
@@ -790,6 +819,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_prio_panel);
         apply_field!(previous_tab);
         apply_field!(next_tab);
+        apply_field!(move_tab_previous);
+        apply_field!(move_tab_next);
         apply_field!(previous_window);
         apply_field!(next_window);
         apply_field!(next_blocked_window);
@@ -818,6 +849,10 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(zoom);
         apply_field!(toggle_pin_tab);
         apply_field!(resize_mode);
+        apply_field!(resize_pane_left);
+        apply_field!(resize_pane_down);
+        apply_field!(resize_pane_up);
+        apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
         apply_field!(toggle_blocked_filter);
         apply_field!(toggle_dock);
@@ -914,6 +949,8 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_prio_panel, keybinds.toggle_prio_panel);
         copy_effective_action_field!(previous_tab, keybinds.previous_tab);
         copy_effective_action_field!(next_tab, keybinds.next_tab);
+        copy_effective_action_field!(move_tab_previous, keybinds.move_tab_previous);
+        copy_effective_action_field!(move_tab_next, keybinds.move_tab_next);
         copy_effective_action_field!(previous_window, keybinds.previous_window);
         copy_effective_action_field!(next_window, keybinds.next_window);
         copy_effective_action_field!(next_blocked_window, keybinds.next_blocked_window);
@@ -942,6 +979,10 @@ impl KeysConfig {
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(toggle_pin_tab, keybinds.toggle_pin_tab);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
+        copy_effective_action_field!(resize_pane_left, keybinds.resize_pane_left);
+        copy_effective_action_field!(resize_pane_down, keybinds.resize_pane_down);
+        copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
+        copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
@@ -1063,6 +1104,8 @@ pub struct UiConfig {
     pub prompt_new_workspace_name: bool,
     /// Draw borders around split panes. Default: true.
     pub pane_borders: bool,
+    /// Draw the outer border around the pane grid. Default: true.
+    pub pane_outer_borders: bool,
     /// Draw interactive scrollbars beside terminal panes. Default: true.
     pub pane_scrollbars: bool,
     /// Keep split panes visually separated instead of sharing divider borders. Default: true.
@@ -1083,6 +1126,12 @@ pub struct UiConfig {
     /// Saved values are "spaces" or "priority". Default: "spaces".
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
+    /// Right-aligned tab-row status entries.
+    pub tab_bar_right: Vec<TabBarRightEntryConfig>,
+    /// Separator between right-aligned tab-row status entries.
+    pub tab_bar_right_separator: String,
+    /// Template for the host terminal window title.
+    pub window_title: String,
     /// Open the home view on launch. Default: false.
     pub show_home_on_start: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
@@ -1128,6 +1177,15 @@ impl ImeCursorShape {
             Self::SteadyBar => 6,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Virtual terminal width used when no client is attached. Default: 120.
+    pub headless_cols: u16,
+    /// Virtual terminal height used when no client is attached. Default: 40.
+    pub headless_rows: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1219,7 +1277,7 @@ pub struct ExperimentalConfig {
     /// if the list contains no valid names, the reveal does not apply.
     /// Accepted names: pi, claude, codex, gemini, cursor, devin, cline,
     /// opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo,
-    /// qodercli, qoder, maki.
+    /// qodercli, qoder, qwen, qwen-code, maki.
     /// Default: empty.
     pub cjk_ime_agents: Vec<String>,
     /// Cursor shape rendered for the IME anchor when
@@ -1279,6 +1337,8 @@ impl Default for KeysConfig {
             toggle_prio_panel: BindingConfig::empty(),
             previous_tab: BindingConfig::one("prefix+ctrl+p"),
             next_tab: BindingConfig::one("prefix+ctrl+n"),
+            move_tab_previous: BindingConfig::empty(),
+            move_tab_next: BindingConfig::empty(),
             previous_window: BindingConfig::one("prefix+p"),
             next_window: BindingConfig::one("prefix+n"),
             next_blocked_window: BindingConfig::one("prefix+b"),
@@ -1307,6 +1367,10 @@ impl Default for KeysConfig {
             zoom: BindingConfig::one("prefix+z"),
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
+            resize_pane_left: BindingConfig::empty(),
+            resize_pane_down: BindingConfig::empty(),
+            resize_pane_up: BindingConfig::empty(),
+            resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
@@ -1353,6 +1417,7 @@ impl Default for UiConfig {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
+            pane_outer_borders: true,
             pane_scrollbars: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
@@ -1361,6 +1426,9 @@ impl Default for UiConfig {
             show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
             tab_bar_position: TabBarPositionConfig::Hidden,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: " ".into(),
+            window_title: super::window_title::default_window_title(),
             show_home_on_start: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
@@ -1450,6 +1518,15 @@ impl<'de> Deserialize<'de> for ToastConfig {
     }
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            headless_cols: crate::config::DEFAULT_HEADLESS_COLS,
+            headless_rows: crate::config::DEFAULT_HEADLESS_ROWS,
+        }
+    }
+}
+
 impl Default for AdvancedConfig {
     fn default() -> Self {
         Self {
@@ -1503,21 +1580,33 @@ manifest_check = false
         assert!(!config.update.manifest_check);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_update_config_defaults_to_preview() {
+    fn update_channel_default_follows_windows_build_identity() {
+        assert_eq!(
+            default_update_channel_for_build(true, true),
+            UpdateChannelConfig::Preview
+        );
+        assert_eq!(
+            default_update_channel_for_build(true, false),
+            UpdateChannelConfig::Stable
+        );
+        assert_eq!(
+            default_update_channel_for_build(false, true),
+            UpdateChannelConfig::Stable
+        );
+    }
+
+    #[test]
+    fn missing_update_channel_uses_build_default() {
         let empty: Config = toml::from_str("").unwrap();
         let without_update_channel: Config =
             toml::from_str("[update]\nversion_check = false").unwrap();
 
-        assert_eq!(
-            Config::default().update.channel,
-            UpdateChannelConfig::Preview
-        );
-        assert_eq!(empty.update.channel, UpdateChannelConfig::Preview);
+        assert_eq!(Config::default().update.channel, default_update_channel());
+        assert_eq!(empty.update.channel, default_update_channel());
         assert_eq!(
             without_update_channel.update.channel,
-            UpdateChannelConfig::Preview
+            default_update_channel()
         );
     }
 
@@ -2120,6 +2209,45 @@ delay_seconds = {}
     fn onboarding_false_skips_setup() {
         let config: Config = toml::from_str("onboarding = false").unwrap();
         assert!(!config.should_show_onboarding());
+    }
+
+    #[test]
+    fn server_headless_size_defaults_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.server.headless_cols,
+            crate::config::DEFAULT_HEADLESS_COLS
+        );
+        assert_eq!(
+            default_config.server.headless_rows,
+            crate::config::DEFAULT_HEADLESS_ROWS
+        );
+
+        let config: Config = toml::from_str(
+            r#"[server]
+headless_cols = 160
+headless_rows = 50
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.server.headless_cols, 160);
+        assert_eq!(config.server.headless_rows, 50);
+
+        let invalid: Config = toml::from_str(
+            r#"[server]
+headless_cols = 0
+headless_rows = 50
+"#,
+        )
+        .unwrap();
+        assert!(invalid.invalid_headless_size_diagnostic().is_some());
+        assert_eq!(
+            invalid.headless_size(),
+            (
+                crate::config::DEFAULT_HEADLESS_COLS,
+                crate::config::DEFAULT_HEADLESS_ROWS
+            )
+        );
     }
 
     #[test]
