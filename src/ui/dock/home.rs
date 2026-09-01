@@ -88,13 +88,19 @@ fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
     if let Some(reason) = projection.unavailable.as_deref() {
         return format!("unavailable: {reason}");
     }
-    projection
-        .observed_at
-        .map(|observed_at| match now.duration_since(observed_at) {
-            Ok(elapsed) => format!("observed {} ago", compact_elapsed(elapsed)),
-            Err(_) => "observed unknown".to_string(),
-        })
-        .unwrap_or_else(|| "observed unknown".to_string())
+    let Some(observed_at) = projection.observed_at else {
+        // No observation at all. Name the cause instead of reporting one
+        // indistinguishable `unknown` for a disabled index and a pending fetch.
+        return if projection.index_enabled {
+            "work index: no observation yet".to_string()
+        } else {
+            "work index off — set work_index.enabled".to_string()
+        };
+    };
+    match now.duration_since(observed_at) {
+        Ok(elapsed) => format!("observed {} ago", compact_elapsed(elapsed)),
+        Err(_) => "observed unknown".to_string(),
+    }
 }
 
 fn render_line(frame: &mut Frame, area: Rect, y: u16, text: String, style: Style) {
@@ -334,6 +340,7 @@ mod tests {
             unbound_tickets: None,
             observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
             unavailable: None,
+            index_enabled: true,
         };
 
         assert_eq!(

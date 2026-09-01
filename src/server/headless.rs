@@ -4849,6 +4849,11 @@ impl HeadlessServer {
                 .start_headless_foreground_process_refresh_if_due(now);
         }
         self.app.start_claude_subagent_refresh_if_due(now);
+        // The work index is a server-owned runtime fact, so it refreshes with or
+        // without an attached TUI. Omitting it here left every server-backed
+        // session with a permanently empty index while the interactive loop
+        // refreshed fine, which is the #119 defect class.
+        self.app.start_work_index_refresh_if_due(now);
 
         if self
             .app

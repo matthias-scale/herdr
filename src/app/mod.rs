@@ -785,6 +785,7 @@ impl App {
             dock_home_selection: None,
             dock_home_focused: false,
             work_index_snapshot: None,
+            work_index_enabled: config.work_index.enabled,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
@@ -1896,6 +1897,7 @@ impl App {
 
         if !invalid_section("work_index") {
             self.work_index_config = config.work_index.clone();
+            self.state.work_index_enabled = self.work_index_config.enabled;
             if let Some(view) = self.state.work_view.as_mut() {
                 view.enabled = self.work_index_config.enabled;
                 if !view.enabled {

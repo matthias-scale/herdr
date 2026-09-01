@@ -1780,6 +1780,10 @@ pub struct AppState {
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Whether the work index is configured on. Mirrored so the dock home can
+    /// distinguish "off" from "on but not observed yet" instead of rendering
+    /// one indistinguishable `unknown` for both.
+    pub(crate) work_index_enabled: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     /// A file the next editor spawn for this agent pane should open. Absent, the
@@ -2605,6 +2609,7 @@ impl AppState {
             dock_home_selection: None,
             dock_home_focused: false,
             work_index_snapshot: None,
+            work_index_enabled: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),

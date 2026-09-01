@@ -323,6 +323,9 @@ pub(crate) struct DockHomeProjection {
     pub(crate) unbound_tickets: Option<usize>,
     pub(crate) observed_at: Option<std::time::SystemTime>,
     pub(crate) unavailable: Option<String>,
+    /// Whether the work index is configured on. Without it, "switched off" and
+    /// "on but nothing observed yet" render as the same `unknown`.
+    pub(crate) index_enabled: bool,
 }
 
 /// Dock home rows: one per bound PR, ordered by first canonical binding,
@@ -330,6 +333,7 @@ pub(crate) struct DockHomeProjection {
 pub(crate) fn project_dock_home(
     bindings: &[DockHomeBinding],
     snapshot: Option<&Snapshot>,
+    index_enabled: bool,
 ) -> DockHomeProjection {
     let mut rows: Vec<DockHomeRow> = Vec::new();
     for binding in bindings {
@@ -409,6 +413,7 @@ pub(crate) fn project_dock_home(
         unbound_tickets: unbound.map(|(_, tickets)| tickets),
         observed_at: snapshot.map(|snapshot| snapshot.observed_at),
         unavailable: snapshot.and_then(|snapshot| snapshot.unavailable.clone()),
+        index_enabled,
     }
 }
 
@@ -457,7 +462,14 @@ impl crate::app::state::AppState {
                 bindings.push(DockHomeBinding {
                     ws_idx,
                     pane_id: detail.pane_id,
-                    agent_label: Some(detail.agent_label.clone()).filter(|label| !label.is_empty()),
+                    // `agent_label` falls back to the `>_` shell glyph for an
+                    // agentless pane. That is not an owner, so only a detected
+                    // agent fills the owner cell; everything else stays `—`.
+                    agent_label: detail
+                        .agent
+                        .is_some()
+                        .then(|| detail.agent_label.clone())
+                        .filter(|label| !label.is_empty()),
                     agent_state: detail.state,
                     pr_url: pr_url.to_string(),
                     role: context.role,
@@ -473,6 +485,7 @@ impl crate::app::state::AppState {
         project_dock_home(
             &self.dock_home_bindings(),
             self.work_index_snapshot.as_ref(),
+            self.work_index_enabled,
         )
     }
 
@@ -632,10 +645,10 @@ mod tests {
             home_binding(0, 10, crate::detect::AgentState::Working),
             home_binding(1, 20, crate::detect::AgentState::Blocked),
         ];
-        let before = project_dock_home(&bindings, None);
+        let before = project_dock_home(&bindings, None, true);
         bindings[0].agent_state = crate::detect::AgentState::Idle;
         bindings[1].agent_state = crate::detect::AgentState::Working;
-        let after = project_dock_home(&bindings, None);
+        let after = project_dock_home(&bindings, None, true);
 
         let keys = |projection: &DockHomeProjection| {
             projection
@@ -656,8 +669,11 @@ mod tests {
         let mut fetched_item = item("owner/repo", 20, "snapshot title", &[], &[]);
         fetched_item.review_decision = Some("APPROVED".to_string());
 
-        let projection =
-            project_dock_home(&[missing, fetched], Some(&snapshot(vec![fetched_item])));
+        let projection = project_dock_home(
+            &[missing, fetched],
+            Some(&snapshot(vec![fetched_item])),
+            true,
+        );
 
         assert_eq!(projection.rows[0].key.repo, "owner/repo");
         assert_eq!(projection.rows[0].number, "10");
@@ -676,7 +692,7 @@ mod tests {
         draft.draft = true;
         draft.review_decision = Some("REVIEW_REQUIRED".to_string());
 
-        let projection = project_dock_home(&[binding], Some(&snapshot(vec![draft])));
+        let projection = project_dock_home(&[binding], Some(&snapshot(vec![draft])), true);
 
         assert_eq!(projection.rows[0].review, "D");
     }
@@ -708,11 +724,12 @@ mod tests {
                 bound_ticket,
                 unbound_ticket,
             ])),
+            true,
         );
         assert_eq!(projection.unbound_prs, Some(1));
         assert_eq!(projection.unbound_tickets, Some(1));
 
-        let unknown = project_dock_home(&[], None);
+        let unknown = project_dock_home(&[], None, true);
         assert_eq!(unknown.unbound_prs, None);
         assert_eq!(unknown.unbound_tickets, None);
     }
