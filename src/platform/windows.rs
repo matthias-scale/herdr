@@ -1512,6 +1512,12 @@ fn nul_terminated_utf16_to_string(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..len])
 }
 
+/// Platform parity with the Linux snapshot path. Only Linux pays a
+/// full-`/proc`-scan per call, so elsewhere this is the uncached function.
+pub fn session_processes_cached(child_pid: u32) -> Vec<u32> {
+    session_processes(child_pid)
+}
+
 pub fn session_processes(child_pid: u32) -> Vec<u32> {
     if child_pid == 0 {
         return Vec::new();
