@@ -781,6 +781,348 @@ fn wait_for_window_title(output: &SharedOutput, expected_suffix: &str) -> String
     );
 }
 
+fn attach_thin_client_with_config(
+    config_home: &PathBuf,
+    runtime_dir: &PathBuf,
+    api_socket: &PathBuf,
+    client_socket: &PathBuf,
+    config: &str,
+) -> (SpawnedHerdr, SpawnedHerdr, SharedOutput) {
+    let spawned_server =
+        spawn_server_with_config(config_home, runtime_dir, api_socket, client_socket, config);
+    wait_for_socket(api_socket, Duration::from_secs(10));
+    wait_for_socket(client_socket, Duration::from_secs(10));
+
+    let thin_client = spawn_client_process(config_home, runtime_dir, api_socket);
+    let reader = thin_client
+        ._master
+        .as_ref()
+        .expect("thin client master")
+        .try_clone_reader()
+        .expect("clone client PTY reader");
+    let output = spawn_pty_drain(reader);
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut attached = false;
+    while Instant::now() < deadline {
+        let out = read_output(&output);
+        if out.contains("\x1b[2J")
+            || out.contains('\u{2500}')
+            || out.contains("workspace")
+            || out.contains("pane")
+            || out.contains("terminal")
+        {
+            attached = true;
+            break;
+        }
+        if out.to_lowercase().contains("herdr:") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+    assert!(
+        attached,
+        "thin client must attach and render a frame; output: {:?}",
+        read_output(&output)
+    );
+
+    (spawned_server, thin_client, output)
+}
+
+fn wait_for_pane_terminal_title(socket_path: &PathBuf, pane_id: &str, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let request = serde_json::json!({
+            "id": "window-title-pane-get",
+            "method": "pane.get",
+            "params": {"pane_id": pane_id},
+        });
+        let response = send_json_request(socket_path, &request.to_string());
+        if response["result"]["pane"]["terminal_title"].as_str() == Some(expected) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("pane {pane_id} did not report terminal title {expected:?}");
+}
+
+fn send_pane_shell_command(socket_path: &PathBuf, pane_id: &str, command: &str) {
+    let request = serde_json::json!({
+        "id": "window-title-command",
+        "method": "pane.send_input",
+        "params": {
+            "pane_id": pane_id,
+            "text": command,
+            "keys": ["Enter"],
+        }
+    });
+    let response = send_json_request(socket_path, &request.to_string());
+    assert_eq!(response["result"]["type"], "ok", "{response}");
+}
+
+fn read_until_client_attaches(client: &SpawnedHerdr) -> String {
+    let master = client._master.as_ref().expect("thin client master");
+    let fd = master.as_raw_fd().expect("thin client PTY file descriptor");
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert_ne!(flags, -1, "read thin client PTY flags");
+    assert_ne!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        -1,
+        "make thin client PTY nonblocking"
+    );
+
+    let mut reader = master.try_clone_reader().expect("clone client PTY reader");
+    let mut output = String::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let mut buf = [0u8; 4096];
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => panic!("read thin client PTY: {err}"),
+        }
+        // The fork's first frame clears the screen and draws vertical rules; do
+        // not narrow this to the horizontal rule upstream happens to emit.
+        if output.contains("\x1b[2J")
+            || output.contains('\u{2500}')
+            || output.contains("workspace")
+            || output.contains("pane")
+            || output.contains("terminal")
+        {
+            return output;
+        }
+    }
+    panic!("thin client must attach and render a frame; output: {output:?}");
+}
+
+#[test]
+fn configured_window_title_tracks_all_tokens_and_focused_osc_only() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let (server, client, output) = attach_thin_client_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n[ui]\nwindow_title = \"H={hostname}|W={workspace}|T={tab}|P={pane}|O={terminal_title}\"\n",
+    );
+
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "create-workspace",
+            "method": "workspace.create",
+            "params": {"cwd": base, "focus": true},
+        })
+        .to_string(),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created", "{created}");
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .expect("workspace id")
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("pane id")
+        .to_string();
+    let tab_id = created["result"]["tab"]["tab_id"]
+        .as_str()
+        .expect("tab id")
+        .to_string();
+
+    for request in [
+        serde_json::json!({
+            "id": "rename-workspace",
+            "method": "workspace.rename",
+            "params": {"workspace_id": workspace_id, "label": "space-a"},
+        }),
+        serde_json::json!({
+            "id": "rename-tab",
+            "method": "tab.rename",
+            "params": {"tab_id": tab_id, "label": "tab-a"},
+        }),
+        serde_json::json!({
+            "id": "rename-pane",
+            "method": "pane.rename",
+            "params": {"pane_id": pane_id, "label": "pane-a"},
+        }),
+    ] {
+        let response = send_json_request(&api_socket, &request.to_string());
+        assert!(response.get("result").is_some(), "{response}");
+    }
+
+    let renamed = wait_for_window_title(&output, "|W=space-a|T=tab-a|P=pane-a|O=");
+    assert!(renamed.starts_with("H="));
+    assert!(
+        !renamed.starts_with("H=|"),
+        "hostname token was empty: {renamed}"
+    );
+
+    send_pane_shell_command(&api_socket, &pane_id, r"printf '\033]0;⠋ building\007'");
+    wait_for_window_title(&output, "|W=space-a|T=tab-a|P=pane-a|O=building");
+
+    let second_tab = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "second-tab",
+            "method": "tab.create",
+            "params": {"workspace_id": workspace_id, "focus": true},
+        })
+        .to_string(),
+    );
+    assert_eq!(second_tab["result"]["type"], "tab_created", "{second_tab}");
+    let second_pane_id = second_tab["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("second pane id")
+        .to_string();
+    wait_for_window_title(&output, "|W=space-a|T=2|P=|O=");
+    let titles_before_hidden_update = captured_window_titles(&output).len();
+    send_pane_shell_command(&api_socket, &pane_id, r"printf '\033]0;hidden update\007'");
+    // Intentionally consume the AppState title through a read-only request
+    // before the queued source is handled.
+    wait_for_pane_terminal_title(&api_socket, &pane_id, "hidden update");
+    send_pane_shell_command(
+        &api_socket,
+        &second_pane_id,
+        r"printf '\033]0;foreground marker\007'",
+    );
+    wait_for_window_title(&output, "|W=space-a|T=2|P=|O=foreground marker");
+    assert!(
+        captured_window_titles(&output)[titles_before_hidden_update..]
+            .iter()
+            .all(|title| !title.ends_with("|O=hidden update")),
+        "a hidden pane title reached the outer terminal"
+    );
+
+    let focused = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "focus-first-tab",
+            "method": "tab.focus",
+            "params": {"tab_id": tab_id},
+        })
+        .to_string(),
+    );
+    assert_eq!(focused["result"]["tab"]["focused"], true, "{focused}");
+    wait_for_window_title(&output, "|W=space-a|T=tab-a|P=pane-a|O=hidden update");
+
+    drop(server);
+    cleanup_spawned_herdr(client, base);
+}
+
+#[test]
+fn client_exits_cleanly_when_terminal_and_transport_hang_up() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let mut spawned_server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
+    read_until_client_attaches(&thin_client);
+
+    // Freeze the client so the dead terminal and transport EOF are both
+    // observable when it resumes, making the `--remote` shutdown race deterministic.
+    let client_pid = thin_client.child.process_id().expect("thin client pid") as libc::pid_t;
+    assert_eq!(
+        unsafe { libc::kill(client_pid, libc::SIGSTOP) },
+        0,
+        "stop thin client"
+    );
+    let server_pid = spawned_server.child.process_id().expect("server pid") as libc::pid_t;
+    assert_eq!(
+        unsafe { libc::kill(server_pid, libc::SIGKILL) },
+        0,
+        "kill server transport"
+    );
+    spawned_server.close_master();
+    thin_client.close_master();
+    assert_eq!(
+        unsafe { libc::kill(client_pid, libc::SIGCONT) },
+        0,
+        "resume thin client"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let status = loop {
+        if let Some(status) = thin_client.child.try_wait().expect("poll thin client") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    drop(spawned_server);
+    cleanup_spawned_herdr(thin_client, base);
+
+    let status = status.expect("thin client should exit after terminal and transport hang up");
+    assert!(
+        status.success(),
+        "thin client should exit cleanly after terminal and transport hang up, got {status}"
+    );
+}
+
+#[test]
+fn client_exits_cleanly_when_terminal_hangs_up() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned_server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
+    let attached_output = read_until_client_attaches(&thin_client);
+
+    // Closing the final PTY master models the outer terminal disappearing: the
+    // foreground client receives SIGHUP and writes to stdout/stderr fail.
+    thin_client.close_master();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let status = loop {
+        if let Some(status) = thin_client.child.try_wait().expect("poll thin client") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let server_response = ping_socket(&api_socket);
+
+    drop(spawned_server);
+    cleanup_spawned_herdr(thin_client, base);
+
+    let status = status.unwrap_or_else(|| {
+        panic!("thin client did not exit after PTY hangup; attach output: {attached_output:?}")
+    });
+    assert!(
+        status.success(),
+        "thin client should exit cleanly after PTY hangup, got {status}; attach output: {attached_output:?}"
+    );
+    assert!(
+        server_response.contains("pong"),
+        "server should survive client PTY hangup: {server_response}"
+    );
+}
+
 #[test]
 fn configured_window_title_is_emitted_in_no_session_mode() {
     let _lock = test_lock();
