@@ -163,6 +163,12 @@ pub struct App {
     >,
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
+    pub(crate) work_index_config: crate::config::WorkIndexConfig,
+    pub(crate) work_index_refresh_in_flight: Option<crate::work_index::WorkIndexRefreshInFlight>,
+    pub(crate) last_work_index_refresh_generation: u64,
+    pub(crate) last_applied_work_index_refresh_generation: u64,
+    pub(crate) next_work_index_refresh: Instant,
+    pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
     pub(crate) foreground_process_refresh_in_flight:
         Option<foreground_process::ForegroundProcessRefreshInFlight>,
     pub(crate) last_foreground_process_refresh_generation: u64,
@@ -178,6 +184,10 @@ pub struct App {
         HashMap<crate::terminal::TerminalId, claude_subagents::TranscriptTracker>,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    pub(crate) work_index_gh_program_override: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    pub(crate) work_index_linearis_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -938,6 +948,12 @@ impl App {
             next_git_work_context_refresh: Instant::now(),
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
+            work_index_config: config.work_index.clone(),
+            work_index_refresh_in_flight: None,
+            last_work_index_refresh_generation: 0,
+            last_applied_work_index_refresh_generation: 0,
+            next_work_index_refresh: Instant::now(),
+            work_index_snapshot: None,
             foreground_process_refresh_in_flight: None,
             last_foreground_process_refresh_generation: 0,
             last_applied_foreground_process_refresh_generation: 0,
@@ -951,6 +967,10 @@ impl App {
             claude_subagent_trackers: HashMap::new(),
             #[cfg(test)]
             git_program_override: None,
+            #[cfg(test)]
+            work_index_gh_program_override: None,
+            #[cfg(test)]
+            work_index_linearis_program_override: None,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
@@ -1868,6 +1888,13 @@ impl App {
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
         }
 
+        if !invalid_section("work_index") {
+            self.work_index_config = config.work_index.clone();
+            if !self.work_index_config.enabled {
+                self.work_index_refresh_in_flight = None;
+            }
+        }
+
         if !invalid_section("theme") {
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
             self.refresh_effective_app_theme();
@@ -2386,6 +2413,27 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn stale_work_index_generation_is_rejected() {
+        let mut app = test_app();
+        app.last_work_index_refresh_generation = 4;
+        app.last_applied_work_index_refresh_generation = 4;
+        let snapshot = crate::work_index::Snapshot {
+            items: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        };
+        assert!(!app.handle_work_index_refreshed(3, snapshot));
+        assert!(app.work_index_snapshot.is_none());
+    }
+
+    #[test]
+    fn disabled_work_index_does_not_start_a_refresh() {
+        let mut app = test_app();
+        app.start_work_index_refresh_if_due(Instant::now());
+        assert!(app.work_index_refresh_in_flight.is_none());
     }
 
     #[test]

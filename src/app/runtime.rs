@@ -406,6 +406,7 @@ impl App {
         changed |= self.clear_due_selection_highlight(now);
 
         self.start_git_work_context_refresh_if_due(now);
+        self.start_work_index_refresh_if_due(now);
         self.start_foreground_process_refresh_if_due(now);
         self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
@@ -871,6 +872,7 @@ impl App {
             include_client_refresh
                 .then(|| self.git_work_context_refresh_deadline())
                 .flatten(),
+            self.work_index_refresh_deadline(),
             include_client_refresh
                 .then(|| self.foreground_process_refresh_deadline())
                 .flatten(),

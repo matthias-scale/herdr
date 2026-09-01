@@ -24,6 +24,7 @@ mod spec;
 mod status;
 mod tab;
 mod window;
+mod work_index;
 mod workspace;
 mod worktree;
 
@@ -158,6 +159,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
         "fleet" => fleet::run_fleet_command(&args[2..])?,
+        "work-index" => work_index::run_work_index_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
