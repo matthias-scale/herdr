@@ -421,6 +421,20 @@ fn compute_view_internal(
         dock_tab_hit_areas,
         dock_body_rect,
     ) = dock_geometry(dock_area, app.dock_collapsed);
+    let (dock_home_row_hit_areas, dock_home_row_keys) =
+        if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
+            let projection = app.dock_home_projection();
+            let hit_areas = dock::home_row_hit_areas(&projection, dock_body_rect);
+            let keys = projection
+                .rows
+                .iter()
+                .take(hit_areas.len())
+                .map(|row| row.key.clone())
+                .collect();
+            (hit_areas, keys)
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
     let home_row_hit_areas = if app.home.is_some() {
         let queue = app.blocked_agents();
@@ -486,6 +500,8 @@ fn compute_view_internal(
         dock_divider_rect,
         dock_tab_bar_rect,
         dock_tab_hit_areas,
+        dock_home_row_hit_areas,
+        dock_home_row_keys,
         dock_body_rect,
     };
     app.sync_copy_mode_search_geometry();
@@ -648,6 +664,8 @@ fn compute_mobile_view(
         dock_divider_rect: Rect::default(),
         dock_tab_bar_rect: Rect::default(),
         dock_tab_hit_areas: Vec::new(),
+        dock_home_row_hit_areas: Vec::new(),
+        dock_home_row_keys: Vec::new(),
         dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {
@@ -1141,6 +1159,56 @@ mod tests {
             );
         }
         assert!(screen.contains("focus an agent first"));
+    }
+
+    #[test]
+    fn dock_home_hit_areas_follow_visible_rows_and_home_visibility() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.mobile_width_threshold = 0;
+        app.dock_collapsed = false;
+        app.dock_tab = crate::app::DockTab::Home;
+        app.workspaces = vec![Workspace::test_new("review")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/125".into()]),
+                work_title: Some("dock home".into()),
+                role: Some(crate::work_context::PaneWorkRole::Review),
+                active_owner: Some(true),
+                ..Default::default()
+            })
+            .expect("work context");
+        let screen = Rect::new(0, 0, 120, 20);
+
+        compute_view(&mut app, screen);
+        let projection = app.dock_home_projection();
+        assert_eq!(
+            app.view.dock_home_row_hit_areas.len(),
+            projection.rows.len()
+        );
+        assert_eq!(app.view.dock_home_row_keys.len(), projection.rows.len());
+        assert_eq!(app.view.dock_home_row_keys[0], projection.rows[0].key);
+        assert_eq!(app.view.dock_home_row_hit_areas[0].height, 2);
+
+        app.dock_collapsed = true;
+        compute_view(&mut app, screen);
+        assert!(app.view.dock_home_row_hit_areas.is_empty());
+        assert!(app.view.dock_home_row_keys.is_empty());
+
+        app.dock_collapsed = false;
+        app.dock_tab = crate::app::DockTab::Editor;
+        compute_view(&mut app, screen);
+        assert!(app.view.dock_home_row_hit_areas.is_empty());
+        assert!(app.view.dock_home_row_keys.is_empty());
     }
 
     #[tokio::test]

@@ -9,6 +9,9 @@ use crate::app::{AppState, DockTab};
 use crate::terminal::TerminalRuntimeRegistry;
 
 mod editor;
+mod home;
+
+pub(crate) use home::row_hit_areas as home_row_hit_areas;
 
 pub(super) fn render_dock(
     app: &AppState,
@@ -60,8 +63,7 @@ pub(super) fn render_dock(
         }
     }
     match app.dock_tab {
-        // Placeholder: the home body lands with the review-sidebar render slice.
-        DockTab::Home => {}
+        DockTab::Home => home::render_home(app, frame, app.view.dock_body_rect),
         DockTab::Editor => editor::render_editor_body(app, terminal_runtimes, frame),
         DockTab::Shortcuts => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)

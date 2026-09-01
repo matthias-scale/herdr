@@ -523,6 +523,23 @@ impl AppState {
                     self.dock_editor_focused = tab == crate::app::DockTab::Editor;
                     return None;
                 }
+                if let Some(index) = self.dock_home_row_at(mouse.column, mouse.row) {
+                    let Some(rendered_key) = self.view.dock_home_row_keys.get(index).cloned()
+                    else {
+                        return None;
+                    };
+                    let projection = self.dock_home_projection();
+                    if let Some(row) = projection.rows.iter().find(|row| row.key == rendered_key) {
+                        let already_selected = self.dock_home_focused
+                            && self.dock_home_selection.as_ref() == Some(&row.key);
+                        self.dock_home_selection = Some(row.key.clone());
+                        self.dock_home_focused = true;
+                        if already_selected {
+                            self.jump_to_dock_home_selection();
+                        }
+                    }
+                    return None;
+                }
                 if in_dock {
                     self.dock_editor_focused = self.dock_tab == crate::app::DockTab::Editor;
                     return None;
@@ -2250,7 +2267,7 @@ mod tests {
             Rect::new(93, 0, 6, 1),
         ];
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 88, 0));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 94, 0));
 
         assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
     }
@@ -2309,7 +2326,7 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
-        let shortcuts = app.state.view.dock_tab_hit_areas[1];
+        let shortcuts = app.state.view.dock_tab_hit_areas[2];
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2319,6 +2336,128 @@ mod tests {
 
         assert!(!app.state.dock_collapsed);
         assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+    }
+
+    #[test]
+    fn dock_home_row_click_selects_then_second_click_jumps() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("current"),
+            Workspace::test_new("review"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[1].focused_pane_id().expect("pane");
+        let terminal_id = app.state.workspaces[1]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/125".into()]),
+                work_title: Some("review dock home".into()),
+                role: Some(crate::work_context::PaneWorkRole::Review),
+                active_owner: Some(true),
+                ..Default::default()
+            })
+            .expect("work context");
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let row = app.state.view.dock_home_row_hit_areas[0];
+        let expected_key = app.state.dock_home_projection().rows[0].key.clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 1,
+            row.y,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.dock_home_selection.as_ref(), Some(&expected_key));
+        assert!(app.state.dock_home_focused);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 1,
+            row.y + 1,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(pane_id));
+        assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn stale_dock_home_row_does_not_jump_to_a_replacement_projection_row() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("current"),
+            Workspace::test_new("first review"),
+            Workspace::test_new("second review"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let mut review_terminal_ids = Vec::new();
+        for (workspace_index, number) in [(1, 125), (2, 126)] {
+            let pane_id = app.state.workspaces[workspace_index]
+                .focused_pane_id()
+                .expect("pane");
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .cloned()
+                .expect("terminal");
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!(
+                        "https://github.com/herdrdev/herdr/pull/{number}"
+                    )]),
+                    work_title: Some(format!("review {number}")),
+                    role: Some(crate::work_context::PaneWorkRole::Review),
+                    active_owner: Some(true),
+                    ..Default::default()
+                })
+                .expect("work context");
+            review_terminal_ids.push(terminal_id);
+        }
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let stale_first_row = app.state.view.dock_home_row_hit_areas[0];
+        let second_key = app.state.dock_home_projection().rows[1].key.clone();
+        app.state.dock_home_selection = Some(second_key.clone());
+        app.state.dock_home_focused = true;
+
+        app.state
+            .terminals
+            .get_mut(&review_terminal_ids[0])
+            .expect("first terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(Vec::new()),
+                ..Default::default()
+            })
+            .expect("clear first work context");
+        let current_projection = app.state.dock_home_projection();
+        assert_eq!(current_projection.rows.len(), 1);
+        assert_eq!(current_projection.rows[0].key, second_key);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            stale_first_row.x + 1,
+            stale_first_row.y,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.dock_home_selection, Some(second_key));
+        assert!(app.state.dock_home_focused);
     }
 
     #[test]

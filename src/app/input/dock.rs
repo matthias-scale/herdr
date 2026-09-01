@@ -22,6 +22,16 @@ impl AppState {
             .and_then(|index| DockTab::ALL.get(index).copied())
     }
 
+    pub(crate) fn dock_home_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.dock_collapsed || self.dock_tab != DockTab::Home {
+            return None;
+        }
+        self.view
+            .dock_home_row_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+    }
+
     pub(crate) fn set_manual_dock_width(&mut self, divider_col: u16) {
         let screen = self.screen_rect();
         let right = screen.x.saturating_add(screen.width);
@@ -36,4 +46,22 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         && col < rect.x.saturating_add(rect.width)
         && row >= rect.y
         && row < rect.y.saturating_add(rect.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dock_home_row_at_maps_both_lines_to_the_same_index() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_tab = DockTab::Home;
+        app.view.dock_home_row_hit_areas = vec![Rect::new(80, 2, 20, 2), Rect::new(80, 4, 20, 2)];
+
+        assert_eq!(app.dock_home_row_at(81, 2), Some(0));
+        assert_eq!(app.dock_home_row_at(81, 3), Some(0));
+        assert_eq!(app.dock_home_row_at(99, 5), Some(1));
+        assert_eq!(app.dock_home_row_at(79, 4), None);
+    }
 }
