@@ -1232,7 +1232,7 @@ impl crate::app::App {
                 }
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkItemDetailRefreshed {
                     generation,
-                    details: Box::new(details),
+                    details,
                 });
             });
     }

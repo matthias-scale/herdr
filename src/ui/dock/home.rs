@@ -918,12 +918,18 @@ mod tests {
             created_at: full.then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
             updated_at: full.then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(120)),
             branch: full.then(|| "sca-3084-dock-ticket".into()),
-            labels: full.then(|| vec!["fleet".into()]).unwrap_or_default(),
+            labels: if full {
+                vec!["fleet".into()]
+            } else {
+                Vec::new()
+            },
             url: full.then(|| "https://linear.app/scalable/issue/SCA-3084".into()),
             parent: full.then(|| "SCA-3000  dock home".into()),
-            relations: full
-                .then(|| vec!["blocks  SCA-3090  preload".into()])
-                .unwrap_or_default(),
+            relations: if full {
+                vec!["blocks  SCA-3090  preload".into()]
+            } else {
+                Vec::new()
+            },
         };
         let mut items = vec![crate::work_index::WorkItem {
             repo: "owner/repo".into(),

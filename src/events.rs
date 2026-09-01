@@ -194,12 +194,10 @@ pub enum AppEvent {
     /// One bounded batch of GitHub detail observations completed.
     WorkItemDetailRefreshed {
         generation: u64,
-        details: Box<
-            Vec<(
-                crate::app::state::WorkItemKey,
-                crate::work_index::WorkItemDetail,
-            )>,
-        >,
+        details: Vec<(
+            crate::app::state::WorkItemKey,
+            crate::work_index::WorkItemDetail,
+        )>,
     },
     /// Background foreground-process observations completed for live panes.
     ForegroundProcessesRefreshed {

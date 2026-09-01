@@ -112,7 +112,7 @@ impl App {
             AppEvent::WorkItemDetailRefreshed {
                 generation,
                 details,
-            } => self.handle_work_item_detail_refreshed(generation, *details),
+            } => self.handle_work_item_detail_refreshed(generation, details),
             AppEvent::ForegroundProcessesRefreshed {
                 generation,
                 observations,
@@ -283,7 +283,7 @@ impl App {
             details,
         } = ev
         {
-            self.handle_work_item_detail_refreshed(generation, *details);
+            self.handle_work_item_detail_refreshed(generation, details);
             return None;
         }
 
