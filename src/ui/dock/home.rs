@@ -375,7 +375,7 @@ mod tests {
     fn unfetched_binding_renders_question_mark_review() {
         let terminal = render(&bound_app(false), Rect::new(0, 0, 30, 10));
         let text = text(&terminal);
-        assert!(text.contains("? ·codex"), "{text:?}");
+        assert!(text.contains("?  codex"), "{text:?}");
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
             usize::from(body_width)
         );
         assert!(first.ends_with('…'), "first line: {first:?}");
-        assert_eq!(second, "   RR·co…·MA…·4m", "second line: {second:?}");
+        assert_eq!(second, "   RR co… MA… 4m", "second line: {second:?}");
         assert_eq!(footer, "─".repeat(usize::from(body_width)));
         assert!(legend.starts_with("age=pr open"), "legend: {legend:?}");
     }
