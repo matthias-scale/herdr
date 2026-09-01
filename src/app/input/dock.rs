@@ -22,12 +22,12 @@ impl AppState {
             .and_then(|index| DockTab::ALL.get(index).copied())
     }
 
-    pub(crate) fn dock_home_row_at(&self, col: u16, row: u16) -> Option<usize> {
+    pub(crate) fn dock_home_tab_at(&self, col: u16, row: u16) -> Option<usize> {
         if self.dock_collapsed || self.dock_tab != DockTab::Home {
             return None;
         }
         self.view
-            .dock_home_row_hit_areas
+            .dock_home_tab_hit_areas
             .iter()
             .position(|area| rect_contains(*area, col, row))
     }
@@ -53,15 +53,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dock_home_row_at_maps_both_lines_to_the_same_index() {
+    fn dock_home_tab_at_maps_each_horizontal_hit_area() {
         let mut app = AppState::test_new();
         app.dock_collapsed = false;
         app.dock_tab = DockTab::Home;
-        app.view.dock_home_row_hit_areas = vec![Rect::new(80, 2, 20, 2), Rect::new(80, 4, 20, 2)];
+        app.view.dock_home_tab_hit_areas = vec![Rect::new(80, 2, 8, 1), Rect::new(88, 2, 9, 1)];
 
-        assert_eq!(app.dock_home_row_at(81, 2), Some(0));
-        assert_eq!(app.dock_home_row_at(81, 3), Some(0));
-        assert_eq!(app.dock_home_row_at(99, 5), Some(1));
-        assert_eq!(app.dock_home_row_at(79, 4), None);
+        assert_eq!(app.dock_home_tab_at(81, 2), Some(0));
+        assert_eq!(app.dock_home_tab_at(90, 2), Some(1));
+        assert_eq!(app.dock_home_tab_at(81, 3), None);
+        assert_eq!(app.dock_home_tab_at(79, 2), None);
     }
 }

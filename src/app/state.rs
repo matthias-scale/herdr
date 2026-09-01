@@ -706,7 +706,6 @@ pub(crate) struct DockPresentationState {
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
     pub(crate) home_focused: bool,
-    pub(crate) home_expanded: Option<WorkItemKey>,
 }
 
 impl Default for DockPresentationState {
@@ -719,7 +718,6 @@ impl Default for DockPresentationState {
             editor_focused: false,
             home_selection: None,
             home_focused: false,
-            home_expanded: None,
         }
     }
 }
@@ -966,8 +964,8 @@ pub struct ViewState {
     pub dock_divider_rect: Rect,
     pub dock_tab_bar_rect: Rect,
     pub dock_tab_hit_areas: Vec<Rect>,
-    pub dock_home_row_hit_areas: Vec<Rect>,
-    pub(crate) dock_home_row_keys: Vec<WorkItemKey>,
+    pub dock_home_tab_hit_areas: Vec<Rect>,
+    pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -1779,9 +1777,6 @@ pub struct AppState {
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
     pub(crate) dock_home_focused: bool,
-    /// Attach-local disclosure state. Moving selection clears it without
-    /// dropping keyboard focus from the home list.
-    pub(crate) dock_home_expanded: Option<WorkItemKey>,
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
@@ -2159,7 +2154,6 @@ impl AppState {
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(&mut self.dock_home_focused, &mut other.home_focused);
-        std::mem::swap(&mut self.dock_home_expanded, &mut other.home_expanded);
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
@@ -2587,8 +2581,8 @@ impl AppState {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
-                dock_home_row_hit_areas: Vec::new(),
-                dock_home_row_keys: Vec::new(),
+                dock_home_tab_hit_areas: Vec::new(),
+                dock_home_tab_keys: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -2621,7 +2615,6 @@ impl AppState {
             dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_focused: false,
-            dock_home_expanded: None,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: None,

@@ -754,8 +754,8 @@ impl App {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
-                dock_home_row_hit_areas: Vec::new(),
-                dock_home_row_keys: Vec::new(),
+                dock_home_tab_hit_areas: Vec::new(),
+                dock_home_tab_keys: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -788,7 +788,6 @@ impl App {
             dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_focused: false,
-            dock_home_expanded: None,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: None,
@@ -2087,6 +2086,13 @@ impl App {
                             if self.state.home.is_some()
                                 && self.handle_home_key_headless(key.as_key_event())
                             {
+                                continue;
+                            }
+                            if self.handle_dock_home_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
                                 continue;
                             }
                             let initial_context = self.terminal_input_context();

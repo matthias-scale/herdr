@@ -587,7 +587,6 @@ impl crate::app::state::AppState {
         let last = projection.rows.len().saturating_sub(1) as i64;
         let next = (index as i64 + delta).clamp(0, last) as usize;
         self.dock_home_selection = projection.rows.get(next).map(|row| row.key.clone());
-        self.dock_home_expanded = None;
         self.dock_scroll = 0;
     }
 
@@ -613,7 +612,6 @@ impl crate::app::state::AppState {
         }
         self.focus_pane_in_workspace(row.ws_idx, row.pane_id);
         self.dock_home_focused = false;
-        self.dock_home_expanded = None;
         self.dock_scroll = 0;
         true
     }
@@ -863,9 +861,29 @@ mod tests {
     #[test]
     fn dock_home_selection_tracks_keys_and_clamps_at_both_ends() {
         let mut state = state_with_bound_prs(&[10, 20, 30]);
+        state.work_index_snapshot = Some(snapshot(vec![
+            item("owner/repo", 30, "thirty", &[], &[]),
+            item("owner/repo", 20, "twenty", &[], &[]),
+            item("owner/repo", 10, "ten", &[], &[]),
+        ]));
         let initial = state.dock_home_projection();
         state.dock_home_selection = Some(initial.rows[1].key.clone());
         assert_eq!(state.dock_home_selected_index(&initial), Some(1));
+
+        state.work_index_snapshot = Some(snapshot(vec![
+            item("owner/repo", 10, "ten refreshed", &[], &[]),
+            item("owner/repo", 30, "thirty refreshed", &[], &[]),
+            item("owner/repo", 20, "twenty refreshed", &[], &[]),
+        ]));
+        let refreshed = state.dock_home_projection();
+        assert_eq!(
+            state
+                .dock_home_selected_row()
+                .expect("refreshed tab")
+                .number,
+            "20"
+        );
+        assert_eq!(state.dock_home_selected_index(&refreshed), Some(1));
 
         state.workspaces.swap(0, 1);
         let reordered = state.dock_home_projection();

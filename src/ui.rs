@@ -421,14 +421,14 @@ fn compute_view_internal(
         dock_tab_hit_areas,
         dock_body_rect,
     ) = dock_geometry(dock_area, app.dock_collapsed);
-    let (dock_home_row_hit_areas, dock_home_row_keys) =
+    let (dock_home_tab_hit_areas, dock_home_tab_keys) =
         if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
             let projection = app.dock_home_projection();
-            let hit_areas = dock::home_row_hit_areas(app, &projection, dock_body_rect);
-            let keys = projection
-                .rows
+            let layouts = dock::home_tab_layouts(app, &projection, dock_body_rect);
+            let hit_areas = layouts.iter().map(|(_, area)| *area).collect();
+            let keys = layouts
                 .iter()
-                .take(hit_areas.len())
+                .filter_map(|(index, _)| projection.rows.get(*index))
                 .map(|row| row.key.clone())
                 .collect();
             (hit_areas, keys)
@@ -500,8 +500,8 @@ fn compute_view_internal(
         dock_divider_rect,
         dock_tab_bar_rect,
         dock_tab_hit_areas,
-        dock_home_row_hit_areas,
-        dock_home_row_keys,
+        dock_home_tab_hit_areas,
+        dock_home_tab_keys,
         dock_body_rect,
     };
     app.sync_copy_mode_search_geometry();
@@ -550,14 +550,22 @@ fn dock_geometry(area: Rect, collapsed: bool) -> (Rect, Rect, Rect, Vec<Rect>, R
 /// fall back to equal shares, which truncates every label evenly rather than
 /// starving the ones at the end.
 fn dock_tab_hit_areas(tab_bar: Rect) -> Vec<Rect> {
-    let count = crate::app::DockTab::ALL.len();
     let widths: Vec<u16> = crate::app::DockTab::ALL
         .iter()
         .map(|tab| u16::try_from(tab.label().chars().count().saturating_add(1)).unwrap_or(u16::MAX))
         .collect();
+    horizontal_tab_hit_areas(tab_bar, &widths)
+}
+
+pub(crate) fn horizontal_tab_hit_areas(tab_bar: Rect, widths: &[u16]) -> Vec<Rect> {
+    let count = widths.len();
+    if count == 0 || tab_bar.width == 0 || tab_bar.height == 0 {
+        return Vec::new();
+    }
     let wanted: u16 = widths.iter().copied().fold(0u16, u16::saturating_add);
     if wanted <= tab_bar.width {
-        let mut constraints: Vec<Constraint> = widths.into_iter().map(Constraint::Length).collect();
+        let mut constraints: Vec<Constraint> =
+            widths.iter().copied().map(Constraint::Length).collect();
         // Without a trailing filler the layout stretches the final tab over the
         // slack, giving it a hit area far wider than its label.
         constraints.push(Constraint::Min(0));
@@ -664,8 +672,8 @@ fn compute_mobile_view(
         dock_divider_rect: Rect::default(),
         dock_tab_bar_rect: Rect::default(),
         dock_tab_hit_areas: Vec::new(),
-        dock_home_row_hit_areas: Vec::new(),
-        dock_home_row_keys: Vec::new(),
+        dock_home_tab_hit_areas: Vec::new(),
+        dock_home_tab_keys: Vec::new(),
         dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {
@@ -1164,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_home_hit_areas_follow_visible_rows_and_home_visibility() {
+    fn dock_home_hit_areas_follow_rendered_tabs_and_home_visibility() {
         let mut app = crate::app::state::AppState::test_new();
         app.mobile_width_threshold = 0;
         app.dock_collapsed = false;
@@ -1194,23 +1202,23 @@ mod tests {
         compute_view(&mut app, screen);
         let projection = app.dock_home_projection();
         assert_eq!(
-            app.view.dock_home_row_hit_areas.len(),
+            app.view.dock_home_tab_hit_areas.len(),
             projection.rows.len()
         );
-        assert_eq!(app.view.dock_home_row_keys.len(), projection.rows.len());
-        assert_eq!(app.view.dock_home_row_keys[0], projection.rows[0].key);
-        assert_eq!(app.view.dock_home_row_hit_areas[0].height, 2);
+        assert_eq!(app.view.dock_home_tab_keys.len(), projection.rows.len());
+        assert_eq!(app.view.dock_home_tab_keys[0], projection.rows[0].key);
+        assert_eq!(app.view.dock_home_tab_hit_areas[0].height, 1);
 
         app.dock_collapsed = true;
         compute_view(&mut app, screen);
-        assert!(app.view.dock_home_row_hit_areas.is_empty());
-        assert!(app.view.dock_home_row_keys.is_empty());
+        assert!(app.view.dock_home_tab_hit_areas.is_empty());
+        assert!(app.view.dock_home_tab_keys.is_empty());
 
         app.dock_collapsed = false;
         app.dock_tab = crate::app::DockTab::Editor;
         compute_view(&mut app, screen);
-        assert!(app.view.dock_home_row_hit_areas.is_empty());
-        assert!(app.view.dock_home_row_keys.is_empty());
+        assert!(app.view.dock_home_tab_hit_areas.is_empty());
+        assert!(app.view.dock_home_tab_keys.is_empty());
     }
 
     #[tokio::test]

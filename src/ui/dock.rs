@@ -11,7 +11,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 mod editor;
 mod home;
 
-pub(crate) use home::row_hit_areas as home_row_hit_areas;
+pub(crate) use home::tab_layouts as home_tab_layouts;
 
 pub(super) fn render_dock(
     app: &AppState,

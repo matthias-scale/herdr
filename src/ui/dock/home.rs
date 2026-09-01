@@ -8,133 +8,53 @@ use ratatui::{
     Frame,
 };
 
-use super::super::text::{display_width, truncate_end};
+use super::super::text::{display_width, middle_elide, truncate_end};
 use crate::{
     app::{state::WorkItemKey, AppState},
     work_index::{WorkItem, WorkItemDetail},
     work_projection::{compact_elapsed, DockHomeProjection, DockHomeRow},
 };
 
-const HEADER_ROWS: u16 = 1;
+const TAB_ROWS: u16 = 1;
 const FOOTER_ROWS: u16 = 4;
-const ROW_HEIGHT: u16 = 2;
 const BODY_LINE_LIMIT: usize = 6;
+const MIN_LEGIBLE_TAB_WIDTH: u16 = 3;
 
-#[derive(Clone, Copy)]
-struct RowLayout {
-    row: Rect,
-    detail_height: u16,
+fn tab_label(row: &DockHomeRow) -> String {
+    format!("{} #{}", row.glyph, row.number)
 }
 
-fn row_layouts(app: &AppState, projection: &DockHomeProjection, area: Rect) -> Vec<RowLayout> {
-    if projection.rows.is_empty() || area.width == 0 {
-        return Vec::new();
-    }
-    let body_bottom = area.bottom().saturating_sub(FOOTER_ROWS);
-    let mut y = area.y.saturating_add(HEADER_ROWS);
-    let mut layouts = Vec::new();
-    for row in &projection.rows {
-        if y.saturating_add(ROW_HEIGHT) > body_bottom {
-            break;
-        }
-        let rect = Rect::new(area.x, y, area.width, ROW_HEIGHT);
-        y = y.saturating_add(ROW_HEIGHT);
-        let detail_height = expanded_detail_lines(app, row, usize::from(area.width))
-            .map(|lines| {
-                u16::try_from(lines.len())
-                    .unwrap_or(u16::MAX)
-                    .min(body_bottom.saturating_sub(y))
-            })
-            .unwrap_or(0);
-        y = y.saturating_add(detail_height);
-        layouts.push(RowLayout {
-            row: rect,
-            detail_height,
-        });
-    }
-    layouts
-}
-
-/// One two-line hit target per row the home body can actually draw. Expanded
-/// detail consumes geometry but never turns its lines into another row's hit
-/// target.
-pub(crate) fn row_hit_areas(
+/// The PR strip uses the dock tab bar's natural-width/equal-share allocator.
+/// If equal shares would lose the state glyph or PR-number suffix, it shows a
+/// selection-following window instead; hidden tabs remain reachable by keys.
+pub(crate) fn tab_layouts(
     app: &AppState,
     projection: &DockHomeProjection,
     area: Rect,
-) -> Vec<Rect> {
-    row_layouts(app, projection, area)
+) -> Vec<(usize, Rect)> {
+    if projection.rows.is_empty() {
+        return Vec::new();
+    }
+    let tab_bar = Rect::new(area.x, area.y, area.width, area.height.min(TAB_ROWS));
+    let capacity = usize::from((area.width / MIN_LEGIBLE_TAB_WIDTH).max(1));
+    let visible_count = projection.rows.len().min(capacity);
+    let selected = app.dock_home_selected_index(projection).unwrap_or(0);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(visible_count)
+        .min(projection.rows.len().saturating_sub(visible_count));
+    let visible = &projection.rows[start..start.saturating_add(visible_count)];
+    let widths = visible
+        .iter()
+        .map(|row| {
+            u16::try_from(display_width(&tab_label(row)).saturating_add(1)).unwrap_or(u16::MAX)
+        })
+        .collect::<Vec<_>>();
+    crate::ui::horizontal_tab_hit_areas(tab_bar, &widths)
         .into_iter()
-        .map(|layout| layout.row)
+        .enumerate()
+        .map(|(offset, area)| (start.saturating_add(offset), area))
         .collect()
-}
-
-fn owner_cell(row: &DockHomeRow) -> String {
-    let mut owner = row.owner.clone().unwrap_or_else(|| "—".to_string());
-    if row.extra_panes > 0 {
-        owner.push_str(&format!("+{}", row.extra_panes));
-    }
-    owner
-}
-
-fn fixed_cell(value: &str, width: usize) -> String {
-    let cell = truncate_end(value, width);
-    let padding = width.saturating_sub(super::super::text::display_width(&cell));
-    format!("{cell}{}", " ".repeat(padding))
-}
-
-fn metadata_widths(width: usize) -> (usize, usize, usize, usize, usize) {
-    const CELL_MAX: usize = 12;
-    let indent: usize = if width >= 38 { 5 } else { 3 };
-    let available = width.saturating_sub(indent.saturating_add(3));
-    let review = available.min(2);
-    let mut remaining = available.saturating_sub(review);
-    let mut owner = remaining.min(3);
-    remaining = remaining.saturating_sub(owner);
-    let mut ticket = remaining.min(3);
-    remaining = remaining.saturating_sub(ticket);
-    let age = remaining.min(4);
-    remaining = remaining.saturating_sub(age);
-    while remaining > 0 && (owner < CELL_MAX || ticket < CELL_MAX) {
-        if owner < CELL_MAX {
-            owner += 1;
-            remaining -= 1;
-        }
-        if remaining > 0 && ticket < CELL_MAX {
-            ticket += 1;
-            remaining -= 1;
-        }
-    }
-    (indent, review, owner, ticket, age)
-}
-
-fn row_lines(row: &DockHomeRow, width: usize) -> [String; 2] {
-    let prefix = format!("{} #{} ", row.glyph, row.number);
-    let title_width = width.saturating_sub(super::super::text::display_width(&prefix));
-    let title = truncate_end(&row.title, title_width);
-    let review = if row.fetched {
-        row.review.as_str()
-    } else {
-        "?"
-    };
-    let (indent_width, review_width, owner_width, ticket_width, age_width) = metadata_widths(width);
-    let metadata = format!(
-        "{}{}{}{}{}{}{}{}",
-        " ".repeat(indent_width),
-        fixed_cell(review, review_width),
-        // Cells are already padded to fixed widths, so a plain space aligns the
-        // columns. A `·` here collides with a cell that fills its width.
-        " ",
-        fixed_cell(&owner_cell(row), owner_width),
-        " ",
-        fixed_cell(&row.ticket, ticket_width),
-        " ",
-        fixed_cell(&row.age, age_width),
-    );
-    [
-        truncate_end(&format!("{prefix}{title}"), width),
-        truncate_end(&metadata, width),
-    ]
 }
 
 fn work_item_for_key<'a>(app: &'a AppState, key: &WorkItemKey) -> Option<&'a WorkItem> {
@@ -354,19 +274,14 @@ fn loaded_detail_lines(
         .collect()
 }
 
-fn expanded_detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Option<Vec<String>> {
-    if !app.dock_home_focused || app.dock_home_expanded.as_ref() != Some(&row.key) {
-        return None;
-    }
+fn detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<String> {
     if app.work_item_detail_loading.as_ref() == Some(&row.key) {
-        return Some(vec!["loading…".to_string()]);
+        return vec!["loading…".to_string()];
     }
-    Some(
-        app.work_item_detail_cache
-            .get(&row.key)
-            .map(|detail| loaded_detail_lines(app, row, detail, width))
-            .unwrap_or_else(|| vec!["loading…".to_string()]),
-    )
+    app.work_item_detail_cache
+        .get(&row.key)
+        .map(|detail| loaded_detail_lines(app, row, detail, width))
+        .unwrap_or_else(|| vec!["loading…".to_string()])
 }
 
 fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
@@ -452,82 +367,67 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let projection = app.dock_home_projection();
-    render_line(
-        frame,
-        area,
-        area.y,
-        format!("review · {} bound", projection.rows.len()),
-        Style::default()
-            .fg(app.palette.overlay1)
-            .add_modifier(Modifier::BOLD),
-    );
 
     if projection.rows.is_empty() {
         render_line(
             frame,
             area,
-            area.y.saturating_add(1),
+            area.y,
             "no pr-bound panes".to_string(),
             Style::default().fg(app.palette.subtext0),
         );
         render_line(
             frame,
             area,
-            area.y.saturating_add(2),
+            area.y.saturating_add(1),
             "bind: herdr tab create --pr <url> --role review".to_string(),
             Style::default().fg(app.palette.overlay0),
         );
-        render_footer(app, &projection, frame, area, area.y.saturating_add(3));
+        render_footer(app, &projection, frame, area, area.y.saturating_add(2));
         return;
     }
 
     let selected = app.dock_home_selected_index(&projection);
-    let layouts = row_layouts(app, &projection, area);
-    for (index, (row, layout)) in projection.rows.iter().zip(layouts.iter()).enumerate() {
-        let rect = layout.row;
+    let tab_layouts = tab_layouts(app, &projection, area);
+    for (index, tab_area) in tab_layouts {
+        let row = &projection.rows[index];
         let is_selected = selected == Some(index);
-        let first_style = if is_selected {
+        let style = if is_selected {
             Style::default()
-                .fg(app.palette.text)
+                .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.palette.subtext0)
-        };
-        let second_style = if is_selected {
-            first_style
         } else {
             Style::default().fg(app.palette.overlay0)
         };
-        let [first, second] = row_lines(row, usize::from(area.width));
-        render_line(frame, rect, rect.y, first, first_style);
-        render_line(frame, rect, rect.y.saturating_add(1), second, second_style);
-        if layout.detail_height > 0 {
-            if let Some(lines) = expanded_detail_lines(app, row, usize::from(area.width)) {
-                let max_scroll = lines
-                    .len()
-                    .saturating_sub(usize::from(layout.detail_height));
-                let scroll = usize::from(app.dock_scroll).min(max_scroll);
-                for (offset, line) in lines
-                    .into_iter()
-                    .skip(scroll)
-                    .take(usize::from(layout.detail_height))
-                    .enumerate()
-                {
-                    render_line(
-                        frame,
-                        area,
-                        rect.bottom().saturating_add(offset as u16),
-                        line,
-                        Style::default().fg(app.palette.subtext0),
-                    );
-                }
-            }
+        let label = middle_elide(&tab_label(row), usize::from(tab_area.width));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, style))),
+            tab_area,
+        );
+    }
+
+    let detail_y = area.y.saturating_add(TAB_ROWS);
+    let footer_y = area.bottom().saturating_sub(FOOTER_ROWS).max(detail_y);
+    let detail_height = footer_y.saturating_sub(detail_y);
+    if let Some(row) = selected.and_then(|index| projection.rows.get(index)) {
+        let lines = detail_lines(app, row, usize::from(area.width));
+        let max_scroll = lines.len().saturating_sub(usize::from(detail_height));
+        let scroll = usize::from(app.dock_scroll).min(max_scroll);
+        for (offset, line) in lines
+            .into_iter()
+            .skip(scroll)
+            .take(usize::from(detail_height))
+            .enumerate()
+        {
+            render_line(
+                frame,
+                area,
+                detail_y.saturating_add(offset as u16),
+                line,
+                Style::default().fg(app.palette.subtext0),
+            );
         }
     }
-    let footer_y = layouts
-        .last()
-        .map(|layout| layout.row.bottom().saturating_add(layout.detail_height))
-        .unwrap_or_else(|| area.y.saturating_add(HEADER_ROWS));
     render_footer(app, &projection, frame, area, footer_y);
 }
 
@@ -642,18 +542,47 @@ mod tests {
         app
     }
 
-    fn expand_with_detail(
+    fn bound_app_with_prs(prs: &[(u64, crate::detect::AgentState)]) -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = prs
+            .iter()
+            .map(|(number, _)| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.active = (!app.workspaces.is_empty()).then_some(0);
+        app.ensure_test_terminals();
+        for (ws_idx, (number, state)) in prs.iter().enumerate() {
+            let pane_id = app.workspaces[ws_idx].focused_pane_id().expect("pane");
+            let terminal_id = app.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .cloned()
+                .expect("terminal");
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+            terminal.detected_agent = Some(crate::detect::Agent::Codex);
+            terminal.state = *state;
+            terminal
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!(
+                        "https://github.com/herdrdev/herdr/pull/{number}"
+                    )]),
+                    work_title: Some(format!("pull request {number}")),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+        app
+    }
+
+    fn selected_with_detail(
         mut app: AppState,
         detail: Option<crate::work_index::WorkItemDetail>,
     ) -> AppState {
         app.work_index_enabled = true;
-        app.dock_home_focused = true;
+        app.dock_home_focused = false;
         let key = app
             .dock_home_selected_row()
             .expect("selected detail row")
             .key;
         app.dock_home_selection = Some(key.clone());
-        app.dock_home_expanded = Some(key.clone());
         match detail {
             Some(detail) => app.work_item_detail_cache.insert(key, detail),
             None => app.work_item_detail_loading = Some(key),
@@ -696,29 +625,26 @@ mod tests {
     }
 
     #[test]
-    fn renders_one_bound_row_with_review_and_owner() {
-        let terminal = render(&bound_app(true), Rect::new(0, 0, 60, 10));
-        let first = line_text(&terminal, 1);
-        let second = line_text(&terminal, 2);
-        assert!(
-            first.contains("● #125 work view pr projection"),
-            "{first:?}"
+    fn renders_one_tab_per_bound_pr_in_canonical_order() {
+        let app = bound_app_with_prs(&[
+            (129, crate::detect::AgentState::Working),
+            (128, crate::detect::AgentState::Idle),
+            (3487, crate::detect::AgentState::Blocked),
+        ]);
+        let projection = app.dock_home_projection();
+        assert_eq!(
+            projection
+                .rows
+                .iter()
+                .map(|row| row.number.as_str())
+                .collect::<Vec<_>>(),
+            vec!["129", "128", "3487"]
         );
-        let review = second.find("RR").expect("review cell");
-        let owner = second.find("codex").expect("agent cell");
-        let ticket = second.find("MAT-125").expect("ticket cell");
-        let age = second.find("4m").expect("age cell");
-        assert!(
-            review < owner && owner < ticket && ticket < age,
-            "{second:?}"
-        );
-    }
-
-    #[test]
-    fn unfetched_binding_renders_question_mark_review() {
-        let terminal = render(&bound_app(false), Rect::new(0, 0, 30, 10));
-        let text = text(&terminal);
-        assert!(text.contains("?  codex"), "{text:?}");
+        let strip = line_text(&render(&app, Rect::new(0, 0, 60, 10)), 0);
+        let first = strip.find("● #129").expect("first canonical tab");
+        let second = strip.find("○ #128").expect("second canonical tab");
+        let third = strip.find("○ #3487").expect("third canonical tab");
+        assert!(first < second && second < third, "{strip:?}");
     }
 
     #[test]
@@ -739,7 +665,7 @@ mod tests {
     fn footer_names_pr_open_age_and_review_codes() {
         let body_width = crate::ui::DOCK_DEFAULT_WIDTH.saturating_sub(2);
         let terminal = render(&AppState::test_new(), Rect::new(0, 0, body_width, 10));
-        let legend = line_text(&terminal, 6);
+        let legend = line_text(&terminal, 5);
         assert_eq!(
             legend.trim_end(),
             "age=pr open · rv=?/—/D/RR/✓/✗",
@@ -765,27 +691,33 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_uses_bold_foreground_without_a_selection_background() {
+    fn selected_tab_uses_dock_accent_and_bold_without_a_background() {
         let app = bound_app(true);
         let terminal = render(&app, Rect::new(0, 0, 30, 10));
-        let cell = &terminal.backend().buffer()[(0, 1)];
-        assert_eq!(cell.fg, app.palette.text);
+        let cell = &terminal.backend().buffer()[(0, 0)];
+        assert_eq!(cell.fg, app.palette.accent);
         assert!(cell.modifier.contains(Modifier::BOLD));
         assert_eq!(cell.bg, Color::Reset);
     }
 
     #[test]
-    fn row_hit_areas_match_every_rendered_two_line_row() {
-        let app = bound_app(true);
+    fn tab_hit_areas_match_every_rendered_tab_on_one_row() {
+        let app = bound_app_with_prs(&[
+            (129, crate::detect::AgentState::Working),
+            (128, crate::detect::AgentState::Idle),
+        ]);
         let projection = app.dock_home_projection();
-        let areas = row_hit_areas(&app, &projection, Rect::new(4, 7, 30, 10));
+        let areas = tab_layouts(&app, &projection, Rect::new(4, 7, 30, 10))
+            .into_iter()
+            .map(|(_, area)| area)
+            .collect::<Vec<_>>();
         assert_eq!(areas.len(), projection.rows.len());
-        assert_eq!(areas, vec![Rect::new(4, 8, 30, 2)]);
+        assert_eq!(areas, vec![Rect::new(4, 7, 7, 1), Rect::new(11, 7, 7, 1)]);
     }
 
     #[test]
     fn renders_full_pull_request_detail_in_ghx_field_order() {
-        let app = expand_with_detail(bound_app(true), Some(full_detail()));
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
         let terminal = render(&app, Rect::new(0, 0, 60, 40));
         let text = text(&terminal);
         let overview = text.find("#125  overview").expect("overview");
@@ -806,7 +738,7 @@ mod tests {
 
     #[test]
     fn optional_detail_fields_render_explicit_unknown_values() {
-        let app = expand_with_detail(bound_app(false), Some(missing_optional_detail()));
+        let app = selected_with_detail(bound_app(false), Some(missing_optional_detail()));
         let terminal = render(&app, Rect::new(0, 0, 50, 35));
         let text = text(&terminal);
 
@@ -818,7 +750,7 @@ mod tests {
 
     #[test]
     fn in_flight_detail_renders_loading_state() {
-        let app = expand_with_detail(bound_app(true), None);
+        let app = selected_with_detail(bound_app(true), None);
         let terminal = render(&app, Rect::new(0, 0, 30, 12));
 
         assert!(text(&terminal).contains("loading…"));
@@ -826,7 +758,7 @@ mod tests {
 
     #[test]
     fn minimum_dock_width_detail_truncates_without_horizontal_wrap() {
-        let app = expand_with_detail(bound_app(true), Some(full_detail()));
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
         let body_width = crate::ui::DOCK_MIN_WIDTH.saturating_sub(2);
         let terminal = render(&app, Rect::new(0, 0, body_width, 40));
         let rendered = text(&terminal);
@@ -844,7 +776,7 @@ mod tests {
 
     #[test]
     fn ordinary_height_detail_scroll_reaches_checks_and_tickets() {
-        let mut app = expand_with_detail(bound_app(true), Some(full_detail()));
+        let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
         let area = Rect::new(0, 0, 40, 24);
         let initial = text(&render(&app, area));
         assert!(!initial.contains("checks  2 failing of 8"), "{initial:?}");
@@ -857,73 +789,102 @@ mod tests {
     }
 
     #[test]
-    fn expanded_detail_shifts_later_row_hit_targets() {
-        let mut app = bound_app(true);
-        let second = crate::workspace::Workspace::test_new("second");
-        app.workspaces.push(second);
-        app.ensure_test_terminals();
-        let pane_id = app.workspaces[1].focused_pane_id().expect("second pane");
-        let terminal_id = app.workspaces[1]
-            .terminal_id(pane_id)
-            .cloned()
-            .expect("second terminal");
-        app.terminals
-            .get_mut(&terminal_id)
-            .expect("second terminal state")
-            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
-                pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/126".into()]),
-                work_title: Some("second pull request".into()),
-                ..Default::default()
-            })
-            .expect("work context");
-        app = expand_with_detail(app, Some(full_detail()));
+    fn selected_tab_always_renders_its_detail_body() {
+        let mut app = bound_app_with_prs(&[
+            (129, crate::detect::AgentState::Working),
+            (128, crate::detect::AgentState::Idle),
+        ]);
         let projection = app.dock_home_projection();
-        let areas = row_hit_areas(&app, &projection, Rect::new(4, 7, 60, 50));
+        let selected = projection.rows[1].key.clone();
+        app.dock_home_selection = Some(selected.clone());
+        app.dock_home_focused = false;
+        let mut detail = full_detail();
+        detail.number = Some(128);
+        detail.title = Some("selected pull request".into());
+        app.work_item_detail_cache.insert(selected, detail);
 
-        assert_eq!(areas.len(), 2);
-        assert_eq!(areas[0], Rect::new(4, 8, 60, 2));
-        assert!(areas[1].y > areas[0].bottom());
-        assert_eq!(areas[1].height, 2);
+        let rendered = text(&render(&app, Rect::new(0, 0, 60, 40)));
+        assert!(rendered.contains("#128  overview"), "{rendered:?}");
+        assert!(!rendered.contains("#129  overview"), "{rendered:?}");
     }
 
     #[test]
-    fn minimum_dock_width_truncates_both_row_lines_without_wrapping() {
-        let app = bound_app(true);
+    fn lifecycle_glyph_changes_do_not_move_tabs() {
+        let mut app = bound_app_with_prs(&[
+            (129, crate::detect::AgentState::Working),
+            (128, crate::detect::AgentState::Idle),
+        ]);
+        let area = Rect::new(0, 0, 30, 12);
+        let before = line_text(&render(&app, area), 0);
+        let before_129 = before.find("#129").expect("#129 tab");
+        let before_128 = before.find("#128").expect("#128 tab");
+
+        let terminal_ids = app
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                let pane_id = workspace.focused_pane_id().expect("pane");
+                workspace.terminal_id(pane_id).cloned().expect("terminal")
+            })
+            .collect::<Vec<_>>();
+        app.terminals
+            .get_mut(&terminal_ids[0])
+            .expect("first terminal")
+            .state = crate::detect::AgentState::Idle;
+        app.terminals
+            .get_mut(&terminal_ids[1])
+            .expect("second terminal")
+            .state = crate::detect::AgentState::Working;
+
+        let after = line_text(&render(&app, area), 0);
+        assert_eq!(after.find("#129"), Some(before_129));
+        assert_eq!(after.find("#128"), Some(before_128));
+        assert!(after.contains("○ #129"), "{after:?}");
+        assert!(after.contains("● #128"), "{after:?}");
+    }
+
+    #[test]
+    fn minimum_width_windows_overflow_before_tabs_become_illegible() {
+        let mut app = bound_app_with_prs(&[
+            (129, crate::detect::AgentState::Working),
+            (128, crate::detect::AgentState::Working),
+            (3487, crate::detect::AgentState::Blocked),
+            (3488, crate::detect::AgentState::Idle),
+            (3360, crate::detect::AgentState::Unknown),
+            (3359, crate::detect::AgentState::Working),
+        ]);
         // The dock's divider and handle consume two columns at DOCK_MIN_WIDTH.
         let body_width = crate::ui::DOCK_MIN_WIDTH.saturating_sub(2);
-        let terminal = render(&app, Rect::new(0, 0, body_width, 10));
-        let first = line_text(&terminal, 1);
-        let second = line_text(&terminal, 2);
-        let footer = line_text(&terminal, 3);
-        let legend = line_text(&terminal, 6);
+        let area = Rect::new(0, 0, body_width, 12);
+        let projection = app.dock_home_projection();
+        let first_layouts = tab_layouts(&app, &projection, area);
+        assert_eq!(projection.rows.len(), 6);
+        assert_eq!(first_layouts.len(), 5);
+        assert_eq!(first_layouts[0].0, 0);
+
+        app.dock_home_selection = projection.rows.last().map(|row| row.key.clone());
+        let layouts = tab_layouts(&app, &projection, area);
+        assert_eq!(layouts.len(), 5);
+        assert_eq!(layouts[0].0, 1);
+        assert_eq!(layouts.last().map(|(index, _)| *index), Some(5));
+        let terminal = render(&app, area);
 
         assert_eq!(
-            super::super::super::text::display_width(&first),
-            usize::from(body_width)
+            layouts.iter().map(|(_, area)| area.width).sum::<u16>(),
+            body_width
         );
-        assert_eq!(
-            super::super::super::text::display_width(&second),
-            usize::from(body_width)
-        );
-        assert!(first.ends_with('…'), "first line: {first:?}");
-        assert_eq!(second, "   RR co… MA… 4m", "second line: {second:?}");
-        assert_eq!(footer, "─".repeat(usize::from(body_width)));
-        assert!(legend.starts_with("age=pr open"), "legend: {legend:?}");
-    }
-
-    #[test]
-    fn metadata_columns_never_shrink_as_the_dock_grows() {
-        let mut previous =
-            metadata_widths(usize::from(crate::ui::DOCK_MIN_WIDTH.saturating_sub(2)));
-        for width in usize::from(crate::ui::DOCK_MIN_WIDTH.saturating_sub(1))
-            ..=usize::from(crate::ui::DOCK_MAX_WIDTH.saturating_sub(2))
-        {
-            let current = metadata_widths(width);
-            assert!(current.1 >= previous.1, "review shrank at {width}");
-            assert!(current.2 >= previous.2, "agent shrank at {width}");
-            assert!(current.3 >= previous.3, "ticket shrank at {width}");
-            assert!(current.4 >= previous.4, "age shrank at {width}");
-            previous = current;
+        assert!(layouts
+            .iter()
+            .all(|(_, area)| area.height == 1 && area.width >= MIN_LEGIBLE_TAB_WIDTH));
+        for (index, tab_area) in layouts {
+            let row = &projection.rows[index];
+            let actual = (tab_area.x..tab_area.right())
+                .map(|x| terminal.backend().buffer()[(x, tab_area.y)].symbol())
+                .collect::<String>();
+            let expected = middle_elide(&tab_label(row), usize::from(tab_area.width));
+            assert_eq!(actual.trim_end(), expected, "tab #{}", row.number);
+            assert_eq!(actual.chars().next(), row.glyph.chars().next());
+            assert!(actual.contains('…'));
         }
     }
 }

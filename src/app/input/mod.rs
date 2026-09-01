@@ -155,35 +155,36 @@ impl App {
         let navigate = &self.state.keybinds.navigate;
         let event = key.as_key_event();
         if event.code == KeyCode::Esc && event.modifiers.is_empty() {
-            if self.state.dock_home_expanded.take().is_none() {
-                self.state.dock_home_focused = false;
-            }
+            self.state.dock_home_focused = false;
             self.state.dock_scroll = 0;
             return true;
         }
-        if navigate.workspace_up.matches_direct_key(key) || navigate.pane_up.matches_direct_key(key)
+        if navigate.workspace_up.matches_direct_key(key)
+            || navigate.pane_up.matches_direct_key(key)
+            || navigate.pane_left.matches_direct_key(key)
         {
             self.state.move_dock_home_selection(-1);
             return true;
         }
         if navigate.workspace_down.matches_direct_key(key)
             || navigate.pane_down.matches_direct_key(key)
+            || navigate.pane_right.matches_direct_key(key)
         {
             self.state.move_dock_home_selection(1);
             return true;
         }
 
         if event.code == KeyCode::Enter && event.modifiers.is_empty() {
-            let selected = self.state.dock_home_selected_row().map(|row| row.key);
-            if self.state.dock_home_expanded == selected {
-                self.state.jump_to_dock_home_selection();
-            } else {
-                self.state.dock_home_expanded = selected;
-                self.state.dock_scroll = 0;
-            }
+            self.state.jump_to_dock_home_selection();
             return true;
         }
         false
+    }
+
+    /// Dock home is attach-local presentation layered over a focused pane, so
+    /// the headless input path must offer it keys before choosing a pane target.
+    pub(crate) fn handle_dock_home_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_home_key(key)
     }
 
     /// Home owns the full key stream so navigation never leaks into a pane.
@@ -1713,12 +1714,94 @@ mod tests {
         app
     }
 
+    #[tokio::test]
+    async fn headless_dock_home_key_moves_selection_without_reaching_the_focused_pane() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+        app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+        assert!(app.terminal_input_context().is_some());
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("initial tab")
+                .number,
+            "10"
+        );
+
+        let key = TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty());
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::Key(key.clone()),
+                crate::raw_input::RawInputEvent::Key(
+                    key.clone()
+                        .with_kind(crossterm::event::KeyEventKind::Repeat),
+                ),
+                crate::raw_input::RawInputEvent::Key(
+                    key.with_kind(crossterm::event::KeyEventKind::Release),
+                ),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            app.state.dock_home_selected_row().expect("next tab").number,
+            "20"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "dock-home presses and repeats must not reach the focused pane"
+        );
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn headless_dock_home_key_reaches_pane_outside_the_focused_open_home_tab() {
+        for guard in ["collapsed", "other tab", "unfocused"] {
+            let mut app = dock_home_test_app(&[10, 20]);
+            match guard {
+                "collapsed" => app.state.dock_collapsed = true,
+                "other tab" => app.state.dock_tab = crate::app::DockTab::Context,
+                "unfocused" => app.state.dock_home_focused = false,
+                _ => unreachable!(),
+            }
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+            app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+            app.route_client_events(
+                vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                    KeyCode::Char('j'),
+                    KeyModifiers::empty(),
+                ))],
+                false,
+            );
+
+            assert_eq!(
+                app.state
+                    .dock_home_selected_row()
+                    .expect("unchanged tab")
+                    .number,
+                "10",
+                "guard: {guard}"
+            );
+            assert_eq!(
+                input_rx.try_recv().expect("key forwarded to pane"),
+                bytes::Bytes::from_static(b"j"),
+                "guard: {guard}"
+            );
+        }
+    }
+
     #[test]
     fn dock_home_navigate_keys_move_and_enter_jumps_to_the_selected_pane() {
         let mut app = dock_home_test_app(&[10, 20]);
 
         assert!(
-            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty(),))
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty(),))
         );
         assert_eq!(
             app.state
@@ -1727,23 +1810,17 @@ mod tests {
                 .number,
             "20"
         );
-        assert!(app.state.dock_home_expanded.is_none());
-        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),)));
-        assert_eq!(app.state.dock_home_expanded, app.state.dock_home_selection);
-        assert_eq!(app.state.active, Some(0));
         assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),)));
         assert_eq!(app.state.active, Some(1));
         assert!(!app.state.dock_home_focused);
     }
 
     #[test]
-    fn dock_home_escape_collapses_the_expanded_detail() {
+    fn dock_home_escape_unfocuses_the_tab_strip() {
         let mut app = dock_home_test_app(&[10]);
-        app.state.dock_home_expanded = app.state.dock_home_selected_row().map(|row| row.key);
 
         assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
-        assert!(app.state.dock_home_focused);
-        assert!(app.state.dock_home_expanded.is_none());
+        assert!(!app.state.dock_home_focused);
     }
 
     #[test]

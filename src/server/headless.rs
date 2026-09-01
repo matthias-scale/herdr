@@ -4865,9 +4865,7 @@ impl HeadlessServer {
                 let presentation = &client.dock_presentation;
                 (
                     presentation.home_selection.clone(),
-                    !presentation.collapsed
-                        && presentation.tab == crate::app::DockTab::Home
-                        && presentation.home_focused,
+                    !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
                 )
             });
         if let Some((selection, detail_visible)) = detail_request {
@@ -5993,7 +5991,6 @@ mod tests {
                 editor_focused,
                 home_selection: None,
                 home_focused: false,
-                home_expanded: None,
             };
             server.clients.insert(client_id, client);
         }

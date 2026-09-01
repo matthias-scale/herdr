@@ -1432,8 +1432,7 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
                 .expect("work context");
         }
         let first_key = app.state.dock_home_selected_row().expect("first row").key;
-        app.state.dock_home_selection = Some(first_key.clone());
-        app.state.dock_home_expanded = Some(first_key);
+        app.state.dock_home_selection = Some(first_key);
         app.state.move_dock_home_selection(1);
         let key = app
             .state
@@ -1441,7 +1440,6 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
             .expect("newly selected row")
             .key;
         assert_eq!(key.pr_number, Some(8));
-        assert!(app.state.dock_home_expanded.is_none());
         let now = Instant::now();
 
         app.start_work_item_detail_refresh_if_due(now, Some(key.clone()), true);

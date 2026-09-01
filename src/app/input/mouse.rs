@@ -523,23 +523,16 @@ impl AppState {
                     self.dock_editor_focused = tab == crate::app::DockTab::Editor;
                     return None;
                 }
-                if let Some(index) = self.dock_home_row_at(mouse.column, mouse.row) {
-                    let rendered_key = self.view.dock_home_row_keys.get(index).cloned()?;
+                if let Some(index) = self.dock_home_tab_at(mouse.column, mouse.row) {
+                    let rendered_key = self.view.dock_home_tab_keys.get(index).cloned()?;
                     let projection = self.dock_home_projection();
                     if let Some(row) = projection.rows.iter().find(|row| row.key == rendered_key) {
-                        let was_focused = self.dock_home_focused;
-                        let already_selected = self.dock_home_focused
-                            && self.dock_home_selection.as_ref() == Some(&row.key);
-                        let already_expanded = self.dock_home_expanded.as_ref() == Some(&row.key);
+                        let already_selected = self.dock_home_selection.as_ref() == Some(&row.key);
                         self.dock_home_selection = Some(row.key.clone());
                         self.dock_home_focused = true;
-                        if already_expanded {
+                        if already_selected {
                             self.jump_to_dock_home_selection();
-                        } else if already_selected || !was_focused {
-                            self.dock_home_expanded = Some(row.key.clone());
-                            self.dock_scroll = 0;
                         } else {
-                            self.dock_home_expanded = None;
                             self.dock_scroll = 0;
                         }
                     }
@@ -2344,7 +2337,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_home_row_click_selects_then_second_click_jumps() {
+    fn dock_home_tab_click_selects_then_second_click_jumps() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![
             Workspace::test_new("current"),
@@ -2373,24 +2366,26 @@ mod tests {
         app.state.dock_collapsed = false;
         app.state.dock_tab = crate::app::DockTab::Home;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
-        let row = app.state.view.dock_home_row_hit_areas[0];
+        let tab = app.state.view.dock_home_tab_hit_areas[0];
         let expected_key = app.state.dock_home_projection().rows[0].key.clone();
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            row.x + 1,
-            row.y,
+            tab.x + 1,
+            tab.y,
         ));
 
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.dock_home_selection.as_ref(), Some(&expected_key));
         assert!(app.state.dock_home_focused);
-        assert_eq!(app.state.dock_home_expanded.as_ref(), Some(&expected_key));
+
+        // Esc removes keyboard focus but leaves the visibly selected tab.
+        app.state.dock_home_focused = false;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            row.x + 1,
-            row.y + 1,
+            tab.x + 1,
+            tab.y,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -2399,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_dock_home_row_does_not_jump_to_a_replacement_projection_row() {
+    fn stale_dock_home_tab_does_not_jump_to_a_replacement_projection_tab() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![
             Workspace::test_new("current"),
@@ -2437,7 +2432,7 @@ mod tests {
         app.state.dock_collapsed = false;
         app.state.dock_tab = crate::app::DockTab::Home;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
-        let stale_first_row = app.state.view.dock_home_row_hit_areas[0];
+        let stale_first_tab = app.state.view.dock_home_tab_hit_areas[0];
         let second_key = app.state.dock_home_projection().rows[1].key.clone();
         app.state.dock_home_selection = Some(second_key.clone());
         app.state.dock_home_focused = true;
@@ -2457,8 +2452,8 @@ mod tests {
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            stale_first_row.x + 1,
-            stale_first_row.y,
+            stale_first_tab.x + 1,
+            stale_first_tab.y,
         ));
 
         assert_eq!(app.state.active, Some(0));
