@@ -72,13 +72,17 @@ fn selection_following_tab_window(
                 .iter()
                 .copied()
                 .fold(0u16, u16::saturating_add);
-            let leading_width = (start > 0)
-                .then(|| hidden_count_width(start, true))
-                .unwrap_or(0);
+            let leading_width = if start > 0 {
+                hidden_count_width(start, true)
+            } else {
+                0
+            };
             let trailing_count = label_widths.len().saturating_sub(end);
-            let trailing_width = (trailing_count > 0)
-                .then(|| hidden_count_width(trailing_count, false))
-                .unwrap_or(0);
+            let trailing_width = if trailing_count > 0 {
+                hidden_count_width(trailing_count, false)
+            } else {
+                0
+            };
             if tabs_width
                 .saturating_add(leading_width)
                 .saturating_add(trailing_width)
