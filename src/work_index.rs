@@ -286,7 +286,9 @@ pub(crate) fn refresh_work_index(
             target_deadline(batch_deadline, target_timeout),
         ) {
             Ok(tickets) => tickets,
-            Err(RefreshError::TimedOut) => Vec::new(),
+            Err(RefreshError::TimedOut) => {
+                return unavailable_snapshot("Linear observation timed out")
+            }
             Err(RefreshError::Failed(message)) => return unavailable_snapshot(message),
         },
         _ => Vec::new(),
@@ -612,16 +614,41 @@ fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
 
 fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
     let bytes = value.as_bytes();
-    if bytes.len() != 20
+    if bytes.len() < 20
         || bytes[4] != b'-'
         || bytes[7] != b'-'
         || bytes[10] != b'T'
         || bytes[13] != b':'
         || bytes[16] != b':'
-        || bytes[19] != b'Z'
     {
         return None;
     }
+    let zone_index = bytes[19..]
+        .iter()
+        .position(|byte| matches!(byte, b'Z' | b'+' | b'-'))?
+        + 19;
+    if zone_index > 19
+        && (bytes[19] != b'.'
+            || zone_index == 20
+            || !bytes[20..zone_index].iter().all(u8::is_ascii_digit))
+    {
+        return None;
+    }
+    let zone = bytes[zone_index];
+    let offset_seconds = match zone {
+        b'Z' if zone_index + 1 == bytes.len() => 0,
+        b'+' | b'-'
+            if zone_index + 6 == bytes.len() && bytes.get(zone_index + 3) == Some(&b':') =>
+        {
+            let hours = parse_decimal(bytes.get(zone_index + 1..zone_index + 3)?)?;
+            let minutes = parse_decimal(bytes.get(zone_index + 4..zone_index + 6)?)?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            u64::from(hours) * 60 * 60 + u64::from(minutes) * 60
+        }
+        _ => return None,
+    };
     let year = parse_decimal(bytes.get(0..4)?)?;
     let month = parse_decimal(bytes.get(5..7)?)?;
     let day = parse_decimal(bytes.get(8..10)?)?;
@@ -643,7 +670,16 @@ fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
         .checked_add(u64::from(hour) * 60 * 60)?
         .checked_add(u64::from(minute) * 60)?
         .checked_add(u64::from(second))?;
-    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+    let utc_seconds = match zone {
+        b'+' if offset_seconds > seconds => {
+            return SystemTime::UNIX_EPOCH
+                .checked_sub(Duration::from_secs(offset_seconds - seconds));
+        }
+        b'+' => seconds - offset_seconds,
+        b'-' => seconds.checked_add(offset_seconds)?,
+        _ => seconds,
+    };
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(utc_seconds))
 }
 
 fn parse_decimal(bytes: &[u8]) -> Option<u32> {
@@ -742,14 +778,7 @@ fn fetch_linear_tickets(
                     .filter_map(|label| nested_text(Some(label), "name"))
                     .collect(),
                 parent: node.get("parent").and_then(format_linear_reference),
-                relations: node
-                    .get("relations")
-                    .and_then(|relations| relations.get("nodes"))
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(format_linear_relation)
-                    .collect(),
+                relations: format_linear_relations(node),
             })
         })
         .collect())
@@ -770,8 +799,32 @@ fn format_linear_reference(value: &Value) -> Option<String> {
     }
 }
 
-fn format_linear_relation(value: &Value) -> Option<String> {
-    let kind = nested_text(Some(value), "type");
+fn format_linear_relations(value: &Value) -> Vec<String> {
+    let forward = value
+        .get("relations")
+        .and_then(|relations| relations.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|relation| format_linear_relation(relation, false));
+    let inverse = value
+        .get("inverseRelations")
+        .and_then(|relations| relations.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|relation| format_linear_relation(relation, true));
+    forward.chain(inverse).collect()
+}
+
+fn format_linear_relation(value: &Value, inverse: bool) -> Option<String> {
+    let kind = nested_text(Some(value), "type").map(|kind| match (inverse, kind.as_str()) {
+        (true, "blocks") => "blocked by".to_string(),
+        (true, "blocked by") => "blocks".to_string(),
+        (true, "duplicate" | "duplicate of") => "duplicated by".to_string(),
+        (false, "duplicate") => "duplicate of".to_string(),
+        _ => kind,
+    });
     let related = value
         .get("relatedIssue")
         .or_else(|| value.get("issue"))
@@ -1137,9 +1190,6 @@ impl crate::app::App {
         selection: Option<crate::app::state::WorkItemKey>,
         detail_visible: bool,
     ) {
-        if !detail_visible {
-            return;
-        }
         if self
             .work_item_detail_refresh_in_flight
             .as_ref()
@@ -1151,6 +1201,9 @@ impl crate::app::App {
                 }
             }
         }
+        if !detail_visible {
+            return;
+        }
         if self.work_item_detail_refresh_in_flight.is_some() {
             return;
         }
@@ -1161,6 +1214,7 @@ impl crate::app::App {
                 keys.insert(0, selection);
             }
         }
+        keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
         let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         keys.retain(|key| {
             key.pr_number.is_some()
@@ -1170,7 +1224,6 @@ impl crate::app::App {
                     .work_item_detail_cache
                     .is_fresh(key, now, interval)
         });
-        keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
         if keys.is_empty() {
             return;
         }
@@ -1365,6 +1418,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_fractional_and_offset_rfc3339_timestamps() {
+        let expected = parse_rfc3339_system_time("2026-08-30T11:22:33Z");
+        assert_eq!(
+            parse_rfc3339_system_time("2026-08-30T13:22:33.123+02:00"),
+            expected
+        );
+        assert_eq!(
+            parse_rfc3339_system_time("2026-08-30T09:22:33-02:00"),
+            expected
+        );
+    }
+
+    #[test]
     fn malformed_rfc3339_timestamp_is_unknown() {
         assert_eq!(parse_rfc3339_system_time("2023-02-29T00:00:00Z"), None);
     }
@@ -1436,6 +1502,31 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
                 failing: 1,
                 total: 2
             })
+        );
+    }
+
+    #[test]
+    fn linear_ticket_fetch_includes_inverse_relations() {
+        let dir = fixture_dir("linear-inverse-relations");
+        let (_gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"blocks","relatedIssue":{"identifier":"SCA-8","title":"outbound"}}]},"inverseRelations":{"nodes":[{"type":"blocks","issue":{"identifier":"SCA-6","title":"inbound"}},{"type":"duplicate","issue":{"identifier":"SCA-5","title":"original"}}]}}]}'
+"#,
+        );
+
+        let tickets =
+            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
+                .expect("Linear ticket fetch");
+
+        assert_eq!(
+            tickets[0].relations,
+            vec![
+                "blocks  SCA-8  outbound",
+                "blocked by  SCA-6  inbound",
+                "duplicated by  SCA-5  original"
+            ]
         );
     }
 
@@ -1669,6 +1760,73 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
     }
 
     #[test]
+    fn detail_prefetch_does_not_rotate_beyond_the_cache_capacity() {
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        app.state.workspaces = (1_u64..=20)
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for (workspace_index, number) in (1_u64..=20).enumerate() {
+            let pane_id = app.state.workspaces[workspace_index].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+        let keys = app
+            .state
+            .dock_home_keys_for_section(crate::app::state::DockHomeSection::Prs);
+        for key in keys.iter().take(WORK_ITEM_DETAIL_CACHE_CAPACITY) {
+            app.state
+                .work_item_detail_cache
+                .insert(key.clone(), unavailable_detail(SystemTime::now()));
+        }
+        let now = Instant::now();
+
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            None,
+            true,
+        );
+
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+    }
+
+    #[test]
+    fn expired_detail_batch_is_cleared_while_detail_is_hidden() {
+        let mut app = test_app_with_work_index();
+        let key = work_item_key(8);
+        app.state.work_item_detail_loading.insert(key.clone());
+        app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            keys: vec![key.clone()],
+            generation: 1,
+            deadline: Instant::now() - Duration::from_secs(1),
+        });
+
+        app.start_work_item_detail_refresh_if_due(
+            Instant::now(),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            false,
+        );
+
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+        assert!(!app.state.work_item_detail_loading.contains(&key));
+    }
+
+    #[test]
     fn attachment_join_keeps_orphan_buckets_and_ignores_branch_names() {
         let dir = fixture_dir("join");
         let (gh, linearis) = fake_programs(
@@ -1782,12 +1940,41 @@ esac
             &config(),
             &[],
             Instant::now(),
-            Instant::now() + Duration::from_millis(20),
-            Duration::from_millis(1),
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(50),
             &gh,
             &linearis,
         );
         assert!(snapshot.items.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("GitHub observation timed out")
+        );
+    }
+
+    #[test]
+    fn linear_timeout_is_no_observation() {
+        let dir = fixture_dir("linear-timeout");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            "#!/bin/sh\nsleep 2\n",
+        );
+        let snapshot = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + Duration::from_secs(2),
+            Duration::from_millis(500),
+            &gh,
+            &linearis,
+        );
+
+        assert!(snapshot.items.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("Linear observation timed out")
+        );
     }
 
     #[test]

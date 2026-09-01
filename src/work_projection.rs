@@ -564,7 +564,9 @@ fn push_ticket_row(
         .and_then(|item| item.pr_url.clone());
     rows.push(DockHomeTicketRow {
         key: WorkItemKey {
-            repo: item.map(|item| item.repo.clone()).unwrap_or_default(),
+            // Repository enrichment may arrive on a later work-index refresh.
+            // Ticket selection identity must remain stable across that refresh.
+            repo: String::new(),
             pr_number: None,
             pr_url: None,
             ticket_id: Some(ticket_id.to_string()),
@@ -1188,6 +1190,24 @@ mod tests {
             .and_then(|index| refreshed.ticket_rows.get(index))
             .expect("selected ticket");
         assert_eq!(ticket.ticket.identifier, "SCA-200");
+    }
+
+    #[test]
+    fn ticket_selection_key_survives_repository_enrichment() {
+        let mut before = item("", 0, "unused", &["SCA-200"], &[]);
+        before.pr_number = None;
+        before.pr_url = None;
+        before.pr_title = None;
+        let initial = project_dock_home(&[], &[], Some(&snapshot(vec![before])), true);
+        let selected = initial.ticket_rows[0].key.clone();
+
+        let mut after = item("owner/repo", 0, "unused", &["SCA-200"], &[]);
+        after.pr_number = None;
+        after.pr_url = None;
+        after.pr_title = None;
+        let refreshed = project_dock_home(&[], &[], Some(&snapshot(vec![after])), true);
+
+        assert_eq!(refreshed.ticket_rows[0].key, selected);
     }
 
     #[test]

@@ -515,12 +515,15 @@ impl AppState {
                 }
                 if self.on_dock_toggle(mouse.column, mouse.row) {
                     self.dock_collapsed = !self.dock_collapsed;
+                    self.dock_home_focused =
+                        !self.dock_collapsed && self.dock_tab == crate::app::DockTab::Home;
                     self.mark_session_dirty();
                     return None;
                 }
                 if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
                     self.dock_tab = tab;
                     self.dock_editor_focused = tab == crate::app::DockTab::Editor;
+                    self.dock_home_focused = tab == crate::app::DockTab::Home;
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -2258,6 +2261,7 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = true;
+        app.state.dock_tab = crate::app::DockTab::Home;
         app.state.view.dock_rect = Rect::new(79, 0, 1, 20);
         app.state.view.dock_handle_rect = app.state.view.dock_rect;
         let focused_before = app
@@ -2275,6 +2279,7 @@ mod tests {
             .and_then(|idx| app.state.workspaces.get(idx))
             .and_then(Workspace::focused_pane_id);
         assert_eq!(focused_after, focused_before);
+        assert!(app.state.dock_home_focused);
     }
 
     #[test]
@@ -2293,6 +2298,12 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 94, 0));
 
         assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert!(!app.state.dock_home_focused);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 82, 0));
+
+        assert_eq!(app.state.dock_tab, crate::app::DockTab::Home);
+        assert!(app.state.dock_home_focused);
     }
 
     #[test]

@@ -4876,10 +4876,10 @@ impl HeadlessServer {
                     !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
                 )
             });
-        if let Some((section, selection, detail_visible)) = detail_request {
-            self.app
-                .start_work_item_detail_refresh_if_due(now, section, selection, detail_visible);
-        }
+        let (section, selection, detail_visible) =
+            detail_request.unwrap_or((crate::app::state::DockHomeSection::Prs, None, false));
+        self.app
+            .start_work_item_detail_refresh_if_due(now, section, selection, detail_visible);
 
         if self
             .app

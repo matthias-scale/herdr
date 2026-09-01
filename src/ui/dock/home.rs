@@ -656,18 +656,23 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         DockHomeSection::Tickets => projection.ticket_rows.is_empty(),
     };
     if active_empty {
-        let reason = match app.dock_home_section {
-            DockHomeSection::Prs => "no pr-bound panes",
-            DockHomeSection::Tickets if !app.work_index_linear_team_configured => {
-                "tickets off — set work_index.linear_team"
+        let reason = if let Some(reason) = projection.unavailable.as_deref() {
+            format!("unavailable: {reason}")
+        } else {
+            match app.dock_home_section {
+                DockHomeSection::Prs => "no pr-bound panes",
+                DockHomeSection::Tickets if !app.work_index_linear_team_configured => {
+                    "tickets off — set work_index.linear_team"
+                }
+                DockHomeSection::Tickets => "no matching tickets",
             }
-            DockHomeSection::Tickets => "no matching tickets",
+            .to_string()
         };
         render_line(
             frame,
             area,
             area.y.saturating_add(TAB_ROWS),
-            reason.to_string(),
+            reason,
             Style::default().fg(app.palette.subtext0),
         );
         if app.dock_home_section == DockHomeSection::Prs {
@@ -1097,6 +1102,18 @@ mod tests {
         let empty = text(&render(&app, Rect::new(0, 0, 50, 12)));
         assert!(empty.contains("no matching tickets"));
         assert!(!empty.contains("tickets off"));
+
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            unavailable: Some("Linear observation timed out".into()),
+            observed_at: SystemTime::now(),
+        });
+        let unavailable = text(&render(&app, Rect::new(0, 0, 50, 12)));
+        assert!(
+            unavailable.contains("unavailable: Linear observation timed out"),
+            "{unavailable:?}"
+        );
+        assert!(!unavailable.contains("no matching tickets"));
     }
 
     #[test]
