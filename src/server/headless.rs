@@ -5966,6 +5966,8 @@ mod tests {
                 tab: crate::app::DockTab::Editor,
                 scroll: 0,
                 editor_focused,
+                home_selection: None,
+                home_focused: false,
             };
             server.clients.insert(client_id, client);
         }

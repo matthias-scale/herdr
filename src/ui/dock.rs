@@ -60,6 +60,8 @@ pub(super) fn render_dock(
         }
     }
     match app.dock_tab {
+        // Placeholder: the home body lands with the review-sidebar render slice.
+        DockTab::Home => {}
         DockTab::Editor => editor::render_editor_body(app, terminal_runtimes, frame),
         DockTab::Shortcuts => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)

@@ -702,6 +702,10 @@ pub(crate) struct DockPresentationState {
     pub(crate) tab: DockTab,
     pub(crate) scroll: u16,
     pub(crate) editor_focused: bool,
+    /// Selection inside the home tab. Stored as a work-item key, never an
+    /// index, so it survives snapshot refreshes and list reordering.
+    pub(crate) home_selection: Option<WorkItemKey>,
+    pub(crate) home_focused: bool,
 }
 
 impl Default for DockPresentationState {
@@ -709,9 +713,11 @@ impl Default for DockPresentationState {
         Self {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
-            tab: DockTab::Editor,
+            tab: DockTab::Home,
             scroll: 0,
             editor_focused: false,
+            home_selection: None,
+            home_focused: false,
         }
     }
 }
@@ -869,6 +875,7 @@ pub enum ViewLayout {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockTab {
+    Home,
     Editor,
     Shortcuts,
     Context,
@@ -876,7 +883,8 @@ pub enum DockTab {
 }
 
 impl DockTab {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::Home,
         Self::Editor,
         Self::Shortcuts,
         Self::Context,
@@ -885,12 +893,13 @@ impl DockTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Editor => "Editor",
-            Self::Shortcuts => "Shortcuts",
-            Self::Context => "Context",
-            // Four labels plus one space each must fit the 32-column default dock;
-            // a longer name here truncates "Shortcuts" instead of itself.
-            Self::Scratchpad => "Note",
+            Self::Home => "home",
+            Self::Editor => "edit",
+            Self::Shortcuts => "keys",
+            Self::Context => "ctx",
+            // Five labels plus one space each must fit the 32-column default
+            // dock; longer names truncate their left neighbour instead.
+            Self::Scratchpad => "note",
         }
     }
 
@@ -1762,6 +1771,13 @@ pub struct AppState {
     pub dock_tab: DockTab,
     pub dock_scroll: u16,
     pub(crate) dock_editor_focused: bool,
+    /// Selection inside the dock home tab, swapped per client through
+    /// `DockPresentationState`. A key, never an index.
+    pub(crate) dock_home_selection: Option<WorkItemKey>,
+    pub(crate) dock_home_focused: bool,
+    /// Server-global work index snapshot. Set on every applied
+    /// `WorkIndexRefreshed`; the dock home enriches rows from it.
+    pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     /// A file the next editor spawn for this agent pane should open. Absent, the
@@ -2123,6 +2139,8 @@ impl AppState {
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
+        std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
+        std::mem::swap(&mut self.dock_home_focused, &mut other.home_focused);
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
@@ -2577,9 +2595,12 @@ impl AppState {
             sidebar_max_width: 36,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: DockTab::Editor,
+            dock_tab: DockTab::Home,
             dock_scroll: 0,
             dock_editor_focused: false,
+            dock_home_selection: None,
+            dock_home_focused: false,
+            work_index_snapshot: None,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),

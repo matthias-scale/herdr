@@ -65,6 +65,25 @@ fn is_pull_request(item: &WorkItem) -> bool {
     item.pr_number.is_some() || item.pr_url.is_some()
 }
 
+/// Review cell shared by both projections. Draft wins over the review
+/// decision: GitHub marks drafts REVIEW_REQUIRED at open time, and the draft
+/// state is the more actionable signal.
+fn review_cell(draft: bool, review_decision: Option<&str>) -> &'static str {
+    if draft {
+        return "D";
+    }
+    match review_decision {
+        Some("REVIEW_REQUIRED") => "RR",
+        Some("APPROVED") => "✓",
+        Some("CHANGES_REQUESTED") => "✗",
+        _ => "—",
+    }
+}
+
+fn parse_pr_number(pr_url: &str) -> Option<u64> {
+    pr_url.rsplit('/').next()?.parse().ok()
+}
+
 fn item_key(item: &WorkItem) -> WorkItemKey {
     WorkItemKey {
         repo: item.repo.clone(),
@@ -80,18 +99,6 @@ fn project_row(item: &WorkItem) -> WorkPrRow {
         [] => "no ticket".to_string(),
         [ticket] => ticket.clone(),
         tickets => format!("{} tickets", tickets.len()),
-    };
-    // Draft wins over the review decision: GitHub marks drafts REVIEW_REQUIRED
-    // at open time, and the draft state is the more actionable signal.
-    let review = if item.draft {
-        "D"
-    } else {
-        match item.review_decision.as_deref() {
-            Some("REVIEW_REQUIRED") => "RR",
-            Some("APPROVED") => "✓",
-            Some("CHANGES_REQUESTED") => "✗",
-            _ => "—",
-        }
     };
     WorkPrRow {
         key: item_key(item),
@@ -111,7 +118,7 @@ fn project_row(item: &WorkItem) -> WorkPrRow {
         }),
         extra_panes,
         ticket,
-        review: review.to_string(),
+        review: review_cell(item.draft, item.review_decision.as_deref()).to_string(),
         owner_pane_id: owner.map(|pane| pane.pane_id.clone()),
     }
 }
@@ -271,6 +278,248 @@ impl WorkViewState {
                 self.selected = Some(key);
             }
         }
+    }
+}
+
+/// One pane's declared PR binding, gathered in canonical workspace/tab/layout
+/// order so a lifecycle change never moves a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHomeBinding {
+    pub(crate) ws_idx: usize,
+    pub(crate) pane_id: crate::layout::PaneId,
+    pub(crate) agent_label: Option<String>,
+    pub(crate) agent_state: crate::detect::AgentState,
+    pub(crate) pr_url: String,
+    pub(crate) role: Option<crate::work_context::PaneWorkRole>,
+    pub(crate) active_owner: bool,
+    pub(crate) work_title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHomeRow {
+    pub(crate) key: WorkItemKey,
+    pub(crate) number: String,
+    pub(crate) title: String,
+    /// Owning agent's label; `None` when no pane actively owns the PR.
+    pub(crate) owner: Option<String>,
+    /// Sidebar glyph vocabulary: ● working, ○ blocked/idle, · no agent.
+    pub(crate) glyph: &'static str,
+    /// Review cell from the snapshot, or "?" when the row is a declared
+    /// binding that no fetch has ever confirmed.
+    pub(crate) review: String,
+    pub(crate) fetched: bool,
+    pub(crate) extra_panes: usize,
+    /// Jump target: the owning pane, else the first registered pane.
+    pub(crate) ws_idx: usize,
+    pub(crate) pane_id: crate::layout::PaneId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHomeProjection {
+    pub(crate) rows: Vec<DockHomeRow>,
+    /// Unbound open PRs / ticket-only items; `None` when no snapshot exists
+    /// and the honest answer is "unknown", not zero.
+    pub(crate) unbound_prs: Option<usize>,
+    pub(crate) unbound_tickets: Option<usize>,
+    pub(crate) observed_at: Option<std::time::SystemTime>,
+    pub(crate) unavailable: Option<String>,
+}
+
+/// Dock home rows: one per bound PR, ordered by first canonical binding,
+/// enriched from the work-index snapshot when one was collected.
+pub(crate) fn project_dock_home(
+    bindings: &[DockHomeBinding],
+    snapshot: Option<&Snapshot>,
+) -> DockHomeProjection {
+    let mut rows: Vec<DockHomeRow> = Vec::new();
+    for binding in bindings {
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.key.pr_url.as_deref() == Some(binding.pr_url.as_str()))
+        {
+            row.extra_panes += 1;
+            if binding.active_owner && row.owner.is_none() {
+                row.owner = binding.agent_label.clone();
+                row.glyph = dock_home_glyph(binding.agent_state);
+                row.ws_idx = binding.ws_idx;
+                row.pane_id = binding.pane_id;
+            }
+            continue;
+        }
+        let item = snapshot.and_then(|snapshot| {
+            snapshot.items.iter().find(|item| {
+                item.pr_url.as_deref() == Some(binding.pr_url.as_str())
+            })
+        });
+        let fetched = item.is_some();
+        let review = item
+            .map(|item| review_cell(item.draft, item.review_decision.as_deref()).to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let title = item
+            .and_then(|item| item.pr_title.clone())
+            .or_else(|| binding.work_title.clone())
+            .unwrap_or_else(|| "(untitled PR)".to_string());
+        let repo = item
+            .map(|item| item.repo.clone())
+            .or_else(|| binding.repo_slug())
+            .unwrap_or_default();
+        rows.push(DockHomeRow {
+            key: WorkItemKey {
+                repo,
+                pr_number: item
+                    .and_then(|item| item.pr_number)
+                    .or_else(|| parse_pr_number(&binding.pr_url)),
+                pr_url: Some(binding.pr_url.clone()),
+            },
+            number: item
+                .and_then(|item| item.pr_number)
+                .or_else(|| parse_pr_number(&binding.pr_url))
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            title,
+            owner: binding
+                .active_owner
+                .then(|| binding.agent_label.clone())
+                .flatten(),
+            glyph: dock_home_glyph(binding.agent_state),
+            review,
+            fetched,
+            extra_panes: 0,
+            ws_idx: binding.ws_idx,
+            pane_id: binding.pane_id,
+        });
+    }
+    let unbound = snapshot.map(|snapshot| {
+        let prs = snapshot
+            .items
+            .iter()
+            .filter(|item| is_pull_request(item) && item.panes.is_empty())
+            .count();
+        let tickets = snapshot
+            .items
+            .iter()
+            .filter(|item| !is_pull_request(item) && item.panes.is_empty())
+            .count();
+        (prs, tickets)
+    });
+    DockHomeProjection {
+        rows,
+        unbound_prs: unbound.map(|(prs, _)| prs),
+        unbound_tickets: unbound.map(|(_, tickets)| tickets),
+        observed_at: snapshot.map(|snapshot| snapshot.observed_at),
+        unavailable: snapshot.and_then(|snapshot| snapshot.unavailable.clone()),
+    }
+}
+
+fn dock_home_glyph(state: crate::detect::AgentState) -> &'static str {
+    match state {
+        crate::detect::AgentState::Working => "●",
+        crate::detect::AgentState::Blocked | crate::detect::AgentState::Idle => "○",
+        _ => "·",
+    }
+}
+
+impl DockHomeBinding {
+    fn repo_slug(&self) -> Option<String> {
+        // https://github.com/<owner>/<repo>/pull/<n>
+        let mut parts = self.pr_url.split('/');
+        match (parts.next_back(), parts.next_back(), parts.next_back()) {
+            (Some(_number), Some("pull"), Some(repo)) => {
+                let owner = parts.next_back()?;
+                Some(format!("{owner}/{repo}"))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl crate::app::state::AppState {
+    /// Bound PR registrations in canonical workspace/tab/layout order.
+    pub(crate) fn dock_home_bindings(&self) -> Vec<DockHomeBinding> {
+        let mut bindings = Vec::new();
+        for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
+            for detail in workspace.pane_details(&self.terminals) {
+                let pane = workspace
+                    .tabs
+                    .get(detail.tab_idx)
+                    .and_then(|tab| tab.panes.get(&detail.pane_id));
+                let Some(terminal) = pane
+                    .map(|pane| pane.attached_terminal_id.clone())
+                    .and_then(|id| self.terminals.get(&id))
+                else {
+                    continue;
+                };
+                let context = terminal.effective_work_context();
+                let Some(pr_url) = context.primary_pr() else {
+                    continue;
+                };
+                bindings.push(DockHomeBinding {
+                    ws_idx,
+                    pane_id: detail.pane_id,
+                    agent_label: Some(detail.agent_label.clone())
+                        .filter(|label| !label.is_empty()),
+                    agent_state: detail.state,
+                    pr_url: pr_url.to_string(),
+                    role: context.role,
+                    active_owner: context.active_owner,
+                    work_title: context.work_title.clone(),
+                });
+            }
+        }
+        bindings
+    }
+
+    pub(crate) fn dock_home_projection(&self) -> DockHomeProjection {
+        project_dock_home(
+            &self.dock_home_bindings(),
+            self.work_index_snapshot.as_ref(),
+        )
+    }
+
+    /// Index of the selected home row, defaulting to the first row; `None`
+    /// when nothing is bound.
+    pub(crate) fn dock_home_selected_index(&self, projection: &DockHomeProjection) -> Option<usize> {
+        if projection.rows.is_empty() {
+            return None;
+        }
+        self.dock_home_selection
+            .as_ref()
+            .and_then(|key| projection.rows.iter().position(|row| &row.key == key))
+            .or(Some(0))
+    }
+
+    pub(crate) fn move_dock_home_selection(&mut self, delta: i64) {
+        let projection = self.dock_home_projection();
+        let Some(index) = self.dock_home_selected_index(&projection) else {
+            return;
+        };
+        let last = projection.rows.len().saturating_sub(1) as i64;
+        let next = (index as i64 + delta).clamp(0, last) as usize;
+        self.dock_home_selection = projection.rows.get(next).map(|row| row.key.clone());
+    }
+
+    pub(crate) fn dock_home_selected_row(&self) -> Option<DockHomeRow> {
+        let projection = self.dock_home_projection();
+        let index = self.dock_home_selected_index(&projection)?;
+        projection.rows.get(index).cloned()
+    }
+
+    /// Focus the pane behind the selected home row. Returns false when the
+    /// pane vanished between projection and jump — never a dead pointer.
+    pub(crate) fn jump_to_dock_home_selection(&mut self) -> bool {
+        let Some(row) = self.dock_home_selected_row() else {
+            return false;
+        };
+        let exists = self
+            .workspaces
+            .get(row.ws_idx)
+            .is_some_and(|ws| ws.tabs.iter().any(|tab| tab.panes.contains_key(&row.pane_id)));
+        if !exists {
+            return false;
+        }
+        self.focus_pane_in_workspace(row.ws_idx, row.pane_id);
+        self.dock_home_focused = false;
+        true
     }
 }
 

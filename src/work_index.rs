@@ -733,6 +733,7 @@ impl crate::app::App {
         if let Some(work_view) = self.state.work_view.as_mut() {
             work_view.replace_snapshot(snapshot.clone());
         }
+        self.state.work_index_snapshot = Some(snapshot.clone());
         self.work_index_snapshot = Some(snapshot);
         true
     }
