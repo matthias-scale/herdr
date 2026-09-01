@@ -295,6 +295,7 @@ pub(crate) struct DockHomeBinding {
     pub(crate) active_owner: bool,
     pub(crate) work_title: Option<String>,
     pub(crate) ticket_ids: Vec<String>,
+    pub(crate) preview_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +311,8 @@ pub(crate) struct DockHomeRow {
     /// binding that no fetch has ever confirmed.
     pub(crate) review: String,
     pub(crate) ticket: String,
+    pub(crate) ticket_ids: Vec<String>,
+    pub(crate) preview_urls: Vec<String>,
     /// Time since the PR was opened, or "—" when GitHub did not provide a
     /// trustworthy creation time.
     pub(crate) age: String,
@@ -360,6 +363,16 @@ fn project_dock_home_at(
             if row.ticket == "no ticket" && !binding.ticket_ids.is_empty() {
                 row.ticket = ticket_cell(&binding.ticket_ids);
             }
+            for ticket_id in &binding.ticket_ids {
+                if !row.ticket_ids.contains(ticket_id) {
+                    row.ticket_ids.push(ticket_id.clone());
+                }
+            }
+            for preview_url in &binding.preview_urls {
+                if !row.preview_urls.contains(preview_url) {
+                    row.preview_urls.push(preview_url.clone());
+                }
+            }
             if binding.active_owner && row.owner.is_none() {
                 row.owner = binding.agent_label.clone();
                 row.glyph = dock_home_glyph(binding.agent_state);
@@ -390,6 +403,14 @@ fn project_dock_home_at(
             .map(|item| item.ticket_ids.as_slice())
             .filter(|ticket_ids| !ticket_ids.is_empty())
             .unwrap_or(binding.ticket_ids.as_slice());
+        let mut preview_urls = item
+            .map(|item| item.preview_urls.clone())
+            .unwrap_or_default();
+        for preview_url in &binding.preview_urls {
+            if !preview_urls.contains(preview_url) {
+                preview_urls.push(preview_url.clone());
+            }
+        }
         let age = item
             .and_then(|item| item.created_at)
             .and_then(|created_at| now.duration_since(created_at).ok())
@@ -416,6 +437,8 @@ fn project_dock_home_at(
             glyph: dock_home_glyph(binding.agent_state),
             review,
             ticket: ticket_cell(ticket_ids),
+            ticket_ids: ticket_ids.to_vec(),
+            preview_urls,
             age,
             fetched,
             extra_panes: 0,
@@ -526,6 +549,7 @@ impl crate::app::state::AppState {
                     active_owner: context.active_owner,
                     work_title: context.work_title.clone(),
                     ticket_ids: context.ticket_ids.clone(),
+                    preview_urls: context.preview_urls.clone(),
                 });
             }
         }
@@ -563,6 +587,8 @@ impl crate::app::state::AppState {
         let last = projection.rows.len().saturating_sub(1) as i64;
         let next = (index as i64 + delta).clamp(0, last) as usize;
         self.dock_home_selection = projection.rows.get(next).map(|row| row.key.clone());
+        self.dock_home_expanded = None;
+        self.dock_scroll = 0;
     }
 
     pub(crate) fn dock_home_selected_row(&self) -> Option<DockHomeRow> {
@@ -587,6 +613,8 @@ impl crate::app::state::AppState {
         }
         self.focus_pane_in_workspace(row.ws_idx, row.pane_id);
         self.dock_home_focused = false;
+        self.dock_home_expanded = None;
+        self.dock_scroll = 0;
         true
     }
 }
@@ -661,6 +689,7 @@ mod tests {
             active_owner: true,
             work_title: Some(format!("binding {pr_number}")),
             ticket_ids: Vec::new(),
+            preview_urls: Vec::new(),
         }
     }
 
@@ -744,6 +773,7 @@ mod tests {
         indexed_binding.ticket_ids = vec!["MAT-10".to_string()];
         let mut fallback_binding = home_binding(1, 20, crate::detect::AgentState::Working);
         fallback_binding.ticket_ids = vec!["MAT-20".to_string(), "SCA-20".to_string()];
+        fallback_binding.preview_urls = vec!["https://preview.example/pr-20".to_string()];
         let empty_binding = home_binding(2, 30, crate::detect::AgentState::Idle);
         let indexed_item = item("owner/repo", 10, "indexed", &["SCA-10"], &[]);
         let fallback_item = item("owner/repo", 20, "fallback", &[], &[]);
@@ -757,6 +787,10 @@ mod tests {
 
         assert_eq!(projection.rows[0].ticket, "SCA-10");
         assert_eq!(projection.rows[1].ticket, "2 tickets");
+        assert_eq!(
+            projection.rows[1].preview_urls,
+            vec!["https://preview.example/pr-20"]
+        );
         assert_eq!(projection.rows[2].ticket, "no ticket");
         assert!(projection.rows.iter().all(|row| row.age == "—"));
     }

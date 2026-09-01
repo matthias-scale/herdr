@@ -2482,6 +2482,9 @@ impl HeadlessServer {
                 self.refresh_client_work_views();
                 changed || view_open
             }
+            AppEvent::WorkItemDetailRefreshed { .. } => {
+                self.app.handle_internal_event_with_render_impact(ev)
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }
@@ -4854,6 +4857,23 @@ impl HeadlessServer {
         // session with a permanently empty index while the interactive loop
         // refreshed fine, which is the #119 defect class.
         self.app.start_work_index_refresh_if_due(now);
+        let detail_request = self
+            .foreground_client_id
+            .and_then(|client_id| self.clients.get(&client_id))
+            .filter(|client| client.is_full_app_client())
+            .map(|client| {
+                let presentation = &client.dock_presentation;
+                (
+                    presentation.home_selection.clone(),
+                    !presentation.collapsed
+                        && presentation.tab == crate::app::DockTab::Home
+                        && presentation.home_focused,
+                )
+            });
+        if let Some((selection, detail_visible)) = detail_request {
+            self.app
+                .start_work_item_detail_refresh_if_due(now, selection, detail_visible);
+        }
 
         if self
             .app
@@ -5973,6 +5993,7 @@ mod tests {
                 editor_focused,
                 home_selection: None,
                 home_focused: false,
+                home_expanded: None,
             };
             server.clients.insert(client_id, client);
         }

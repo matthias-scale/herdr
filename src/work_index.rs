@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,11 +15,131 @@ use crate::work_context::{
 
 pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const WORK_ITEM_DETAIL_CACHE_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkIndexRefreshInFlight {
     pub(crate) generation: u64,
     pub(crate) deadline: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemDetailRefreshInFlight {
+    pub(crate) key: crate::app::state::WorkItemKey,
+    pub(crate) generation: u64,
+    pub(crate) deadline: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemCheckSummary {
+    pub(crate) failing: usize,
+    pub(crate) total: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemDetail {
+    pub(crate) number: Option<u64>,
+    pub(crate) title: Option<String>,
+    pub(crate) body: Option<String>,
+    pub(crate) author: Option<String>,
+    pub(crate) base_ref_name: Option<String>,
+    pub(crate) head_ref_name: Option<String>,
+    pub(crate) created_at: Option<SystemTime>,
+    pub(crate) updated_at: Option<SystemTime>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) review_decision: Option<String>,
+    pub(crate) is_draft: Option<bool>,
+    pub(crate) checks: Option<WorkItemCheckSummary>,
+    /// GitHub's `gh pr view --json` payload does not expose review threads.
+    /// Keep the absence explicit rather than substituting review count data.
+    pub(crate) unresolved_review_threads: Option<usize>,
+    pub(crate) unavailable: Option<String>,
+    pub(crate) observed_at: SystemTime,
+}
+
+impl WorkItemDetail {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            number: None,
+            title: None,
+            body: None,
+            author: None,
+            base_ref_name: None,
+            head_ref_name: None,
+            created_at: None,
+            updated_at: None,
+            labels: Vec::new(),
+            url: None,
+            review_decision: None,
+            is_draft: None,
+            checks: None,
+            unresolved_review_threads: None,
+            unavailable: Some(message.into()),
+            observed_at: SystemTime::now(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkItemDetailCache {
+    entries: HashMap<crate::app::state::WorkItemKey, CachedWorkItemDetail>,
+    order: VecDeque<crate::app::state::WorkItemKey>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedWorkItemDetail {
+    detail: WorkItemDetail,
+    refreshed_at: Instant,
+}
+
+impl WorkItemDetailCache {
+    pub(crate) fn get(&self, key: &crate::app::state::WorkItemKey) -> Option<&WorkItemDetail> {
+        self.entries.get(key).map(|cached| &cached.detail)
+    }
+
+    pub(crate) fn insert(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
+        self.insert_at(key, detail, Instant::now());
+    }
+
+    fn insert_at(
+        &mut self,
+        key: crate::app::state::WorkItemKey,
+        detail: WorkItemDetail,
+        refreshed_at: Instant,
+    ) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CachedWorkItemDetail {
+                detail,
+                refreshed_at,
+            },
+        );
+        while self.entries.len() > WORK_ITEM_DETAIL_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn is_fresh(
+        &self,
+        key: &crate::app::state::WorkItemKey,
+        now: Instant,
+        interval: Duration,
+    ) -> bool {
+        self.entries.get(key).is_some_and(|cached| {
+            now.checked_duration_since(cached.refreshed_at)
+                .is_some_and(|age| age < interval)
+        })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +488,105 @@ fn fetch_github_pull_requests(
             })
         })
         .collect())
+}
+
+const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
+    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup";
+
+fn fetch_github_pull_request_detail(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Result<WorkItemDetail, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    let number = number.to_string();
+    command.args([
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        repo,
+        "--json",
+        GITHUB_PULL_REQUEST_DETAIL_FIELDS,
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("GitHub PR detail observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub PR detail observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub PR detail observation returned invalid JSON".into())
+    })?;
+    Ok(WorkItemDetail {
+        number: value.get("number").and_then(Value::as_u64),
+        title: value_text(value.get("title")),
+        body: value_text(value.get("body")),
+        author: value
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        base_ref_name: value_text(value.get("baseRefName")),
+        head_ref_name: value_text(value.get("headRefName")),
+        created_at: value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        updated_at: value
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        labels: value
+            .get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| value_text(Some(label)))
+            .collect(),
+        url: value_text(value.get("url")),
+        review_decision: value_text(value.get("reviewDecision")),
+        is_draft: value.get("isDraft").and_then(Value::as_bool),
+        checks: status_check_summary(value.get("statusCheckRollup")),
+        unresolved_review_threads: None,
+        unavailable: None,
+        observed_at: SystemTime::now(),
+    })
+}
+
+fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
+    let rollup = value?.as_array()?;
+    if rollup.is_empty() {
+        return None;
+    }
+    let failing = rollup
+        .iter()
+        .filter(|check| {
+            check
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .is_some_and(|conclusion| {
+                    matches!(
+                        conclusion,
+                        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+                    )
+                })
+        })
+        .count();
+    Some(WorkItemCheckSummary {
+        failing,
+        total: rollup.len(),
+    })
 }
 
 fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
@@ -739,6 +958,12 @@ impl crate::app::App {
         })
     }
 
+    pub(crate) fn work_item_detail_refresh_deadline(&self) -> Option<Instant> {
+        self.work_item_detail_refresh_in_flight
+            .as_ref()
+            .map(|refresh| refresh.deadline)
+    }
+
     pub(crate) fn start_work_index_refresh_if_due(&mut self, now: Instant) {
         if !self.work_index_config.enabled {
             return;
@@ -812,12 +1037,143 @@ impl crate::app::App {
         self.work_index_snapshot = Some(snapshot);
         true
     }
+
+    pub(crate) fn start_work_item_detail_refresh_if_due(
+        &mut self,
+        now: Instant,
+        selection: Option<crate::app::state::WorkItemKey>,
+        detail_visible: bool,
+    ) {
+        if !detail_visible {
+            return;
+        }
+        if self
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .is_some_and(|refresh| now >= refresh.deadline)
+        {
+            self.work_item_detail_refresh_in_flight = None;
+            self.state.work_item_detail_loading = None;
+        }
+        if self.work_item_detail_refresh_in_flight.is_some() {
+            return;
+        }
+        let projection = self.state.dock_home_projection();
+        let key = selection
+            .and_then(|selection| {
+                projection
+                    .rows
+                    .iter()
+                    .find(|row| row.key == selection)
+                    .map(|row| row.key.clone())
+            })
+            .or_else(|| projection.rows.first().map(|row| row.key.clone()));
+        let Some(key) = key else {
+            return;
+        };
+        let Some(number) = key.pr_number else {
+            return;
+        };
+        if key.repo.is_empty() {
+            return;
+        }
+        let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
+        if self
+            .state
+            .work_item_detail_cache
+            .is_fresh(&key, now, interval)
+        {
+            return;
+        }
+
+        self.last_work_item_detail_refresh_generation = self
+            .last_work_item_detail_refresh_generation
+            .wrapping_add(1);
+        let generation = self.last_work_item_detail_refresh_generation;
+        let deadline = now + WORK_INDEX_TARGET_TIMEOUT;
+        self.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            key: key.clone(),
+            generation,
+            deadline,
+        });
+        self.state.work_item_detail_loading = Some(key.clone());
+        let event_tx = self.event_tx.clone();
+        let gh_program = self.work_index_gh_program();
+        let repo = key.repo.clone();
+        let _ = std::thread::Builder::new()
+            .name("herdr-work-item-detail".into())
+            .spawn(move || {
+                let detail =
+                    match fetch_github_pull_request_detail(&repo, number, &gh_program, deadline) {
+                        Ok(detail) => detail,
+                        Err(RefreshError::TimedOut) => {
+                            WorkItemDetail::unavailable("GitHub PR detail observation timed out")
+                        }
+                        Err(RefreshError::Failed(message)) => WorkItemDetail::unavailable(message),
+                    };
+                let _ = event_tx.blocking_send(crate::events::AppEvent::WorkItemDetailRefreshed {
+                    generation,
+                    key,
+                    detail: Box::new(detail),
+                });
+            });
+    }
+
+    pub(crate) fn handle_work_item_detail_refreshed(
+        &mut self,
+        generation: u64,
+        key: crate::app::state::WorkItemKey,
+        detail: WorkItemDetail,
+    ) -> bool {
+        let matches_in_flight = self
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .is_some_and(|refresh| refresh.generation == generation && refresh.key == key);
+        if !matches_in_flight
+            || generation <= self.last_applied_work_item_detail_refresh_generation
+            || generation != self.last_work_item_detail_refresh_generation
+        {
+            return false;
+        }
+        self.work_item_detail_refresh_in_flight = None;
+        self.last_applied_work_item_detail_refresh_generation = generation;
+        if self.state.work_item_detail_loading.as_ref() == Some(&key) {
+            self.state.work_item_detail_loading = None;
+        }
+        self.state.work_item_detail_cache.insert(key, detail);
+        true
+    }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    fn work_item_key(number: u64) -> crate::app::state::WorkItemKey {
+        crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(number),
+            pr_url: Some(format!("https://github.com/owner/repo/pull/{number}")),
+        }
+    }
+
+    fn unavailable_detail(observed_at: SystemTime) -> WorkItemDetail {
+        let mut detail = WorkItemDetail::unavailable("not available");
+        detail.observed_at = observed_at;
+        detail
+    }
+
+    fn test_app_with_work_index() -> crate::app::App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = true;
+        config.work_index.repos = vec!["owner/repo".into()];
+        let mut app =
+            crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.work_index_enabled = true;
+        app
+    }
 
     fn write_executable(path: &Path, contents: &str) {
         std::fs::write(path, contents).expect("write fake executable");
@@ -916,6 +1272,187 @@ printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"r
         assert_eq!(
             pull_requests[0].created_at,
             parse_rfc3339_system_time("2026-08-30T11:22:33Z")
+        );
+    }
+
+    #[test]
+    fn github_pull_request_detail_fetch_requests_every_render_field() {
+        let dir = fixture_dir("github-detail-fields");
+        let (gh, _linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"conclusion":"FAILURE"}},{{"conclusion":"SUCCESS"}}]}}'
+"#
+            ),
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+        );
+
+        let detail = fetch_github_pull_request_detail(
+            "owner/repo",
+            7,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .unwrap_or_else(|_| panic!("GitHub pull request detail fetch failed"));
+
+        assert_eq!(detail.title.as_deref(), Some("Detail"));
+        assert_eq!(detail.author.as_deref(), Some("ms"));
+        assert_eq!(detail.labels, vec!["high-risk"]);
+        assert_eq!(
+            detail.checks,
+            Some(WorkItemCheckSummary {
+                failing: 1,
+                total: 2
+            })
+        );
+    }
+
+    #[test]
+    fn status_rollup_distinguishes_absent_empty_and_all_passing() {
+        assert_eq!(status_check_summary(None), None);
+        assert_eq!(status_check_summary(Some(&serde_json::json!([]))), None);
+        assert_eq!(
+            status_check_summary(Some(&serde_json::json!([
+                {"conclusion": "SUCCESS"},
+                {"conclusion": "NEUTRAL"},
+                {"conclusion": null}
+            ]))),
+            Some(WorkItemCheckSummary {
+                failing: 0,
+                total: 3
+            })
+        );
+        assert_eq!(
+            status_check_summary(Some(&serde_json::json!([
+                {"conclusion": "FAILURE"},
+                {"conclusion": "TIMED_OUT"},
+                {"conclusion": "CANCELLED"},
+                {"conclusion": "ACTION_REQUIRED"},
+                {"conclusion": "SUCCESS"}
+            ]))),
+            Some(WorkItemCheckSummary {
+                failing: 4,
+                total: 5
+            })
+        );
+    }
+
+    #[test]
+    fn work_item_detail_cache_is_keyed_and_bounded() {
+        let mut cache = WorkItemDetailCache::default();
+        for number in 1..=17 {
+            cache.insert(
+                work_item_key(number),
+                unavailable_detail(SystemTime::UNIX_EPOCH),
+            );
+        }
+
+        assert_eq!(cache.len(), WORK_ITEM_DETAIL_CACHE_CAPACITY);
+        assert!(cache.get(&work_item_key(1)).is_none());
+        assert!(cache.get(&work_item_key(2)).is_some());
+        assert!(cache.get(&work_item_key(17)).is_some());
+    }
+
+    #[test]
+    fn work_item_detail_cache_freshness_uses_monotonic_time() {
+        let mut cache = WorkItemDetailCache::default();
+        let key = work_item_key(7);
+        let refreshed_at = Instant::now();
+        let wall_clock_in_future = SystemTime::now() + Duration::from_secs(3_600);
+        cache.insert_at(
+            key.clone(),
+            unavailable_detail(wall_clock_in_future),
+            refreshed_at,
+        );
+
+        assert!(cache.is_fresh(
+            &key,
+            refreshed_at + Duration::from_secs(59),
+            Duration::from_secs(60),
+        ));
+        assert!(!cache.is_fresh(
+            &key,
+            refreshed_at + Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+    }
+
+    #[test]
+    fn stale_work_item_detail_generation_is_rejected() {
+        let mut app = test_app_with_work_index();
+        let current_key = work_item_key(8);
+        app.last_work_item_detail_refresh_generation = 2;
+        app.last_applied_work_item_detail_refresh_generation = 0;
+        app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            key: current_key.clone(),
+            generation: 2,
+            deadline: Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        });
+        app.state.work_item_detail_loading = Some(current_key.clone());
+
+        assert!(!app.handle_work_item_detail_refreshed(
+            1,
+            work_item_key(7),
+            unavailable_detail(SystemTime::UNIX_EPOCH),
+        ));
+        assert!(app
+            .state
+            .work_item_detail_cache
+            .get(&work_item_key(7))
+            .is_none());
+        assert_eq!(app.state.work_item_detail_loading, Some(current_key));
+    }
+
+    #[test]
+    fn uncached_selected_pull_request_starts_one_detail_fetch() {
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("first"),
+            crate::workspace::Workspace::test_new("second"),
+        ];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for (workspace_index, number) in [7_u64, 8].into_iter().enumerate() {
+            let pane_id = app.state.workspaces[workspace_index].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+        let first_key = app.state.dock_home_selected_row().expect("first row").key;
+        app.state.dock_home_selection = Some(first_key.clone());
+        app.state.dock_home_expanded = Some(first_key);
+        app.state.move_dock_home_selection(1);
+        let key = app
+            .state
+            .dock_home_selected_row()
+            .expect("newly selected row")
+            .key;
+        assert_eq!(key.pr_number, Some(8));
+        assert!(app.state.dock_home_expanded.is_none());
+        let now = Instant::now();
+
+        app.start_work_item_detail_refresh_if_due(now, Some(key.clone()), true);
+        app.start_work_item_detail_refresh_if_due(now, Some(key.clone()), true);
+
+        assert_eq!(app.last_work_item_detail_refresh_generation, 1);
+        assert_eq!(
+            app.work_item_detail_refresh_in_flight
+                .as_ref()
+                .map(|refresh| (refresh.generation, refresh.key.clone())),
+            Some((1, key))
         );
     }
 

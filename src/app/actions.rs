@@ -3325,7 +3325,9 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
-            AppEvent::WorkIndexRefreshed { .. } => Vec::new(),
+            AppEvent::WorkIndexRefreshed { .. } | AppEvent::WorkItemDetailRefreshed { .. } => {
+                Vec::new()
+            }
             AppEvent::ForegroundProcessesRefreshed { .. } => Vec::new(),
             AppEvent::ClaudeSubagentsRefreshed { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),

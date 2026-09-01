@@ -407,6 +407,14 @@ impl App {
 
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
+        let detail_visible = !self.state.dock_collapsed
+            && self.state.dock_tab == crate::app::DockTab::Home
+            && self.state.dock_home_focused;
+        self.start_work_item_detail_refresh_if_due(
+            now,
+            self.state.dock_home_selection.clone(),
+            detail_visible,
+        );
         self.start_foreground_process_refresh_if_due(now);
         self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
@@ -873,6 +881,7 @@ impl App {
                 .then(|| self.git_work_context_refresh_deadline())
                 .flatten(),
             self.work_index_refresh_deadline(),
+            self.work_item_detail_refresh_deadline(),
             include_client_refresh
                 .then(|| self.foreground_process_refresh_deadline())
                 .flatten(),

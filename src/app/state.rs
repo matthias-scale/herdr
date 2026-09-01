@@ -706,6 +706,7 @@ pub(crate) struct DockPresentationState {
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
     pub(crate) home_focused: bool,
+    pub(crate) home_expanded: Option<WorkItemKey>,
 }
 
 impl Default for DockPresentationState {
@@ -718,6 +719,7 @@ impl Default for DockPresentationState {
             editor_focused: false,
             home_selection: None,
             home_focused: false,
+            home_expanded: None,
         }
     }
 }
@@ -1777,9 +1779,19 @@ pub struct AppState {
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
     pub(crate) dock_home_focused: bool,
+    /// Attach-local disclosure state. Moving selection clears it without
+    /// dropping keyboard focus from the home list.
+    pub(crate) dock_home_expanded: Option<WorkItemKey>,
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Server-global on-demand detail facts, keyed by stable work identity.
+    /// Client-local selection decides which entry is rendered, but never owns
+    /// or duplicates the fetched data.
+    pub(crate) work_item_detail_cache: crate::work_index::WorkItemDetailCache,
+    /// The one detail request currently running. This is runtime observation
+    /// state, not a client-local loading flag inferred by the renderer.
+    pub(crate) work_item_detail_loading: Option<WorkItemKey>,
     /// Whether the work index is configured on. Mirrored so the dock home can
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
@@ -1981,7 +1993,7 @@ impl WorkProjection {
 
 /// Stable identity of a projected work row. Selection is stored as this key,
 /// not an index, so it survives snapshot refreshes and projection rotations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct WorkItemKey {
     pub(crate) repo: String,
     pub(crate) pr_number: Option<u64>,
@@ -2147,6 +2159,7 @@ impl AppState {
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(&mut self.dock_home_focused, &mut other.home_focused);
+        std::mem::swap(&mut self.dock_home_expanded, &mut other.home_expanded);
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
@@ -2608,7 +2621,10 @@ impl AppState {
             dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_focused: false,
+            dock_home_expanded: None,
             work_index_snapshot: None,
+            work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
+            work_item_detail_loading: None,
             work_index_enabled: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),

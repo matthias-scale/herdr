@@ -153,6 +153,14 @@ impl App {
         }
 
         let navigate = &self.state.keybinds.navigate;
+        let event = key.as_key_event();
+        if event.code == KeyCode::Esc && event.modifiers.is_empty() {
+            if self.state.dock_home_expanded.take().is_none() {
+                self.state.dock_home_focused = false;
+            }
+            self.state.dock_scroll = 0;
+            return true;
+        }
         if navigate.workspace_up.matches_direct_key(key) || navigate.pane_up.matches_direct_key(key)
         {
             self.state.move_dock_home_selection(-1);
@@ -165,9 +173,14 @@ impl App {
             return true;
         }
 
-        let event = key.as_key_event();
         if event.code == KeyCode::Enter && event.modifiers.is_empty() {
-            self.state.jump_to_dock_home_selection();
+            let selected = self.state.dock_home_selected_row().map(|row| row.key);
+            if self.state.dock_home_expanded == selected {
+                self.state.jump_to_dock_home_selection();
+            } else {
+                self.state.dock_home_expanded = selected;
+                self.state.dock_scroll = 0;
+            }
             return true;
         }
         false
@@ -1714,9 +1727,23 @@ mod tests {
                 .number,
             "20"
         );
+        assert!(app.state.dock_home_expanded.is_none());
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),)));
+        assert_eq!(app.state.dock_home_expanded, app.state.dock_home_selection);
+        assert_eq!(app.state.active, Some(0));
         assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),)));
         assert_eq!(app.state.active, Some(1));
         assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn dock_home_escape_collapses_the_expanded_detail() {
+        let mut app = dock_home_test_app(&[10]);
+        app.state.dock_home_expanded = app.state.dock_home_selected_row().map(|row| row.key);
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
+        assert!(app.state.dock_home_focused);
+        assert!(app.state.dock_home_expanded.is_none());
     }
 
     #[test]

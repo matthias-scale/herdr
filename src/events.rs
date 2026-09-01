@@ -191,6 +191,12 @@ pub enum AppEvent {
         generation: u64,
         snapshot: crate::work_index::Snapshot,
     },
+    /// One selected work item's bounded GitHub detail observation completed.
+    WorkItemDetailRefreshed {
+        generation: u64,
+        key: crate::app::state::WorkItemKey,
+        detail: Box<crate::work_index::WorkItemDetail>,
+    },
     /// Background foreground-process observations completed for live panes.
     ForegroundProcessesRefreshed {
         generation: u64,

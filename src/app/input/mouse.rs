@@ -527,12 +527,20 @@ impl AppState {
                     let rendered_key = self.view.dock_home_row_keys.get(index).cloned()?;
                     let projection = self.dock_home_projection();
                     if let Some(row) = projection.rows.iter().find(|row| row.key == rendered_key) {
+                        let was_focused = self.dock_home_focused;
                         let already_selected = self.dock_home_focused
                             && self.dock_home_selection.as_ref() == Some(&row.key);
+                        let already_expanded = self.dock_home_expanded.as_ref() == Some(&row.key);
                         self.dock_home_selection = Some(row.key.clone());
                         self.dock_home_focused = true;
-                        if already_selected {
+                        if already_expanded {
                             self.jump_to_dock_home_selection();
+                        } else if already_selected || !was_focused {
+                            self.dock_home_expanded = Some(row.key.clone());
+                            self.dock_scroll = 0;
+                        } else {
+                            self.dock_home_expanded = None;
+                            self.dock_scroll = 0;
                         }
                     }
                     return None;
@@ -2377,6 +2385,7 @@ mod tests {
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.dock_home_selection.as_ref(), Some(&expected_key));
         assert!(app.state.dock_home_focused);
+        assert_eq!(app.state.dock_home_expanded.as_ref(), Some(&expected_key));
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),

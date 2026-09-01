@@ -424,7 +424,7 @@ fn compute_view_internal(
     let (dock_home_row_hit_areas, dock_home_row_keys) =
         if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
             let projection = app.dock_home_projection();
-            let hit_areas = dock::home_row_hit_areas(&projection, dock_body_rect);
+            let hit_areas = dock::home_row_hit_areas(app, &projection, dock_body_rect);
             let keys = projection
                 .rows
                 .iter()
