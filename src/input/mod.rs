@@ -12,7 +12,7 @@ pub use model::ime_compatible_keyboard_enhancement_flags;
 #[cfg(any(unix, test))]
 pub use model::MouseProtocolMode;
 pub use model::{
-    host_modify_other_keys_mode, KeyIdentity, KeyboardProtocol, MouseProtocolEncoding,
-    TerminalKey, TextCommit, WindowsKeyRecord,
+    host_modify_other_keys_mode, KeyIdentity, KeyboardProtocol, MouseProtocolEncoding, TerminalKey,
+    TextCommit, WindowsKeyRecord,
 };
 pub use parse::parse_terminal_key_sequence;

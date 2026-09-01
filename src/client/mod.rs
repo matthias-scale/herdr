@@ -2674,7 +2674,13 @@ fn current_terminal_geometry(
 fn initial_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32, bool) {
     let geometry = current_terminal_geometry(kitty_graphics_enabled, &AtomicU64::new(0));
     let exact_cell_size = !kitty_graphics_enabled || ioctl_cell_size().is_some();
-    (geometry.0, geometry.1, geometry.2, geometry.3, exact_cell_size)
+    (
+        geometry.0,
+        geometry.1,
+        geometry.2,
+        geometry.3,
+        exact_cell_size,
+    )
 }
 
 /// Reports polled changes and terminal wake signals, including resumes.

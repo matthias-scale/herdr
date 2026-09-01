@@ -304,10 +304,7 @@ impl AppState {
 
         let (cards, _) = crate::ui::compute_sidebar_row_areas(self, self.view.sidebar_rect);
         let slots = crate::ui::workspace_drop_slots(self, &cards, area);
-        if slots
-            .last()
-            .is_some_and(|(_, slot_row)| row <= *slot_row)
-        {
+        if slots.last().is_some_and(|(_, slot_row)| row <= *slot_row) {
             slots
                 .into_iter()
                 .enumerate()

@@ -2037,8 +2037,7 @@ impl AppState {
                     mouse.kind,
                     crate::input::mouse::Position::Cell { column, row },
                     mouse.modifiers,
-                )
-                else {
+                ) else {
                     warn!(pane = info.id.raw(), kind = ?mouse.kind, "failed to encode mouse wheel event");
                     return true;
                 };

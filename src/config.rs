@@ -38,6 +38,8 @@ pub use self::{
 };
 
 pub(crate) use self::keybinds::parse_key_combo;
+#[cfg(test)]
+pub(crate) use self::sidebar::SidebarTokenStyle;
 pub(crate) use self::{
     io::upsert_top_level_bool,
     tab_bar::{
@@ -48,8 +50,6 @@ pub(crate) use self::{
     theme::canonical_theme_name,
     window_title::{sanitize_window_title_text, window_title_diagnostics},
 };
-#[cfg(test)]
-pub(crate) use self::sidebar::SidebarTokenStyle;
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;

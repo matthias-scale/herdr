@@ -4,10 +4,24 @@ use serde::Deserialize;
 use tracing::warn;
 
 pub const THEME_NAMES: &[&str] = &[
-    "catppuccin", "catppuccin-latte", "terminal", "tokyo-night", "tokyo-night-day",
-    "dracula", "nord", "gruvbox", "gruvbox-light", "one-dark", "one-light",
-    "solarized", "solarized-light", "kanagawa", "kanagawa-lotus", "rose-pine",
-    "rose-pine-dawn", "vesper",
+    "catppuccin",
+    "catppuccin-latte",
+    "terminal",
+    "tokyo-night",
+    "tokyo-night-day",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "gruvbox-light",
+    "one-dark",
+    "one-light",
+    "solarized",
+    "solarized-light",
+    "kanagawa",
+    "kanagawa-lotus",
+    "rose-pine",
+    "rose-pine-dawn",
+    "vesper",
 ];
 
 pub(crate) fn canonical_theme_name(name: &str) -> Option<&'static str> {

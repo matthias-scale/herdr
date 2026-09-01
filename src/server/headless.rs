@@ -7371,9 +7371,9 @@ next_tab = ""
                             intent: api::schema::ReadIntent::Interactive,
                         }),
                     },
-            respond_to: baseline_tx,
-            response_write_complete: None,
-            stream_active: None,
+                    respond_to: baseline_tx,
+                    response_write_complete: None,
+                    stream_active: None,
                 });
                 let baseline: api::schema::SuccessResponse = serde_json::from_str(
                     &baseline_rx

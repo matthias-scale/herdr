@@ -522,9 +522,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         } else {
             PIN_GLYPH_OFF
         };
-        let padding = width
-            .saturating_sub(1)
-            .saturating_sub(display_width(&name));
+        let padding = width.saturating_sub(1).saturating_sub(display_width(&name));
         let left = padding / 2;
         let text = format!(
             "{pin}{left_pad}{name}{right_pad}",
@@ -694,7 +692,8 @@ mod tests {
         app.active = Some(0);
         app.view.tab_bar_rect = Rect::new(0, 0, 60, 1);
         let content = tab_bar_content_area(&app, app.view.tab_bar_rect);
-        let view = compute_tab_bar_view(&app.workspaces[0], &app.terminals, content, 0, true, false);
+        let view =
+            compute_tab_bar_view(&app.workspaces[0], &app.terminals, content, 0, true, false);
         app.view.tab_hit_areas = view.tab_hit_areas.clone();
 
         let backend = TestBackend::new(60, 1);
@@ -729,7 +728,8 @@ mod tests {
         app.active = Some(0);
         app.view.tab_bar_rect = Rect::new(0, 0, 40, 1);
         let content = tab_bar_content_area(&app, app.view.tab_bar_rect);
-        let view = compute_tab_bar_view(&app.workspaces[0], &app.terminals, content, 0, true, false);
+        let view =
+            compute_tab_bar_view(&app.workspaces[0], &app.terminals, content, 0, true, false);
         app.view.tab_hit_areas = view.tab_hit_areas;
 
         let backend = TestBackend::new(40, 1);
@@ -805,7 +805,14 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
-        let view = compute_tab_bar_view(&app.workspaces[0], &app.terminals, app.view.tab_bar_rect, 0, true, false);
+        let view = compute_tab_bar_view(
+            &app.workspaces[0],
+            &app.terminals,
+            app.view.tab_bar_rect,
+            0,
+            true,
+            false,
+        );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
         let backend = TestBackend::new(30, 1);
@@ -835,7 +842,14 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
-        let view = compute_tab_bar_view(&app.workspaces[0], &app.terminals, app.view.tab_bar_rect, 0, true, false);
+        let view = compute_tab_bar_view(
+            &app.workspaces[0],
+            &app.terminals,
+            app.view.tab_bar_rect,
+            0,
+            true,
+            false,
+        );
         app.view.tab_hit_areas = view.tab_hit_areas;
 
         let backend = TestBackend::new(30, 1);

@@ -161,7 +161,11 @@ pub(crate) fn git_status_snapshot_for_cwd_with_demand_and_program(
         let fingerprint = fingerprint(repository_context, false, deadline, git_program);
         let branch = demand
             .branch
-            .then(|| fingerprint.as_ref().and_then(GitStatusFingerprint::branch_name))
+            .then(|| {
+                fingerprint
+                    .as_ref()
+                    .and_then(GitStatusFingerprint::branch_name)
+            })
             .flatten();
         let snapshot = WorkspaceGitStatusSnapshot {
             auto_label,

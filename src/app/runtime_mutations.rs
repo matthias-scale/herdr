@@ -1,10 +1,9 @@
 use crate::api::schema::{
     EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
-    PaneRenameParams,
-    PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, TabCreateParams,
-    TabMoveParams, TabPinParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
-    WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget,
-    WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+    PaneZoomParams, TabCreateParams, TabMoveParams, TabPinParams, TabRenameParams, TabTarget,
+    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
+    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;

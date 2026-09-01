@@ -6779,14 +6779,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let tenth_row = row_y(9);
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(workspace_area.x, first_row)].symbol(), "1");
-        assert_eq!(
-            buffer[(workspace_area.x + 1, first_row)].symbol(),
-            " "
-        );
-        assert_eq!(
-            buffer[(workspace_area.x + 2, first_row)].symbol(),
-            "·"
-        );
+        assert_eq!(buffer[(workspace_area.x + 1, first_row)].symbol(), " ");
+        assert_eq!(buffer[(workspace_area.x + 2, first_row)].symbol(), "·");
         assert_eq!(buffer[(workspace_area.x, tenth_row)].symbol(), "1");
         assert_eq!(buffer[(workspace_area.x + 1, tenth_row)].symbol(), "0");
         assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), "·");

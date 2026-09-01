@@ -121,6 +121,7 @@ class ChangelogScriptTests(unittest.TestCase):
                 "linux-aarch64": "https://github.com/herdrdev/herdr/releases/download/v0.1.1/herdr-linux-aarch64",
                 "macos-x86_64": "https://github.com/herdrdev/herdr/releases/download/v0.1.1/herdr-macos-x86_64",
                 "macos-aarch64": "https://github.com/herdrdev/herdr/releases/download/v0.1.1/herdr-macos-aarch64",
+                "windows-x86_64": "https://github.com/herdrdev/herdr/releases/download/v0.1.1/herdr-windows-x86_64.zip",
             },
         )
         self.assertEqual(manifest["releases"]["0.1.1"]["assets"], manifest["assets"])

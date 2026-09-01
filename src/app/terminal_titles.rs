@@ -156,10 +156,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn sync_keeps_latest_raw_title_and_emits_only_for_stripped_changes() {
