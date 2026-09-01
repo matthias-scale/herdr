@@ -1130,6 +1130,8 @@ mod tests {
     fn an_open_dock_exposes_every_named_tab_and_a_body_area() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
+        // Home is the default tab now; this case still asserts the editor body.
+        app.dock_tab = crate::app::DockTab::Editor;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.mode = Mode::Terminal;

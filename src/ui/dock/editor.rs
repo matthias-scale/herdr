@@ -560,6 +560,8 @@ mod tests {
         app.terminal_runtimes
             .insert(editor_terminal_id.clone(), runtime);
         app.state.dock_collapsed = false;
+        // Home is the default tab now; the editor only resizes on its own tab.
+        app.state.dock_tab = DockTab::Editor;
         app.state.view.dock_body_rect = Rect::new(0, 0, 18, 5);
         app.state.dock_editor_sessions.insert(
             agent_pane_id,

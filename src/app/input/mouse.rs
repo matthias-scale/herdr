@@ -524,10 +524,7 @@ impl AppState {
                     return None;
                 }
                 if let Some(index) = self.dock_home_row_at(mouse.column, mouse.row) {
-                    let Some(rendered_key) = self.view.dock_home_row_keys.get(index).cloned()
-                    else {
-                        return None;
-                    };
+                    let rendered_key = self.view.dock_home_row_keys.get(index).cloned()?;
                     let projection = self.dock_home_projection();
                     if let Some(row) = projection.rows.iter().find(|row| row.key == rendered_key) {
                         let already_selected = self.dock_home_focused
