@@ -159,16 +159,17 @@ impl App {
             self.state.dock_scroll = 0;
             return true;
         }
+        // Arrows only. `pane_left`/`pane_right`/`pane_up`/`pane_down` default to
+        // bare `h`/`j`/`k`/`l`, and the dock is focused over a live shell, so
+        // consuming those would swallow ordinary typing into the pane.
         if navigate.workspace_up.matches_direct_key(key)
-            || navigate.pane_up.matches_direct_key(key)
-            || navigate.pane_left.matches_direct_key(key)
+            || matches!(event.code, KeyCode::Up | KeyCode::Left) && event.modifiers.is_empty()
         {
             self.state.move_dock_home_selection(-1);
             return true;
         }
         if navigate.workspace_down.matches_direct_key(key)
-            || navigate.pane_down.matches_direct_key(key)
-            || navigate.pane_right.matches_direct_key(key)
+            || matches!(event.code, KeyCode::Down | KeyCode::Right) && event.modifiers.is_empty()
         {
             self.state.move_dock_home_selection(1);
             return true;
@@ -1731,7 +1732,7 @@ mod tests {
             "10"
         );
 
-        let key = TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty());
+        let key = TerminalKey::new(KeyCode::Down, KeyModifiers::empty());
         app.route_client_events(
             vec![
                 crate::raw_input::RawInputEvent::Key(key.clone()),
@@ -1800,9 +1801,7 @@ mod tests {
     fn dock_home_navigate_keys_move_and_enter_jumps_to_the_selected_pane() {
         let mut app = dock_home_test_app(&[10, 20]);
 
-        assert!(
-            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty(),))
-        );
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Right, KeyModifiers::empty(),)));
         assert_eq!(
             app.state
                 .dock_home_selected_row()
@@ -1829,15 +1828,18 @@ mod tests {
         let config: crate::config::Config = toml::from_str(
             r#"
 [keys]
-navigate_pane_up = "ctrl+k"
-navigate_pane_down = "ctrl+j"
+navigate_workspace_down = "ctrl+j"
 "#,
         )
         .expect("valid config");
         app.state.keybinds = config.keybinds();
 
+        // Bare letters always belong to the pane: the dock is focused over a
+        // live shell, so `h`/`j`/`k`/`l` must never be swallowed here.
         assert!(!app
             .handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty(),)));
+        assert!(!app
+            .handle_dock_home_key(&TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty(),)));
         assert!(
             app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::CONTROL,))
         );
