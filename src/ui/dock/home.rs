@@ -1192,6 +1192,46 @@ mod tests {
     }
 
     #[test]
+    fn review_and_check_states_keep_text_tokens_while_palette_changes() {
+        let mut detail = full_detail();
+        let app = selected_with_detail(bound_app(true), Some(detail.clone()));
+        let terminal = render(&app, Rect::new(0, 0, 100, 40));
+        let review_required = text_position(&terminal, "RR");
+        assert_eq!(
+            terminal.backend().buffer()[review_required].fg,
+            app.palette.peach
+        );
+
+        detail.review_decision = Some("APPROVED".into());
+        detail.checks = Some(crate::work_index::WorkItemCheckSummary {
+            failing: 0,
+            total: 8,
+        });
+        let approved_app = selected_with_detail(bound_app(true), Some(detail.clone()));
+        let approved = render(&approved_app, Rect::new(0, 0, 100, 40));
+        let approved_token = text_position(&approved, "approved");
+        assert_eq!(
+            approved.backend().buffer()[approved_token].fg,
+            approved_app.palette.green
+        );
+        let passing = text_position(&approved, "0 failing of 8");
+        assert_eq!(
+            approved.backend().buffer()[passing].fg,
+            approved_app.palette.green
+        );
+
+        detail.is_draft = Some(true);
+        detail.review_decision = None;
+        let draft_app = selected_with_detail(bound_app(true), Some(detail));
+        let draft = render(&draft_app, Rect::new(0, 0, 100, 40));
+        let draft_token = text_position(&draft, "draft");
+        assert_eq!(
+            draft.backend().buffer()[draft_token].fg,
+            draft_app.palette.overlay0
+        );
+    }
+
+    #[test]
     fn tab_hit_areas_match_every_rendered_tab_on_one_row() {
         let app = bound_app_with_prs(&[
             (129, crate::detect::AgentState::Working),
