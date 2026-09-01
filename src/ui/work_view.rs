@@ -218,6 +218,7 @@ mod tests {
             ticket_ids: tickets.iter().map(|ticket| (*ticket).to_string()).collect(),
             ticket_title: None,
             ticket_state: None,
+            ticket_details: Vec::new(),
             branch: None,
             preview_urls: Vec::new(),
             panes: Vec::new(),

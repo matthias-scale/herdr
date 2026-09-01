@@ -10,12 +10,15 @@ use ratatui::{
 
 use super::super::text::{display_width, middle_elide, truncate_end};
 use crate::{
-    app::{state::WorkItemKey, AppState},
+    app::{
+        state::{DockHomeSection, WorkItemKey},
+        AppState,
+    },
     work_index::{WorkItem, WorkItemDetail},
-    work_projection::{compact_elapsed, DockHomeProjection, DockHomeRow},
+    work_projection::{compact_elapsed, DockHomeProjection, DockHomeRow, DockHomeTicketRow},
 };
 
-const TAB_ROWS: u16 = 1;
+const TAB_ROWS: u16 = 2;
 const FOOTER_ROWS: u16 = 4;
 const BODY_LINE_LIMIT: usize = 6;
 const MIN_LEGIBLE_TAB_WIDTH: u16 = 3;
@@ -35,7 +38,7 @@ pub(crate) fn tab_layouts(
     if projection.rows.is_empty() {
         return Vec::new();
     }
-    let tab_bar = Rect::new(area.x, area.y, area.width, area.height.min(TAB_ROWS));
+    let tab_bar = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
     let capacity = usize::from((area.width / MIN_LEGIBLE_TAB_WIDTH).max(1));
     let visible_count = projection.rows.len().min(capacity);
     let selected = app.dock_home_selected_index(projection).unwrap_or(0);
@@ -57,12 +60,57 @@ pub(crate) fn tab_layouts(
         .collect()
 }
 
+pub(crate) fn ticket_tab_layouts(
+    app: &AppState,
+    projection: &DockHomeProjection,
+    area: Rect,
+) -> Vec<(usize, Rect)> {
+    if projection.ticket_rows.is_empty() {
+        return Vec::new();
+    }
+    let tab_bar = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
+    let capacity = usize::from((area.width / MIN_LEGIBLE_TAB_WIDTH).max(1));
+    let visible_count = projection.ticket_rows.len().min(capacity);
+    let selected = app.dock_home_selected_ticket_index(projection).unwrap_or(0);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(visible_count)
+        .min(projection.ticket_rows.len().saturating_sub(visible_count));
+    let visible = &projection.ticket_rows[start..start.saturating_add(visible_count)];
+    let widths = visible
+        .iter()
+        .map(|row| {
+            u16::try_from(display_width(&row.ticket.identifier).saturating_add(1))
+                .unwrap_or(u16::MAX)
+        })
+        .collect::<Vec<_>>();
+    crate::ui::horizontal_tab_hit_areas(tab_bar, &widths)
+        .into_iter()
+        .enumerate()
+        .map(|(offset, area)| (start.saturating_add(offset), area))
+        .collect()
+}
+
+pub(crate) fn section_layouts(area: Rect) -> [Rect; 2] {
+    let row = Rect::new(area.x, area.y, area.width, 1);
+    let areas = crate::ui::horizontal_tab_hit_areas(row, &[4, 8]);
+    [
+        areas.first().copied().unwrap_or_default(),
+        areas.get(1).copied().unwrap_or_default(),
+    ]
+}
+
 fn work_item_for_key<'a>(app: &'a AppState, key: &WorkItemKey) -> Option<&'a WorkItem> {
     app.work_index_snapshot.as_ref()?.items.iter().find(|item| {
         (key.pr_number.is_some()
             && item.pr_number == key.pr_number
             && item.repo.eq_ignore_ascii_case(&key.repo))
             || (key.pr_url.is_some() && item.pr_url == key.pr_url)
+            || key.ticket_id.as_ref().is_some_and(|ticket_id| {
+                item.ticket_ids
+                    .iter()
+                    .any(|candidate| candidate == ticket_id)
+            })
     })
 }
 
@@ -284,6 +332,55 @@ fn detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<String> 
         .unwrap_or_else(|| vec!["loading…".to_string()])
 }
 
+fn ticket_detail_lines(row: &DockHomeTicketRow, width: usize) -> Vec<String> {
+    let ticket = &row.ticket;
+    let now = SystemTime::now();
+    let labels = if ticket.labels.is_empty() {
+        "—".to_string()
+    } else {
+        ticket.labels.join(" · ")
+    };
+    let mut lines = vec![
+        format!("{}  overview", ticket.identifier),
+        labels,
+        missing(ticket.title.as_deref()).to_string(),
+        format!(
+            "{} · {} · opened {} · updated {}",
+            missing(ticket.state.as_deref()),
+            missing(ticket.assignee.as_deref()),
+            elapsed_from(ticket.created_at, now),
+            elapsed_from(ticket.updated_at, now),
+        ),
+        missing(ticket.branch.as_deref()).to_string(),
+        String::new(),
+        "links".to_string(),
+        format!(" linear    {}", missing(ticket.url.as_deref())),
+        format!(" pr        {}", missing(row.linked_pr_url.as_deref())),
+        String::new(),
+        "what it does".to_string(),
+    ];
+    lines.extend(body_lines(ticket.description.as_deref(), width));
+    lines.push(String::new());
+    lines.push("parent".to_string());
+    lines.push(format!(" {}", missing(ticket.parent.as_deref())));
+    lines.push(String::new());
+    lines.push("relations".to_string());
+    if ticket.relations.is_empty() {
+        lines.push(" —".to_string());
+    } else {
+        lines.extend(
+            ticket
+                .relations
+                .iter()
+                .map(|relation| format!(" {relation}")),
+        );
+    }
+    lines
+        .into_iter()
+        .map(|line| truncate_end(&line, width))
+        .collect()
+}
+
 fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
     if let Some(reason) = projection.unavailable.as_deref() {
         return format!("unavailable: {reason}");
@@ -368,49 +465,116 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
     }
     let projection = app.dock_home_projection();
 
-    if projection.rows.is_empty() {
-        render_line(
-            frame,
-            area,
-            area.y,
-            "no pr-bound panes".to_string(),
-            Style::default().fg(app.palette.subtext0),
-        );
-        render_line(
-            frame,
-            area,
-            area.y.saturating_add(1),
-            "bind: herdr tab create --pr <url> --role review".to_string(),
-            Style::default().fg(app.palette.overlay0),
-        );
-        render_footer(app, &projection, frame, area, area.y.saturating_add(2));
-        return;
-    }
-
-    let selected = app.dock_home_selected_index(&projection);
-    let tab_layouts = tab_layouts(app, &projection, area);
-    for (index, tab_area) in tab_layouts {
-        let row = &projection.rows[index];
-        let is_selected = selected == Some(index);
-        let style = if is_selected {
+    for (section, label, section_area) in [
+        (DockHomeSection::Prs, "prs", section_layouts(area)[0]),
+        (
+            DockHomeSection::Tickets,
+            "tickets",
+            section_layouts(area)[1],
+        ),
+    ] {
+        let style = if app.dock_home_section == section {
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.palette.overlay0)
         };
-        let label = middle_elide(&tab_label(row), usize::from(tab_area.width));
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(label, style))),
-            tab_area,
+            section_area,
         );
+    }
+
+    let active_empty = match app.dock_home_section {
+        DockHomeSection::Prs => projection.rows.is_empty(),
+        DockHomeSection::Tickets => projection.ticket_rows.is_empty(),
+    };
+    if active_empty {
+        let reason = match app.dock_home_section {
+            DockHomeSection::Prs => "no pr-bound panes",
+            DockHomeSection::Tickets if !app.work_index_linear_team_configured => {
+                "tickets off — set work_index.linear_team"
+            }
+            DockHomeSection::Tickets => "no matching tickets",
+        };
+        render_line(
+            frame,
+            area,
+            area.y.saturating_add(TAB_ROWS),
+            reason.to_string(),
+            Style::default().fg(app.palette.subtext0),
+        );
+        if app.dock_home_section == DockHomeSection::Prs {
+            render_line(
+                frame,
+                area,
+                area.y.saturating_add(TAB_ROWS + 1),
+                "bind: herdr tab create --pr <url> --role review".to_string(),
+                Style::default().fg(app.palette.overlay0),
+            );
+        }
+        render_footer(
+            app,
+            &projection,
+            frame,
+            area,
+            area.y.saturating_add(TAB_ROWS + 2),
+        );
+        return;
+    }
+
+    let selected_pr = app.dock_home_selected_index(&projection);
+    let selected_ticket = app.dock_home_selected_ticket_index(&projection);
+    match app.dock_home_section {
+        DockHomeSection::Prs => {
+            for (index, tab_area) in tab_layouts(app, &projection, area) {
+                let row = &projection.rows[index];
+                let style = if selected_pr == Some(index) {
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.palette.overlay0)
+                };
+                let label = middle_elide(&tab_label(row), usize::from(tab_area.width));
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(label, style))),
+                    tab_area,
+                );
+            }
+        }
+        DockHomeSection::Tickets => {
+            for (index, tab_area) in ticket_tab_layouts(app, &projection, area) {
+                let row = &projection.ticket_rows[index];
+                let style = if selected_ticket == Some(index) {
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.palette.overlay0)
+                };
+                let label = middle_elide(&row.ticket.identifier, usize::from(tab_area.width));
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(label, style))),
+                    tab_area,
+                );
+            }
+        }
     }
 
     let detail_y = area.y.saturating_add(TAB_ROWS);
     let footer_y = area.bottom().saturating_sub(FOOTER_ROWS).max(detail_y);
     let detail_height = footer_y.saturating_sub(detail_y);
-    if let Some(row) = selected.and_then(|index| projection.rows.get(index)) {
-        let lines = detail_lines(app, row, usize::from(area.width));
+    let lines = match app.dock_home_section {
+        DockHomeSection::Prs => selected_pr
+            .and_then(|index| projection.rows.get(index))
+            .map(|row| detail_lines(app, row, usize::from(area.width))),
+        DockHomeSection::Tickets => selected_ticket
+            .and_then(|index| projection.ticket_rows.get(index))
+            .map(|row| ticket_detail_lines(row, usize::from(area.width))),
+    };
+    if let Some(lines) = lines {
         let max_scroll = lines.len().saturating_sub(usize::from(detail_height));
         let scroll = usize::from(app.dock_scroll).min(max_scroll);
         for (offset, line) in lines
@@ -522,6 +686,7 @@ mod tests {
                     ticket_ids: vec!["MAT-125".into()],
                     ticket_title: None,
                     ticket_state: None,
+                    ticket_details: Vec::new(),
                     branch: None,
                     preview_urls: Vec::new(),
                     panes: vec![crate::work_index::WorkItemPane {
@@ -569,6 +734,73 @@ mod tests {
                 })
                 .expect("work context");
         }
+        app
+    }
+
+    fn ticket_app(full: bool) -> AppState {
+        let mut app = AppState::test_new();
+        app.work_index_enabled = true;
+        app.work_index_linear_team_configured = true;
+        app.dock_home_section = DockHomeSection::Tickets;
+        let ticket = crate::work_index::WorkTicket {
+            identifier: "SCA-3084".into(),
+            title: full.then(|| "ticket detail in the dock".into()),
+            description: full.then(|| "A complete Linear description body.".into()),
+            state: full.then(|| "In Progress".into()),
+            assignee: full.then(|| "Matthias".into()),
+            created_at: full.then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
+            updated_at: full.then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(120)),
+            branch: full.then(|| "sca-3084-dock-ticket".into()),
+            labels: full.then(|| vec!["fleet".into()]).unwrap_or_default(),
+            url: full.then(|| "https://linear.app/scalable/issue/SCA-3084".into()),
+            parent: full.then(|| "SCA-3000  dock home".into()),
+            relations: full
+                .then(|| vec!["blocks  SCA-3090  preload".into()])
+                .unwrap_or_default(),
+        };
+        let mut items = vec![crate::work_index::WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: None,
+            pr_url: None,
+            pr_title: None,
+            pr_state: None,
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            ticket_ids: vec![ticket.identifier.clone()],
+            ticket_title: ticket.title.clone(),
+            ticket_state: ticket.state.clone(),
+            ticket_details: vec![ticket],
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: crate::work_index::WorkItemSource::default(),
+        }];
+        if full {
+            items.push(crate::work_index::WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(42),
+                pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+                pr_title: Some("linked pull request".into()),
+                pr_state: Some("open".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                ticket_ids: vec!["SCA-3084".into()],
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: None,
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: crate::work_index::WorkItemSource::default(),
+            });
+        }
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items,
+            unavailable: None,
+            observed_at: SystemTime::now(),
+        });
         app
     }
 
@@ -625,6 +857,62 @@ mod tests {
     }
 
     #[test]
+    fn section_selector_defaults_to_prs() {
+        let app = AppState::test_new();
+        assert_eq!(app.dock_home_section, DockHomeSection::Prs);
+        let terminal = render(&app, Rect::new(0, 0, 30, 10));
+        assert!(line_text(&terminal, 0).starts_with("prs tickets"));
+    }
+
+    #[test]
+    fn ticket_detail_renders_every_linear_field() {
+        let terminal = render(&ticket_app(true), Rect::new(0, 0, 64, 40));
+        let rendered = text(&terminal);
+        for expected in [
+            "SCA-3084  overview",
+            "fleet",
+            "ticket detail in the dock",
+            "In Progress · Matthias",
+            "sca-3084-dock-ticket",
+            "https://linear.app/scalable/issue/SCA-3084",
+            "https://github.com/owner/repo/pull/42",
+            "A complete Linear description body.",
+            "SCA-3000  dock home",
+            "blocks  SCA-3090  preload",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_ticket_fields_render_explicit_dashes_without_panicking() {
+        let rendered = text(&render(&ticket_app(false), Rect::new(0, 0, 50, 40)));
+        assert!(
+            rendered.contains("— · — · opened — · updated —"),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("linear    —"), "{rendered:?}");
+        assert!(rendered.contains("parent"), "{rendered:?}");
+        assert!(rendered.contains("relations"), "{rendered:?}");
+    }
+
+    #[test]
+    fn empty_ticket_states_name_configuration_and_no_matches_separately() {
+        let mut app = AppState::test_new();
+        app.dock_home_section = DockHomeSection::Tickets;
+        let off = text(&render(&app, Rect::new(0, 0, 50, 12)));
+        assert!(off.contains("tickets off — set work_index.linear_team"));
+
+        app.work_index_linear_team_configured = true;
+        let empty = text(&render(&app, Rect::new(0, 0, 50, 12)));
+        assert!(empty.contains("no matching tickets"));
+        assert!(!empty.contains("tickets off"));
+    }
+
+    #[test]
     fn renders_one_tab_per_bound_pr_in_canonical_order() {
         let app = bound_app_with_prs(&[
             (129, crate::detect::AgentState::Working),
@@ -640,7 +928,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["129", "128", "3487"]
         );
-        let strip = line_text(&render(&app, Rect::new(0, 0, 60, 10)), 0);
+        let strip = line_text(&render(&app, Rect::new(0, 0, 60, 10)), 1);
         let first = strip.find("● #129").expect("first canonical tab");
         let second = strip.find("○ #128").expect("second canonical tab");
         let third = strip.find("○ #3487").expect("third canonical tab");
@@ -665,7 +953,7 @@ mod tests {
     fn footer_names_pr_open_age_and_review_codes() {
         let body_width = crate::ui::DOCK_DEFAULT_WIDTH.saturating_sub(2);
         let terminal = render(&AppState::test_new(), Rect::new(0, 0, body_width, 10));
-        let legend = line_text(&terminal, 5);
+        let legend = line_text(&terminal, 7);
         assert_eq!(
             legend.trim_end(),
             "age=pr open · rv=?/—/D/RR/✓/✗",
@@ -677,6 +965,7 @@ mod tests {
     fn future_observation_time_renders_unknown_instead_of_guessing_zero() {
         let projection = DockHomeProjection {
             rows: Vec::new(),
+            ticket_rows: Vec::new(),
             unbound_prs: None,
             unbound_tickets: None,
             observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
@@ -712,7 +1001,7 @@ mod tests {
             .map(|(_, area)| area)
             .collect::<Vec<_>>();
         assert_eq!(areas.len(), projection.rows.len());
-        assert_eq!(areas, vec![Rect::new(4, 7, 7, 1), Rect::new(11, 7, 7, 1)]);
+        assert_eq!(areas, vec![Rect::new(4, 8, 7, 1), Rect::new(11, 8, 7, 1)]);
     }
 
     #[test]
@@ -723,7 +1012,10 @@ mod tests {
         let overview = text.find("#125  overview").expect("overview");
         let links = text.find("links").expect("links");
         let body = text.find("what it does").expect("body heading");
-        let tickets = text.find("tickets").expect("tickets");
+        let tickets = body
+            + text[body..]
+                .find("tickets")
+                .expect("tickets heading after body");
         let review = text
             .find("review threads  unknown")
             .expect("review threads");
@@ -815,7 +1107,7 @@ mod tests {
             (128, crate::detect::AgentState::Idle),
         ]);
         let area = Rect::new(0, 0, 30, 12);
-        let before = line_text(&render(&app, area), 0);
+        let before = line_text(&render(&app, area), 1);
         let before_129 = before.find("#129").expect("#129 tab");
         let before_128 = before.find("#128").expect("#128 tab");
 
@@ -836,7 +1128,7 @@ mod tests {
             .expect("second terminal")
             .state = crate::detect::AgentState::Working;
 
-        let after = line_text(&render(&app, area), 0);
+        let after = line_text(&render(&app, area), 1);
         assert_eq!(after.find("#129"), Some(before_129));
         assert_eq!(after.find("#128"), Some(before_128));
         assert!(after.contains("○ #129"), "{after:?}");

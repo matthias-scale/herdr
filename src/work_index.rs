@@ -177,10 +177,28 @@ pub(crate) struct WorkItem {
     pub ticket_ids: Vec<String>,
     pub ticket_title: Option<String>,
     pub ticket_state: Option<String>,
+    #[serde(default)]
+    pub ticket_details: Vec<WorkTicket>,
     pub branch: Option<String>,
     pub preview_urls: Vec<String>,
     pub panes: Vec<WorkItemPane>,
     pub source: WorkItemSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkTicket {
+    pub(crate) identifier: String,
+    pub(crate) title: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) assignee: Option<String>,
+    pub(crate) created_at: Option<SystemTime>,
+    pub(crate) updated_at: Option<SystemTime>,
+    pub(crate) branch: Option<String>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) relations: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,13 +220,7 @@ struct GithubPullRequest {
     created_at: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone)]
-struct LinearTicket {
-    id: String,
-    title: Option<String>,
-    state: Option<String>,
-    branch: Option<String>,
-}
+type LinearTicket = WorkTicket;
 
 #[derive(Debug, Clone)]
 struct Attachment {
@@ -290,6 +302,7 @@ pub(crate) fn refresh_work_index(
             ticket_ids: Vec::new(),
             ticket_title: None,
             ticket_state: None,
+            ticket_details: Vec::new(),
             branch: Some(pr.branch),
             preview_urls: Vec::new(),
             panes: Vec::new(),
@@ -302,7 +315,7 @@ pub(crate) fn refresh_work_index(
 
     let mut ticket_by_id = tickets
         .iter()
-        .map(|ticket| (ticket.id.clone(), ticket))
+        .map(|ticket| (ticket.identifier.clone(), ticket))
         .collect::<HashMap<_, _>>();
     for attachment in attachments {
         let ticket = ticket_by_id.remove(&attachment.ticket_id);
@@ -325,6 +338,7 @@ pub(crate) fn refresh_work_index(
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
+                ticket_details: Vec::new(),
                 branch: attachment.branch.clone(),
                 preview_urls: attachment.preview_urls.clone(),
                 panes: Vec::new(),
@@ -343,11 +357,12 @@ pub(crate) fn refresh_work_index(
         if let Some(ticket) = ticket {
             item.ticket_title = ticket.title.clone();
             item.ticket_state = ticket.state.clone();
+            item.ticket_details.push(ticket.clone());
         }
     }
 
     for ticket in ticket_by_id.into_values() {
-        let Some(_ticket_url) = linear_ticket_url(&ticket.id) else {
+        let Some(_ticket_url) = linear_ticket_url(&ticket.identifier) else {
             continue;
         };
         let repo = panes
@@ -357,7 +372,7 @@ pub(crate) fn refresh_work_index(
                     .ticket_ids
                     .iter()
                     .filter_map(|id| normalize_ticket_id(id).ok())
-                    .any(|id| id == ticket.id)
+                    .any(|id| id == ticket.identifier)
             })
             .and_then(|pane| pane.work_context.repo.as_deref())
             .and_then(|repo| normalize_repo_slug(repo).ok())
@@ -376,9 +391,10 @@ pub(crate) fn refresh_work_index(
             draft: false,
             review_decision: None,
             created_at: None,
-            ticket_ids: vec![ticket.id.clone()],
+            ticket_ids: vec![ticket.identifier.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
+            ticket_details: vec![ticket.clone()],
             branch: ticket.branch.clone(),
             preview_urls: Vec::new(),
             panes: Vec::new(),
@@ -695,15 +711,72 @@ fn fetch_linear_tickets(
     Ok(nodes
         .iter()
         .filter_map(|node| {
-            let id = normalize_ticket_id(node.get("identifier")?.as_str()?).ok()?;
-            Some(LinearTicket {
-                id,
+            let identifier = normalize_ticket_id(node.get("identifier")?.as_str()?).ok()?;
+            Some(WorkTicket {
+                url: linear_ticket_url(&identifier),
+                identifier,
                 title: value_text(node.get("title")),
-                state: value_text(node.get("state")),
+                description: value_text(node.get("description")),
+                state: nested_text(node.get("state"), "name"),
+                assignee: nested_text(node.get("assignee"), "name"),
+                created_at: node
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
+                updated_at: node
+                    .get("updatedAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
                 branch: value_text(node.get("branchName")),
+                labels: node
+                    .get("labels")
+                    .and_then(|labels| labels.get("nodes"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|label| nested_text(Some(label), "name"))
+                    .collect(),
+                parent: node.get("parent").and_then(format_linear_reference),
+                relations: node
+                    .get("relations")
+                    .and_then(|relations| relations.get("nodes"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(format_linear_relation)
+                    .collect(),
             })
         })
         .collect())
+}
+
+fn nested_text(value: Option<&Value>, field: &str) -> Option<String> {
+    value_text(value.and_then(|value| value.get(field))).or_else(|| value_text(value))
+}
+
+fn format_linear_reference(value: &Value) -> Option<String> {
+    let identifier = nested_text(Some(value), "identifier");
+    let title = nested_text(Some(value), "title");
+    match (identifier, title) {
+        (Some(identifier), Some(title)) => Some(format!("{identifier}  {title}")),
+        (Some(identifier), None) => Some(identifier),
+        (None, Some(title)) => Some(title),
+        (None, None) => value_text(Some(value)),
+    }
+}
+
+fn format_linear_relation(value: &Value) -> Option<String> {
+    let kind = nested_text(Some(value), "type");
+    let related = value
+        .get("relatedIssue")
+        .or_else(|| value.get("issue"))
+        .and_then(format_linear_reference)
+        .or_else(|| format_linear_reference(value));
+    match (kind, related) {
+        (Some(kind), Some(related)) => Some(format!("{kind}  {related}")),
+        (None, Some(related)) => Some(related),
+        _ => None,
+    }
 }
 
 fn fetch_attachments(
@@ -750,7 +823,7 @@ fn fetch_ticket_attachments(
     command.args([
         "attachments",
         "list",
-        &ticket.id,
+        &ticket.identifier,
         "--source-type",
         "github",
         "--compact",
@@ -788,7 +861,7 @@ fn fetch_ticket_attachments(
                 _ => repo_slug_from_pr_url(&url)?,
             };
             Some(Attachment {
-                ticket_id: ticket.id.clone(),
+                ticket_id: ticket.identifier.clone(),
                 repo,
                 number,
                 url,
@@ -895,6 +968,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 },
                 ticket_title: None,
                 ticket_state: None,
+                ticket_details: Vec::new(),
                 branch: pane.work_context.branch.clone(),
                 preview_urls: pane.work_context.preview_urls.clone(),
                 panes: Vec::new(),
@@ -1155,6 +1229,7 @@ mod tests {
             repo: "owner/repo".into(),
             pr_number: Some(number),
             pr_url: Some(format!("https://github.com/owner/repo/pull/{number}")),
+            ticket_id: None,
         }
     }
 

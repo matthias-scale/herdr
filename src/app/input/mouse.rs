@@ -523,12 +523,37 @@ impl AppState {
                     self.dock_editor_focused = tab == crate::app::DockTab::Editor;
                     return None;
                 }
+                if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
+                    self.set_dock_home_section(section);
+                    self.dock_home_focused = true;
+                    return None;
+                }
                 if let Some(index) = self.dock_home_tab_at(mouse.column, mouse.row) {
                     let rendered_key = self.view.dock_home_tab_keys.get(index).cloned()?;
                     let projection = self.dock_home_projection();
-                    if let Some(row) = projection.rows.iter().find(|row| row.key == rendered_key) {
-                        let already_selected = self.dock_home_selection.as_ref() == Some(&row.key);
-                        self.dock_home_selection = Some(row.key.clone());
+                    let key = match self.dock_home_section {
+                        crate::app::state::DockHomeSection::Prs => projection
+                            .rows
+                            .iter()
+                            .find(|row| row.key == rendered_key)
+                            .map(|row| row.key.clone()),
+                        crate::app::state::DockHomeSection::Tickets => projection
+                            .ticket_rows
+                            .iter()
+                            .find(|row| row.key == rendered_key)
+                            .map(|row| row.key.clone()),
+                    };
+                    if let Some(key) = key {
+                        let already_selected =
+                            self.dock_home_active_selection().as_ref() == Some(&key);
+                        match self.dock_home_section {
+                            crate::app::state::DockHomeSection::Prs => {
+                                self.dock_home_selection = Some(key)
+                            }
+                            crate::app::state::DockHomeSection::Tickets => {
+                                self.dock_home_ticket_selection = Some(key)
+                            }
+                        }
                         self.dock_home_focused = true;
                         if already_selected {
                             self.jump_to_dock_home_selection();

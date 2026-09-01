@@ -705,6 +705,8 @@ pub(crate) struct DockPresentationState {
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
+    pub(crate) home_ticket_selection: Option<WorkItemKey>,
+    pub(crate) home_section: DockHomeSection,
     pub(crate) home_focused: bool,
 }
 
@@ -717,6 +719,8 @@ impl Default for DockPresentationState {
             scroll: 0,
             editor_focused: false,
             home_selection: None,
+            home_ticket_selection: None,
+            home_section: DockHomeSection::Prs,
             home_focused: false,
         }
     }
@@ -964,6 +968,7 @@ pub struct ViewState {
     pub dock_divider_rect: Rect,
     pub dock_tab_bar_rect: Rect,
     pub dock_tab_hit_areas: Vec<Rect>,
+    pub dock_home_section_hit_areas: Vec<Rect>,
     pub dock_home_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_body_rect: Rect,
@@ -1776,6 +1781,8 @@ pub struct AppState {
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
+    pub(crate) dock_home_ticket_selection: Option<WorkItemKey>,
+    pub(crate) dock_home_section: DockHomeSection,
     pub(crate) dock_home_focused: bool,
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
@@ -1791,6 +1798,7 @@ pub struct AppState {
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
     pub(crate) work_index_enabled: bool,
+    pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     /// A file the next editor spawn for this agent pane should open. Absent, the
@@ -1993,6 +2001,14 @@ pub(crate) struct WorkItemKey {
     pub(crate) repo: String,
     pub(crate) pr_number: Option<u64>,
     pub(crate) pr_url: Option<String>,
+    pub(crate) ticket_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DockHomeSection {
+    #[default]
+    Prs,
+    Tickets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2153,6 +2169,11 @@ impl AppState {
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
+        std::mem::swap(
+            &mut self.dock_home_ticket_selection,
+            &mut other.home_ticket_selection,
+        );
+        std::mem::swap(&mut self.dock_home_section, &mut other.home_section);
         std::mem::swap(&mut self.dock_home_focused, &mut other.home_focused);
     }
 
@@ -2581,6 +2602,7 @@ impl AppState {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
                 dock_body_rect: Rect::default(),
@@ -2614,11 +2636,14 @@ impl AppState {
             dock_scroll: 0,
             dock_editor_focused: false,
             dock_home_selection: None,
+            dock_home_ticket_selection: None,
+            dock_home_section: DockHomeSection::Prs,
             dock_home_focused: false,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: None,
             work_index_enabled: false,
+            work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),

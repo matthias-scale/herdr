@@ -5990,6 +5990,8 @@ mod tests {
                 scroll: 0,
                 editor_focused,
                 home_selection: None,
+                home_ticket_selection: None,
+                home_section: crate::app::state::DockHomeSection::Prs,
                 home_focused: false,
             };
             server.clients.insert(client_id, client);

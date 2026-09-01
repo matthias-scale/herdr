@@ -421,19 +421,37 @@ fn compute_view_internal(
         dock_tab_hit_areas,
         dock_body_rect,
     ) = dock_geometry(dock_area, app.dock_collapsed);
-    let (dock_home_tab_hit_areas, dock_home_tab_keys) =
+    let (dock_home_section_hit_areas, dock_home_tab_hit_areas, dock_home_tab_keys) =
         if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
             let projection = app.dock_home_projection();
-            let layouts = dock::home_tab_layouts(app, &projection, dock_body_rect);
+            let layouts = match app.dock_home_section {
+                crate::app::state::DockHomeSection::Prs => {
+                    dock::home_tab_layouts(app, &projection, dock_body_rect)
+                }
+                crate::app::state::DockHomeSection::Tickets => {
+                    dock::home_ticket_tab_layouts(app, &projection, dock_body_rect)
+                }
+            };
             let hit_areas = layouts.iter().map(|(_, area)| *area).collect();
             let keys = layouts
                 .iter()
-                .filter_map(|(index, _)| projection.rows.get(*index))
-                .map(|row| row.key.clone())
+                .filter_map(|(index, _)| match app.dock_home_section {
+                    crate::app::state::DockHomeSection::Prs => {
+                        projection.rows.get(*index).map(|row| row.key.clone())
+                    }
+                    crate::app::state::DockHomeSection::Tickets => projection
+                        .ticket_rows
+                        .get(*index)
+                        .map(|row| row.key.clone()),
+                })
                 .collect();
-            (hit_areas, keys)
+            (
+                dock::home_section_layouts(dock_body_rect).to_vec(),
+                hit_areas,
+                keys,
+            )
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
 
     let home_row_hit_areas = if app.home.is_some() {
@@ -500,6 +518,7 @@ fn compute_view_internal(
         dock_divider_rect,
         dock_tab_bar_rect,
         dock_tab_hit_areas,
+        dock_home_section_hit_areas,
         dock_home_tab_hit_areas,
         dock_home_tab_keys,
         dock_body_rect,
@@ -672,6 +691,7 @@ fn compute_mobile_view(
         dock_divider_rect: Rect::default(),
         dock_tab_bar_rect: Rect::default(),
         dock_tab_hit_areas: Vec::new(),
+        dock_home_section_hit_areas: Vec::new(),
         dock_home_tab_hit_areas: Vec::new(),
         dock_home_tab_keys: Vec::new(),
         dock_body_rect: Rect::default(),

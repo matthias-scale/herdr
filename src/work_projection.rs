@@ -90,6 +90,11 @@ fn item_key(item: &WorkItem) -> WorkItemKey {
         repo: item.repo.clone(),
         pr_number: item.pr_number,
         pr_url: item.pr_url.clone(),
+        ticket_id: item
+            .pr_number
+            .is_none()
+            .then(|| item.ticket_ids.first().cloned())
+            .flatten(),
     }
 }
 
@@ -299,6 +304,13 @@ pub(crate) struct DockHomeBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHomeTicketBinding {
+    pub(crate) ws_idx: usize,
+    pub(crate) pane_id: crate::layout::PaneId,
+    pub(crate) ticket_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockHomeRow {
     pub(crate) key: WorkItemKey,
     pub(crate) number: String,
@@ -324,8 +336,17 @@ pub(crate) struct DockHomeRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHomeTicketRow {
+    pub(crate) key: WorkItemKey,
+    pub(crate) ticket: crate::work_index::WorkTicket,
+    pub(crate) linked_pr_url: Option<String>,
+    pub(crate) jump_target: Option<(usize, crate::layout::PaneId)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockHomeProjection {
     pub(crate) rows: Vec<DockHomeRow>,
+    pub(crate) ticket_rows: Vec<DockHomeTicketRow>,
     /// Unbound open PRs / ticket-only items; `None` when no snapshot exists
     /// and the honest answer is "unknown", not zero.
     pub(crate) unbound_prs: Option<usize>,
@@ -341,14 +362,22 @@ pub(crate) struct DockHomeProjection {
 /// enriched from the work-index snapshot when one was collected.
 pub(crate) fn project_dock_home(
     bindings: &[DockHomeBinding],
+    ticket_bindings: &[DockHomeTicketBinding],
     snapshot: Option<&Snapshot>,
     index_enabled: bool,
 ) -> DockHomeProjection {
-    project_dock_home_at(bindings, snapshot, index_enabled, SystemTime::now())
+    project_dock_home_at(
+        bindings,
+        ticket_bindings,
+        snapshot,
+        index_enabled,
+        SystemTime::now(),
+    )
 }
 
 fn project_dock_home_at(
     bindings: &[DockHomeBinding],
+    ticket_bindings: &[DockHomeTicketBinding],
     snapshot: Option<&Snapshot>,
     index_enabled: bool,
     now: SystemTime,
@@ -423,6 +452,7 @@ fn project_dock_home_at(
                     .and_then(|item| item.pr_number)
                     .or_else(|| parse_pr_number(&binding.pr_url)),
                 pr_url: Some(binding.pr_url.clone()),
+                ticket_id: None,
             },
             number: item
                 .and_then(|item| item.pr_number)
@@ -459,14 +489,90 @@ fn project_dock_home_at(
             .count();
         (prs, tickets)
     });
+    let mut ticket_rows = Vec::new();
+    if let Some(snapshot) = snapshot {
+        for item in snapshot.items.iter().filter(|item| !is_pull_request(item)) {
+            for ticket_id in &item.ticket_ids {
+                push_ticket_row(&mut ticket_rows, Some(snapshot), ticket_id, None);
+            }
+        }
+    }
+    for binding in ticket_bindings {
+        push_ticket_row(
+            &mut ticket_rows,
+            snapshot,
+            &binding.ticket_id,
+            Some((binding.ws_idx, binding.pane_id)),
+        );
+    }
+    ticket_rows.sort_by(|left, right| left.ticket.identifier.cmp(&right.ticket.identifier));
     DockHomeProjection {
         rows,
+        ticket_rows,
         unbound_prs: unbound.map(|(prs, _)| prs),
         unbound_tickets: unbound.map(|(_, tickets)| tickets),
         observed_at: snapshot.map(|snapshot| snapshot.observed_at),
         unavailable: snapshot.and_then(|snapshot| snapshot.unavailable.clone()),
         index_enabled,
     }
+}
+
+fn push_ticket_row(
+    rows: &mut Vec<DockHomeTicketRow>,
+    snapshot: Option<&Snapshot>,
+    ticket_id: &str,
+    jump_target: Option<(usize, crate::layout::PaneId)>,
+) {
+    if let Some(existing) = rows
+        .iter_mut()
+        .find(|row| row.ticket.identifier == ticket_id)
+    {
+        if existing.jump_target.is_none() {
+            existing.jump_target = jump_target;
+        }
+        return;
+    }
+    let item = snapshot
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .find(|item| item.ticket_ids.iter().any(|id| id == ticket_id));
+    let ticket = item
+        .and_then(|item| {
+            item.ticket_details
+                .iter()
+                .find(|ticket| ticket.identifier == ticket_id)
+        })
+        .cloned()
+        .unwrap_or_else(|| crate::work_index::WorkTicket {
+            identifier: ticket_id.to_string(),
+            title: None,
+            description: None,
+            state: None,
+            assignee: None,
+            created_at: None,
+            updated_at: None,
+            branch: None,
+            labels: Vec::new(),
+            url: crate::work_context::linear_ticket_url(ticket_id),
+            parent: None,
+            relations: Vec::new(),
+        });
+    let linked_pr_url = snapshot
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .find(|item| item.pr_url.is_some() && item.ticket_ids.iter().any(|id| id == ticket_id))
+        .and_then(|item| item.pr_url.clone());
+    rows.push(DockHomeTicketRow {
+        key: WorkItemKey {
+            repo: item.map(|item| item.repo.clone()).unwrap_or_default(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some(ticket_id.to_string()),
+        },
+        linked_pr_url,
+        ticket,
+        jump_target,
+    });
 }
 
 fn ticket_cell(ticket_ids: &[String]) -> String {
@@ -556,9 +662,37 @@ impl crate::app::state::AppState {
         bindings
     }
 
+    pub(crate) fn dock_home_ticket_bindings(&self) -> Vec<DockHomeTicketBinding> {
+        let mut bindings = Vec::new();
+        for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
+            for detail in workspace.pane_details(&self.terminals) {
+                let terminal = workspace
+                    .tabs
+                    .get(detail.tab_idx)
+                    .and_then(|tab| tab.panes.get(&detail.pane_id))
+                    .map(|pane| pane.attached_terminal_id.clone())
+                    .and_then(|id| self.terminals.get(&id));
+                let Some(terminal) = terminal else {
+                    continue;
+                };
+                for ticket_id in &terminal.effective_work_context().ticket_ids {
+                    if let Ok(ticket_id) = crate::work_context::normalize_ticket_id(ticket_id) {
+                        bindings.push(DockHomeTicketBinding {
+                            ws_idx,
+                            pane_id: detail.pane_id,
+                            ticket_id,
+                        });
+                    }
+                }
+            }
+        }
+        bindings
+    }
+
     pub(crate) fn dock_home_projection(&self) -> DockHomeProjection {
         project_dock_home(
             &self.dock_home_bindings(),
+            &self.dock_home_ticket_bindings(),
             self.work_index_snapshot.as_ref(),
             self.work_index_enabled,
         )
@@ -581,13 +715,70 @@ impl crate::app::state::AppState {
 
     pub(crate) fn move_dock_home_selection(&mut self, delta: i64) {
         let projection = self.dock_home_projection();
-        let Some(index) = self.dock_home_selected_index(&projection) else {
-            return;
-        };
-        let last = projection.rows.len().saturating_sub(1) as i64;
-        let next = (index as i64 + delta).clamp(0, last) as usize;
-        self.dock_home_selection = projection.rows.get(next).map(|row| row.key.clone());
+        match self.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => {
+                let Some(index) = self.dock_home_selected_index(&projection) else {
+                    return;
+                };
+                let last = projection.rows.len().saturating_sub(1) as i64;
+                let next = (index as i64 + delta).clamp(0, last) as usize;
+                self.dock_home_selection = projection.rows.get(next).map(|row| row.key.clone());
+            }
+            crate::app::state::DockHomeSection::Tickets => {
+                let Some(index) = self.dock_home_selected_ticket_index(&projection) else {
+                    return;
+                };
+                let last = projection.ticket_rows.len().saturating_sub(1) as i64;
+                let next = (index as i64 + delta).clamp(0, last) as usize;
+                self.dock_home_ticket_selection =
+                    projection.ticket_rows.get(next).map(|row| row.key.clone());
+            }
+        }
         self.dock_scroll = 0;
+    }
+
+    pub(crate) fn dock_home_selected_ticket_index(
+        &self,
+        projection: &DockHomeProjection,
+    ) -> Option<usize> {
+        if projection.ticket_rows.is_empty() {
+            return None;
+        }
+        self.dock_home_ticket_selection
+            .as_ref()
+            .and_then(|key| {
+                projection
+                    .ticket_rows
+                    .iter()
+                    .position(|row| &row.key == key)
+            })
+            .or(Some(0))
+    }
+
+    pub(crate) fn set_dock_home_section(&mut self, section: crate::app::state::DockHomeSection) {
+        self.dock_home_section = section;
+        self.dock_scroll = 0;
+    }
+
+    pub(crate) fn dock_home_active_keys(&self) -> Vec<WorkItemKey> {
+        let projection = self.dock_home_projection();
+        match self.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => {
+                projection.rows.into_iter().map(|row| row.key).collect()
+            }
+            crate::app::state::DockHomeSection::Tickets => projection
+                .ticket_rows
+                .into_iter()
+                .map(|row| row.key)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn dock_home_active_selection(&self) -> Option<WorkItemKey> {
+        match self.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => self.dock_home_selection.clone(),
+            crate::app::state::DockHomeSection::Tickets => self.dock_home_ticket_selection.clone(),
+        }
     }
 
     pub(crate) fn dock_home_selected_row(&self) -> Option<DockHomeRow> {
@@ -599,18 +790,28 @@ impl crate::app::state::AppState {
     /// Focus the pane behind the selected home row. Returns false when the
     /// pane vanished between projection and jump — never a dead pointer.
     pub(crate) fn jump_to_dock_home_selection(&mut self) -> bool {
-        let Some(row) = self.dock_home_selected_row() else {
+        let target = match self.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => self
+                .dock_home_selected_row()
+                .map(|row| (row.ws_idx, row.pane_id)),
+            crate::app::state::DockHomeSection::Tickets => {
+                let projection = self.dock_home_projection();
+                self.dock_home_selected_ticket_index(&projection)
+                    .and_then(|index| projection.ticket_rows.get(index))
+                    .and_then(|row| row.jump_target)
+            }
+        };
+        let Some((ws_idx, pane_id)) = target else {
             return false;
         };
-        let exists = self.workspaces.get(row.ws_idx).is_some_and(|ws| {
-            ws.tabs
-                .iter()
-                .any(|tab| tab.panes.contains_key(&row.pane_id))
-        });
+        let exists = self
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| ws.tabs.iter().any(|tab| tab.panes.contains_key(&pane_id)));
         if !exists {
             return false;
         }
-        self.focus_pane_in_workspace(row.ws_idx, row.pane_id);
+        self.focus_pane_in_workspace(ws_idx, pane_id);
         self.dock_home_focused = false;
         self.dock_scroll = 0;
         true
@@ -642,6 +843,7 @@ mod tests {
             ticket_ids: tickets.iter().map(|ticket| ticket.to_string()).collect(),
             ticket_title: None,
             ticket_state: None,
+            ticket_details: Vec::new(),
             branch: None,
             preview_urls: Vec::new(),
             panes: panes
@@ -725,10 +927,10 @@ mod tests {
             home_binding(0, 10, crate::detect::AgentState::Working),
             home_binding(1, 20, crate::detect::AgentState::Blocked),
         ];
-        let before = project_dock_home(&bindings, None, true);
+        let before = project_dock_home(&bindings, &[], None, true);
         bindings[0].agent_state = crate::detect::AgentState::Idle;
         bindings[1].agent_state = crate::detect::AgentState::Working;
-        let after = project_dock_home(&bindings, None, true);
+        let after = project_dock_home(&bindings, &[], None, true);
 
         let keys = |projection: &DockHomeProjection| {
             projection
@@ -751,6 +953,7 @@ mod tests {
 
         let projection = project_dock_home(
             &[missing, fetched],
+            &[],
             Some(&snapshot(vec![fetched_item])),
             true,
         );
@@ -778,6 +981,7 @@ mod tests {
 
         let projection = project_dock_home_at(
             &[indexed_binding, fallback_binding, empty_binding],
+            &[],
             Some(&snapshot(vec![indexed_item, fallback_item])),
             true,
             SystemTime::UNIX_EPOCH + Duration::from_secs(300),
@@ -801,6 +1005,7 @@ mod tests {
 
         let projection = project_dock_home_at(
             &[binding],
+            &[],
             Some(&snapshot(vec![indexed_item])),
             true,
             SystemTime::UNIX_EPOCH + Duration::from_secs(300),
@@ -816,7 +1021,7 @@ mod tests {
         draft.draft = true;
         draft.review_decision = Some("REVIEW_REQUIRED".to_string());
 
-        let projection = project_dock_home(&[binding], Some(&snapshot(vec![draft])), true);
+        let projection = project_dock_home(&[binding], &[], Some(&snapshot(vec![draft])), true);
 
         assert_eq!(projection.rows[0].review, "D");
     }
@@ -842,6 +1047,7 @@ mod tests {
 
         let projection = project_dock_home(
             &[],
+            &[],
             Some(&snapshot(vec![
                 bound_pr,
                 unbound_pr,
@@ -853,7 +1059,7 @@ mod tests {
         assert_eq!(projection.unbound_prs, Some(1));
         assert_eq!(projection.unbound_tickets, Some(1));
 
-        let unknown = project_dock_home(&[], None, true);
+        let unknown = project_dock_home(&[], &[], None, true);
         assert_eq!(unknown.unbound_prs, None);
         assert_eq!(unknown.unbound_tickets, None);
     }
@@ -912,6 +1118,73 @@ mod tests {
                 .number,
             "50"
         );
+    }
+
+    #[test]
+    fn dock_home_ticket_rows_merge_snapshot_items_and_pane_ticket_ids() {
+        let mut state = state_with_bound_prs(&[10]);
+        let pane_id = state.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["SCA-200".into()]),
+                ..Default::default()
+            })
+            .expect("work context");
+        let mut ticket_only = item("owner/repo", 0, "unused", &["SCA-100"], &[]);
+        ticket_only.pr_number = None;
+        ticket_only.pr_url = None;
+        ticket_only.pr_title = None;
+        state.work_index_snapshot = Some(snapshot(vec![ticket_only]));
+
+        let projection = state.dock_home_projection();
+        assert_eq!(
+            projection
+                .ticket_rows
+                .iter()
+                .map(|row| row.ticket.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SCA-100", "SCA-200"]
+        );
+        assert!(projection.ticket_rows[0].jump_target.is_none());
+        assert_eq!(projection.ticket_rows[1].jump_target, Some((0, pane_id)));
+    }
+
+    #[test]
+    fn each_home_section_keeps_its_key_selection_across_refresh_reordering() {
+        let mut state = state_with_bound_prs(&[10, 20]);
+        let pr_projection = state.dock_home_projection();
+        state.dock_home_selection = Some(pr_projection.rows[1].key.clone());
+
+        let mut first = item("owner/repo", 0, "unused", &["SCA-100"], &[]);
+        first.pr_number = None;
+        first.pr_url = None;
+        first.pr_title = None;
+        let mut second = item("owner/repo", 0, "unused", &["SCA-200"], &[]);
+        second.pr_number = None;
+        second.pr_url = None;
+        second.pr_title = None;
+        state.work_index_snapshot = Some(snapshot(vec![first.clone(), second.clone()]));
+        let ticket_projection = state.dock_home_projection();
+        state.dock_home_ticket_selection = Some(ticket_projection.ticket_rows[1].key.clone());
+
+        state.work_index_snapshot = Some(snapshot(vec![second, first]));
+        let refreshed = state.dock_home_projection();
+        assert_eq!(
+            state.dock_home_selected_row().expect("selected pr").number,
+            "20"
+        );
+        let ticket = state
+            .dock_home_selected_ticket_index(&refreshed)
+            .and_then(|index| refreshed.ticket_rows.get(index))
+            .expect("selected ticket");
+        assert_eq!(ticket.ticket.identifier, "SCA-200");
     }
 
     #[test]

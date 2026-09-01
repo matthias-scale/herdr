@@ -32,6 +32,25 @@ impl AppState {
             .position(|area| rect_contains(*area, col, row))
     }
 
+    pub(crate) fn dock_home_section_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::DockHomeSection> {
+        if self.dock_collapsed || self.dock_tab != DockTab::Home {
+            return None;
+        }
+        self.view
+            .dock_home_section_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+            .and_then(|index| match index {
+                0 => Some(crate::app::state::DockHomeSection::Prs),
+                1 => Some(crate::app::state::DockHomeSection::Tickets),
+                _ => None,
+            })
+    }
+
     pub(crate) fn set_manual_dock_width(&mut self, divider_col: u16) {
         let screen = self.screen_rect();
         let right = screen.x.saturating_add(screen.width);

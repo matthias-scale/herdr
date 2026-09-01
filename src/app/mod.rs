@@ -754,6 +754,7 @@ impl App {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
                 dock_body_rect: Rect::default(),
@@ -787,11 +788,18 @@ impl App {
             dock_scroll: 0,
             dock_editor_focused: false,
             dock_home_selection: None,
+            dock_home_ticket_selection: None,
+            dock_home_section: state::DockHomeSection::Prs,
             dock_home_focused: false,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: None,
             work_index_enabled: config.work_index.enabled,
+            work_index_linear_team_configured: config
+                .work_index
+                .linear_team
+                .as_deref()
+                .is_some_and(|team| !team.trim().is_empty()),
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),

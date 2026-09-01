@@ -474,12 +474,26 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
-                self.state.dock_tab = self.state.dock_tab.previous();
+                if self.state.dock_tab == crate::app::DockTab::Home
+                    && self.state.dock_home_section == crate::app::state::DockHomeSection::Tickets
+                {
+                    self.state
+                        .set_dock_home_section(crate::app::state::DockHomeSection::Prs);
+                } else {
+                    self.state.dock_tab = self.state.dock_tab.previous();
+                }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NextDockTab => {
-                self.state.dock_tab = self.state.dock_tab.next();
+                if self.state.dock_tab == crate::app::DockTab::Home
+                    && self.state.dock_home_section == crate::app::state::DockHomeSection::Prs
+                {
+                    self.state
+                        .set_dock_home_section(crate::app::state::DockHomeSection::Tickets);
+                } else {
+                    self.state.dock_tab = self.state.dock_tab.next();
+                }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
@@ -2317,12 +2331,24 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {
-            state.dock_tab = state.dock_tab.previous();
+            if state.dock_tab == crate::app::DockTab::Home
+                && state.dock_home_section == crate::app::state::DockHomeSection::Tickets
+            {
+                state.set_dock_home_section(crate::app::state::DockHomeSection::Prs);
+            } else {
+                state.dock_tab = state.dock_tab.previous();
+            }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
         NavigateAction::NextDockTab => {
-            state.dock_tab = state.dock_tab.next();
+            if state.dock_tab == crate::app::DockTab::Home
+                && state.dock_home_section == crate::app::state::DockHomeSection::Prs
+            {
+                state.set_dock_home_section(crate::app::state::DockHomeSection::Tickets);
+            } else {
+                state.dock_tab = state.dock_tab.next();
+            }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
@@ -3046,6 +3072,19 @@ mod tests {
             NavigateAction::NextDockTab,
             ActionContext::Prefix,
         );
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert!(state.dock_home_focused);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextDockTab,
+            ActionContext::Prefix,
+        );
         assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
         assert!(state.dock_editor_focused);
         assert!(!state.dock_home_focused);
@@ -3057,8 +3096,24 @@ mod tests {
             ActionContext::Prefix,
         );
         assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
+        );
         assert!(!state.dock_editor_focused);
         assert!(state.dock_home_focused);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Prs
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
 
         state.dock_collapsed = true;
         state.session_dirty = false;
