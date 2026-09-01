@@ -674,10 +674,28 @@
           "description": "Open the read-only Symphony workflow dashboard."
         },
         {
+          "key": "keys.work",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+w\"",
+          "description": "Open the work projection view over the repo-wide work index."
+        },
+        {
           "key": "keys.inbox",
           "type": "keybinding",
           "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",
           "description": "Open the blocked-agent inbox."
+        },
+        {
+          "key": "keys.home",
+          "type": "keybinding",
+          "default": "\"ctrl+alt+h\"",
+          "description": "Open the home view."
+        },
+        {
+          "key": "keys.toggle_status_detail",
+          "type": "keybinding",
+          "default": "\"prefix+shift+m\"",
+          "description": "Toggle detailed status metrics."
         },
         {
           "key": "keys.indexed.tabs",
@@ -860,6 +878,12 @@
             "bottom",
             "hidden"
           ]
+        },
+        {
+          "key": "ui.show_home_on_start",
+          "type": "boolean",
+          "default": "false",
+          "description": "Open the home view when Herdr starts."
         },
         {
           "key": "ui.agent_panel_sort",
@@ -1253,6 +1277,36 @@
           "type": "string",
           "default": "\"~/.herdr/worktrees\"",
           "description": "Root directory under which Herdr creates <repo>/<branch-slug> checkouts."
+        }
+      ]
+    },
+    {
+      "id": "work_index",
+      "title": "Work index",
+      "keys": [
+        {
+          "key": "work_index.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Enable repo-wide GitHub, Linear, and agent-pane work indexing."
+        },
+        {
+          "key": "work_index.refresh_interval_seconds",
+          "type": "integer",
+          "default": "300",
+          "description": "Seconds between work-index refreshes."
+        },
+        {
+          "key": "work_index.linear_team",
+          "type": "string",
+          "default": "unset",
+          "description": "Linear team key used to discover started tickets."
+        },
+        {
+          "key": "work_index.repos",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "GitHub repositories to index as owner/repo values."
         }
       ]
     },

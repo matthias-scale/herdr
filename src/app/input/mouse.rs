@@ -88,7 +88,11 @@ impl AppState {
         mouse: MouseEvent,
     ) {
         self.forwarded_pane_input = None;
-        if self.mode != Mode::Terminal || self.symphony_detail.is_some() || self.inbox.is_some() {
+        if self.mode != Mode::Terminal
+            || self.symphony_detail.is_some()
+            || self.inbox.is_some()
+            || self.work_view.is_some()
+        {
             return;
         }
         let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
