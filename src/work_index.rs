@@ -1960,12 +1960,14 @@ esac
             "#!/bin/sh\nprintf '%s' '[]'\n",
             "#!/bin/sh\nsleep 2\n",
         );
+        let mut linear_only_config = config();
+        linear_only_config.repos.clear();
         let snapshot = refresh_work_index(
-            &config(),
+            &linear_only_config,
             &[],
             Instant::now(),
-            Instant::now() + Duration::from_secs(2),
-            Duration::from_millis(500),
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(50),
             &gh,
             &linearis,
         );
