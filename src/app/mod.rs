@@ -214,10 +214,10 @@ pub struct App {
     pub(crate) session_save_retry_deadline: Option<Instant>,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
-    pub(crate) tab_bar_status_generation: u64,
-    pub(crate) tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
-    pub(crate) tab_bar_commands: Vec<tab_bar_status::TabBarCommandRuntime>,
-    pub(crate) next_tab_bar_datetime_refresh: Option<Instant>,
+    tab_bar_status_generation: u64,
+    tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
+    tab_bar_commands: Vec<tab_bar_status::TabBarCommandRuntime>,
+    next_tab_bar_datetime_refresh: Option<Instant>,
     /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
     pub(crate) window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
@@ -1212,11 +1212,12 @@ impl App {
         let mut host_keyboard_report_all_active = false;
 
         while !self.state.should_quit {
+            self.reap_finished_custom_commands();
             self.reap_finished_detached_processes();
             if self.render_dirty.is_pending() {
                 needs_render = true;
             }
-            let terminal_title_change = self.sync_terminal_titles();
+            let terminal_title_change = self.sync_pending_terminal_titles();
             if terminal_title_change.chrome_changed
                 || (terminal_title_change.raw_changed && self.terminal_title_sidebar_configured())
             {
@@ -1359,6 +1360,18 @@ impl App {
             if needs_render && self.can_render_now(now) {
                 self.sync_status_context_before_render();
                 let _ = self.render_dirty.take();
+                if self.window_title_configured() {
+                    let title = self
+                        .window_title()
+                        .and_then(|title| crate::config::sanitize_window_title_text(&title));
+                    if sent_window_title.as_ref() != Some(&title) {
+                        crate::terminal_effects::write_window_title(
+                            &mut std::io::stdout(),
+                            title.as_deref(),
+                        )?;
+                        sent_window_title = Some(title);
+                    }
+                }
                 let _sync_output = SyncOutputGuard::begin()?;
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 if self.full_redraw_pending {

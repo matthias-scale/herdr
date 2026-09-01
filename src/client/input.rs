@@ -42,7 +42,7 @@ pub fn stdin_reader_loop(
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
-    host_sgr_pixels_active: Arc<AtomicBool>,
+    #[cfg(unix)] host_sgr_pixels_active: Arc<AtomicBool>,
     #[cfg(unix)] direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     #[cfg(unix)] direct_response_active: Arc<AtomicBool>,
 ) {
@@ -106,6 +106,24 @@ fn unix_stdin_reader_loop(
             &mut seen_query_generation,
             &host_color_query_generation,
         );
+        if direct_filter.has_pending()
+            && stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
+                == Some(false)
+        {
+            let released = direct_response
+                .lock()
+                .ok()
+                .and_then(|mut matcher| direct_filter.flush_if_inactive(&mut matcher));
+            if let Some(data) = released {
+                if event_tx
+                    .blocking_send(ClientLoopEvent::StdinInput(data))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            continue;
+        }
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {

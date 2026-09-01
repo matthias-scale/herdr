@@ -362,6 +362,13 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
     cache: &HashMap<PathBuf, GitStatusCacheEntry>,
     demand: GitStatusRefreshDemand,
 ) -> WorkspaceGitRefreshOutput {
+    let items = items
+        .into_iter()
+        .map(|mut item| {
+            item.demand = demand;
+            item
+        })
+        .collect();
     refresh_workspace_git_statuses(
         items,
         cache,

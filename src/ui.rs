@@ -363,7 +363,7 @@ fn compute_view_internal(
             compute_tab_bar_view(
                 ws,
                 &app.terminals,
-                tab_bar_rect,
+                tab_bar_content_area(app, tab_bar_rect),
                 app.tab_scroll,
                 app.tab_scroll_follow_active,
                 app.mouse_capture,

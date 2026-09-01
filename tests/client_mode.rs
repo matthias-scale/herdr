@@ -751,6 +751,56 @@ fn attach_thin_client(
     (spawned_server, thin_client, output)
 }
 
+fn captured_window_titles(output: &SharedOutput) -> Vec<String> {
+    read_output(output)
+        .split("\x1b]0;")
+        .skip(1)
+        .filter_map(|suffix| {
+            suffix
+                .split_once('\x07')
+                .map(|(title, _)| title.to_string())
+        })
+        .collect()
+}
+
+fn wait_for_window_title(output: &SharedOutput, expected_suffix: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(title) = captured_window_titles(output)
+            .into_iter()
+            .find(|title| title.ends_with(expected_suffix))
+        {
+            return title;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "outer window title ending in {expected_suffix:?} was not emitted; titles: {:?}; output: {:?}",
+        captured_window_titles(output),
+        read_output(output)
+    );
+}
+
+#[test]
+fn configured_window_title_is_emitted_in_no_session_mode() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let no_session = spawn_no_session_process(&config_home, &runtime_dir);
+    let reader = no_session
+        ._master
+        .as_ref()
+        .expect("no-session PTY master")
+        .try_clone_reader()
+        .expect("clone no-session PTY reader");
+    let output = spawn_pty_drain(reader);
+
+    wait_for_window_title(&output, "monolithic");
+
+    cleanup_spawned_herdr(no_session, base);
+}
+
 /// Polls until the client exits, then returns only the output captured after
 /// the `since` byte watermark. Panics if the client does not exit within the
 /// deadline.

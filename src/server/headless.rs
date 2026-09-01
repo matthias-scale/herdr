@@ -596,7 +596,7 @@ impl HeadlessServer {
                 needs_render = true;
                 crate::render_prof::event("render.request.signal");
             }
-            let terminal_title_change = self.app.sync_terminal_titles();
+            let terminal_title_change = self.app.sync_pending_terminal_titles();
             if terminal_title_change.chrome_changed
                 || (terminal_title_change.raw_changed
                     && self.app.terminal_title_sidebar_configured())
@@ -723,7 +723,15 @@ impl HeadlessServer {
             self.stream_host_keyboard_enhancement_flags();
 
             // 7. Render virtually and stream frames.
-            if needs_render && self.app.can_render_now(now) {
+            let render_cadence_due = self.app.can_render_now(now);
+            if needs_render
+                && (render_cadence_due
+                    || (self.app.can_present_now(now)
+                        && self.has_pending_presentation_work(
+                            needs_full_render,
+                            needs_graphics_render,
+                        )))
+            {
                 if self.app.sync_status_context_before_render() {
                     needs_full_render = true;
                     needs_graphics_render = false;
@@ -4010,7 +4018,7 @@ impl HeadlessServer {
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
-        let mut response = if matches!(
+        let response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
         ) {

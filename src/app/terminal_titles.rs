@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::App;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -11,6 +13,7 @@ const RESTORED_AGENT_TITLE_LABEL_LIMIT: usize = 44;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TerminalTitleSyncChange {
     pub(crate) raw_changed: bool,
+    pub(crate) stripped_changed: bool,
     pub(crate) chrome_changed: bool,
 }
 
@@ -30,6 +33,20 @@ fn label_tracks_agent_title(label: Option<&str>, previous_title: Option<&str>) -
 }
 
 impl App {
+    pub(crate) fn sync_pending_terminal_titles(&mut self) -> TerminalTitleSyncChange {
+        let sources = self.render_dirty.pending_terminal_title_sources();
+        let changes = self.sync_terminal_titles_with_sources(Some(&sources));
+        let title_changes = TerminalTitleChanges {
+            raw_changed: changes.raw_changed,
+            stripped_changed: changes.stripped_changed,
+        };
+        if changes.chrome_changed || self.terminal_title_sidebar_changed(&title_changes) {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changes
+    }
+
     pub(crate) fn terminal_title_sidebar_configured(&self) -> bool {
         let config = &self.state.sidebar_agents;
         std::iter::once(&config.rows)
@@ -59,10 +76,20 @@ impl App {
     }
 
     pub(crate) fn sync_terminal_titles(&mut self) -> TerminalTitleSyncChange {
+        self.sync_terminal_titles_with_sources(None)
+    }
+
+    fn sync_terminal_titles_with_sources(
+        &mut self,
+        sources: Option<&HashSet<crate::layout::PaneId>>,
+    ) -> TerminalTitleSyncChange {
         let mut observations = Vec::new();
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
+                    if sources.is_some_and(|sources| !sources.contains(pane_id)) {
+                        continue;
+                    }
                     let terminal_id = &pane.attached_terminal_id;
                     let Some(runtime) = self.terminal_runtimes.get(terminal_id) else {
                         continue;
@@ -94,6 +121,7 @@ impl App {
                 );
             let change = terminal.set_terminal_title(title);
             sync_change.raw_changed |= change.raw_changed;
+            sync_change.stripped_changed |= change.stripped_changed;
             if change.stripped_changed {
                 let current_title = terminal.terminal_title_stripped();
                 if pane_label_tracks_title {
@@ -159,7 +187,6 @@ mod tests {
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
-    use std::collections::HashSet;
 
     #[tokio::test]
     async fn sync_keeps_latest_raw_title_and_emits_only_for_stripped_changes() {
@@ -179,8 +206,6 @@ mod tests {
         let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
         runtime.test_process_pty_bytes("\x1b]0;⠋ 修复🙂标题\x07".as_bytes());
         app.terminal_runtimes.insert(terminal_id.clone(), runtime);
-        let sources = HashSet::from([pane_id]);
-
         let change = app.sync_terminal_titles();
         assert!(change.raw_changed);
         assert!(change.chrome_changed);

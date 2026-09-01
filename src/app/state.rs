@@ -4,7 +4,6 @@ use crate::config::{
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
-use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use crate::detect::AgentState;
@@ -3107,6 +3106,54 @@ mod tests {
             assert!(
                 Palette::from_name(name).is_some(),
                 "theme should resolve: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_active_rows_remain_visible_with_matching_terminal_backgrounds() {
+        for name in THEME_NAMES
+            .iter()
+            .copied()
+            .filter(|name| *name != "terminal")
+        {
+            let palette = Palette::from_name(name).unwrap();
+            let background_contrast = contrast_ratio(palette.panel_bg, palette.active_row_bg);
+            assert!(
+                background_contrast >= 1.05,
+                "active row blends into the matching terminal background for {name}: {background_contrast:.2}:1"
+            );
+
+            let text_contrast = contrast_ratio(palette.text, palette.active_row_bg);
+            assert!(
+                text_contrast >= 3.0,
+                "active row text loses contrast for {name}: {text_contrast:.2}:1"
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_selection_rows_stay_distinct_from_background_and_active_rows() {
+        for name in THEME_NAMES
+            .iter()
+            .copied()
+            .filter(|name| *name != "terminal")
+        {
+            let palette = Palette::from_name(name).unwrap();
+            let background_contrast = contrast_ratio(palette.panel_bg, palette.selection_bg);
+            assert!(
+                background_contrast >= 1.05,
+                "selection row blends into the matching terminal background for {name}: {background_contrast:.2}:1"
+            );
+
+            let text_contrast = contrast_ratio(palette.text, palette.selection_bg);
+            assert!(
+                text_contrast >= 3.0,
+                "selection row text loses contrast for {name}: {text_contrast:.2}:1"
+            );
+            assert_ne!(
+                palette.selection_bg, palette.active_row_bg,
+                "selection row shares the active row color for {name}"
             );
         }
     }

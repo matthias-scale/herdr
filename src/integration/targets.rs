@@ -7,7 +7,9 @@ use serde_json::{json, Map, Value};
 use super::claude_settings::{
     install_with_title as install_claude_settings, uninstall as uninstall_claude_settings,
 };
-use super::command::{hook_command, shell_single_quote};
+use super::command::hook_command;
+#[cfg(unix)]
+use super::command::shell_single_quote;
 use super::config_edit::{
     build_codex_config_with_hooks, build_kimi_config_with_hooks, ensure_command_hook,
     ensure_direct_command_hook, ensure_flat_command_hook, ensure_hermes_plugin_enabled,

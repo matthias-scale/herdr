@@ -103,7 +103,8 @@ impl PendingAltScreenRead {
         let Some(runtime) = runtime else {
             return self.complete_fallback();
         };
-        let Some((screen, snapshot)) = runtime.screen_text_snapshot() else {
+        let Some((screen, snapshot, _snapshot_seq)) = runtime.screen_text_snapshot_with_seq()
+        else {
             return self.complete_fallback();
         };
         if screen != crate::ghostty::ActiveScreen::Alternate

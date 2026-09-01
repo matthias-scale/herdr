@@ -4,12 +4,15 @@ use std::{
     ffi::{c_void, OsStr},
     io,
     mem::{size_of, MaybeUninit},
-    os::windows::ffi::OsStrExt,
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    },
     path::{Path, PathBuf},
     ptr::{copy_nonoverlapping, null_mut},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
-        Arc, LazyLock, Mutex,
+        Arc, LazyLock, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -92,10 +95,11 @@ use windows_sys::{
             },
             Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
             Threading::{
-                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
-                QueryFullProcessImageNameW, TerminateProcess, CREATE_NO_WINDOW, DETACHED_PROCESS,
-                PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread,
+                QueryFullProcessImageNameW, ResumeThread, TerminateProcess, CREATE_NO_WINDOW,
+                CREATE_SUSPENDED, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
+                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+                THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -209,7 +213,15 @@ mod status_metric_tests {
 
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
+const FOREGROUND_SELECTION_RECHECK: Duration = Duration::from_secs(5);
+const FOREGROUND_SELECTION_CACHE_CAPACITY: usize = 1_024;
+const FOREGROUND_SELECTION_CACHE_RETENTION: Duration = Duration::from_secs(60);
 const PANE_RUNTIME_MARKER_ENV_VAR: &str = "HERDR_PANE_RUNTIME_ID";
+
+pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
+    title.strip_prefix("Administrator: ").unwrap_or(title)
+}
+
 const MAX_PROCESS_ENVIRONMENT_BYTES: usize = 256 * 1024;
 const PROCESS_ENVIRONMENT_READ_CHUNK_BYTES: usize = 16 * 1024;
 const PROCESS_RUNTIME_MARKER_CACHE_CAPACITY: usize = 1_024;
@@ -366,6 +378,90 @@ pub(crate) fn encode_windows_conpty_fallback(key: &crate::input::TerminalKey) ->
 struct CachedProcessSnapshot {
     built_at: Instant,
     snapshot: Arc<ProcessSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessSignature {
+    pid: u32,
+    parent_pid: u32,
+    name: String,
+}
+
+impl ProcessSignature {
+    fn from_entry(entry: &WindowsProcessEntry) -> Self {
+        Self {
+            pid: entry.pid,
+            parent_pid: entry.parent_pid,
+            name: entry.name.clone(),
+        }
+    }
+
+    fn matches(&self, entry: Option<&WindowsProcessEntry>) -> bool {
+        entry.is_some_and(|entry| {
+            self.pid == entry.pid && self.parent_pid == entry.parent_pid && self.name == entry.name
+        })
+    }
+}
+
+#[derive(Debug)]
+enum ProcessIdentity {
+    Handle(OwnedHandle),
+    #[cfg(test)]
+    Stub {
+        running: bool,
+        creation_time: Option<u64>,
+    },
+}
+
+impl ProcessIdentity {
+    fn open(pid: u32) -> Option<Self> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
+        Some(Self::Handle(handle))
+    }
+
+    fn running(&self) -> bool {
+        match self {
+            Self::Handle(handle) => {
+                let mut exit_code = 0;
+                let read = unsafe {
+                    GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) != 0
+                };
+                read && exit_code == STILL_ACTIVE
+            }
+            #[cfg(test)]
+            Self::Stub { running, .. } => *running,
+        }
+    }
+
+    fn creation_time(&self) -> Option<u64> {
+        match self {
+            Self::Handle(handle) => process_creation_time(handle.as_raw_handle().cast()),
+            #[cfg(test)]
+            Self::Stub { creation_time, .. } => *creation_time,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CachedForegroundSelection {
+    shell: ProcessSignature,
+    selected: ProcessSignature,
+    descendants: Vec<ProcessSignature>,
+    descendant_identities: Vec<ProcessIdentity>,
+    shell_identity: ProcessIdentity,
+    selected_identity: ProcessIdentity,
+    job: ForegroundJob,
+    verified_at: Instant,
+    last_used: Instant,
+}
+
+#[derive(Debug, Default)]
+struct ForegroundSelectionCache {
+    entries: HashMap<u32, CachedForegroundSelection>,
 }
 
 #[derive(Debug)]
@@ -1067,8 +1163,8 @@ pub(crate) fn foreground_process_job(child_pid: u32) -> Option<ForegroundJob> {
     // Called for every pane on each foreground refresh, so it must share the
     // snapshot cache with the other per-pane probes rather than walking every
     // process on the system once per pane.
-    let entries = cached_foreground_processes();
-    select_pane_foreground_process_job(child_pid, &entries)
+    let snapshot = cached_foreground_processes();
+    select_pane_foreground_process_job_from_snapshot(child_pid, &snapshot)
 }
 
 pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
@@ -1217,77 +1313,30 @@ fn select_pane_foreground_job(
     shell_pid: u32,
     entries: &[WindowsProcessEntry],
 ) -> Option<ForegroundJob> {
-    select_pane_foreground_job_with_runtime_inspection(
+    select_pane_foreground_job_from_snapshot_uncached(
         shell_pid,
-        entries,
-        |shell| process_is_git_bash(shell.pid),
-        |entry| process_runtime_marker(entry.pid),
+        &ProcessSnapshot::new(entries.to_vec()),
     )
-}
-
-fn select_pane_foreground_job_with_runtime_inspection(
-    shell_pid: u32,
-    entries: &[WindowsProcessEntry],
-    shell_is_git_bash: impl FnOnce(&WindowsProcessEntry) -> bool,
-    mut runtime_marker: impl FnMut(&WindowsProcessEntry) -> Option<String>,
-) -> Option<ForegroundJob> {
-    let shell = entries.iter().find(|entry| entry.pid == shell_pid)?;
-    let descendants = descendant_entries(shell_pid, entries);
-    let mut candidates = Vec::new();
-    for entry in std::iter::once(shell).chain(descendants) {
-        if process_entry_identifies_agent(entry) {
-            candidates.push(entry);
-        }
-    }
-
-    if let Some(selected) = select_topmost_agent_chain_candidate(&candidates, entries) {
-        return Some(foreground_job_from_entry(selected));
-    }
-    if !candidates.is_empty() || !shell_is_git_bash(shell) {
-        return Some(foreground_job_from_entry(shell));
-    }
-
-    let escaped_candidates: Vec<_> = entries
-        .iter()
-        .filter(|entry| process_entry_identifies_agent(entry))
-        .collect();
-    if escaped_candidates.is_empty() {
-        return Some(foreground_job_from_entry(shell));
-    }
-
-    let Some(shell_runtime_marker) = runtime_marker(shell).filter(|marker| !marker.is_empty())
-    else {
-        return Some(foreground_job_from_entry(shell));
-    };
-    let matching_candidates: Vec<_> = escaped_candidates
-        .into_iter()
-        .filter(|entry| runtime_marker(entry).as_deref() == Some(shell_runtime_marker.as_str()))
-        .collect();
-    let selected =
-        select_topmost_agent_chain_candidate(&matching_candidates, entries).unwrap_or(shell);
-    Some(foreground_job_from_entry(selected))
 }
 
 fn process_entry_identifies_agent(entry: &WindowsProcessEntry) -> bool {
     crate::detect::identify_agent_in_job(&foreground_job_from_entry(entry)).is_some()
 }
 
-fn select_pane_foreground_process_job(
+fn select_pane_foreground_process_job_from_snapshot(
     shell_pid: u32,
-    entries: &[WindowsProcessEntry],
+    snapshot: &ProcessSnapshot,
 ) -> Option<ForegroundJob> {
-    let selected = select_pane_foreground_job(shell_pid, entries)?;
+    let selected = select_pane_foreground_job_from_snapshot_uncached(shell_pid, snapshot)?;
     if selected.process_group_id != shell_pid {
-        let selected_entry = entries
-            .iter()
-            .find(|entry| entry.pid == selected.process_group_id)?;
+        let selected_entry = snapshot.entry(selected.process_group_id)?;
         return Some(foreground_job_from_entry_with_descendants(
             selected_entry,
-            entries,
+            snapshot,
         ));
     }
 
-    let descendants = descendant_entries(shell_pid, entries);
+    let descendants = descendant_entries(shell_pid, snapshot);
     if descendants.iter().any(|entry| {
         let job = foreground_job_from_entry(entry);
         crate::detect::identify_agent_in_job(&job).is_some()
@@ -1295,21 +1344,28 @@ fn select_pane_foreground_process_job(
         return None;
     }
 
-    select_single_plain_descendant(shell_pid, &descendants, entries).map(foreground_job_from_entry)
+    select_single_plain_descendant(shell_pid, &descendants, snapshot).map(foreground_job_from_entry)
+}
+
+#[cfg(test)]
+fn select_pane_foreground_process_job(
+    shell_pid: u32,
+    entries: &[WindowsProcessEntry],
+) -> Option<ForegroundJob> {
+    select_pane_foreground_process_job_from_snapshot(
+        shell_pid,
+        &ProcessSnapshot::new(entries.to_vec()),
+    )
 }
 
 fn select_single_plain_descendant<'a>(
     shell_pid: u32,
     descendants: &[&'a WindowsProcessEntry],
-    entries: &[WindowsProcessEntry],
+    snapshot: &ProcessSnapshot,
 ) -> Option<&'a WindowsProcessEntry> {
     // A single rooted descendant chain gives us one clear command. If the
     // descendants branch into unrelated processes, return no label instead of
     // guessing which branch is foreground.
-    let parent_by_pid: HashMap<u32, u32> = entries
-        .iter()
-        .map(|entry| (entry.pid, entry.parent_pid))
-        .collect();
     let plain_descendants = descendants
         .iter()
         .copied()
@@ -1318,7 +1374,7 @@ fn select_single_plain_descendant<'a>(
 
     plain_descendants.iter().copied().find(|entry| {
         plain_descendants.iter().all(|other| {
-            entry.pid == other.pid || process_is_ancestor(entry.pid, other.pid, &parent_by_pid)
+            entry.pid == other.pid || process_is_ancestor(entry.pid, other.pid, snapshot)
         })
     })
 }
@@ -1332,11 +1388,11 @@ fn foreground_job_from_entry(entry: &WindowsProcessEntry) -> ForegroundJob {
 
 fn foreground_job_from_entry_with_descendants(
     entry: &WindowsProcessEntry,
-    entries: &[WindowsProcessEntry],
+    snapshot: &ProcessSnapshot,
 ) -> ForegroundJob {
     let mut processes = vec![foreground_process_from_entry(entry)];
     processes.extend(
-        descendant_entries(entry.pid, entries)
+        descendant_entries(entry.pid, snapshot)
             .into_iter()
             .map(foreground_process_from_entry),
     );
@@ -1348,16 +1404,11 @@ fn foreground_job_from_entry_with_descendants(
 
 fn select_topmost_agent_chain_candidate<'a>(
     candidates: &[&'a WindowsProcessEntry],
-    entries: &[WindowsProcessEntry],
+    snapshot: &ProcessSnapshot,
 ) -> Option<&'a WindowsProcessEntry> {
-    let parent_by_pid: HashMap<u32, u32> = entries
-        .iter()
-        .map(|entry| (entry.pid, entry.parent_pid))
-        .collect();
-
     candidates.iter().copied().find(|entry| {
         candidates.iter().all(|other| {
-            entry.pid == other.pid || process_is_ancestor(entry.pid, other.pid, &parent_by_pid)
+            entry.pid == other.pid || process_is_ancestor(entry.pid, other.pid, snapshot)
         })
     })
 }
@@ -1666,288 +1717,6 @@ impl WindowsProcessCommand {
             cmdline,
         }
     }
-}
-
-fn process_is_git_bash(pid: u32) -> bool {
-    let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
-        return false;
-    };
-    let Some(creation_time) = process_creation_time(process.0) else {
-        return false;
-    };
-    {
-        let mut cache = GIT_BASH_PROCESS_CACHE
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if let Some(cached) = cache.get_mut(&pid) {
-            if cached.creation_time == creation_time {
-                cached.last_used = Instant::now();
-                return cached.is_git_bash;
-            }
-        }
-    }
-
-    let is_git_bash = process_executable_path(process.0)
-        .as_deref()
-        .is_some_and(|path| is_git_bash_executable_path(std::path::Path::new(path)));
-    let mut cache = GIT_BASH_PROCESS_CACHE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if cache.len() >= PROCESS_RUNTIME_MARKER_CACHE_CAPACITY {
-        cache.retain(|_, cached| {
-            cached.last_used.elapsed() < PROCESS_RUNTIME_MARKER_CACHE_RETENTION
-        });
-        if cache.len() >= PROCESS_RUNTIME_MARKER_CACHE_CAPACITY {
-            cache.clear();
-        }
-    }
-    cache.insert(
-        pid,
-        CachedGitBashProcess {
-            creation_time,
-            is_git_bash,
-            last_used: Instant::now(),
-        },
-    );
-    is_git_bash
-}
-
-fn process_executable_path(process: HANDLE) -> Option<String> {
-    let mut path = vec![0_u16; 32_768];
-    let mut len = path.len() as u32;
-    if unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut len) } == 0 {
-        return None;
-    }
-    String::from_utf16(&path[..len as usize]).ok()
-}
-
-fn command_uses_git_bash(command: &portable_pty::CommandBuilder) -> bool {
-    let Some(program) = command.get_argv().first() else {
-        return false;
-    };
-    let path = std::path::Path::new(program);
-    if path.is_absolute() {
-        return is_git_bash_executable_path(path);
-    }
-    if program.to_string_lossy().contains(['/', '\\']) {
-        return false;
-    }
-
-    let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
-        return false;
-    };
-    let candidate_name = if file_name.eq_ignore_ascii_case("bash") {
-        "bash.exe"
-    } else if file_name.eq_ignore_ascii_case("bash.exe") {
-        file_name
-    } else {
-        return false;
-    };
-    let search_path = command
-        .get_env("PATH")
-        .map(OsStr::to_os_string)
-        .or_else(|| std::env::var_os("PATH"));
-    search_path.is_some_and(|search_path| {
-        std::env::split_paths(&search_path)
-            .map(|directory| directory.join(candidate_name))
-            .find(|candidate| candidate.is_file())
-            .is_some_and(|candidate| is_git_bash_executable_path(&candidate))
-    })
-}
-
-fn is_git_bash_executable_path(path: &std::path::Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
-        return false;
-    };
-    if !file_name.eq_ignore_ascii_case("bash.exe") || !path.is_absolute() || !path.is_file() {
-        return false;
-    }
-
-    let Some(bin_dir) = path.parent() else {
-        return false;
-    };
-    if !bin_dir
-        .file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("bin"))
-    {
-        return false;
-    }
-
-    let Some(mut root) = bin_dir.parent() else {
-        return false;
-    };
-    if root
-        .file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("usr"))
-    {
-        let Some(parent) = root.parent() else {
-            return false;
-        };
-        root = parent;
-    }
-
-    root.join("usr").join("bin").join("msys-2.0.dll").is_file()
-        && root.join("cmd").join("git.exe").is_file()
-}
-
-fn process_runtime_marker(pid: u32) -> Option<String> {
-    let process = ProcessHandle::open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
-    let creation_time = process_creation_time(process.0)?;
-    {
-        let mut cache = PROCESS_RUNTIME_MARKER_CACHE
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if let Some(cached) = cache.get_mut(&pid) {
-            if cached.creation_time == creation_time
-                && (cached.marker.is_some()
-                    || cached.cached_at.elapsed() < PROCESS_RUNTIME_MARKER_NEGATIVE_TTL)
-            {
-                cached.last_used = Instant::now();
-                return cached.marker.clone();
-            }
-        }
-    }
-
-    let marker = process_runtime_marker_from_handle(process.0)?;
-    let mut cache = PROCESS_RUNTIME_MARKER_CACHE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if cache.len() >= PROCESS_RUNTIME_MARKER_CACHE_CAPACITY {
-        cache.retain(|_, cached| {
-            cached.last_used.elapsed() < PROCESS_RUNTIME_MARKER_CACHE_RETENTION
-        });
-        if cache.len() >= PROCESS_RUNTIME_MARKER_CACHE_CAPACITY {
-            cache.clear();
-        }
-    }
-    cache.insert(
-        pid,
-        CachedProcessRuntimeMarker {
-            creation_time,
-            marker: marker.clone(),
-            cached_at: Instant::now(),
-            last_used: Instant::now(),
-        },
-    );
-    marker
-}
-
-fn process_creation_time(process: HANDLE) -> Option<u64> {
-    let mut creation_time = FILETIME::default();
-    let mut exit_time = FILETIME::default();
-    let mut kernel_time = FILETIME::default();
-    let mut user_time = FILETIME::default();
-    if unsafe {
-        GetProcessTimes(
-            process,
-            &mut creation_time,
-            &mut exit_time,
-            &mut kernel_time,
-            &mut user_time,
-        )
-    } == 0
-    {
-        return None;
-    }
-    Some((u64::from(creation_time.dwHighDateTime) << 32) | u64::from(creation_time.dwLowDateTime))
-}
-
-fn process_runtime_marker_from_handle(process: HANDLE) -> Option<Option<String>> {
-    let parameters = read_process_parameters(process)?;
-    let environment = read_process_environment(process, parameters.environment)?;
-    Some(environment_variable_from_utf16(
-        &environment,
-        PANE_RUNTIME_MARKER_ENV_VAR,
-    ))
-}
-
-fn read_process_environment(process: HANDLE, address: *const c_void) -> Option<Vec<u16>> {
-    if address.is_null() {
-        return None;
-    }
-
-    let mut memory = MaybeUninit::<MEMORY_BASIC_INFORMATION>::uninit();
-    let queried = unsafe {
-        VirtualQueryEx(
-            process,
-            address,
-            memory.as_mut_ptr(),
-            size_of::<MEMORY_BASIC_INFORMATION>(),
-        )
-    };
-    if queried == 0 {
-        return None;
-    }
-    let memory = unsafe { memory.assume_init() };
-    let address = address as usize;
-    let base = memory.BaseAddress as usize;
-    let offset = address.checked_sub(base)?;
-    let available = memory.RegionSize.checked_sub(offset)?;
-    let read_len = available.min(MAX_PROCESS_ENVIRONMENT_BYTES);
-    if read_len < size_of::<u16>() {
-        return None;
-    }
-
-    let max_units = read_len / size_of::<u16>();
-    let chunk_units = PROCESS_ENVIRONMENT_READ_CHUNK_BYTES / size_of::<u16>();
-    let mut environment = Vec::new();
-    while environment.len() < max_units {
-        let unit_count = (max_units - environment.len()).min(chunk_units);
-        let chunk_bytes = unit_count * size_of::<u16>();
-        let mut chunk = vec![0_u16; unit_count];
-        let mut bytes_read = 0;
-        let offset = environment.len().checked_mul(size_of::<u16>())?;
-        let chunk_address = address.checked_add(offset)?;
-        if unsafe {
-            ReadProcessMemory(
-                process,
-                chunk_address as *const c_void,
-                chunk.as_mut_ptr().cast::<c_void>(),
-                chunk_bytes,
-                &mut bytes_read,
-            )
-        } == 0
-        {
-            break;
-        }
-        chunk.truncate(bytes_read / size_of::<u16>());
-        if chunk.is_empty() {
-            break;
-        }
-        environment.extend_from_slice(&chunk);
-        if let Some(end) = environment
-            .windows(2)
-            .position(|pair| pair == [0, 0])
-            .map(|index| index + 2)
-        {
-            environment.truncate(end);
-            return Some(environment);
-        }
-        if bytes_read < chunk_bytes {
-            break;
-        }
-    }
-    None
-}
-
-fn environment_variable_from_utf16(environment: &[u16], name: &str) -> Option<String> {
-    for variable in environment.split(|unit| *unit == 0) {
-        if variable.is_empty() {
-            break;
-        }
-        let Some(separator) = variable.iter().position(|unit| *unit == u16::from(b'=')) else {
-            continue;
-        };
-        let Ok(variable_name) = String::from_utf16(&variable[..separator]) else {
-            continue;
-        };
-        if variable_name.eq_ignore_ascii_case(name) {
-            return String::from_utf16(&variable[separator + 1..]).ok();
-        }
-    }
-    None
 }
 
 fn process_is_git_bash(pid: u32) -> bool {

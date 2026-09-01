@@ -24,7 +24,27 @@ fn retain_detached_process_after_wait(
     }
 }
 
+fn retain_custom_command_after_wait(
+    pid: u32,
+    result: std::io::Result<Option<std::process::ExitStatus>>,
+) -> bool {
+    match result {
+        Ok(None) => true,
+        Ok(Some(_)) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => true,
+        Err(err) => {
+            tracing::warn!(pid, err = %err, "failed to reap detached custom command");
+            false
+        }
+    }
+}
+
 impl App {
+    pub(crate) fn reap_finished_custom_commands(&mut self) {
+        self.detached_custom_command_children
+            .retain_mut(|child| retain_custom_command_after_wait(child.id(), child.try_wait()));
+    }
+
     pub(crate) fn reap_finished_detached_processes(&mut self) {
         self.detached_process_children
             .retain_mut(|child| retain_detached_process_after_wait(child.id(), child.try_wait()));

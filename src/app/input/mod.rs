@@ -1523,6 +1523,18 @@ async fn wait_for_detached_process_reap(app: &mut App, pid: u32) -> bool {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
+async fn wait_for_custom_command_reap(app: &mut App, pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while crate::platform::process_exists(pid) && tokio::time::Instant::now() < deadline {
+        app.reap_finished_custom_commands();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    app.reap_finished_custom_commands();
+    !crate::platform::process_exists(pid)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

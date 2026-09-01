@@ -53,8 +53,12 @@ if (process.argv[2] === '--rewrite-preview-doc-fixture') {
   if (unsupported.length > 0) {
     throw new Error('usage: node website/scripts/prepare-docs.mjs [--docs-only] [--draft]');
   }
-  if (!process.argv.includes('--docs-only')) await preparePublicAssets();
-  await prepareDocs({ draft: process.argv.includes('--draft') });
+  const docsOnly = process.argv.includes('--docs-only');
+  if (!docsOnly) await preparePublicAssets();
+  await prepareDocs({
+    draft: process.argv.includes('--draft'),
+    publishAgentIndexes: !docsOnly,
+  });
 }
 
 async function preparePublicAssets() {
@@ -86,7 +90,7 @@ async function preparePublicAssets() {
   }
 }
 
-async function prepareDocs({ draft }) {
+async function prepareDocs({ draft, publishAgentIndexes }) {
   const manifest = JSON.parse(await readFile(versionsManifestPath, 'utf8'));
   if (
     manifest.schema_version !== 1 ||

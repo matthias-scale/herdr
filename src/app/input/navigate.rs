@@ -1271,7 +1271,7 @@ impl App {
             command.current_dir(cwd);
         }
         let child = command.spawn()?;
-        self.detached_process_children.push(child);
+        self.detached_custom_command_children.push(child);
         Ok(())
     }
 
@@ -2592,7 +2592,7 @@ mod tests {
 
     use super::super::{state_with_workspaces, unique_temp_path};
     #[cfg(unix)]
-    use super::super::{wait_for_detached_process_reap, wait_for_file};
+    use super::super::{wait_for_custom_command_reap, wait_for_file};
     use super::*;
     use crate::{
         app::App,
@@ -5147,10 +5147,10 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.mode, Mode::Terminal);
 
         std::fs::write(&release_path, b"release").expect("release command");
-        let reaped_by_runtime = wait_for_detached_process_reap(&mut app, pid).await;
+        let reaped_by_runtime = wait_for_custom_command_reap(&mut app, pid).await;
         if !reaped_by_runtime {
             if let Some(child) = app
-                .detached_process_children
+                .detached_custom_command_children
                 .iter_mut()
                 .find(|child| child.id() == pid)
             {

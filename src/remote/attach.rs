@@ -1696,6 +1696,16 @@ impl SshStdioBridge {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok(stream) => {
+                        let stream = match prepare_remote_bridge_stream(stream) {
+                            Ok(stream) => stream,
+                            Err(err) => {
+                                tracing::error!(
+                                    error = %err,
+                                    "remote bridge failed to prepare client socket"
+                                );
+                                continue;
+                            }
+                        };
                         if let Err(err) = bridge_connection(
                             stream,
                             &target,

@@ -1557,6 +1557,7 @@ async fn run_client_loop(
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
+    #[cfg(unix)]
     let stdin_sgr_pixels_active = host_sgr_pixels_active.clone();
     #[cfg(unix)]
     let stdin_direct_response = state.direct_graphics_response.clone();
@@ -1573,6 +1574,7 @@ async fn run_client_loop(
             stdin_host_color_query_generation,
             will_query_host_cell_size,
             stdin_mouse_capture_active,
+            #[cfg(unix)]
             stdin_sgr_pixels_active,
             #[cfg(unix)]
             stdin_direct_response,

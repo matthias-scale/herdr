@@ -6676,13 +6676,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .enumerate()
             .skip(scroll)
-            .filter_map(|(row_idx, row)| {
-                matches!(row, SidebarRow::Agent { .. } | SidebarRow::Tab { .. }).then(|| {
-                    let y = ws_area.y + (row_idx - scroll) as u16;
-                    (ws_area.x..ws_area.x + ws_area.width)
-                        .map(|x| buffer[(x, y)].style())
-                        .collect::<Vec<_>>()
-                })
+            .filter(|&(_, row)| matches!(row, SidebarRow::Agent { .. } | SidebarRow::Tab { .. }))
+            .map(|(row_idx, _)| {
+                let y = ws_area.y + (row_idx - scroll) as u16;
+                (ws_area.x..ws_area.x + ws_area.width)
+                    .map(|x| buffer[(x, y)].style())
+                    .collect::<Vec<_>>()
             })
             .take(rows as usize)
             .collect()
