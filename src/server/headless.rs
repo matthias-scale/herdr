@@ -2482,6 +2482,9 @@ impl HeadlessServer {
                 self.refresh_client_work_views();
                 changed || view_open
             }
+            AppEvent::WorkItemDetailRefreshed { .. } => {
+                self.app.handle_internal_event_with_render_impact(ev)
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }
@@ -4849,6 +4852,34 @@ impl HeadlessServer {
                 .start_headless_foreground_process_refresh_if_due(now);
         }
         self.app.start_claude_subagent_refresh_if_due(now);
+        // The work index is a server-owned runtime fact, so it refreshes with or
+        // without an attached TUI. Omitting it here left every server-backed
+        // session with a permanently empty index while the interactive loop
+        // refreshed fine, which is the #119 defect class.
+        self.app.start_work_index_refresh_if_due(now);
+        let detail_request = self
+            .foreground_client_id
+            .and_then(|client_id| self.clients.get(&client_id))
+            .filter(|client| client.is_full_app_client())
+            .map(|client| {
+                let presentation = &client.dock_presentation;
+                (
+                    presentation.home_section,
+                    match presentation.home_section {
+                        crate::app::state::DockHomeSection::Prs => {
+                            presentation.home_selection.clone()
+                        }
+                        crate::app::state::DockHomeSection::Tickets => {
+                            presentation.home_ticket_selection.clone()
+                        }
+                    },
+                    !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
+                )
+            });
+        let (section, selection, detail_visible) =
+            detail_request.unwrap_or((crate::app::state::DockHomeSection::Prs, None, false));
+        self.app
+            .start_work_item_detail_refresh_if_due(now, section, selection, detail_visible);
 
         if self
             .app
@@ -5966,6 +5997,10 @@ mod tests {
                 tab: crate::app::DockTab::Editor,
                 scroll: 0,
                 editor_focused,
+                home_selection: None,
+                home_ticket_selection: None,
+                home_section: crate::app::state::DockHomeSection::Prs,
+                home_focused: false,
             };
             server.clients.insert(client_id, client);
         }

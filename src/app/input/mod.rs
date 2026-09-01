@@ -99,6 +99,9 @@ impl App {
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
         }
+        if self.handle_dock_home_key(&key) {
+            return None;
+        }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
@@ -138,6 +141,51 @@ impl App {
             },
         }
         None
+    }
+
+    fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != crate::app::DockTab::Home
+            || !self.state.dock_home_focused
+        {
+            return false;
+        }
+
+        let navigate = &self.state.keybinds.navigate;
+        let event = key.as_key_event();
+        if event.code == KeyCode::Esc && event.modifiers.is_empty() {
+            self.state.dock_home_focused = false;
+            self.state.dock_scroll = 0;
+            return true;
+        }
+        // Arrows only. `pane_left`/`pane_right`/`pane_up`/`pane_down` default to
+        // bare `h`/`j`/`k`/`l`, and the dock is focused over a live shell, so
+        // consuming those would swallow ordinary typing into the pane.
+        if navigate.workspace_up.matches_direct_key(key)
+            || matches!(event.code, KeyCode::Up | KeyCode::Left) && event.modifiers.is_empty()
+        {
+            self.state.move_dock_home_selection(-1);
+            return true;
+        }
+        if navigate.workspace_down.matches_direct_key(key)
+            || matches!(event.code, KeyCode::Down | KeyCode::Right) && event.modifiers.is_empty()
+        {
+            self.state.move_dock_home_selection(1);
+            return true;
+        }
+
+        if event.code == KeyCode::Enter && event.modifiers.is_empty() {
+            self.state.jump_to_dock_home_selection();
+            return true;
+        }
+        false
+    }
+
+    /// Dock home is attach-local presentation layered over a focused pane, so
+    /// the headless input path must offer it keys before choosing a pane target.
+    pub(crate) fn handle_dock_home_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_home_key(key)
     }
 
     /// Home owns the full key stream so navigation never leaks into a pane.
@@ -1210,6 +1258,7 @@ impl App {
         };
 
         self.state.dock_editor_focused = false;
+        self.state.dock_home_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
@@ -1632,6 +1681,182 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn dock_home_test_app(pr_numbers: &[u64]) -> App {
+        let mut app = test_app();
+        app.state.workspaces = pr_numbers
+            .iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.state.ensure_test_terminals();
+        app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_home_focused = true;
+        for (ws_idx, number) in pr_numbers.iter().enumerate() {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn headless_dock_home_key_moves_selection_without_reaching_the_focused_pane() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+        app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+        assert!(app.terminal_input_context().is_some());
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("initial tab")
+                .number,
+            "10"
+        );
+
+        let key = TerminalKey::new(KeyCode::Down, KeyModifiers::empty());
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::Key(key.clone()),
+                crate::raw_input::RawInputEvent::Key(
+                    key.clone()
+                        .with_kind(crossterm::event::KeyEventKind::Repeat),
+                ),
+                crate::raw_input::RawInputEvent::Key(
+                    key.with_kind(crossterm::event::KeyEventKind::Release),
+                ),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            app.state.dock_home_selected_row().expect("next tab").number,
+            "20"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "dock-home presses and repeats must not reach the focused pane"
+        );
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn headless_dock_home_key_reaches_pane_outside_the_focused_open_home_tab() {
+        for guard in ["collapsed", "other tab", "unfocused"] {
+            let mut app = dock_home_test_app(&[10, 20]);
+            match guard {
+                "collapsed" => app.state.dock_collapsed = true,
+                "other tab" => app.state.dock_tab = crate::app::DockTab::Context,
+                "unfocused" => app.state.dock_home_focused = false,
+                _ => unreachable!(),
+            }
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+            app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+            app.route_client_events(
+                vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                    KeyCode::Char('j'),
+                    KeyModifiers::empty(),
+                ))],
+                false,
+            );
+
+            assert_eq!(
+                app.state
+                    .dock_home_selected_row()
+                    .expect("unchanged tab")
+                    .number,
+                "10",
+                "guard: {guard}"
+            );
+            assert_eq!(
+                input_rx.try_recv().expect("key forwarded to pane"),
+                bytes::Bytes::from_static(b"j"),
+                "guard: {guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn dock_home_navigate_keys_move_and_enter_jumps_to_the_selected_pane() {
+        let mut app = dock_home_test_app(&[10, 20]);
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Right, KeyModifiers::empty(),)));
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("second row")
+                .number,
+            "20"
+        );
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),)));
+        assert_eq!(app.state.active, Some(1));
+        assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn dock_home_escape_unfocuses_the_tab_strip() {
+        let mut app = dock_home_test_app(&[10]);
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
+        assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn dock_home_navigate_keys_honor_config_and_do_not_steal_other_focus() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+navigate_workspace_down = "ctrl+j"
+"#,
+        )
+        .expect("valid config");
+        app.state.keybinds = config.keybinds();
+
+        // Bare letters always belong to the pane: the dock is focused over a
+        // live shell, so `h`/`j`/`k`/`l` must never be swallowed here.
+        assert!(!app
+            .handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty(),)));
+        assert!(!app
+            .handle_dock_home_key(&TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty(),)));
+        assert!(
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::CONTROL,))
+        );
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("second row")
+                .number,
+            "20"
+        );
+
+        app.state.dock_tab = crate::app::DockTab::Editor;
+        app.state.dock_editor_focused = true;
+        assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
+        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_home_focused = false;
+        assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
     }
 
     fn app_with_blocked_home_rows(row_count: usize) -> (App, Vec<crate::layout::PaneId>) {

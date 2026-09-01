@@ -9,6 +9,11 @@ use crate::app::{AppState, DockTab};
 use crate::terminal::TerminalRuntimeRegistry;
 
 mod editor;
+mod home;
+
+pub(crate) use home::section_layouts as home_section_layouts;
+pub(crate) use home::tab_layouts as home_tab_layouts;
+pub(crate) use home::ticket_tab_layouts as home_ticket_tab_layouts;
 
 pub(super) fn render_dock(
     app: &AppState,
@@ -60,6 +65,7 @@ pub(super) fn render_dock(
         }
     }
     match app.dock_tab {
+        DockTab::Home => home::render_home(app, frame, app.view.dock_body_rect),
         DockTab::Editor => editor::render_editor_body(app, terminal_runtimes, frame),
         DockTab::Shortcuts => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)

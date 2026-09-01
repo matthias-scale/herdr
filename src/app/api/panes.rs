@@ -1218,12 +1218,46 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
+        let mut patch = params.patch;
+        if patch.active_owner == Some(true) {
+            let requested_pr = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .ok_or_else(|| "pane terminal not found".to_string())
+                .and_then(|terminal| {
+                    let mut candidate = terminal.work_context.clone();
+                    candidate.apply_manual_patch(patch.clone())?;
+                    Ok(candidate.effective().primary_pr().map(str::to_string))
+                });
+            let requested_pr = match requested_pr {
+                Ok(requested_pr) => requested_pr,
+                Err(message) => return encode_error(id, "invalid_work_context", message),
+            };
+            if requested_pr.as_deref().is_some_and(|pr_url| {
+                self.state.workspaces.iter().any(|workspace| {
+                    workspace.tabs.iter().any(|tab| {
+                        tab.panes.values().any(|pane| {
+                            pane.attached_terminal_id != terminal_id
+                                && self
+                                    .state
+                                    .terminals
+                                    .get(&pane.attached_terminal_id)
+                                    .map(crate::terminal::TerminalState::effective_work_context)
+                                    .is_some_and(|existing| existing.is_active_owner_of(pr_url))
+                        })
+                    })
+                })
+            }) {
+                patch.active_owner = Some(false);
+            }
+        }
         let mutation = self
             .state
             .terminals
             .get_mut(&terminal_id)
             .ok_or_else(|| "pane terminal not found".to_string())
-            .and_then(|terminal| terminal.apply_manual_work_context_patch(params.patch));
+            .and_then(|terminal| terminal.apply_manual_work_context_patch(patch));
         let changed = match mutation {
             Ok(changed) => changed,
             Err(message) => return encode_error(id, "invalid_work_context", message),
@@ -2268,6 +2302,8 @@ mod tests {
                     pr_urls: Some(vec!["https://github.com/o/r/pull/09".into()]),
                     branch: Some("feat/context".into()),
                     work_title: Some("Context model".into()),
+                    role: Some(crate::work_context::PaneWorkRole::Ship),
+                    active_owner: Some(true),
                     clear_fields: Vec::new(),
                 },
             },
@@ -2285,6 +2321,18 @@ mod tests {
         assert_eq!(
             pane.work_context.work_title.as_deref(),
             Some("Context model")
+        );
+        assert_eq!(
+            pane.work_context.role,
+            Some(crate::work_context::PaneWorkRole::Ship)
+        );
+        assert!(pane.work_context.active_owner);
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .work_context
+                .snapshot_tiers()
+                .manual,
+            pane.work_context
         );
         assert_eq!(app.collect_agent_infos()[0].work_context, pane.work_context);
         assert_eq!(pane_updated_events(&app), 1);
@@ -2310,6 +2358,8 @@ mod tests {
                     pr_urls: Some(vec!["https://github.com/o/r/pull/9".into()]),
                     branch: Some("feat/context".into()),
                     work_title: Some("Context model".into()),
+                    role: Some(crate::work_context::PaneWorkRole::Ship),
+                    active_owner: Some(true),
                     clear_fields: Vec::new(),
                 },
             },
@@ -2333,6 +2383,72 @@ mod tests {
         assert_eq!(metadata_error_code(&invalid), "invalid_work_context");
         assert_eq!(app.pane_info(0, internal_pane_id).unwrap(), before);
         assert_eq!(pane_updated_events(&app), 1);
+    }
+
+    #[test]
+    fn live_work_context_claim_is_demoted_when_another_pane_owns_the_pr() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("owner"), Workspace::test_new("review")];
+        app.state.ensure_test_terminals();
+        let panes = app
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(ws_idx, workspace)| {
+                let pane_id = workspace.tabs[0].root_pane;
+                (
+                    app.public_pane_id(ws_idx, pane_id).unwrap(),
+                    workspace.terminal_id(pane_id).cloned().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let claim = |pane_id: String, role| PaneWorkContextSetParams {
+            pane_id,
+            patch: crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(role),
+                active_owner: Some(true),
+                ..Default::default()
+            },
+        };
+
+        let first = app.handle_pane_work_context_set(
+            "owner".into(),
+            claim(panes[0].0.clone(), crate::work_context::PaneWorkRole::Ship),
+        );
+        assert!(serde_json::from_str::<SuccessResponse>(&first).is_ok());
+        let second = app.handle_pane_work_context_set(
+            "review".into(),
+            claim(
+                panes[1].0.clone(),
+                crate::work_context::PaneWorkRole::Review,
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&second).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+
+        let owner = app.state.terminals[&panes[0].1].effective_work_context();
+        assert_eq!(owner.role, Some(crate::work_context::PaneWorkRole::Ship));
+        assert!(owner.active_owner);
+        assert_eq!(
+            pane.work_context.role,
+            Some(crate::work_context::PaneWorkRole::Review)
+        );
+        assert!(!pane.work_context.active_owner);
+        assert_eq!(
+            app.state.terminals[&panes[1].1].effective_work_context(),
+            &pane.work_context
+        );
     }
 
     fn pane_updated_events(app: &App) -> usize {

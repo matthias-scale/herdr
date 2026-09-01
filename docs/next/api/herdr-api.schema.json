@@ -3832,12 +3832,20 @@
             "pr_urls",
             "branch",
             "repo",
-            "work_title"
+            "work_title",
+            "role",
+            "active_owner"
           ],
           "type": "string"
         },
         "PaneWorkContextSetParams": {
           "properties": {
+            "active_owner": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "branch": {
               "type": [
                 "string",
@@ -3866,6 +3874,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkRole"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "ticket_ids": {

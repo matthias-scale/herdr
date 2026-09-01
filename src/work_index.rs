@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,11 +15,136 @@ use crate::work_context::{
 
 pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const WORK_ITEM_DETAIL_CACHE_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkIndexRefreshInFlight {
     pub(crate) generation: u64,
     pub(crate) deadline: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemDetailRefreshInFlight {
+    pub(crate) keys: Vec<crate::app::state::WorkItemKey>,
+    pub(crate) generation: u64,
+    pub(crate) deadline: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemCheckSummary {
+    pub(crate) failing: usize,
+    pub(crate) total: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemDetail {
+    pub(crate) number: Option<u64>,
+    pub(crate) title: Option<String>,
+    pub(crate) body: Option<String>,
+    pub(crate) author: Option<String>,
+    pub(crate) base_ref_name: Option<String>,
+    pub(crate) head_ref_name: Option<String>,
+    pub(crate) created_at: Option<SystemTime>,
+    pub(crate) updated_at: Option<SystemTime>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) review_decision: Option<String>,
+    pub(crate) is_draft: Option<bool>,
+    pub(crate) checks: Option<WorkItemCheckSummary>,
+    /// GitHub's `gh pr view --json` payload does not expose review threads.
+    /// Keep the absence explicit rather than substituting review count data.
+    pub(crate) unresolved_review_threads: Option<usize>,
+    pub(crate) unavailable: Option<String>,
+    pub(crate) observed_at: SystemTime,
+}
+
+impl WorkItemDetail {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            number: None,
+            title: None,
+            body: None,
+            author: None,
+            base_ref_name: None,
+            head_ref_name: None,
+            created_at: None,
+            updated_at: None,
+            labels: Vec::new(),
+            url: None,
+            review_decision: None,
+            is_draft: None,
+            checks: None,
+            unresolved_review_threads: None,
+            unavailable: Some(message.into()),
+            observed_at: SystemTime::now(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkItemDetailCache {
+    entries: HashMap<crate::app::state::WorkItemKey, CachedWorkItemDetail>,
+    order: VecDeque<crate::app::state::WorkItemKey>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedWorkItemDetail {
+    detail: WorkItemDetail,
+    refreshed_at: Instant,
+}
+
+impl WorkItemDetailCache {
+    pub(crate) fn get(&self, key: &crate::app::state::WorkItemKey) -> Option<&WorkItemDetail> {
+        self.entries.get(key).map(|cached| &cached.detail)
+    }
+
+    pub(crate) fn insert(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
+        self.insert_at(key, detail, Instant::now());
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn insert_at(
+        &mut self,
+        key: crate::app::state::WorkItemKey,
+        detail: WorkItemDetail,
+        refreshed_at: Instant,
+    ) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CachedWorkItemDetail {
+                detail,
+                refreshed_at,
+            },
+        );
+        while self.entries.len() > WORK_ITEM_DETAIL_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn is_fresh(
+        &self,
+        key: &crate::app::state::WorkItemKey,
+        now: Instant,
+        interval: Duration,
+    ) -> bool {
+        self.entries.get(key).is_some_and(|cached| {
+            now.checked_duration_since(cached.refreshed_at)
+                .is_some_and(|age| age < interval)
+        })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,13 +177,33 @@ pub(crate) struct WorkItem {
     pub pr_state: Option<String>,
     pub draft: bool,
     pub review_decision: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<SystemTime>,
     pub ticket_ids: Vec<String>,
     pub ticket_title: Option<String>,
     pub ticket_state: Option<String>,
+    #[serde(default)]
+    pub ticket_details: Vec<WorkTicket>,
     pub branch: Option<String>,
     pub preview_urls: Vec<String>,
     pub panes: Vec<WorkItemPane>,
     pub source: WorkItemSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkTicket {
+    pub(crate) identifier: String,
+    pub(crate) title: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) assignee: Option<String>,
+    pub(crate) created_at: Option<SystemTime>,
+    pub(crate) updated_at: Option<SystemTime>,
+    pub(crate) branch: Option<String>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) relations: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,15 +222,10 @@ struct GithubPullRequest {
     branch: String,
     draft: bool,
     review_decision: Option<String>,
+    created_at: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone)]
-struct LinearTicket {
-    id: String,
-    title: Option<String>,
-    state: Option<String>,
-    branch: Option<String>,
-}
+type LinearTicket = WorkTicket;
 
 #[derive(Debug, Clone)]
 struct Attachment {
@@ -146,7 +286,9 @@ pub(crate) fn refresh_work_index(
             target_deadline(batch_deadline, target_timeout),
         ) {
             Ok(tickets) => tickets,
-            Err(RefreshError::TimedOut) => Vec::new(),
+            Err(RefreshError::TimedOut) => {
+                return unavailable_snapshot("Linear observation timed out")
+            }
             Err(RefreshError::Failed(message)) => return unavailable_snapshot(message),
         },
         _ => Vec::new(),
@@ -163,9 +305,11 @@ pub(crate) fn refresh_work_index(
             pr_state: Some("open".into()),
             draft: pr.draft,
             review_decision: pr.review_decision,
+            created_at: pr.created_at,
             ticket_ids: Vec::new(),
             ticket_title: None,
             ticket_state: None,
+            ticket_details: Vec::new(),
             branch: Some(pr.branch),
             preview_urls: Vec::new(),
             panes: Vec::new(),
@@ -178,7 +322,7 @@ pub(crate) fn refresh_work_index(
 
     let mut ticket_by_id = tickets
         .iter()
-        .map(|ticket| (ticket.id.clone(), ticket))
+        .map(|ticket| (ticket.identifier.clone(), ticket))
         .collect::<HashMap<_, _>>();
     for attachment in attachments {
         let ticket = ticket_by_id.remove(&attachment.ticket_id);
@@ -197,9 +341,11 @@ pub(crate) fn refresh_work_index(
                 pr_state: attachment.state.clone(),
                 draft: attachment.draft,
                 review_decision: None,
+                created_at: None,
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
+                ticket_details: Vec::new(),
                 branch: attachment.branch.clone(),
                 preview_urls: attachment.preview_urls.clone(),
                 panes: Vec::new(),
@@ -218,11 +364,12 @@ pub(crate) fn refresh_work_index(
         if let Some(ticket) = ticket {
             item.ticket_title = ticket.title.clone();
             item.ticket_state = ticket.state.clone();
+            item.ticket_details.push(ticket.clone());
         }
     }
 
     for ticket in ticket_by_id.into_values() {
-        let Some(_ticket_url) = linear_ticket_url(&ticket.id) else {
+        let Some(_ticket_url) = linear_ticket_url(&ticket.identifier) else {
             continue;
         };
         let repo = panes
@@ -232,7 +379,7 @@ pub(crate) fn refresh_work_index(
                     .ticket_ids
                     .iter()
                     .filter_map(|id| normalize_ticket_id(id).ok())
-                    .any(|id| id == ticket.id)
+                    .any(|id| id == ticket.identifier)
             })
             .and_then(|pane| pane.work_context.repo.as_deref())
             .and_then(|repo| normalize_repo_slug(repo).ok())
@@ -250,9 +397,11 @@ pub(crate) fn refresh_work_index(
             pr_state: None,
             draft: false,
             review_decision: None,
-            ticket_ids: vec![ticket.id.clone()],
+            created_at: None,
+            ticket_ids: vec![ticket.identifier.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
+            ticket_details: vec![ticket.clone()],
             branch: ticket.branch.clone(),
             preview_urls: Vec::new(),
             panes: Vec::new(),
@@ -317,7 +466,7 @@ fn fetch_github_pull_requests(
         "--limit",
         "200",
         "--json",
-        "number,title,headRefName,isDraft,reviewDecision,url",
+        "number,title,headRefName,isDraft,reviewDecision,url,createdAt",
     ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
@@ -355,9 +504,210 @@ fn fetch_github_pull_requests(
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string),
+                created_at: value
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
             })
         })
         .collect())
+}
+
+const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
+    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup";
+
+fn fetch_github_pull_request_detail(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Result<WorkItemDetail, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    let number = number.to_string();
+    command.args([
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        repo,
+        "--json",
+        GITHUB_PULL_REQUEST_DETAIL_FIELDS,
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("GitHub PR detail observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub PR detail observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub PR detail observation returned invalid JSON".into())
+    })?;
+    Ok(WorkItemDetail {
+        number: value.get("number").and_then(Value::as_u64),
+        title: value_text(value.get("title")),
+        body: value_text(value.get("body")),
+        author: value
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        base_ref_name: value_text(value.get("baseRefName")),
+        head_ref_name: value_text(value.get("headRefName")),
+        created_at: value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        updated_at: value
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        labels: value
+            .get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| value_text(Some(label)))
+            .collect(),
+        url: value_text(value.get("url")),
+        review_decision: value_text(value.get("reviewDecision")),
+        is_draft: value.get("isDraft").and_then(Value::as_bool),
+        checks: status_check_summary(value.get("statusCheckRollup")),
+        unresolved_review_threads: None,
+        unavailable: None,
+        observed_at: SystemTime::now(),
+    })
+}
+
+fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
+    let rollup = value?.as_array()?;
+    if rollup.is_empty() {
+        return None;
+    }
+    let failing = rollup
+        .iter()
+        .filter(|check| {
+            check
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .is_some_and(|conclusion| {
+                    matches!(
+                        conclusion,
+                        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+                    )
+                })
+        })
+        .count();
+    Some(WorkItemCheckSummary {
+        failing,
+        total: rollup.len(),
+    })
+}
+
+fn parse_rfc3339_system_time(value: &str) -> Option<SystemTime> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let zone_index = bytes[19..]
+        .iter()
+        .position(|byte| matches!(byte, b'Z' | b'+' | b'-'))?
+        + 19;
+    if zone_index > 19
+        && (bytes[19] != b'.'
+            || zone_index == 20
+            || !bytes[20..zone_index].iter().all(u8::is_ascii_digit))
+    {
+        return None;
+    }
+    let zone = bytes[zone_index];
+    let offset_seconds = match zone {
+        b'Z' if zone_index + 1 == bytes.len() => 0,
+        b'+' | b'-'
+            if zone_index + 6 == bytes.len() && bytes.get(zone_index + 3) == Some(&b':') =>
+        {
+            let hours = parse_decimal(bytes.get(zone_index + 1..zone_index + 3)?)?;
+            let minutes = parse_decimal(bytes.get(zone_index + 4..zone_index + 6)?)?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            u64::from(hours) * 60 * 60 + u64::from(minutes) * 60
+        }
+        _ => return None,
+    };
+    let year = parse_decimal(bytes.get(0..4)?)?;
+    let month = parse_decimal(bytes.get(5..7)?)?;
+    let day = parse_decimal(bytes.get(8..10)?)?;
+    let hour = parse_decimal(bytes.get(11..13)?)?;
+    let minute = parse_decimal(bytes.get(14..16)?)?;
+    let second = parse_decimal(bytes.get(17..19)?)?;
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if year < 1970 || day == 0 || day > month_days || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let seconds = days_since_unix_epoch(year, month, day)
+        .checked_mul(24 * 60 * 60)?
+        .checked_add(u64::from(hour) * 60 * 60)?
+        .checked_add(u64::from(minute) * 60)?
+        .checked_add(u64::from(second))?;
+    let utc_seconds = match zone {
+        b'+' if offset_seconds > seconds => {
+            return SystemTime::UNIX_EPOCH
+                .checked_sub(Duration::from_secs(offset_seconds - seconds));
+        }
+        b'+' => seconds - offset_seconds,
+        b'-' => seconds.checked_add(offset_seconds)?,
+        _ => seconds,
+    };
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(utc_seconds))
+}
+
+fn parse_decimal(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        if byte.is_ascii_digit() {
+            Some(value * 10 + u32::from(*byte - b'0'))
+        } else {
+            None
+        }
+    })
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> u64 {
+    let adjusted_year = i64::from(year) - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year / 400
+    } else {
+        (adjusted_year - 399) / 400
+    };
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    (era * 146_097 + day_of_era - 719_468) as u64
 }
 
 fn fetch_linear_tickets(
@@ -402,15 +752,89 @@ fn fetch_linear_tickets(
     Ok(nodes
         .iter()
         .filter_map(|node| {
-            let id = normalize_ticket_id(node.get("identifier")?.as_str()?).ok()?;
-            Some(LinearTicket {
-                id,
+            let identifier = normalize_ticket_id(node.get("identifier")?.as_str()?).ok()?;
+            Some(WorkTicket {
+                url: linear_ticket_url(&identifier),
+                identifier,
                 title: value_text(node.get("title")),
-                state: value_text(node.get("state")),
+                description: value_text(node.get("description")),
+                state: nested_text(node.get("state"), "name"),
+                assignee: nested_text(node.get("assignee"), "name"),
+                created_at: node
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
+                updated_at: node
+                    .get("updatedAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
                 branch: value_text(node.get("branchName")),
+                labels: node
+                    .get("labels")
+                    .and_then(|labels| labels.get("nodes"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|label| nested_text(Some(label), "name"))
+                    .collect(),
+                parent: node.get("parent").and_then(format_linear_reference),
+                relations: format_linear_relations(node),
             })
         })
         .collect())
+}
+
+fn nested_text(value: Option<&Value>, field: &str) -> Option<String> {
+    value_text(value.and_then(|value| value.get(field))).or_else(|| value_text(value))
+}
+
+fn format_linear_reference(value: &Value) -> Option<String> {
+    let identifier = nested_text(Some(value), "identifier");
+    let title = nested_text(Some(value), "title");
+    match (identifier, title) {
+        (Some(identifier), Some(title)) => Some(format!("{identifier}  {title}")),
+        (Some(identifier), None) => Some(identifier),
+        (None, Some(title)) => Some(title),
+        (None, None) => value_text(Some(value)),
+    }
+}
+
+fn format_linear_relations(value: &Value) -> Vec<String> {
+    let forward = value
+        .get("relations")
+        .and_then(|relations| relations.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|relation| format_linear_relation(relation, false));
+    let inverse = value
+        .get("inverseRelations")
+        .and_then(|relations| relations.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|relation| format_linear_relation(relation, true));
+    forward.chain(inverse).collect()
+}
+
+fn format_linear_relation(value: &Value, inverse: bool) -> Option<String> {
+    let kind = nested_text(Some(value), "type").map(|kind| match (inverse, kind.as_str()) {
+        (true, "blocks") => "blocked by".to_string(),
+        (true, "blocked by") => "blocks".to_string(),
+        (true, "duplicate" | "duplicate of") => "duplicated by".to_string(),
+        (false, "duplicate") => "duplicate of".to_string(),
+        _ => kind,
+    });
+    let related = value
+        .get("relatedIssue")
+        .or_else(|| value.get("issue"))
+        .and_then(format_linear_reference)
+        .or_else(|| format_linear_reference(value));
+    match (kind, related) {
+        (Some(kind), Some(related)) => Some(format!("{kind}  {related}")),
+        (None, Some(related)) => Some(related),
+        _ => None,
+    }
 }
 
 fn fetch_attachments(
@@ -457,7 +881,7 @@ fn fetch_ticket_attachments(
     command.args([
         "attachments",
         "list",
-        &ticket.id,
+        &ticket.identifier,
         "--source-type",
         "github",
         "--compact",
@@ -495,7 +919,7 @@ fn fetch_ticket_attachments(
                 _ => repo_slug_from_pr_url(&url)?,
             };
             Some(Attachment {
-                ticket_id: ticket.id.clone(),
+                ticket_id: ticket.identifier.clone(),
                 repo,
                 number,
                 url,
@@ -592,6 +1016,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 pr_state: None,
                 draft: false,
                 review_decision: None,
+                created_at: None,
                 ticket_ids: {
                     // Sorted so the snapshot is byte-stable across refreshes:
                     // it is consumed as JSON by ghx and diffed by hand.
@@ -601,6 +1026,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 },
                 ticket_title: None,
                 ticket_state: None,
+                ticket_details: Vec::new(),
                 branch: pane.work_context.branch.clone(),
                 preview_urls: pane.work_context.preview_urls.clone(),
                 panes: Vec::new(),
@@ -662,6 +1088,12 @@ impl crate::app::App {
                 .as_ref()
                 .map_or(self.next_work_index_refresh, |refresh| refresh.deadline)
         })
+    }
+
+    pub(crate) fn work_item_detail_refresh_deadline(&self) -> Option<Instant> {
+        self.work_item_detail_refresh_in_flight
+            .as_ref()
+            .map(|refresh| refresh.deadline)
     }
 
     pub(crate) fn start_work_index_refresh_if_due(&mut self, now: Instant) {
@@ -733,7 +1165,164 @@ impl crate::app::App {
         if let Some(work_view) = self.state.work_view.as_mut() {
             work_view.replace_snapshot(snapshot.clone());
         }
+        self.state.work_index_snapshot = Some(snapshot.clone());
         self.work_index_snapshot = Some(snapshot);
+        self.invalidate_work_item_details();
+        true
+    }
+
+    fn invalidate_work_item_details(&mut self) {
+        if let Some(refresh) = self.work_item_detail_refresh_in_flight.take() {
+            for key in refresh.keys {
+                self.state.work_item_detail_loading.remove(&key);
+            }
+        }
+        self.last_work_item_detail_refresh_generation = self
+            .last_work_item_detail_refresh_generation
+            .wrapping_add(1);
+        self.state.work_item_detail_cache.clear();
+    }
+
+    pub(crate) fn start_work_item_detail_refresh_if_due(
+        &mut self,
+        now: Instant,
+        section: crate::app::state::DockHomeSection,
+        selection: Option<crate::app::state::WorkItemKey>,
+        detail_visible: bool,
+    ) {
+        if self
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .is_some_and(|refresh| now >= refresh.deadline)
+        {
+            if let Some(refresh) = self.work_item_detail_refresh_in_flight.take() {
+                for key in refresh.keys {
+                    self.state.work_item_detail_loading.remove(&key);
+                }
+            }
+        }
+        if !detail_visible {
+            return;
+        }
+        if self.work_item_detail_refresh_in_flight.is_some() {
+            return;
+        }
+        let mut keys = self.state.dock_home_keys_for_section(section);
+        if let Some(selection) = selection {
+            if let Some(index) = keys.iter().position(|key| key == &selection) {
+                let selection = keys.remove(index);
+                keys.insert(0, selection);
+            }
+        }
+        keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
+        let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
+        keys.retain(|key| {
+            key.pr_number.is_some()
+                && !key.repo.is_empty()
+                && !self
+                    .state
+                    .work_item_detail_cache
+                    .is_fresh(key, now, interval)
+        });
+        if keys.is_empty() {
+            return;
+        }
+
+        self.last_work_item_detail_refresh_generation = self
+            .last_work_item_detail_refresh_generation
+            .wrapping_add(1);
+        let generation = self.last_work_item_detail_refresh_generation;
+        let deadline = now + WORK_INDEX_BATCH_TIMEOUT;
+        self.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            keys: keys.clone(),
+            generation,
+            deadline,
+        });
+        self.state
+            .work_item_detail_loading
+            .extend(keys.iter().cloned());
+        let event_tx = self.event_tx.clone();
+        let gh_program = self.work_index_gh_program();
+        let _ = std::thread::Builder::new()
+            .name("herdr-work-item-details".into())
+            .spawn(move || {
+                let mut details = Vec::with_capacity(keys.len());
+                for chunk in keys.chunks(8) {
+                    std::thread::scope(|scope| {
+                        let handles = chunk
+                            .iter()
+                            .map(|key| {
+                                let key = key.clone();
+                                let gh_program = gh_program.clone();
+                                scope.spawn(move || {
+                                    let detail = match fetch_github_pull_request_detail(
+                                        &key.repo,
+                                        key.pr_number.unwrap_or_default(),
+                                        &gh_program,
+                                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
+                                    ) {
+                                        Ok(detail) => detail,
+                                        Err(RefreshError::TimedOut) => WorkItemDetail::unavailable(
+                                            "GitHub PR detail observation timed out",
+                                        ),
+                                        Err(RefreshError::Failed(message)) => {
+                                            WorkItemDetail::unavailable(message)
+                                        }
+                                    };
+                                    (key, detail)
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        for handle in handles {
+                            if let Ok(detail) = handle.join() {
+                                details.push(detail);
+                            }
+                        }
+                    });
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
+                let _ = event_tx.blocking_send(crate::events::AppEvent::WorkItemDetailRefreshed {
+                    generation,
+                    details,
+                });
+            });
+    }
+
+    pub(crate) fn handle_work_item_detail_refreshed(
+        &mut self,
+        generation: u64,
+        details: Vec<(crate::app::state::WorkItemKey, WorkItemDetail)>,
+    ) -> bool {
+        let matches_in_flight = self
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .is_some_and(|refresh| {
+                refresh.generation == generation
+                    && refresh.keys.len() == details.len()
+                    && refresh
+                        .keys
+                        .iter()
+                        .zip(&details)
+                        .all(|(expected, (actual, _))| expected == actual)
+            });
+        if !matches_in_flight
+            || generation <= self.last_applied_work_item_detail_refresh_generation
+            || generation != self.last_work_item_detail_refresh_generation
+        {
+            return false;
+        }
+        let refresh = self.work_item_detail_refresh_in_flight.take();
+        self.last_applied_work_item_detail_refresh_generation = generation;
+        if let Some(refresh) = refresh {
+            for key in refresh.keys {
+                self.state.work_item_detail_loading.remove(&key);
+            }
+        }
+        for (key, detail) in details {
+            self.state.work_item_detail_cache.insert(key, detail);
+        }
         true
     }
 }
@@ -742,6 +1331,32 @@ impl crate::app::App {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    fn work_item_key(number: u64) -> crate::app::state::WorkItemKey {
+        crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(number),
+            pr_url: Some(format!("https://github.com/owner/repo/pull/{number}")),
+            ticket_id: None,
+        }
+    }
+
+    fn unavailable_detail(observed_at: SystemTime) -> WorkItemDetail {
+        let mut detail = WorkItemDetail::unavailable("not available");
+        detail.observed_at = observed_at;
+        detail
+    }
+
+    fn test_app_with_work_index() -> crate::app::App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = true;
+        config.work_index.repos = vec!["owner/repo".into()];
+        let mut app =
+            crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.work_index_enabled = true;
+        app
+    }
 
     fn write_executable(path: &Path, contents: &str) {
         std::fs::write(path, contents).expect("write fake executable");
@@ -787,12 +1402,437 @@ mod tests {
     }
 
     #[test]
+    fn parses_normal_rfc3339_timestamp() {
+        assert_eq!(
+            parse_rfc3339_system_time("2026-08-30T11:22:33Z"),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_788_088_953))
+        );
+    }
+
+    #[test]
+    fn parses_leap_year_rfc3339_timestamp() {
+        assert_eq!(
+            parse_rfc3339_system_time("2024-02-29T00:00:00Z"),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_709_164_800))
+        );
+    }
+
+    #[test]
+    fn parses_fractional_and_offset_rfc3339_timestamps() {
+        let expected = parse_rfc3339_system_time("2026-08-30T11:22:33Z");
+        assert_eq!(
+            parse_rfc3339_system_time("2026-08-30T13:22:33.123+02:00"),
+            expected
+        );
+        assert_eq!(
+            parse_rfc3339_system_time("2026-08-30T09:22:33-02:00"),
+            expected
+        );
+    }
+
+    #[test]
+    fn malformed_rfc3339_timestamp_is_unknown() {
+        assert_eq!(parse_rfc3339_system_time("2023-02-29T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn older_work_item_json_defaults_created_at_to_unknown() {
+        let item: WorkItem = serde_json::from_str(
+            r#"{"repo":"owner/repo","pr_number":7,"pr_url":null,"pr_title":null,"pr_state":null,"draft":false,"review_decision":null,"ticket_ids":[],"ticket_title":null,"ticket_state":null,"branch":null,"preview_urls":[],"panes":[],"source":{"github":true,"linear":false,"pane":false}}"#,
+        )
+        .expect("older work item JSON");
+
+        assert_eq!(item.created_at, None);
+    }
+
+    #[test]
+    fn github_pull_request_fetch_requests_created_at() {
+        let dir = fixture_dir("github-created-at");
+        let (gh, _linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,headRefName,isDraft,reviewDecision,url,createdAt" || exit 42
+printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z"}]'
+"#,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+        );
+
+        let pull_requests = fetch_github_pull_requests(
+            "owner/repo",
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .unwrap_or_else(|_| panic!("GitHub pull request fetch failed"));
+
+        assert_eq!(pull_requests.len(), 1);
+        assert_eq!(
+            pull_requests[0].created_at,
+            parse_rfc3339_system_time("2026-08-30T11:22:33Z")
+        );
+    }
+
+    #[test]
+    fn github_pull_request_detail_fetch_requests_every_render_field() {
+        let dir = fixture_dir("github-detail-fields");
+        let (gh, _linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"conclusion":"FAILURE"}},{{"conclusion":"SUCCESS"}}]}}'
+"#
+            ),
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+        );
+
+        let detail = fetch_github_pull_request_detail(
+            "owner/repo",
+            7,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .unwrap_or_else(|_| panic!("GitHub pull request detail fetch failed"));
+
+        assert_eq!(detail.title.as_deref(), Some("Detail"));
+        assert_eq!(detail.author.as_deref(), Some("ms"));
+        assert_eq!(detail.labels, vec!["high-risk"]);
+        assert_eq!(
+            detail.checks,
+            Some(WorkItemCheckSummary {
+                failing: 1,
+                total: 2
+            })
+        );
+    }
+
+    #[test]
+    fn linear_ticket_fetch_includes_inverse_relations() {
+        let dir = fixture_dir("linear-inverse-relations");
+        let (_gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            r#"#!/bin/sh
+printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"blocks","relatedIssue":{"identifier":"SCA-8","title":"outbound"}}]},"inverseRelations":{"nodes":[{"type":"blocks","issue":{"identifier":"SCA-6","title":"inbound"}},{"type":"duplicate","issue":{"identifier":"SCA-5","title":"original"}}]}}]}'
+"#,
+        );
+
+        let tickets =
+            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
+                .expect("Linear ticket fetch");
+
+        assert_eq!(
+            tickets[0].relations,
+            vec![
+                "blocks  SCA-8  outbound",
+                "blocked by  SCA-6  inbound",
+                "duplicated by  SCA-5  original"
+            ]
+        );
+    }
+
+    #[test]
+    fn status_rollup_distinguishes_absent_empty_and_all_passing() {
+        assert_eq!(status_check_summary(None), None);
+        assert_eq!(status_check_summary(Some(&serde_json::json!([]))), None);
+        assert_eq!(
+            status_check_summary(Some(&serde_json::json!([
+                {"conclusion": "SUCCESS"},
+                {"conclusion": "NEUTRAL"},
+                {"conclusion": null}
+            ]))),
+            Some(WorkItemCheckSummary {
+                failing: 0,
+                total: 3
+            })
+        );
+        assert_eq!(
+            status_check_summary(Some(&serde_json::json!([
+                {"conclusion": "FAILURE"},
+                {"conclusion": "TIMED_OUT"},
+                {"conclusion": "CANCELLED"},
+                {"conclusion": "ACTION_REQUIRED"},
+                {"conclusion": "SUCCESS"}
+            ]))),
+            Some(WorkItemCheckSummary {
+                failing: 4,
+                total: 5
+            })
+        );
+    }
+
+    #[test]
+    fn work_item_detail_cache_is_keyed_and_bounded() {
+        let mut cache = WorkItemDetailCache::default();
+        for number in 1..=17 {
+            cache.insert(
+                work_item_key(number),
+                unavailable_detail(SystemTime::UNIX_EPOCH),
+            );
+        }
+
+        assert_eq!(cache.len(), WORK_ITEM_DETAIL_CACHE_CAPACITY);
+        assert!(cache.get(&work_item_key(1)).is_none());
+        assert!(cache.get(&work_item_key(2)).is_some());
+        assert!(cache.get(&work_item_key(17)).is_some());
+    }
+
+    #[test]
+    fn work_item_detail_cache_freshness_uses_monotonic_time() {
+        let mut cache = WorkItemDetailCache::default();
+        let key = work_item_key(7);
+        let refreshed_at = Instant::now();
+        let wall_clock_in_future = SystemTime::now() + Duration::from_secs(3_600);
+        cache.insert_at(
+            key.clone(),
+            unavailable_detail(wall_clock_in_future),
+            refreshed_at,
+        );
+
+        assert!(cache.is_fresh(
+            &key,
+            refreshed_at + Duration::from_secs(59),
+            Duration::from_secs(60),
+        ));
+        assert!(!cache.is_fresh(
+            &key,
+            refreshed_at + Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+    }
+
+    #[test]
+    fn stale_work_item_detail_generation_is_rejected() {
+        let mut app = test_app_with_work_index();
+        let current_key = work_item_key(8);
+        app.last_work_item_detail_refresh_generation = 2;
+        app.last_applied_work_item_detail_refresh_generation = 0;
+        app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            keys: vec![current_key.clone()],
+            generation: 2,
+            deadline: Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        });
+        app.state
+            .work_item_detail_loading
+            .insert(current_key.clone());
+
+        assert!(!app.handle_work_item_detail_refreshed(
+            1,
+            vec![(work_item_key(7), unavailable_detail(SystemTime::UNIX_EPOCH),)],
+        ));
+        assert!(app
+            .state
+            .work_item_detail_cache
+            .get(&work_item_key(7))
+            .is_none());
+        assert!(app.state.work_item_detail_loading.contains(&current_key));
+    }
+
+    #[test]
+    fn work_index_refresh_invalidates_detail_cache_and_in_flight_generation() {
+        let mut app = test_app_with_work_index();
+        let key = work_item_key(8);
+        app.state
+            .work_item_detail_cache
+            .insert(key.clone(), unavailable_detail(SystemTime::UNIX_EPOCH));
+        app.state.work_item_detail_loading.insert(key.clone());
+        app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            keys: vec![key.clone()],
+            generation: 4,
+            deadline: Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+        });
+        app.last_work_item_detail_refresh_generation = 4;
+        app.invalidate_work_item_details();
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+        assert!(!app.state.work_item_detail_loading.contains(&key));
+        assert!(app.state.work_item_detail_cache.get(&key).is_none());
+        assert_eq!(app.last_work_item_detail_refresh_generation, 5);
+        assert!(!app.handle_work_item_detail_refreshed(
+            4,
+            vec![(key, unavailable_detail(SystemTime::UNIX_EPOCH))],
+        ));
+    }
+
+    #[test]
+    fn one_bounded_batch_prefetches_the_active_pr_section_selected_first() {
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("first"),
+            crate::workspace::Workspace::test_new("second"),
+        ];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for (workspace_index, number) in [7_u64, 8].into_iter().enumerate() {
+            let pane_id = app.state.workspaces[workspace_index].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+        let first_key = app.state.dock_home_selected_row().expect("first row").key;
+        app.state.dock_home_selection = Some(first_key);
+        app.state.move_dock_home_selection(1);
+        let key = app
+            .state
+            .dock_home_selected_row()
+            .expect("newly selected row")
+            .key;
+        assert_eq!(key.pr_number, Some(8));
+        let now = Instant::now();
+
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            true,
+        );
+
+        assert_eq!(app.last_work_item_detail_refresh_generation, 1);
+        let refresh = app
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .expect("detail batch");
+        assert_eq!(refresh.generation, 1, "second call must not start a batch");
+        assert_eq!(refresh.keys.len(), 2);
+        assert_eq!(refresh.keys.first(), Some(&key));
+        assert!(refresh
+            .keys
+            .iter()
+            .all(|key| app.state.work_item_detail_loading.contains(key)));
+    }
+
+    #[test]
+    fn detail_prefetch_batch_is_capped_at_cache_capacity() {
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        app.state.workspaces = (1_u64..=20)
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for (workspace_index, number) in (1_u64..=20).enumerate() {
+            let pane_id = app.state.workspaces[workspace_index].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+
+        app.start_work_item_detail_refresh_if_due(
+            Instant::now(),
+            crate::app::state::DockHomeSection::Prs,
+            None,
+            true,
+        );
+
+        assert_eq!(
+            app.work_item_detail_refresh_in_flight
+                .as_ref()
+                .expect("detail batch")
+                .keys
+                .len(),
+            WORK_ITEM_DETAIL_CACHE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn detail_prefetch_does_not_rotate_beyond_the_cache_capacity() {
+        let mut app = test_app_with_work_index();
+        app.work_index_gh_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        app.state.workspaces = (1_u64..=20)
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for (workspace_index, number) in (1_u64..=20).enumerate() {
+            let pane_id = app.state.workspaces[workspace_index].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[workspace_index]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+        let keys = app
+            .state
+            .dock_home_keys_for_section(crate::app::state::DockHomeSection::Prs);
+        for key in keys.iter().take(WORK_ITEM_DETAIL_CACHE_CAPACITY) {
+            app.state
+                .work_item_detail_cache
+                .insert(key.clone(), unavailable_detail(SystemTime::now()));
+        }
+        let now = Instant::now();
+
+        app.start_work_item_detail_refresh_if_due(
+            now,
+            crate::app::state::DockHomeSection::Prs,
+            None,
+            true,
+        );
+
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+    }
+
+    #[test]
+    fn expired_detail_batch_is_cleared_while_detail_is_hidden() {
+        let mut app = test_app_with_work_index();
+        let key = work_item_key(8);
+        app.state.work_item_detail_loading.insert(key.clone());
+        app.work_item_detail_refresh_in_flight = Some(WorkItemDetailRefreshInFlight {
+            keys: vec![key.clone()],
+            generation: 1,
+            deadline: Instant::now() - Duration::from_secs(1),
+        });
+
+        app.start_work_item_detail_refresh_if_due(
+            Instant::now(),
+            crate::app::state::DockHomeSection::Prs,
+            Some(key.clone()),
+            false,
+        );
+
+        assert!(app.work_item_detail_refresh_in_flight.is_none());
+        assert!(!app.state.work_item_detail_loading.contains(&key));
+    }
+
+    #[test]
     fn attachment_join_keeps_orphan_buckets_and_ignores_branch_names() {
         let dir = fixture_dir("join");
         let (gh, linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-printf '%s' '[{"number":7,"title":"Attached PR","headRefName":"plain-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"No ticket PR","headRefName":"other-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/8"}]'
+printf '%s' '[{"number":7,"title":"Attached PR","headRefName":"plain-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z"},{"number":8,"title":"No ticket PR","headRefName":"other-branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/8"}]'
 "#,
             r#"#!/bin/sh
 case "$*" in
@@ -818,6 +1858,10 @@ esac
             .expect("joined PR");
         assert_eq!(joined.ticket_ids, vec!["SCA-2"]);
         assert_eq!(joined.branch.as_deref(), Some("plain-branch"));
+        assert_eq!(
+            joined.created_at,
+            parse_rfc3339_system_time("2026-08-30T11:22:33Z")
+        );
         assert!(snapshot
             .items
             .iter()
@@ -896,12 +1940,43 @@ esac
             &config(),
             &[],
             Instant::now(),
-            Instant::now() + Duration::from_millis(20),
-            Duration::from_millis(1),
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(50),
             &gh,
             &linearis,
         );
         assert!(snapshot.items.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("GitHub observation timed out")
+        );
+    }
+
+    #[test]
+    fn linear_timeout_is_no_observation() {
+        let dir = fixture_dir("linear-timeout");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' '[]'\n",
+            "#!/bin/sh\nsleep 2\n",
+        );
+        let mut linear_only_config = config();
+        linear_only_config.repos.clear();
+        let snapshot = refresh_work_index(
+            &linear_only_config,
+            &[],
+            Instant::now(),
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(50),
+            &gh,
+            &linearis,
+        );
+
+        assert!(snapshot.items.is_empty());
+        assert_eq!(
+            snapshot.unavailable.as_deref(),
+            Some("Linear observation timed out")
+        );
     }
 
     #[test]

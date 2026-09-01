@@ -290,6 +290,14 @@ impl App {
                     self.state.ensure_agent_row_visible(ws_idx, pane_id);
                 }
             }
+            NavigateAction::NextReviewAgent => {
+                if let Some((ws_idx, pane_id)) = next_review_agent_target(&self.state) {
+                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                    self.state.dock_editor_focused = false;
+                    self.state.dock_home_focused = false;
+                }
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::NewTab => {
                 if self.state.active.is_some() {
                     if self.state.prompt_new_tab_name {
@@ -454,28 +462,49 @@ impl App {
             }
             NavigateAction::ToggleDock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
+                // Opening the dock focuses its active tab. Without this the home
+                // tab opens unfocused, so its keys do nothing and the selected
+                // row never expands, with nothing on screen saying why.
+                if self.state.dock_collapsed {
+                    self.state.dock_home_focused = false;
+                    self.state.dock_editor_focused = false;
+                } else {
+                    sync_dock_tab_focus(&mut self.state);
+                }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
-                self.state.dock_tab = self.state.dock_tab.previous();
-                if self.state.dock_tab == crate::app::DockTab::Editor {
-                    self.state.dock_editor_focused = true;
+                if self.state.dock_tab == crate::app::DockTab::Home
+                    && self.state.dock_home_section == crate::app::state::DockHomeSection::Tickets
+                {
+                    self.state
+                        .set_dock_home_section(crate::app::state::DockHomeSection::Prs);
+                } else {
+                    self.state.dock_tab = self.state.dock_tab.previous();
                 }
+                sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NextDockTab => {
-                self.state.dock_tab = self.state.dock_tab.next();
-                if self.state.dock_tab == crate::app::DockTab::Editor {
-                    self.state.dock_editor_focused = true;
+                if self.state.dock_tab == crate::app::DockTab::Home
+                    && self.state.dock_home_section == crate::app::state::DockHomeSection::Prs
+                {
+                    self.state
+                        .set_dock_home_section(crate::app::state::DockHomeSection::Tickets);
+                } else {
+                    self.state.dock_tab = self.state.dock_tab.next();
                 }
+                sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::EditScratchpad => {
                 self.open_scratchpad_in_editor();
+                sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::ShowScratchpad => {
                 self.state.show_scratchpad_tab();
+                sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::CyclePaneNext => {
@@ -1707,6 +1736,7 @@ pub(crate) enum NavigateAction {
     NextWorkspace,
     PreviousAgent,
     NextAgent,
+    NextReviewAgent,
     NewTab,
     RenameTab,
     ToggleTabPrio,
@@ -1777,6 +1807,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::NextWorkspace
             | NavigateAction::PreviousAgent
             | NavigateAction::NextAgent
+            | NavigateAction::NextReviewAgent
             | NavigateAction::PreviousTab
             | NavigateAction::NextTab
             | NavigateAction::ToggleTabPrio
@@ -1792,6 +1823,41 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::LastPane
             | NavigateAction::OpenNotificationTarget
     )
+}
+
+fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::PaneId)> {
+    let review_bindings = state
+        .dock_home_bindings()
+        .into_iter()
+        .filter(|binding| binding.role == Some(crate::work_context::PaneWorkRole::Review))
+        .collect::<Vec<_>>();
+    if review_bindings.is_empty() {
+        return None;
+    }
+
+    let focused = state.active.and_then(|ws_idx| {
+        state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.focused_pane_id())
+            .map(|pane_id| (ws_idx, pane_id))
+    });
+    let next = focused
+        .and_then(|focused| {
+            review_bindings
+                .iter()
+                .position(|binding| (binding.ws_idx, binding.pane_id) == focused)
+        })
+        .map(|index| (index + 1) % review_bindings.len())
+        .unwrap_or(0);
+    review_bindings
+        .get(next)
+        .map(|binding| (binding.ws_idx, binding.pane_id))
+}
+
+fn sync_dock_tab_focus(state: &mut AppState) {
+    state.dock_home_focused = state.dock_tab == crate::app::DockTab::Home;
+    state.dock_editor_focused = state.dock_tab == crate::app::DockTab::Editor;
 }
 
 fn indexed_navigation_action(
@@ -1879,6 +1945,7 @@ fn non_indexed_action_for_key(
         (&kb.next_workspace, NavigateAction::NextWorkspace),
         (&kb.previous_agent, NavigateAction::PreviousAgent),
         (&kb.next_agent, NavigateAction::NextAgent),
+        (&kb.next_review_agent, NavigateAction::NextReviewAgent),
         (&kb.new_tab, NavigateAction::NewTab),
         (&kb.rename_tab, NavigateAction::RenameTab),
         (&kb.toggle_tab_prio, NavigateAction::ToggleTabPrio),
@@ -2091,6 +2158,14 @@ pub(super) fn execute_navigate_action_in_context(
             state.next_agent();
             leave_navigate_mode(state);
         }
+        NavigateAction::NextReviewAgent => {
+            if let Some((ws_idx, pane_id)) = next_review_agent_target(state) {
+                state.focus_pane_in_workspace(ws_idx, pane_id);
+                state.dock_editor_focused = false;
+                state.dock_home_focused = false;
+            }
+            leave_navigate_mode(state);
+        }
         NavigateAction::NewTab => {
             if state.active.is_some() {
                 if state.prompt_new_tab_name {
@@ -2246,26 +2321,42 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ToggleDock => {
             state.dock_collapsed = !state.dock_collapsed;
+            // Headless mirror of the interactive arm above.
+            if state.dock_collapsed {
+                state.dock_home_focused = false;
+                state.dock_editor_focused = false;
+            } else {
+                sync_dock_tab_focus(state);
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {
-            state.dock_tab = state.dock_tab.previous();
-            if state.dock_tab == crate::app::DockTab::Editor {
-                state.dock_editor_focused = true;
+            if state.dock_tab == crate::app::DockTab::Home
+                && state.dock_home_section == crate::app::state::DockHomeSection::Tickets
+            {
+                state.set_dock_home_section(crate::app::state::DockHomeSection::Prs);
+            } else {
+                state.dock_tab = state.dock_tab.previous();
             }
+            sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
         NavigateAction::NextDockTab => {
-            state.dock_tab = state.dock_tab.next();
-            if state.dock_tab == crate::app::DockTab::Editor {
-                state.dock_editor_focused = true;
+            if state.dock_tab == crate::app::DockTab::Home
+                && state.dock_home_section == crate::app::state::DockHomeSection::Prs
+            {
+                state.set_dock_home_section(crate::app::state::DockHomeSection::Tickets);
+            } else {
+                state.dock_tab = state.dock_tab.next();
             }
+            sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
         // Spawning the editor needs an `App`; the state-only mirror cannot do it.
         NavigateAction::EditScratchpad => leave_navigate_mode(state),
         NavigateAction::ShowScratchpad => {
             state.show_scratchpad_tab();
+            sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {
@@ -2944,6 +3035,31 @@ mod tests {
             .unwrap();
     }
 
+    fn register_review_test_context(
+        state: &mut AppState,
+        ws_idx: usize,
+        role: crate::work_context::PaneWorkRole,
+        pr_number: u64,
+    ) {
+        let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = state.workspaces[ws_idx]
+            .terminal_id(pane_id)
+            .expect("root terminal")
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec![format!(
+                    "https://github.com/owner/repo/pull/{pr_number}"
+                )]),
+                role: Some(role),
+                ..Default::default()
+            })
+            .expect("valid work context");
+    }
+
     #[test]
     fn dock_key_actions_cycle_tabs_and_toggle_the_dock() {
         let mut state = app_with_test_workspaces(&["one"]).state;
@@ -2956,7 +3072,22 @@ mod tests {
             NavigateAction::NextDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert!(state.dock_home_focused);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
+        assert!(state.dock_editor_focused);
+        assert!(!state.dock_home_focused);
 
         execute_navigate_action_in_context(
             &mut state,
@@ -2964,7 +3095,25 @@ mod tests {
             NavigateAction::PreviousDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
+        );
+        assert!(!state.dock_editor_focused);
+        assert!(state.dock_home_focused);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Prs
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
 
         state.dock_collapsed = true;
         state.session_dirty = false;
@@ -2978,6 +3127,80 @@ mod tests {
         assert!(
             !state.session_dirty,
             "client-local dock presentation must not dirty shared session state"
+        );
+    }
+
+    #[test]
+    fn next_review_agent_cycles_canonical_bindings_and_wraps() {
+        let mut state = app_with_test_workspaces(&["review-a", "ship", "review-b"]).state;
+        register_review_test_context(&mut state, 0, crate::work_context::PaneWorkRole::Review, 10);
+        register_review_test_context(&mut state, 1, crate::work_context::PaneWorkRole::Ship, 20);
+        register_review_test_context(&mut state, 2, crate::work_context::PaneWorkRole::Review, 30);
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextReviewAgent,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.active, Some(2));
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextReviewAgent,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.active, Some(0));
+
+        let ship_pane = state.workspaces[1].tabs[0].root_pane;
+        assert!(state.focus_pane_in_workspace(1, ship_pane));
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextReviewAgent,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn next_review_agent_is_a_noop_without_review_bindings() {
+        let mut state = app_with_test_workspaces(&["ship"]).state;
+        register_review_test_context(&mut state, 0, crate::work_context::PaneWorkRole::Ship, 10);
+        let focused_before = state.current_pane_focus_target();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextReviewAgent,
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.current_pane_focus_target(), focused_before);
+    }
+
+    #[test]
+    fn next_review_agent_default_avoids_reload_config_collision() {
+        let state = app_with_test_workspaces(&["one"]).state;
+
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::NextReviewAgent)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('r'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::ReloadConfig)
         );
     }
 

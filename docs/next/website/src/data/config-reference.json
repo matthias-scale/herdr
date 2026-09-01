@@ -404,6 +404,12 @@
           "description": "Focus the next detected agent in canonical workspace, tab, and pane order, wrapping at both ends and ignoring sidebar ordering, filtering, and disclosure. Unset by default."
         },
         {
+          "key": "keys.next_review_agent",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+r\"",
+          "description": "Focus the next pane registered for review work."
+        },
+        {
           "key": "keys.focus_agent",
           "type": "keybinding",
           "default": "unset",

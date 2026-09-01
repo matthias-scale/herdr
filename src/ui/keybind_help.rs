@@ -131,6 +131,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
         help_entry(keybind_label(&kb.previous_agent), "previous agent"),
         help_entry(keybind_label(&kb.next_agent), "next agent"),
+        help_entry(keybind_label(&kb.next_review_agent), "next review agent"),
         help_entry(indexed_label(&kb.focus_agent), "focus agent 1-9"),
         help_entry(keybind_label(&kb.new_tab), "new tab"),
         help_entry(keybind_label(&kb.rename_tab), "rename tab"),

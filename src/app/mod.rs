@@ -169,6 +169,10 @@ pub struct App {
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    pub(crate) work_item_detail_refresh_in_flight:
+        Option<crate::work_index::WorkItemDetailRefreshInFlight>,
+    pub(crate) last_work_item_detail_refresh_generation: u64,
+    pub(crate) last_applied_work_item_detail_refresh_generation: u64,
     pub(crate) foreground_process_refresh_in_flight:
         Option<foreground_process::ForegroundProcessRefreshInFlight>,
     pub(crate) last_foreground_process_refresh_generation: u64,
@@ -750,6 +754,9 @@ impl App {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_home_section_hit_areas: Vec::new(),
+                dock_home_tab_hit_areas: Vec::new(),
+                dock_home_tab_keys: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -777,9 +784,22 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: state::DockTab::Editor,
+            dock_tab: state::DockTab::Home,
             dock_scroll: 0,
             dock_editor_focused: false,
+            dock_home_selection: None,
+            dock_home_ticket_selection: None,
+            dock_home_section: state::DockHomeSection::Prs,
+            dock_home_focused: false,
+            work_index_snapshot: None,
+            work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
+            work_item_detail_loading: std::collections::HashSet::new(),
+            work_index_enabled: config.work_index.enabled,
+            work_index_linear_team_configured: config
+                .work_index
+                .linear_team
+                .as_deref()
+                .is_some_and(|team| !team.trim().is_empty()),
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),
@@ -955,6 +975,9 @@ impl App {
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
             work_index_snapshot: None,
+            work_item_detail_refresh_in_flight: None,
+            last_work_item_detail_refresh_generation: 0,
+            last_applied_work_item_detail_refresh_generation: 0,
             foreground_process_refresh_in_flight: None,
             last_foreground_process_refresh_generation: 0,
             last_applied_foreground_process_refresh_generation: 0,
@@ -1891,6 +1914,7 @@ impl App {
 
         if !invalid_section("work_index") {
             self.work_index_config = config.work_index.clone();
+            self.state.work_index_enabled = self.work_index_config.enabled;
             if let Some(view) = self.state.work_view.as_mut() {
                 view.enabled = self.work_index_config.enabled;
                 if !view.enabled {
@@ -2070,6 +2094,13 @@ impl App {
                             if self.state.home.is_some()
                                 && self.handle_home_key_headless(key.as_key_event())
                             {
+                                continue;
+                            }
+                            if self.handle_dock_home_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
                                 continue;
                             }
                             let initial_context = self.terminal_input_context();
