@@ -101,11 +101,13 @@ fn row_lines(row: &DockHomeRow, width: usize) -> [String; 2] {
         "{}{}{}{}{}{}{}{}",
         " ".repeat(indent_width),
         fixed_cell(review, review_width),
-        "·",
+        // Cells are already padded to fixed widths, so a plain space aligns the
+        // columns. A `·` here collides with a cell that fills its width.
+        " ",
         fixed_cell(&owner_cell(row), owner_width),
-        "·",
+        " ",
         fixed_cell(&row.ticket, ticket_width),
-        "·",
+        " ",
         fixed_cell(&row.age, age_width),
     );
     [
