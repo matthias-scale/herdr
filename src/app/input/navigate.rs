@@ -462,6 +462,15 @@ impl App {
             }
             NavigateAction::ToggleDock => {
                 self.state.dock_collapsed = !self.state.dock_collapsed;
+                // Opening the dock focuses its active tab. Without this the home
+                // tab opens unfocused, so its keys do nothing and the selected
+                // row never expands, with nothing on screen saying why.
+                if self.state.dock_collapsed {
+                    self.state.dock_home_focused = false;
+                    self.state.dock_editor_focused = false;
+                } else {
+                    sync_dock_tab_focus(&mut self.state);
+                }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
@@ -2298,6 +2307,13 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ToggleDock => {
             state.dock_collapsed = !state.dock_collapsed;
+            // Headless mirror of the interactive arm above.
+            if state.dock_collapsed {
+                state.dock_home_focused = false;
+                state.dock_editor_focused = false;
+            } else {
+                sync_dock_tab_focus(state);
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {
