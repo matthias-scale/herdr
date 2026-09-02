@@ -1,0 +1,429 @@
+//! Markdown-ish rendering for pull request and Linear ticket bodies.
+//!
+//! Bodies arrive as GitHub/Linear markdown. Rather than pull in a parser we
+//! recognise the constructs that actually carry meaning in a review pane —
+//! headings, bullets, emphasis and inline code — and emit styled spans for
+//! them. Everything unrecognised falls through as plain text, so a body is
+//! never made less readable than the raw source.
+
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use crate::app::state::Palette;
+
+use super::text::display_width;
+
+/// Inline emphasis carried by a run of characters.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Emphasis {
+    bold: bool,
+    italic: bool,
+    code: bool,
+}
+
+/// Block-level role of a source line, which fixes the base colour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Block {
+    Heading,
+    Body,
+    Code,
+}
+
+/// One whitespace-delimited word plus the emphasis it was written with.
+struct Word {
+    text: String,
+    emphasis: Emphasis,
+    width: usize,
+}
+
+/// Render `body` as styled lines wrapped to `width`, prefixing every line with
+/// `indent`. Returns a single em dash when the body is absent or blank.
+pub(crate) fn body_lines(
+    palette: &Palette,
+    body: Option<&str>,
+    width: usize,
+    indent: &str,
+) -> Vec<Line<'static>> {
+    let dash = || {
+        vec![Line::from(Span::styled(
+            format!("{indent}—"),
+            Style::default().fg(palette.text),
+        ))]
+    };
+    let Some(body) = body.filter(|body| !body.trim().is_empty()) else {
+        return dash();
+    };
+    let cleaned = strip_html_comments(body);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut fenced = false;
+    for source_line in cleaned.lines() {
+        if source_line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            let words = parse_words(source_line.trim_end(), Block::Code);
+            for line in wrap_words(&words, width) {
+                lines.push(styled_line(palette, Block::Code, indent, line));
+            }
+            continue;
+        }
+
+        let (block, prefix, content) = classify(source_line);
+        if content.trim().is_empty() && prefix.is_empty() {
+            if lines.last().is_some_and(|line| line.width() > indent.len()) {
+                lines.push(Line::default());
+            }
+            continue;
+        }
+
+        let mut words = Vec::new();
+        if !prefix.is_empty() {
+            words.push(Word {
+                width: display_width(&prefix),
+                text: prefix,
+                emphasis: Emphasis::default(),
+            });
+        }
+        words.extend(parse_words(content, block));
+
+        for line in wrap_words(&words, width) {
+            lines.push(styled_line(palette, block, indent, line));
+        }
+    }
+
+    while lines.last().is_some_and(|line| line.spans.is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return dash();
+    }
+    lines
+}
+
+/// Split a source line into its block role, a literal prefix that must lead the
+/// first wrapped row, and the inline-markdown remainder.
+fn classify(source: &str) -> (Block, String, &str) {
+    let trimmed = source.trim();
+    let heading = trimmed.trim_start_matches('#');
+    if heading.len() != trimmed.len() {
+        return (Block::Heading, String::new(), heading.trim_start());
+    }
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            for task in ["[ ] ", "[x] ", "[X] "] {
+                if let Some(item) = rest.strip_prefix(task) {
+                    let box_mark = if task.starts_with("[ ]") {
+                        "☐"
+                    } else {
+                        "☑"
+                    };
+                    return (Block::Body, box_mark.to_string(), item);
+                }
+            }
+            return (Block::Body, "•".to_string(), rest);
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("> ") {
+        return (Block::Body, "│".to_string(), rest);
+    }
+    if let Some((number, rest)) = ordered_marker(trimmed) {
+        return (Block::Body, number, rest);
+    }
+    (Block::Body, String::new(), trimmed)
+}
+
+/// Recognise `1. item` / `12) item` and return its rendered marker.
+fn ordered_marker(trimmed: &str) -> Option<(String, &str)> {
+    let digits = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .filter(|end| *end > 0 && *end <= 3)?;
+    let rest = &trimmed[digits..];
+    let rest = rest
+        .strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))?;
+    Some((format!("{}.", &trimmed[..digits]), rest))
+}
+
+/// Parse inline markdown into whitespace-delimited words. Headings and code
+/// blocks carry their emphasis from the block role instead.
+fn parse_words(content: &str, block: Block) -> Vec<Word> {
+    let base = Emphasis {
+        bold: block == Block::Heading,
+        code: block == Block::Code,
+        ..Emphasis::default()
+    };
+    let chars: Vec<char> = content.chars().collect();
+    let mut words: Vec<Word> = Vec::new();
+    let mut current = String::new();
+    let mut emphasis = base;
+    let mut index = 0usize;
+
+    let flush = |current: &mut String, emphasis: Emphasis, words: &mut Vec<Word>| {
+        if current.is_empty() {
+            return;
+        }
+        words.push(Word {
+            width: display_width(current),
+            text: std::mem::take(current),
+            emphasis,
+        });
+    };
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            flush(&mut current, emphasis, &mut words);
+            index += 1;
+            continue;
+        }
+        if ch == '`' && !emphasis.code {
+            if let Some(end) = chars[index + 1..].iter().position(|c| *c == '`') {
+                flush(&mut current, emphasis, &mut words);
+                let literal: String = chars[index + 1..index + 1 + end].iter().collect();
+                for token in literal.split_whitespace() {
+                    words.push(Word {
+                        width: display_width(token),
+                        text: token.to_string(),
+                        emphasis: Emphasis { code: true, ..base },
+                    });
+                }
+                index += end + 2;
+                continue;
+            }
+        }
+        if !emphasis.code && (ch == '*' || ch == '_') {
+            let doubled = chars.get(index + 1).is_some_and(|next| *next == ch);
+            // A lone `_` is left literal so snake_case identifiers survive.
+            if doubled {
+                flush(&mut current, emphasis, &mut words);
+                emphasis.bold = !emphasis.bold;
+                index += 2;
+                continue;
+            }
+            if ch == '*' {
+                flush(&mut current, emphasis, &mut words);
+                emphasis.italic = !emphasis.italic;
+                index += 1;
+                continue;
+            }
+        }
+        current.push(ch);
+        index += 1;
+    }
+    flush(&mut current, emphasis, &mut words);
+    words
+}
+
+/// Greedily pack words into rows no wider than `width`.
+fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
+    if width == 0 || words.is_empty() {
+        return Vec::new();
+    }
+    let mut rows: Vec<Vec<&Word>> = Vec::new();
+    let mut row: Vec<&Word> = Vec::new();
+    let mut row_width = 0usize;
+    for word in words {
+        let separator = usize::from(!row.is_empty());
+        if !row.is_empty() && row_width + separator + word.width > width {
+            rows.push(std::mem::take(&mut row));
+            row_width = 0;
+        }
+        row_width += usize::from(!row.is_empty()) + word.width;
+        row.push(word);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// Turn one packed row into a `Line`, merging neighbouring words that share
+/// emphasis so the span count stays proportional to the styling, not the text.
+fn styled_line(palette: &Palette, block: Block, indent: &str, row: Vec<&Word>) -> Line<'static> {
+    let mut spans = Vec::new();
+    if !indent.is_empty() {
+        spans.push(Span::raw(indent.to_string()));
+    }
+    let mut pending: Option<(String, Emphasis)> = None;
+    for (position, word) in row.iter().enumerate() {
+        match pending.as_mut() {
+            Some((text, emphasis)) if *emphasis == word.emphasis => {
+                text.push(' ');
+                text.push_str(&word.text);
+            }
+            Some(_) => {
+                let (text, emphasis) = pending.take().expect("pending run");
+                spans.push(Span::styled(text, style_for(palette, block, emphasis)));
+                spans.push(Span::styled(
+                    " ".to_string(),
+                    style_for(palette, block, Emphasis::default()),
+                ));
+                pending = Some((word.text.clone(), word.emphasis));
+            }
+            None => {
+                debug_assert_eq!(position, 0, "only the first word starts a run");
+                pending = Some((word.text.clone(), word.emphasis));
+            }
+        }
+    }
+    if let Some((text, emphasis)) = pending {
+        spans.push(Span::styled(text, style_for(palette, block, emphasis)));
+    }
+    Line::from(spans)
+}
+
+fn style_for(palette: &Palette, block: Block, emphasis: Emphasis) -> Style {
+    let colour = if emphasis.code {
+        palette.mauve
+    } else if block == Block::Heading {
+        palette.accent
+    } else {
+        palette.text
+    };
+    let mut style = Style::default().fg(colour);
+    if emphasis.bold || block == Block::Heading {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if emphasis.italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    style
+}
+
+fn strip_html_comments(text: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::new();
+    while let Some(start) = remaining.find("<!--") {
+        output.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 4..];
+        let Some(end) = after_start.find("-->") else {
+            return output;
+        };
+        remaining = &after_start[end + 3..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::Palette;
+
+    fn palette() -> Palette {
+        Palette::catppuccin()
+    }
+
+    fn text(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_body_renders_a_single_dash() {
+        assert_eq!(text(&body_lines(&palette(), None, 40, " ")), vec![" —"]);
+        assert_eq!(
+            text(&body_lines(&palette(), Some("   \n\n"), 40, " ")),
+            vec![" —"]
+        );
+    }
+
+    #[test]
+    fn bold_runs_become_bold_spans_without_their_markers() {
+        let lines = body_lines(&palette(), Some("ships **the fix** today"), 40, "");
+        assert_eq!(text(&lines), vec!["ships the fix today"]);
+        let bold: Vec<&str> = lines[0]
+            .spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::BOLD))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(bold, vec!["the fix"]);
+    }
+
+    #[test]
+    fn headings_are_accented_and_bold_across_every_span() {
+        let lines = body_lines(&palette(), Some("## what it does"), 40, "");
+        assert_eq!(text(&lines), vec!["what it does"]);
+        assert!(lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.add_modifier.contains(Modifier::BOLD)
+                && span.style.fg == Some(palette().accent)));
+    }
+
+    #[test]
+    fn inline_code_keeps_its_own_colour_and_drops_the_backticks() {
+        let lines = body_lines(&palette(), Some("call `render_home` here"), 40, "");
+        assert_eq!(text(&lines), vec!["call render_home here"]);
+        let code: Vec<&str> = lines[0]
+            .spans
+            .iter()
+            .filter(|span| span.style.fg == Some(palette().mauve))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(code, vec!["render_home"]);
+    }
+
+    #[test]
+    fn a_lone_underscore_stays_literal_so_identifiers_survive() {
+        let lines = body_lines(&palette(), Some("set work_index.enabled now"), 40, "");
+        assert_eq!(text(&lines), vec!["set work_index.enabled now"]);
+    }
+
+    #[test]
+    fn bullets_and_tasks_get_markers_and_wrap_under_their_width() {
+        let lines = body_lines(
+            &palette(),
+            Some("- first item\n- [ ] open task\n- [x] done task\n1. ordered"),
+            40,
+            "",
+        );
+        assert_eq!(
+            text(&lines),
+            vec!["• first item", "☐ open task", "☑ done task", "1. ordered"]
+        );
+    }
+
+    #[test]
+    fn long_lines_wrap_within_the_requested_width() {
+        let lines = body_lines(&palette(), Some("alpha beta gamma delta"), 11, "");
+        assert_eq!(text(&lines), vec!["alpha beta", "gamma delta"]);
+        assert!(lines.iter().all(|line| line.width() <= 11));
+    }
+
+    #[test]
+    fn fenced_code_drops_its_fences_and_keeps_the_code_colour() {
+        let lines = body_lines(
+            &palette(),
+            Some("before\n```sh\njust check\n```\nafter"),
+            40,
+            "",
+        );
+        assert_eq!(text(&lines), vec!["before", "just check", "after"]);
+        assert_eq!(lines[1].spans[0].style.fg, Some(palette().mauve));
+    }
+
+    #[test]
+    fn html_comments_are_stripped_before_rendering() {
+        let lines = body_lines(&palette(), Some("keep <!-- drop me --> this"), 40, "");
+        assert_eq!(text(&lines), vec!["keep this"]);
+    }
+
+    #[test]
+    fn a_zero_width_body_renders_nothing_rather_than_panicking() {
+        assert_eq!(
+            text(&body_lines(&palette(), Some("anything at all"), 0, "")),
+            vec!["—"]
+        );
+    }
+}

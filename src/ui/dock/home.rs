@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use super::super::markdown;
 use super::super::text::{display_width, truncate_end};
 use crate::{
     app::{
@@ -337,90 +338,6 @@ fn link_color(app: &AppState, value: &str) -> ratatui::style::Color {
     }
 }
 
-fn strip_html_comments(text: &str) -> String {
-    let mut remaining = text;
-    let mut output = String::new();
-    while let Some(start) = remaining.find("<!--") {
-        output.push_str(&remaining[..start]);
-        let after_start = &remaining[start + 4..];
-        let Some(end) = after_start.find("-->") else {
-            return output;
-        };
-        remaining = &after_start[end + 3..];
-    }
-    output.push_str(remaining);
-    output
-}
-
-fn readable_markdown_line(line: &str) -> &str {
-    let trimmed = line.trim();
-    let heading = trimmed.trim_start_matches('#').trim_start();
-    if heading.len() != trimmed.len() {
-        return heading;
-    }
-    for marker in ["- ", "* ", "+ "] {
-        if let Some(value) = trimmed.strip_prefix(marker) {
-            return value;
-        }
-    }
-    trimmed
-}
-
-fn wrap_line(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for ch in normalized.chars() {
-        let ch_width = display_width(&ch.to_string());
-        if current_width.saturating_add(ch_width) > width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-            current_width = 0;
-        }
-        if current.is_empty() && ch == ' ' {
-            continue;
-        }
-        current.push(ch);
-        current_width = current_width.saturating_add(ch_width);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
-fn body_lines(body: Option<&str>, width: usize) -> Vec<String> {
-    let Some(body) = body.filter(|body| !body.trim().is_empty()) else {
-        return vec!["—".to_string()];
-    };
-    let cleaned = strip_html_comments(body);
-    let mut lines = Vec::new();
-    for source_line in cleaned.lines() {
-        let readable = readable_markdown_line(source_line);
-        if readable.is_empty() {
-            if lines.last().is_some_and(|line: &String| !line.is_empty()) {
-                lines.push(String::new());
-            }
-        } else {
-            lines.extend(wrap_line(readable, width));
-        }
-    }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        return vec!["—".to_string()];
-    }
-    lines
-}
-
 fn loaded_detail_lines(
     app: &AppState,
     row: &DockHomeRow,
@@ -531,11 +448,12 @@ fn loaded_detail_lines(
     ));
     lines.push(Line::default());
     lines.push(heading(app, "what it does"));
-    lines.extend(
-        body_lines(detail.body.as_deref(), width.saturating_sub(1))
-            .into_iter()
-            .map(|line| value_line(app, format!(" {line}"))),
-    );
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        detail.body.as_deref(),
+        width.saturating_sub(1),
+        " ",
+    ));
     lines
 }
 
@@ -585,11 +503,12 @@ fn detail_tab_lines(
                     app,
                     [(" author ".into(), author, app.palette.text)],
                 )];
-                lines.extend(
-                    body_lines(Some(&comment.body), width.saturating_sub(1))
-                        .into_iter()
-                        .map(|line| value_line(app, format!(" {line}"))),
-                );
+                lines.extend(markdown::body_lines(
+                    &app.palette,
+                    Some(&comment.body),
+                    width.saturating_sub(1),
+                    " ",
+                ));
                 lines
             }),
             "no comments",
@@ -655,11 +574,12 @@ fn ticket_subtab_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<L
                     missing(ticket.title.as_deref())
                 ),
             )];
-            lines.extend(
-                body_lines(ticket.description.as_deref(), width.saturating_sub(1))
-                    .into_iter()
-                    .map(|line| value_line(app, format!(" {line}"))),
-            );
+            lines.extend(markdown::body_lines(
+                &app.palette,
+                ticket.description.as_deref(),
+                width.saturating_sub(1),
+                " ",
+            ));
             lines
         }),
         "no linked ticket",
@@ -753,11 +673,12 @@ fn ticket_detail_lines(
     }
     lines.push(Line::default());
     lines.push(heading(app, "what it does"));
-    lines.extend(
-        body_lines(ticket.description.as_deref(), width.saturating_sub(1))
-            .into_iter()
-            .map(|line| value_line(app, format!(" {line}"))),
-    );
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        ticket.description.as_deref(),
+        width.saturating_sub(1),
+        " ",
+    ));
     lines
 }
 
