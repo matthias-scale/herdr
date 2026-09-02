@@ -421,38 +421,48 @@ fn compute_view_internal(
         dock_tab_hit_areas,
         dock_body_rect,
     ) = dock_geometry(dock_area, app.dock_collapsed);
-    let (dock_home_section_hit_areas, dock_home_tab_hit_areas, dock_home_tab_keys) =
-        if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
-            let projection = app.dock_home_projection();
-            let layouts = match app.dock_home_section {
-                crate::app::state::DockHomeSection::Prs => {
-                    dock::home_tab_layouts(app, &projection, dock_body_rect)
-                }
-                crate::app::state::DockHomeSection::Tickets => {
-                    dock::home_ticket_tab_layouts(app, &projection, dock_body_rect)
-                }
-            };
-            let hit_areas = layouts.iter().map(|(_, area)| *area).collect();
-            let keys = layouts
-                .iter()
-                .filter_map(|(index, _)| match app.dock_home_section {
-                    crate::app::state::DockHomeSection::Prs => {
-                        projection.rows.get(*index).map(|row| row.key.clone())
-                    }
-                    crate::app::state::DockHomeSection::Tickets => projection
-                        .ticket_rows
-                        .get(*index)
-                        .map(|row| row.key.clone()),
-                })
-                .collect();
-            (
-                dock::home_section_layouts(dock_body_rect).to_vec(),
-                hit_areas,
-                keys,
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
+    let (
+        dock_home_section_hit_areas,
+        dock_home_tab_hit_areas,
+        dock_home_tab_keys,
+        dock_home_detail_tab_hit_areas,
+    ) = if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
+        let projection = app.dock_home_projection();
+        let layouts = match app.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => {
+                dock::home_tab_layouts(app, &projection, dock_body_rect)
+            }
+            crate::app::state::DockHomeSection::Tickets => {
+                dock::home_ticket_tab_layouts(app, &projection, dock_body_rect)
+            }
         };
+        let hit_areas = layouts.tabs.iter().map(|(_, area)| *area).collect();
+        let keys = layouts
+            .tabs
+            .iter()
+            .filter_map(|(index, _)| match app.dock_home_section {
+                crate::app::state::DockHomeSection::Prs => {
+                    projection.rows.get(*index).map(|row| row.key.clone())
+                }
+                crate::app::state::DockHomeSection::Tickets => projection
+                    .ticket_rows
+                    .get(*index)
+                    .map(|row| row.key.clone()),
+            })
+            .collect();
+        (
+            dock::home_section_layouts(dock_body_rect).to_vec(),
+            hit_areas,
+            keys,
+            if app.dock_home_section == crate::app::state::DockHomeSection::Prs {
+                dock::home_detail_tab_layouts(dock_body_rect).to_vec()
+            } else {
+                Vec::new()
+            },
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
 
     let home_row_hit_areas = if app.home.is_some() {
         let queue = app.blocked_agents();
@@ -521,6 +531,7 @@ fn compute_view_internal(
         dock_home_section_hit_areas,
         dock_home_tab_hit_areas,
         dock_home_tab_keys,
+        dock_home_detail_tab_hit_areas,
         dock_body_rect,
     };
     app.sync_copy_mode_search_geometry();
@@ -694,6 +705,7 @@ fn compute_mobile_view(
         dock_home_section_hit_areas: Vec::new(),
         dock_home_tab_hit_areas: Vec::new(),
         dock_home_tab_keys: Vec::new(),
+        dock_home_detail_tab_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {
@@ -1228,11 +1240,16 @@ mod tests {
         assert_eq!(app.view.dock_home_tab_keys.len(), projection.rows.len());
         assert_eq!(app.view.dock_home_tab_keys[0], projection.rows[0].key);
         assert_eq!(app.view.dock_home_tab_hit_areas[0].height, 1);
+        assert_eq!(
+            app.view.dock_home_detail_tab_hit_areas.len(),
+            crate::app::state::DockHomeDetailTab::ALL.len()
+        );
 
         app.dock_collapsed = true;
         compute_view(&mut app, screen);
         assert!(app.view.dock_home_tab_hit_areas.is_empty());
         assert!(app.view.dock_home_tab_keys.is_empty());
+        assert!(app.view.dock_home_detail_tab_hit_areas.is_empty());
 
         app.dock_collapsed = false;
         app.dock_tab = crate::app::DockTab::Editor;

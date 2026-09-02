@@ -37,6 +37,31 @@ pub(crate) struct WorkItemCheckSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemComment {
+    pub(crate) author: Option<String>,
+    pub(crate) body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemAction {
+    pub(crate) name: String,
+    pub(crate) state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemFile {
+    pub(crate) path: String,
+    pub(crate) additions: u64,
+    pub(crate) deletions: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemCommit {
+    pub(crate) short_id: String,
+    pub(crate) subject: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkItemDetail {
     pub(crate) number: Option<u64>,
     pub(crate) title: Option<String>,
@@ -51,6 +76,10 @@ pub(crate) struct WorkItemDetail {
     pub(crate) review_decision: Option<String>,
     pub(crate) is_draft: Option<bool>,
     pub(crate) checks: Option<WorkItemCheckSummary>,
+    pub(crate) comments: Vec<WorkItemComment>,
+    pub(crate) actions: Vec<WorkItemAction>,
+    pub(crate) files: Vec<WorkItemFile>,
+    pub(crate) commits: Vec<WorkItemCommit>,
     /// GitHub's `gh pr view --json` payload does not expose review threads.
     /// Keep the absence explicit rather than substituting review count data.
     pub(crate) unresolved_review_threads: Option<usize>,
@@ -74,6 +103,10 @@ impl WorkItemDetail {
             review_decision: None,
             is_draft: None,
             checks: None,
+            comments: Vec::new(),
+            actions: Vec::new(),
+            files: Vec::new(),
+            commits: Vec::new(),
             unresolved_review_threads: None,
             unavailable: Some(message.into()),
             observed_at: SystemTime::now(),
@@ -514,7 +547,7 @@ fn fetch_github_pull_requests(
 }
 
 const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
-    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup";
+    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,comments,files,commits";
 
 fn fetch_github_pull_request_detail(
     repo: &str,
@@ -581,10 +614,80 @@ fn fetch_github_pull_request_detail(
         review_decision: value_text(value.get("reviewDecision")),
         is_draft: value.get("isDraft").and_then(Value::as_bool),
         checks: status_check_summary(value.get("statusCheckRollup")),
+        comments: github_comments(value.get("comments")),
+        actions: github_actions(value.get("statusCheckRollup")),
+        files: github_files(value.get("files")),
+        commits: github_commits(value.get("commits")),
         unresolved_review_threads: None,
         unavailable: None,
         observed_at: SystemTime::now(),
     })
+}
+
+fn github_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|comment| {
+            let body = value_text(comment.get("body"))?;
+            Some(WorkItemComment {
+                author: comment
+                    .get("author")
+                    .and_then(|author| author.get("login"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                body,
+            })
+        })
+        .collect()
+}
+
+fn github_actions(value: Option<&Value>) -> Vec<WorkItemAction> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| {
+            let name =
+                value_text(action.get("name")).or_else(|| value_text(action.get("context")))?;
+            let state = value_text(action.get("conclusion"))
+                .filter(|state| !state.is_empty())
+                .or_else(|| value_text(action.get("status")))
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(WorkItemAction { name, state })
+        })
+        .collect()
+}
+
+fn github_files(value: Option<&Value>) -> Vec<WorkItemFile> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            Some(WorkItemFile {
+                path: value_text(file.get("path"))?,
+                additions: file.get("additions").and_then(Value::as_u64).unwrap_or(0),
+                deletions: file.get("deletions").and_then(Value::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+fn github_commits(value: Option<&Value>) -> Vec<WorkItemCommit> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|commit| {
+            let oid = value_text(commit.get("oid"))?;
+            Some(WorkItemCommit {
+                short_id: oid.chars().take(7).collect(),
+                subject: value_text(commit.get("messageHeadline")).unwrap_or_else(|| "—".into()),
+            })
+        })
+        .collect()
 }
 
 fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
@@ -1479,7 +1582,7 @@ printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"r
             &format!(
                 r#"#!/bin/sh
 test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
-printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"conclusion":"FAILURE"}},{{"conclusion":"SUCCESS"}}]}}'
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}]}}'
 "#
             ),
             "#!/bin/sh\nprintf '%s' '[]'\n",
@@ -1503,6 +1606,17 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
                 total: 2
             })
         );
+        assert_eq!(detail.comments[0].author.as_deref(), Some("reviewer"));
+        assert_eq!(detail.comments[0].body, "Looks good");
+        assert_eq!(detail.actions[0].name, "test");
+        assert_eq!(detail.actions[0].state, "FAILURE");
+        assert_eq!(detail.files[0].path, "src/lib.rs");
+        assert_eq!(
+            (detail.files[0].additions, detail.files[0].deletions),
+            (4, 2)
+        );
+        assert_eq!(detail.commits[0].short_id, "abcdef0");
+        assert_eq!(detail.commits[0].subject, "fix detail");
     }
 
     #[test]

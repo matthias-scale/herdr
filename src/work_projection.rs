@@ -700,6 +700,59 @@ impl crate::app::state::AppState {
         )
     }
 
+    /// Follow a changed pane focus to its bound PR without repeatedly
+    /// overwriting an attach-local explicit selection for the same pane.
+    pub(crate) fn reconcile_dock_home_with_focused_pane(&mut self) {
+        let focused = self.current_pane_focus_target();
+        if self.dock_home_followed_pane == focused {
+            return;
+        }
+        self.dock_home_followed_pane = focused.clone();
+
+        let Some(focused) = focused else {
+            return;
+        };
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == focused.workspace_id)
+        else {
+            return;
+        };
+        let Some(pr_url) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(focused.pane_id))
+            .and_then(|terminal_id| self.terminals.get(terminal_id))
+            .and_then(|terminal| {
+                terminal
+                    .effective_work_context()
+                    .primary_pr()
+                    .map(str::to_string)
+            })
+        else {
+            return;
+        };
+        let Some(key) = self
+            .dock_home_projection()
+            .rows
+            .into_iter()
+            .find(|row| {
+                row.key
+                    .pr_url
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&pr_url))
+            })
+            .map(|row| row.key)
+        else {
+            return;
+        };
+
+        self.dock_home_selection = Some(key);
+        self.dock_home_section = crate::app::state::DockHomeSection::Prs;
+        self.dock_scroll = 0;
+    }
+
     /// Index of the selected home row, defaulting to the first row; `None`
     /// when nothing is bound.
     pub(crate) fn dock_home_selected_index(
@@ -759,6 +812,11 @@ impl crate::app::state::AppState {
 
     pub(crate) fn set_dock_home_section(&mut self, section: crate::app::state::DockHomeSection) {
         self.dock_home_section = section;
+        self.dock_scroll = 0;
+    }
+
+    pub(crate) fn set_dock_home_detail_tab(&mut self, tab: crate::app::state::DockHomeDetailTab) {
+        self.dock_home_detail_tab = tab;
         self.dock_scroll = 0;
     }
 
@@ -1122,6 +1180,78 @@ mod tests {
                 .expect("clamped bottom")
                 .number,
             "50"
+        );
+    }
+
+    #[test]
+    fn selecting_detail_tab_preserves_pane_focus_and_typing_route() {
+        let mut state = state_with_bound_prs(&[10]);
+        state.dock_home_focused = false;
+        let focused = state.current_pane_focus_target();
+
+        state.set_dock_home_detail_tab(crate::app::state::DockHomeDetailTab::Files);
+
+        assert_eq!(state.current_pane_focus_target(), focused);
+        assert!(!state.dock_home_focused);
+        assert_eq!(
+            state.dock_home_detail_tab,
+            crate::app::state::DockHomeDetailTab::Files
+        );
+    }
+
+    #[test]
+    fn dock_home_follows_changed_bound_pane_without_fighting_same_pane_selection() {
+        let mut state = state_with_bound_prs(&[10, 20, 30]);
+        let projection = state.dock_home_projection();
+        let key_for = |number: &str| {
+            projection
+                .rows
+                .iter()
+                .find(|row| row.number == number)
+                .expect("bound PR row")
+                .key
+                .clone()
+        };
+        state.dock_home_selection = Some(key_for("10"));
+        state.dock_home_section = crate::app::state::DockHomeSection::Tickets;
+
+        let second = state.workspaces[1].tabs[0].root_pane;
+        assert!(state.focus_pane_in_workspace(1, second));
+        assert_eq!(state.dock_home_selection, Some(key_for("20")));
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Prs
+        );
+
+        state.dock_home_selection = Some(key_for("10"));
+        assert!(!state.focus_pane_in_workspace(1, second));
+        assert_eq!(state.dock_home_selection, Some(key_for("10")));
+        state.switch_workspace(1);
+        assert_eq!(state.dock_home_selection, Some(key_for("10")));
+
+        let third = state.workspaces[2].tabs[0].root_pane;
+        assert!(state.focus_pane_in_workspace(2, third));
+        assert_eq!(state.dock_home_selection, Some(key_for("30")));
+    }
+
+    #[test]
+    fn dock_home_focus_on_unbound_pane_preserves_selection_and_section() {
+        let mut state = state_with_bound_prs(&[10, 20]);
+        state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("unbound"));
+        state.ensure_test_terminals();
+        let selected = state.dock_home_projection().rows[1].key.clone();
+        state.dock_home_selection = Some(selected.clone());
+        state.dock_home_section = crate::app::state::DockHomeSection::Tickets;
+
+        let unbound = state.workspaces[2].tabs[0].root_pane;
+        assert!(state.focus_pane_in_workspace(2, unbound));
+
+        assert_eq!(state.dock_home_selection, Some(selected));
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
         );
     }
 

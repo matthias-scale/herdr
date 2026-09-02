@@ -707,7 +707,12 @@ pub(crate) struct DockPresentationState {
     pub(crate) home_selection: Option<WorkItemKey>,
     pub(crate) home_ticket_selection: Option<WorkItemKey>,
     pub(crate) home_section: DockHomeSection,
+    pub(crate) home_detail_tab: DockHomeDetailTab,
     pub(crate) home_focused: bool,
+    /// Focus target last considered for automatic PR-tab selection. Keeping
+    /// this attach-local lets an explicit selection survive while pane focus
+    /// remains unchanged.
+    pub(crate) home_followed_pane: Option<PaneFocusTarget>,
 }
 
 impl Default for DockPresentationState {
@@ -721,7 +726,9 @@ impl Default for DockPresentationState {
             home_selection: None,
             home_ticket_selection: None,
             home_section: DockHomeSection::Prs,
+            home_detail_tab: DockHomeDetailTab::Overview,
             home_focused: false,
+            home_followed_pane: None,
         }
     }
 }
@@ -971,6 +978,7 @@ pub struct ViewState {
     pub dock_home_section_hit_areas: Vec<Rect>,
     pub dock_home_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
+    pub dock_home_detail_tab_hit_areas: Vec<Rect>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -1783,7 +1791,11 @@ pub struct AppState {
     pub(crate) dock_home_selection: Option<WorkItemKey>,
     pub(crate) dock_home_ticket_selection: Option<WorkItemKey>,
     pub(crate) dock_home_section: DockHomeSection,
+    pub(crate) dock_home_detail_tab: DockHomeDetailTab,
     pub(crate) dock_home_focused: bool,
+    /// Focus target last considered for automatic dock-home selection, swapped
+    /// per client through `DockPresentationState`.
+    pub(crate) dock_home_followed_pane: Option<PaneFocusTarget>,
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
@@ -2011,6 +2023,39 @@ pub(crate) enum DockHomeSection {
     Tickets,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DockHomeDetailTab {
+    #[default]
+    Overview,
+    Comments,
+    Actions,
+    Files,
+    Commits,
+    Ticket,
+}
+
+impl DockHomeDetailTab {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Overview,
+        Self::Comments,
+        Self::Actions,
+        Self::Files,
+        Self::Commits,
+        Self::Ticket,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Comments => "comments",
+            Self::Actions => "actions",
+            Self::Files => "files",
+            Self::Commits => "commits",
+            Self::Ticket => "ticket",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkViewState {
     pub(crate) projection: WorkProjection,
@@ -2174,7 +2219,12 @@ impl AppState {
             &mut other.home_ticket_selection,
         );
         std::mem::swap(&mut self.dock_home_section, &mut other.home_section);
+        std::mem::swap(&mut self.dock_home_detail_tab, &mut other.home_detail_tab);
         std::mem::swap(&mut self.dock_home_focused, &mut other.home_focused);
+        std::mem::swap(
+            &mut self.dock_home_followed_pane,
+            &mut other.home_followed_pane,
+        );
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
@@ -2605,6 +2655,7 @@ impl AppState {
                 dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
+                dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -2638,7 +2689,9 @@ impl AppState {
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_section: DockHomeSection::Prs,
+            dock_home_detail_tab: DockHomeDetailTab::Overview,
             dock_home_focused: false,
+            dock_home_followed_pane: None,
             work_index_snapshot: None,
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
