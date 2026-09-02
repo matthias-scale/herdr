@@ -545,6 +545,11 @@ impl AppState {
                             .iter()
                             .find(|row| row.key == rendered_key)
                             .map(|row| row.key.clone()),
+                        crate::app::state::DockHomeSection::XPolls => projection
+                            .poll_rows
+                            .iter()
+                            .find(|row| row.key == rendered_key)
+                            .map(|row| row.key.clone()),
                     };
                     if let Some(key) = key {
                         let already_selected =
@@ -555,6 +560,9 @@ impl AppState {
                             }
                             crate::app::state::DockHomeSection::Tickets => {
                                 self.dock_home_ticket_selection = Some(key)
+                            }
+                            crate::app::state::DockHomeSection::XPolls => {
+                                self.dock_home_poll_selection = Some(key)
                             }
                         }
                         self.dock_home_focused = true;

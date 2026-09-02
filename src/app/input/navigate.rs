@@ -474,11 +474,11 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
-                if self.state.dock_tab == crate::app::DockTab::Home
-                    && self.state.dock_home_section == crate::app::state::DockHomeSection::Tickets
-                {
-                    self.state
-                        .set_dock_home_section(crate::app::state::DockHomeSection::Prs);
+                if let (crate::app::DockTab::Home, Some(previous)) = (
+                    self.state.dock_tab,
+                    previous_home_section(self.state.dock_home_section),
+                ) {
+                    self.state.set_dock_home_section(previous);
                 } else {
                     self.state.dock_tab = self.state.dock_tab.previous();
                 }
@@ -486,11 +486,11 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NextDockTab => {
-                if self.state.dock_tab == crate::app::DockTab::Home
-                    && self.state.dock_home_section == crate::app::state::DockHomeSection::Prs
-                {
-                    self.state
-                        .set_dock_home_section(crate::app::state::DockHomeSection::Tickets);
+                if let (crate::app::DockTab::Home, Some(next)) = (
+                    self.state.dock_tab,
+                    next_home_section(self.state.dock_home_section),
+                ) {
+                    self.state.set_dock_home_section(next);
                 } else {
                     self.state.dock_tab = self.state.dock_tab.next();
                 }
@@ -2331,10 +2331,11 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {
-            if state.dock_tab == crate::app::DockTab::Home
-                && state.dock_home_section == crate::app::state::DockHomeSection::Tickets
-            {
-                state.set_dock_home_section(crate::app::state::DockHomeSection::Prs);
+            if let (crate::app::DockTab::Home, Some(previous)) = (
+                state.dock_tab,
+                previous_home_section(state.dock_home_section),
+            ) {
+                state.set_dock_home_section(previous);
             } else {
                 state.dock_tab = state.dock_tab.previous();
             }
@@ -2342,10 +2343,10 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::NextDockTab => {
-            if state.dock_tab == crate::app::DockTab::Home
-                && state.dock_home_section == crate::app::state::DockHomeSection::Prs
+            if let (crate::app::DockTab::Home, Some(next)) =
+                (state.dock_tab, next_home_section(state.dock_home_section))
             {
-                state.set_dock_home_section(crate::app::state::DockHomeSection::Tickets);
+                state.set_dock_home_section(next);
             } else {
                 state.dock_tab = state.dock_tab.next();
             }
@@ -2560,6 +2561,36 @@ fn unique_scrollback_path(attempt: u32) -> std::path::PathBuf {
         "herdr-scrollback-{}-{nanos}-{attempt}.txt",
         std::process::id()
     ))
+}
+
+/// The home sections cycle in order; `None` means the dock tab itself should
+/// move instead.
+fn next_home_section(
+    section: crate::app::state::DockHomeSection,
+) -> Option<crate::app::state::DockHomeSection> {
+    match section {
+        crate::app::state::DockHomeSection::Prs => {
+            Some(crate::app::state::DockHomeSection::Tickets)
+        }
+        crate::app::state::DockHomeSection::Tickets => {
+            Some(crate::app::state::DockHomeSection::XPolls)
+        }
+        crate::app::state::DockHomeSection::XPolls => None,
+    }
+}
+
+fn previous_home_section(
+    section: crate::app::state::DockHomeSection,
+) -> Option<crate::app::state::DockHomeSection> {
+    match section {
+        crate::app::state::DockHomeSection::Prs => None,
+        crate::app::state::DockHomeSection::Tickets => {
+            Some(crate::app::state::DockHomeSection::Prs)
+        }
+        crate::app::state::DockHomeSection::XPolls => {
+            Some(crate::app::state::DockHomeSection::Tickets)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3085,6 +3116,18 @@ mod tests {
             NavigateAction::NextDockTab,
             ActionContext::Prefix,
         );
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::XPolls
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextDockTab,
+            ActionContext::Prefix,
+        );
         assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
         assert!(state.dock_editor_focused);
         assert!(!state.dock_home_focused);
@@ -3098,10 +3141,22 @@ mod tests {
         assert_eq!(state.dock_tab, crate::app::DockTab::Home);
         assert_eq!(
             state.dock_home_section,
-            crate::app::state::DockHomeSection::Tickets
+            crate::app::state::DockHomeSection::XPolls
         );
         assert!(!state.dock_editor_focused);
         assert!(state.dock_home_focused);
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::PreviousDockTab,
+            ActionContext::Prefix,
+        );
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
+        );
+        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
 
         execute_navigate_action_in_context(
             &mut state,

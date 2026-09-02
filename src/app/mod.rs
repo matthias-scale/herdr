@@ -790,6 +790,7 @@ impl App {
             dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
+            dock_home_poll_selection: None,
             dock_home_section: state::DockHomeSection::Prs,
             dock_home_detail_tab: state::DockHomeDetailTab::Overview,
             dock_home_focused: false,

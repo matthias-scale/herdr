@@ -343,10 +343,24 @@ pub(crate) struct DockHomeTicketRow {
     pub(crate) jump_target: Option<(usize, crate::layout::PaneId)>,
 }
 
+/// One closing-block gate awaiting a human answer, with the pane that raised
+/// it. `key` reuses `WorkItemKey` so the tab strip, hit testing and selection
+/// plumbing stay shared; it carries no `pr_number`, which is what keeps poll
+/// rows out of the pull request detail prefetcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockHomePollRow {
+    pub(crate) key: WorkItemKey,
+    pub(crate) agent_label: String,
+    pub(crate) workspace_label: String,
+    pub(crate) item: crate::api::schema::ClosingBlockItem,
+    pub(crate) jump_target: (usize, crate::layout::PaneId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockHomeProjection {
     pub(crate) rows: Vec<DockHomeRow>,
     pub(crate) ticket_rows: Vec<DockHomeTicketRow>,
+    pub(crate) poll_rows: Vec<DockHomePollRow>,
     /// Unbound open PRs / ticket-only items; `None` when no snapshot exists
     /// and the honest answer is "unknown", not zero.
     pub(crate) unbound_prs: Option<usize>,
@@ -509,6 +523,7 @@ fn project_dock_home_at(
     DockHomeProjection {
         rows,
         ticket_rows,
+        poll_rows: Vec::new(),
         unbound_prs: unbound.map(|(prs, _)| prs),
         unbound_tickets: unbound.map(|(_, tickets)| tickets),
         observed_at: snapshot.map(|snapshot| snapshot.observed_at),
@@ -692,12 +707,76 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn dock_home_projection(&self) -> DockHomeProjection {
-        project_dock_home(
+        let mut projection = project_dock_home(
             &self.dock_home_bindings(),
             &self.dock_home_ticket_bindings(),
             self.work_index_snapshot.as_ref(),
             self.work_index_enabled,
-        )
+        );
+        projection.poll_rows = self.dock_home_poll_rows();
+        projection
+    }
+
+    /// Every closing-block gate currently raised, ordered by workspace and then
+    /// by the gate's own number so the list is stable across refreshes.
+    fn dock_home_poll_rows(&self) -> Vec<DockHomePollRow> {
+        let mut rows = Vec::new();
+        for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
+                        continue;
+                    };
+                    if terminal.closing_gates.is_empty() {
+                        continue;
+                    }
+                    let agent_label = terminal
+                        .manual_label
+                        .clone()
+                        .or_else(|| terminal.effective_title())
+                        .or_else(|| terminal.effective_agent_label().map(str::to_string))
+                        .unwrap_or_else(|| "agent".to_string());
+                    let workspace_label = workspace.display_name_from_terminals(&self.terminals);
+                    for item in &terminal.closing_gates {
+                        rows.push(DockHomePollRow {
+                            key: WorkItemKey {
+                                repo: pane.attached_terminal_id.to_string(),
+                                pr_number: None,
+                                pr_url: None,
+                                ticket_id: Some(format!(
+                                    "{}#{}",
+                                    pane.attached_terminal_id, item.n
+                                )),
+                            },
+                            agent_label: agent_label.clone(),
+                            workspace_label: workspace_label.clone(),
+                            item: item.clone(),
+                            jump_target: (ws_idx, *pane_id),
+                        });
+                    }
+                }
+            }
+        }
+        rows.sort_by(|left, right| {
+            left.workspace_label
+                .cmp(&right.workspace_label)
+                .then_with(|| left.agent_label.cmp(&right.agent_label))
+                .then_with(|| left.item.n.cmp(&right.item.n))
+        });
+        rows
+    }
+
+    pub(crate) fn dock_home_selected_poll_index(
+        &self,
+        projection: &DockHomeProjection,
+    ) -> Option<usize> {
+        if projection.poll_rows.is_empty() {
+            return None;
+        }
+        self.dock_home_poll_selection
+            .as_ref()
+            .and_then(|key| projection.poll_rows.iter().position(|row| &row.key == key))
+            .or(Some(0))
     }
 
     /// Follow a changed pane focus to the work item it is bound to without
@@ -808,6 +887,15 @@ impl crate::app::state::AppState {
                 self.dock_home_ticket_selection =
                     projection.ticket_rows.get(next).map(|row| row.key.clone());
             }
+            crate::app::state::DockHomeSection::XPolls => {
+                let Some(index) = self.dock_home_selected_poll_index(&projection) else {
+                    return;
+                };
+                let last = projection.poll_rows.len().saturating_sub(1) as i64;
+                let next = (index as i64 + delta).clamp(0, last) as usize;
+                self.dock_home_poll_selection =
+                    projection.poll_rows.get(next).map(|row| row.key.clone());
+            }
         }
         self.dock_scroll = 0;
     }
@@ -854,6 +942,11 @@ impl crate::app::state::AppState {
                 .into_iter()
                 .map(|row| row.key)
                 .collect(),
+            crate::app::state::DockHomeSection::XPolls => projection
+                .poll_rows
+                .into_iter()
+                .map(|row| row.key)
+                .collect(),
         }
     }
 
@@ -861,6 +954,7 @@ impl crate::app::state::AppState {
         match self.dock_home_section {
             crate::app::state::DockHomeSection::Prs => self.dock_home_selection.clone(),
             crate::app::state::DockHomeSection::Tickets => self.dock_home_ticket_selection.clone(),
+            crate::app::state::DockHomeSection::XPolls => self.dock_home_poll_selection.clone(),
         }
     }
 
@@ -882,6 +976,12 @@ impl crate::app::state::AppState {
                 self.dock_home_selected_ticket_index(&projection)
                     .and_then(|index| projection.ticket_rows.get(index))
                     .and_then(|row| row.jump_target)
+            }
+            crate::app::state::DockHomeSection::XPolls => {
+                let projection = self.dock_home_projection();
+                self.dock_home_selected_poll_index(&projection)
+                    .and_then(|index| projection.poll_rows.get(index))
+                    .map(|row| row.jump_target)
             }
         };
         let Some((ws_idx, pane_id)) = target else {
@@ -1252,6 +1352,105 @@ mod tests {
         let third = state.workspaces[2].tabs[0].root_pane;
         assert!(state.focus_pane_in_workspace(2, third));
         assert_eq!(state.dock_home_selection, Some(key_for("30")));
+    }
+
+    fn gate(n: u32, text: &str, default: Option<&str>) -> crate::api::schema::ClosingBlockItem {
+        crate::api::schema::ClosingBlockItem {
+            n,
+            label: "Gate".to_string(),
+            text: text.to_string(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: default.map(str::to_string),
+            default_at: None,
+        }
+    }
+
+    fn state_with_gates(
+        gates: &[(&str, Vec<crate::api::schema::ClosingBlockItem>)],
+    ) -> crate::app::state::AppState {
+        let mut state = crate::app::state::AppState::test_new();
+        state.workspaces = gates
+            .iter()
+            .map(|(name, _)| crate::workspace::Workspace::test_new(name))
+            .collect();
+        state.active = (!state.workspaces.is_empty()).then_some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        for (ws_idx, (_, items)) in gates.iter().enumerate() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .closing_gates = items.clone();
+        }
+        state
+    }
+
+    #[test]
+    fn x_polls_project_one_row_per_closing_gate_ordered_by_space_then_number() {
+        let state = state_with_gates(&[
+            ("beta", vec![gate(2, "rotate the token", Some("none"))]),
+            (
+                "alpha",
+                vec![gate(2, "second ask", None), gate(1, "first ask", None)],
+            ),
+        ]);
+        let projection = state.dock_home_projection();
+
+        let asks: Vec<&str> = projection
+            .poll_rows
+            .iter()
+            .map(|row| row.item.text.as_str())
+            .collect();
+        assert_eq!(asks, vec!["first ask", "second ask", "rotate the token"]);
+        assert!(
+            projection
+                .poll_rows
+                .iter()
+                .all(|row| row.key.pr_number.is_none()),
+            "poll keys must carry no pr_number, or the detail prefetcher picks them up"
+        );
+    }
+
+    #[test]
+    fn a_pane_without_gates_contributes_no_polls() {
+        let state = state_with_gates(&[("quiet", Vec::new())]);
+        assert!(state.dock_home_projection().poll_rows.is_empty());
+    }
+
+    #[test]
+    fn x_polls_selection_moves_and_clamps_then_enter_jumps_to_the_asking_pane() {
+        let mut state = state_with_gates(&[(
+            "alpha",
+            vec![gate(1, "first ask", None), gate(2, "second ask", None)],
+        )]);
+        state.dock_home_section = crate::app::state::DockHomeSection::XPolls;
+        let projection = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_poll_index(&projection), Some(0));
+
+        state.move_dock_home_selection(1);
+        let projection = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_poll_index(&projection), Some(1));
+        state.move_dock_home_selection(5);
+        let projection = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_poll_index(&projection), Some(1));
+        state.move_dock_home_selection(-9);
+        let projection = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_poll_index(&projection), Some(0));
+
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        assert!(state.jump_to_dock_home_selection());
+        assert_eq!(
+            state.current_pane_focus_target().map(|t| t.pane_id),
+            Some(pane_id)
+        );
     }
 
     fn state_with_bound_tickets(ticket_ids: &[&str]) -> crate::app::state::AppState {

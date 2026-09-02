@@ -161,6 +161,29 @@ pub(crate) fn tab_layouts(
     )
 }
 
+pub(crate) fn poll_tab_layouts(
+    app: &AppState,
+    projection: &DockHomeProjection,
+    area: Rect,
+) -> TabWindow {
+    let widths = projection
+        .poll_rows
+        .iter()
+        .map(|row| tab_cell_width(&poll_tab_label(row)))
+        .collect::<Vec<_>>();
+    selection_following_tab_window(
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        &widths,
+        app.dock_home_selected_poll_index(projection).unwrap_or(0),
+    )
+}
+
+/// A poll's tab reads `<agent> N`, which is short enough for the strip and
+/// still says which agent is waiting.
+pub(crate) fn poll_tab_label(row: &crate::work_projection::DockHomePollRow) -> String {
+    format!("{} {}", row.agent_label, row.item.n)
+}
+
 pub(crate) fn ticket_tab_layouts(
     app: &AppState,
     projection: &DockHomeProjection,
@@ -178,12 +201,13 @@ pub(crate) fn ticket_tab_layouts(
     )
 }
 
-pub(crate) fn section_layouts(area: Rect) -> [Rect; 2] {
+pub(crate) fn section_layouts(area: Rect) -> [Rect; 3] {
     let row = Rect::new(area.x, area.y, area.width, 1);
-    let areas = crate::ui::horizontal_tab_hit_areas(row, &[4, 8]);
+    let areas = crate::ui::horizontal_tab_hit_areas(row, &[4, 8, 8]);
     [
         areas.first().copied().unwrap_or_default(),
         areas.get(1).copied().unwrap_or_default(),
+        areas.get(2).copied().unwrap_or_default(),
     ]
 }
 
@@ -586,6 +610,81 @@ fn ticket_subtab_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<L
     )
 }
 
+/// One poll: the gate's own question, its options and its default, plus the
+/// pane that raised it. The question and options run through the markdown
+/// renderer, so an `(a-rec)` block keeps its emphasis.
+fn poll_detail_lines(
+    app: &AppState,
+    row: &crate::work_projection::DockHomePollRow,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let item = &row.item;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{}  {}", item.n, item.label),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        field_line(
+            app,
+            [
+                ("agent ".into(), row.agent_label.clone(), app.palette.text),
+                (
+                    "space ".into(),
+                    row.workspace_label.clone(),
+                    app.palette.text,
+                ),
+            ],
+        ),
+        Line::default(),
+        heading(app, "asks"),
+    ];
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        Some(item.text.as_str()),
+        width.saturating_sub(1),
+        " ",
+    ));
+    lines.push(Line::default());
+    lines.push(heading(app, "default"));
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        item.default.as_deref(),
+        width.saturating_sub(1),
+        " ",
+    ));
+    lines.push(Line::default());
+    lines.push(heading(app, "links"));
+    lines.push(field_line(
+        app,
+        [(
+            "pr ".into(),
+            item.pr
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| "—".to_string()),
+            app.palette.text,
+        )],
+    ));
+    lines.push(field_line(
+        app,
+        [(
+            "ticket ".into(),
+            missing(item.ticket.as_deref()).to_string(),
+            app.palette.text,
+        )],
+    ));
+    lines.push(field_line(
+        app,
+        [(
+            "url ".into(),
+            missing(item.url.as_deref()).to_string(),
+            link_color(app, missing(item.url.as_deref())),
+        )],
+    ));
+    lines
+}
+
 fn ticket_detail_lines(
     app: &AppState,
     row: &DockHomeTicketRow,
@@ -789,6 +888,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             "tickets",
             section_layouts(area)[1],
         ),
+        (DockHomeSection::XPolls, "x-polls", section_layouts(area)[2]),
     ] {
         let style = if app.dock_home_section == section {
             Style::default()
@@ -806,6 +906,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
     let active_empty = match app.dock_home_section {
         DockHomeSection::Prs => projection.rows.is_empty(),
         DockHomeSection::Tickets => projection.ticket_rows.is_empty(),
+        DockHomeSection::XPolls => projection.poll_rows.is_empty(),
     };
     if active_empty {
         let reason = if let Some(reason) = projection.unavailable.as_deref() {
@@ -817,6 +918,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                     "tickets off — set work_index.linear_team"
                 }
                 DockHomeSection::Tickets => "no matching tickets",
+                DockHomeSection::XPolls => "no open polls",
             }
             .to_string()
         };
@@ -848,6 +950,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let selected_pr = app.dock_home_selected_index(&projection);
     let selected_ticket = app.dock_home_selected_ticket_index(&projection);
+    let selected_poll = app.dock_home_selected_poll_index(&projection);
     match app.dock_home_section {
         DockHomeSection::Prs => {
             let window = tab_layouts(app, &projection, area);
@@ -884,6 +987,24 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                         row.ticket.identifier.clone(),
                         style,
                     ))),
+                    tab_area,
+                );
+            }
+        }
+        DockHomeSection::XPolls => {
+            let window = poll_tab_layouts(app, &projection, area);
+            render_hidden_tab_counts(app, frame, &window);
+            for (index, tab_area) in window.tabs {
+                let row = &projection.poll_rows[index];
+                let style = if selected_poll == Some(index) {
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.palette.overlay0)
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(poll_tab_label(row), style))),
                     tab_area,
                 );
             }
@@ -944,6 +1065,9 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         DockHomeSection::Tickets => selected_ticket
             .and_then(|index| projection.ticket_rows.get(index))
             .map(|row| ticket_detail_lines(app, row, usize::from(area.width))),
+        DockHomeSection::XPolls => selected_poll
+            .and_then(|index| projection.poll_rows.get(index))
+            .map(|row| poll_detail_lines(app, row, usize::from(area.width))),
     };
     let mut rendered_rows = 0u16;
     if let Some(lines) = lines {
@@ -1332,6 +1456,65 @@ mod tests {
         assert!(text.contains("bind: herdr tab create --pr"), "{text:?}");
     }
 
+    fn app_with_gate() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("root terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Gate".to_string(),
+            text: "Rotate the **shared** token?".to_string(),
+            pr: Some(42),
+            ticket: Some("SCA-100".to_string()),
+            url: None,
+            default: Some("none".to_string()),
+            default_at: None,
+        }];
+        app.dock_home_section = DockHomeSection::XPolls;
+        app
+    }
+
+    #[test]
+    fn the_x_polls_section_is_selectable_beside_prs_and_tickets() {
+        let body_width = crate::ui::DOCK_DEFAULT_WIDTH.saturating_sub(2);
+        let terminal = render(&AppState::test_new(), Rect::new(0, 0, body_width, 12));
+        assert!(line_text(&terminal, 0).contains("x-polls"));
+        assert_eq!(section_layouts(Rect::new(0, 0, body_width, 12)).len(), 3);
+    }
+
+    #[test]
+    fn an_empty_x_polls_section_says_there_are_no_open_polls() {
+        let mut app = AppState::test_new();
+        app.dock_home_section = DockHomeSection::XPolls;
+        let terminal = render(&app, Rect::new(0, 0, 60, 12));
+        assert!(text(&terminal).contains("no open polls"));
+    }
+
+    #[test]
+    fn a_poll_detail_names_the_ask_its_default_and_its_links() {
+        let app = app_with_gate();
+        let terminal = render(&app, Rect::new(0, 0, 60, 24));
+        let rendered = text(&terminal);
+
+        assert!(rendered.contains("Gate"), "{rendered}");
+        assert!(rendered.contains("asks"), "{rendered}");
+        // The markdown renderer drops the emphasis markers rather than printing them.
+        assert!(rendered.contains("Rotate the shared token?"), "{rendered}");
+        assert!(rendered.contains("default"), "{rendered}");
+        assert!(rendered.contains("#42"), "{rendered}");
+        assert!(rendered.contains("SCA-100"), "{rendered}");
+    }
+
     #[test]
     fn section_selector_defaults_to_prs() {
         let app = AppState::test_new();
@@ -1454,6 +1637,7 @@ mod tests {
         let projection = DockHomeProjection {
             rows: Vec::new(),
             ticket_rows: Vec::new(),
+            poll_rows: Vec::new(),
             unbound_prs: None,
             unbound_tickets: None,
             observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),

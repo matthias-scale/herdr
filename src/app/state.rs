@@ -706,6 +706,7 @@ pub(crate) struct DockPresentationState {
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
     pub(crate) home_ticket_selection: Option<WorkItemKey>,
+    pub(crate) home_poll_selection: Option<WorkItemKey>,
     pub(crate) home_section: DockHomeSection,
     pub(crate) home_detail_tab: DockHomeDetailTab,
     pub(crate) home_focused: bool,
@@ -725,6 +726,7 @@ impl Default for DockPresentationState {
             editor_focused: false,
             home_selection: None,
             home_ticket_selection: None,
+            home_poll_selection: None,
             home_section: DockHomeSection::Prs,
             home_detail_tab: DockHomeDetailTab::Overview,
             home_focused: false,
@@ -1790,6 +1792,7 @@ pub struct AppState {
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
     pub(crate) dock_home_ticket_selection: Option<WorkItemKey>,
+    pub(crate) dock_home_poll_selection: Option<WorkItemKey>,
     pub(crate) dock_home_section: DockHomeSection,
     pub(crate) dock_home_detail_tab: DockHomeDetailTab,
     pub(crate) dock_home_focused: bool,
@@ -2021,6 +2024,9 @@ pub(crate) enum DockHomeSection {
     #[default]
     Prs,
     Tickets,
+    /// Closing-block gates across every pane: the questions waiting on a
+    /// human answer, gathered where the rest of the work lives.
+    XPolls,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2217,6 +2223,10 @@ impl AppState {
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
             &mut other.home_ticket_selection,
+        );
+        std::mem::swap(
+            &mut self.dock_home_poll_selection,
+            &mut other.home_poll_selection,
         );
         std::mem::swap(&mut self.dock_home_section, &mut other.home_section);
         std::mem::swap(&mut self.dock_home_detail_tab, &mut other.home_detail_tab);
@@ -2688,6 +2698,7 @@ impl AppState {
             dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
+            dock_home_poll_selection: None,
             dock_home_section: DockHomeSection::Prs,
             dock_home_detail_tab: DockHomeDetailTab::Overview,
             dock_home_focused: false,
