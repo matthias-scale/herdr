@@ -436,6 +436,9 @@ fn compute_view_internal(
             crate::app::state::DockHomeSection::Tickets => {
                 dock::home_ticket_tab_layouts(app, &projection, dock_body_rect)
             }
+            crate::app::state::DockHomeSection::XPolls => {
+                dock::home_poll_tab_layouts(app, &projection, dock_body_rect)
+            }
         };
         let hit_areas = layouts.tabs.iter().map(|(_, area)| *area).collect();
         let keys = layouts
@@ -449,6 +452,9 @@ fn compute_view_internal(
                     .ticket_rows
                     .get(*index)
                     .map(|row| row.key.clone()),
+                crate::app::state::DockHomeSection::XPolls => {
+                    projection.poll_rows.get(*index).map(|row| row.key.clone())
+                }
             })
             .collect();
         (

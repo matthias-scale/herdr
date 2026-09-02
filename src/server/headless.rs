@@ -4874,6 +4874,9 @@ impl HeadlessServer {
                         crate::app::state::DockHomeSection::Tickets => {
                             presentation.home_ticket_selection.clone()
                         }
+                        crate::app::state::DockHomeSection::XPolls => {
+                            presentation.home_poll_selection.clone()
+                        }
                     },
                     !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
                 )
@@ -6001,6 +6004,7 @@ mod tests {
                 editor_focused,
                 home_selection: None,
                 home_ticket_selection: None,
+                home_poll_selection: None,
                 home_section: crate::app::state::DockHomeSection::Prs,
                 home_detail_tab: crate::app::state::DockHomeDetailTab::Overview,
                 home_focused: false,

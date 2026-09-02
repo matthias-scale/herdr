@@ -47,6 +47,7 @@ impl AppState {
             .and_then(|index| match index {
                 0 => Some(crate::app::state::DockHomeSection::Prs),
                 1 => Some(crate::app::state::DockHomeSection::Tickets),
+                2 => Some(crate::app::state::DockHomeSection::XPolls),
                 _ => None,
             })
     }
