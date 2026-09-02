@@ -21,6 +21,7 @@ mod inbox;
 pub(crate) mod info_panel;
 mod keybind_help;
 mod loop_runs;
+mod markdown;
 mod menus;
 mod mobile;
 mod navigator;
