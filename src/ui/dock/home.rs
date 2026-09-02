@@ -932,8 +932,11 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         } else {
             TAB_ROWS
         });
-    let footer_y = area.bottom().saturating_sub(FOOTER_ROWS).max(detail_y);
-    let detail_height = footer_y.saturating_sub(detail_y);
+    // The footer follows the content rather than the pane floor, so a short
+    // detail does not leave a gap between the last row and the legend. It only
+    // reaches the floor when the body actually fills the available height.
+    let footer_floor = area.bottom().saturating_sub(FOOTER_ROWS).max(detail_y);
+    let detail_height = footer_floor.saturating_sub(detail_y);
     let lines = match app.dock_home_section {
         DockHomeSection::Prs => selected_pr
             .and_then(|index| projection.rows.get(index))
@@ -942,6 +945,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             .and_then(|index| projection.ticket_rows.get(index))
             .map(|row| ticket_detail_lines(app, row, usize::from(area.width))),
     };
+    let mut rendered_rows = 0u16;
     if let Some(lines) = lines {
         let max_scroll = lines.len().saturating_sub(usize::from(detail_height));
         let scroll = usize::from(app.dock_scroll).min(max_scroll);
@@ -951,6 +955,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             .take(usize::from(detail_height))
             .enumerate()
         {
+            rendered_rows = rendered_rows.saturating_add(1);
             frame.render_widget(
                 Paragraph::new(line),
                 Rect::new(
@@ -962,6 +967,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             );
         }
     }
+    let footer_y = detail_y.saturating_add(rendered_rows).min(footer_floor);
     render_footer(app, &projection, frame, area, footer_y);
 }
 
@@ -1552,6 +1558,36 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(areas.len(), projection.rows.len());
         assert_eq!(areas, vec![Rect::new(4, 8, 7, 1), Rect::new(11, 8, 7, 1)]);
+    }
+
+    #[test]
+    fn the_footer_sits_directly_under_a_short_detail_instead_of_the_pane_floor() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let terminal = render(&app, Rect::new(0, 0, 60, 40));
+        let (_, rule_y) = text_position(&terminal, "unbound");
+        let last_content = (0..rule_y)
+            .rev()
+            .find(|y| !line_text(&terminal, *y).trim().is_empty())
+            .expect("a content row above the footer");
+
+        assert_eq!(
+            rule_y,
+            last_content.saturating_add(1),
+            "the footer rule should start on the row after the last content row"
+        );
+        assert!(
+            rule_y < 40 - FOOTER_ROWS,
+            "a short detail must not pin the footer to the pane floor"
+        );
+    }
+
+    #[test]
+    fn a_detail_that_fills_the_pane_keeps_the_footer_at_the_floor() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let terminal = render(&app, Rect::new(0, 0, 60, 12));
+        let (_, rule_y) = text_position(&terminal, "unbound");
+
+        assert_eq!(rule_y, 12 - FOOTER_ROWS + 1);
     }
 
     #[test]
