@@ -700,8 +700,11 @@ impl crate::app::state::AppState {
         )
     }
 
-    /// Follow a changed pane focus to its bound PR without repeatedly
-    /// overwriting an attach-local explicit selection for the same pane.
+    /// Follow a changed pane focus to the work item it is bound to without
+    /// repeatedly overwriting an attach-local explicit selection for the same
+    /// pane. A pull request wins when the pane has one; otherwise the pane's
+    /// ticket selects the tickets section, so opening a ticket-only tab still
+    /// moves the dock to the work being looked at.
     pub(crate) fn reconcile_dock_home_with_focused_pane(&mut self) {
         let focused = self.current_pane_focus_target();
         if self.dock_home_followed_pane == focused {
@@ -719,37 +722,54 @@ impl crate::app::state::AppState {
         else {
             return;
         };
-        let Some(pr_url) = self
+        let Some(context) = self
             .workspaces
             .get(ws_idx)
             .and_then(|workspace| workspace.terminal_id(focused.pane_id))
             .and_then(|terminal_id| self.terminals.get(terminal_id))
-            .and_then(|terminal| {
-                terminal
-                    .effective_work_context()
-                    .primary_pr()
-                    .map(str::to_string)
-            })
-        else {
-            return;
-        };
-        let Some(key) = self
-            .dock_home_projection()
-            .rows
-            .into_iter()
-            .find(|row| {
-                row.key
-                    .pr_url
-                    .as_deref()
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&pr_url))
-            })
-            .map(|row| row.key)
+            .map(|terminal| terminal.effective_work_context().clone())
         else {
             return;
         };
 
-        self.dock_home_selection = Some(key);
-        self.dock_home_section = crate::app::state::DockHomeSection::Prs;
+        let projection = self.dock_home_projection();
+        if let Some(pr_url) = context.primary_pr() {
+            if let Some(key) = projection
+                .rows
+                .iter()
+                .find(|row| {
+                    row.key
+                        .pr_url
+                        .as_deref()
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(pr_url))
+                })
+                .map(|row| row.key.clone())
+            {
+                self.dock_home_selection = Some(key);
+                self.dock_home_section = crate::app::state::DockHomeSection::Prs;
+                self.dock_scroll = 0;
+                return;
+            }
+        }
+        let Some(ticket_id) = context.primary_ticket() else {
+            return;
+        };
+        let Some(key) = projection
+            .ticket_rows
+            .iter()
+            .find(|row| {
+                row.key
+                    .ticket_id
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(ticket_id))
+            })
+            .map(|row| row.key.clone())
+        else {
+            return;
+        };
+
+        self.dock_home_ticket_selection = Some(key);
+        self.dock_home_section = crate::app::state::DockHomeSection::Tickets;
         self.dock_scroll = 0;
     }
 
@@ -1232,6 +1252,63 @@ mod tests {
         let third = state.workspaces[2].tabs[0].root_pane;
         assert!(state.focus_pane_in_workspace(2, third));
         assert_eq!(state.dock_home_selection, Some(key_for("30")));
+    }
+
+    fn state_with_bound_tickets(ticket_ids: &[&str]) -> crate::app::state::AppState {
+        let mut state = crate::app::state::AppState::test_new();
+        state.workspaces = ticket_ids
+            .iter()
+            .map(|ticket| crate::workspace::Workspace::test_new(ticket))
+            .collect();
+        state.active = (!state.workspaces.is_empty()).then_some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        for (ws_idx, ticket) in ticket_ids.iter().enumerate() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    ticket_ids: Some(vec![(*ticket).to_string()]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        state
+    }
+
+    #[test]
+    fn dock_home_follows_a_focused_pane_to_its_ticket_when_it_has_no_pull_request() {
+        let mut state = state_with_bound_tickets(&["SCA-100", "SCA-200"]);
+        let projection = state.dock_home_projection();
+        let key_for = |identifier: &str| {
+            projection
+                .ticket_rows
+                .iter()
+                .find(|row| row.ticket.identifier == identifier)
+                .expect("bound ticket row")
+                .key
+                .clone()
+        };
+        state.dock_home_section = crate::app::state::DockHomeSection::Prs;
+
+        let second = state.workspaces[1].tabs[0].root_pane;
+        assert!(state.focus_pane_in_workspace(1, second));
+
+        assert_eq!(state.dock_home_ticket_selection, Some(key_for("SCA-200")));
+        assert_eq!(
+            state.dock_home_section,
+            crate::app::state::DockHomeSection::Tickets
+        );
+
+        let first = state.workspaces[0].tabs[0].root_pane;
+        assert!(state.focus_pane_in_workspace(0, first));
+        assert_eq!(state.dock_home_ticket_selection, Some(key_for("SCA-100")));
     }
 
     #[test]
