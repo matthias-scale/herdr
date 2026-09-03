@@ -1,9 +1,9 @@
-//! Pull-request projection of the repo-wide work index.
+//! Pull-request projections of the repo-wide work index.
 //!
 //! The projection is pure data: snapshot in, rows and groups out. Selection,
 //! rotation, and repo filtering live here so the renderer stays dumb and the
-//! rules stay testable without a PTY. Options B/C/D (tickets, agents, review
-//! queue) slot in as additional render arms over the same `WorkViewState`.
+//! rules stay testable without a PTY. Options B/C (tickets and agents) slot in
+//! as additional render arms over the same `WorkViewState`.
 
 use crate::app::state::{WorkItemKey, WorkProjection, WorkViewState};
 use crate::work_context::repo_slugs_match;
@@ -46,6 +46,51 @@ pub(crate) struct WorkPrGroup {
 pub(crate) struct WorkPrProjection {
     pub(crate) groups: Vec<WorkPrGroup>,
     pub(crate) row_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewQueueVerdict {
+    Consistent,
+    StateDrift,
+    Untracked,
+}
+
+impl ReviewQueueVerdict {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Consistent => "✓",
+            Self::StateDrift => "⚠ state drift",
+            Self::Untracked => "⚠ untracked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkReviewQueueRow {
+    pub(crate) key: WorkItemKey,
+    pub(crate) number: String,
+    pub(crate) title: String,
+    pub(crate) ticket: String,
+    pub(crate) ticket_state: String,
+    pub(crate) verdict: ReviewQueueVerdict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkReviewQueueProjection {
+    pub(crate) rows: Vec<WorkReviewQueueRow>,
+    pub(crate) awaiting_review_count: usize,
+    pub(crate) ticket_in_review_count: usize,
+    pub(crate) drift_count: usize,
+}
+
+impl WorkReviewQueueProjection {
+    fn row_index(&self, key: Option<&WorkItemKey>) -> Option<usize> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        key.and_then(|key| self.rows.iter().position(|row| &row.key == key))
+            .or(Some(0))
+    }
 }
 
 impl WorkPrProjection {
@@ -185,6 +230,75 @@ pub(crate) fn project_pull_requests(
     WorkPrProjection { groups, row_count }
 }
 
+fn ticket_is_in_review(item: &WorkItem) -> bool {
+    item.ticket_state
+        .as_deref()
+        .is_some_and(|state| state.trim().eq_ignore_ascii_case("In Review"))
+}
+
+/// Project GitHub's review queue and show whether the linked Linear state
+/// agrees. Drafts are excluded because a draft is not awaiting review, even
+/// when GitHub reports `REVIEW_REQUIRED` at open time.
+pub(crate) fn project_review_queue(
+    snapshot: &Snapshot,
+    repo_filter: Option<&str>,
+) -> WorkReviewQueueProjection {
+    let mut rows = snapshot
+        .items
+        .iter()
+        .filter(|item| is_pull_request(item))
+        .filter(|item| !item.draft)
+        .filter(|item| item.review_decision.as_deref() == Some("REVIEW_REQUIRED"))
+        .filter(|item| repo_filter.is_none_or(|repo| repo_slugs_match(repo, item.repo.as_str())))
+        .map(|item| {
+            let pr_row = project_row(item);
+            let in_review = ticket_is_in_review(item);
+            let verdict = if item.ticket_ids.is_empty() {
+                ReviewQueueVerdict::Untracked
+            } else if in_review {
+                ReviewQueueVerdict::Consistent
+            } else {
+                ReviewQueueVerdict::StateDrift
+            };
+            WorkReviewQueueRow {
+                key: pr_row.key,
+                number: pr_row.number,
+                title: pr_row.title,
+                ticket: pr_row.ticket,
+                ticket_state: if item.ticket_ids.is_empty() {
+                    "—".to_string()
+                } else {
+                    item.ticket_state.clone().unwrap_or_else(|| "—".to_string())
+                },
+                verdict,
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .key
+            .pr_number
+            .unwrap_or(0)
+            .cmp(&left.key.pr_number.unwrap_or(0))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    let awaiting_review_count = rows.len();
+    let ticket_in_review_count = rows
+        .iter()
+        .filter(|row| row.verdict == ReviewQueueVerdict::Consistent)
+        .count();
+    let drift_count = rows
+        .iter()
+        .filter(|row| row.verdict != ReviewQueueVerdict::Consistent)
+        .count();
+    WorkReviewQueueProjection {
+        rows,
+        awaiting_review_count,
+        ticket_in_review_count,
+        drift_count,
+    }
+}
+
 impl WorkViewState {
     /// The PR projection of the current snapshot, or `None` when another
     /// projection is active (placeholder) or no snapshot has been collected.
@@ -203,19 +317,53 @@ impl WorkViewState {
         projection.row_index(self.selected.as_ref())
     }
 
+    pub(crate) fn review_queue_projection(&self) -> Option<WorkReviewQueueProjection> {
+        if self.projection != WorkProjection::ReviewQueue {
+            return None;
+        }
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| project_review_queue(snapshot, self.repo_filter.as_deref()))
+    }
+
+    pub(crate) fn selected_review_queue_index(
+        &self,
+        projection: &WorkReviewQueueProjection,
+    ) -> Option<usize> {
+        projection.row_index(self.selected.as_ref())
+    }
+
     /// Move the selection within the current projection. Placeholder
     /// projections have no rows, so movement is a no-op there and the PR
     /// selection survives a rotation round-trip untouched.
     pub(crate) fn move_selection(&mut self, delta: i64) {
-        let Some(projection) = self.projection() else {
-            return;
+        let next_key = match self.projection {
+            WorkProjection::PullRequests => {
+                let Some(projection) = self.projection() else {
+                    return;
+                };
+                let Some(index) = self.selected_index(&projection) else {
+                    return;
+                };
+                let last = projection.row_count.saturating_sub(1) as i64;
+                let next = (index as i64 + delta).clamp(0, last) as usize;
+                let key = projection.flat_rows().nth(next).map(|row| row.key.clone());
+                key
+            }
+            WorkProjection::ReviewQueue => {
+                let Some(projection) = self.review_queue_projection() else {
+                    return;
+                };
+                let Some(index) = self.selected_review_queue_index(&projection) else {
+                    return;
+                };
+                let last = projection.rows.len().saturating_sub(1) as i64;
+                let next = (index as i64 + delta).clamp(0, last) as usize;
+                projection.rows.get(next).map(|row| row.key.clone())
+            }
+            WorkProjection::Tickets | WorkProjection::Agents => return,
         };
-        let Some(index) = self.selected_index(&projection) else {
-            return;
-        };
-        let last = projection.row_count.saturating_sub(1) as i64;
-        let next = (index as i64 + delta).clamp(0, last) as usize;
-        self.selected = projection.flat_rows().nth(next).map(|row| row.key.clone());
+        self.selected = next_key;
     }
 
     pub(crate) fn rotate(&mut self, forward: bool) {
@@ -1082,6 +1230,12 @@ mod tests {
         WorkViewState::new(true, Some(snapshot(items)))
     }
 
+    fn awaiting_review(mut item: WorkItem, ticket_state: Option<&str>) -> WorkItem {
+        item.review_decision = Some("REVIEW_REQUIRED".to_string());
+        item.ticket_state = ticket_state.map(str::to_string);
+        item
+    }
+
     fn home_binding(
         ws_idx: usize,
         pr_number: u64,
@@ -1807,6 +1961,156 @@ mod tests {
         }
         assert_eq!(view.projection, WorkProjection::PullRequests);
         assert_eq!(view.selected_row().expect("selected row").key, selected.key);
+    }
+
+    #[test]
+    fn review_queue_assigns_each_verdict_from_github_and_linear_state() {
+        let projection = project_review_queue(
+            &snapshot(vec![
+                awaiting_review(
+                    item("owner/repo", 1, "consistent", &["SCA-1"], &[]),
+                    Some("In Review"),
+                ),
+                awaiting_review(
+                    item("owner/repo", 2, "drifted", &["SCA-2"], &[]),
+                    Some("In Progress"),
+                ),
+                awaiting_review(item("owner/repo", 3, "untracked", &[], &[]), None),
+            ]),
+            None,
+        );
+        let verdict = |number| {
+            projection
+                .rows
+                .iter()
+                .find(|row| row.key.pr_number == Some(number))
+                .expect("review queue row")
+                .verdict
+        };
+        assert_eq!(verdict(1), ReviewQueueVerdict::Consistent);
+        assert_eq!(verdict(2), ReviewQueueVerdict::StateDrift);
+        assert_eq!(verdict(3), ReviewQueueVerdict::Untracked);
+    }
+
+    #[test]
+    fn review_queue_excludes_drafts_and_prs_not_awaiting_review() {
+        let mut draft = awaiting_review(
+            item("owner/repo", 1, "draft", &["SCA-1"], &[]),
+            Some("In Progress"),
+        );
+        draft.draft = true;
+        let approved = {
+            let mut value = item("owner/repo", 2, "approved", &["SCA-2"], &[]);
+            value.review_decision = Some("APPROVED".to_string());
+            value
+        };
+        let awaiting = awaiting_review(
+            item("owner/repo", 3, "awaiting", &["SCA-3"], &[]),
+            Some("In Review"),
+        );
+
+        let projection = project_review_queue(&snapshot(vec![draft, approved, awaiting]), None);
+        assert_eq!(projection.awaiting_review_count, 1);
+        assert_eq!(projection.rows[0].key.pr_number, Some(3));
+    }
+
+    #[test]
+    fn review_state_match_is_case_insensitive() {
+        let projection = project_review_queue(
+            &snapshot(vec![awaiting_review(
+                item("owner/repo", 1, "consistent", &["SCA-1"], &[]),
+                Some("iN rEvIeW"),
+            )]),
+            None,
+        );
+        assert_eq!(projection.ticket_in_review_count, 1);
+        assert_eq!(projection.drift_count, 0);
+        assert_eq!(projection.rows[0].verdict, ReviewQueueVerdict::Consistent);
+    }
+
+    #[test]
+    fn review_queue_counts_are_derived_from_its_visible_rows() {
+        let projection = project_review_queue(
+            &snapshot(vec![
+                awaiting_review(
+                    item("owner/repo", 1, "consistent", &["SCA-1"], &[]),
+                    Some("In Review"),
+                ),
+                awaiting_review(
+                    item("owner/repo", 2, "drifted", &["SCA-2"], &[]),
+                    Some("In Progress"),
+                ),
+                awaiting_review(item("owner/repo", 3, "untracked", &[], &[]), None),
+                awaiting_review(
+                    item("owner/other", 4, "filtered out", &["SCA-4"], &[]),
+                    Some("In Progress"),
+                ),
+            ]),
+            Some("owner/repo"),
+        );
+        assert_eq!(projection.awaiting_review_count, projection.rows.len());
+        assert_eq!(projection.awaiting_review_count, 3);
+        assert_eq!(projection.ticket_in_review_count, 1);
+        assert_eq!(projection.drift_count, 2);
+        assert_eq!(
+            projection.drift_count,
+            projection
+                .rows
+                .iter()
+                .filter(|row| row.verdict != ReviewQueueVerdict::Consistent)
+                .count()
+        );
+    }
+
+    #[test]
+    fn rotation_through_review_queue_preserves_the_selected_work_item() {
+        let mut view = view(vec![
+            awaiting_review(
+                item("owner/repo", 1, "one", &["SCA-1"], &[]),
+                Some("In Review"),
+            ),
+            awaiting_review(
+                item("owner/repo", 2, "two", &["SCA-2"], &[]),
+                Some("In Progress"),
+            ),
+        ]);
+        view.move_selection(1);
+        let selected = view.selected_row().expect("selected PR").key;
+
+        view.rotate(false);
+        assert_eq!(view.projection, WorkProjection::ReviewQueue);
+        let queue = view.review_queue_projection().expect("review queue");
+        let index = view
+            .selected_review_queue_index(&queue)
+            .expect("selected queue row");
+        assert_eq!(queue.rows[index].key, selected);
+
+        view.rotate(true);
+        assert_eq!(view.projection, WorkProjection::PullRequests);
+        assert_eq!(view.selected_row().expect("selected PR").key, selected);
+    }
+
+    #[test]
+    fn review_queue_moves_within_only_the_visible_rows() {
+        let mut view = view(vec![
+            awaiting_review(
+                item("owner/repo", 1, "one", &["SCA-1"], &[]),
+                Some("In Review"),
+            ),
+            item("owner/repo", 2, "not awaiting", &["SCA-2"], &[]),
+            awaiting_review(
+                item("owner/repo", 3, "three", &["SCA-3"], &[]),
+                Some("In Progress"),
+            ),
+        ]);
+        view.rotate(false);
+        view.move_selection(1);
+
+        let projection = view.review_queue_projection().expect("review queue");
+        let selected = view
+            .selected_review_queue_index(&projection)
+            .expect("selected row");
+        assert_eq!(projection.rows[selected].key.pr_number, Some(1));
     }
 
     #[test]

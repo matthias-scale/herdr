@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     app::state::{Palette, WorkProjection, WorkViewState},
-    work_projection::{project_pull_requests, WorkPrRow},
+    work_projection::{project_pull_requests, project_review_queue, WorkPrRow, WorkReviewQueueRow},
 };
 
 pub(crate) fn render(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
@@ -18,9 +18,95 @@ pub(crate) fn render(palette: &Palette, state: &WorkViewState, area: Rect, frame
     let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
     match state.projection {
         WorkProjection::PullRequests => render_pull_requests(palette, state, sections[0], frame),
+        WorkProjection::ReviewQueue => render_review_queue(palette, state, sections[0], frame),
         projection => render_placeholder(palette, projection, sections[0], frame),
     }
     render_footer(palette, state, sections[1], frame);
+}
+
+fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    let scope = state
+        .repo_filter
+        .as_deref()
+        .map(short_repo_name)
+        .unwrap_or("all repos");
+    let projection = state
+        .snapshot
+        .as_ref()
+        .filter(|_| state.enabled)
+        .map(|snapshot| project_review_queue(snapshot, state.repo_filter.as_deref()));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" work · review queue · {scope} "))
+        .border_style(Style::default().fg(palette.accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let message = if !state.enabled {
+        Some("work index disabled")
+    } else if state.snapshot.is_none() {
+        Some("work index not yet collected")
+    } else {
+        state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.unavailable.as_deref())
+    };
+    if let Some(message) = message {
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(palette.subtext0)),
+            inner,
+        );
+        return;
+    }
+
+    let Some(projection) = projection else {
+        return;
+    };
+    let mut lines = vec![Line::styled(
+        format_review_queue_summary(
+            projection.awaiting_review_count,
+            projection.ticket_in_review_count,
+            inner.width,
+        ),
+        Style::default()
+            .fg(palette.subtext0)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if projection.rows.is_empty() {
+        lines.push(Line::styled(
+            "  no PRs awaiting review",
+            Style::default().fg(palette.subtext0),
+        ));
+    } else {
+        let selected = state.selected_review_queue_index(&projection).unwrap_or(0);
+        for (index, row) in projection.rows.iter().enumerate() {
+            let style = if index == selected {
+                Style::default()
+                    .fg(palette.text)
+                    .bg(palette.surface0)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            lines.push(Line::styled(
+                format_review_queue_row(row, inner.width),
+                style,
+            ));
+        }
+    }
+    lines.push(Line::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(palette.surface1),
+    ));
+    lines.push(Line::styled(
+        format!(
+            "  drift {} PRs awaiting review whose ticket is not In Review",
+            projection.drift_count
+        ),
+        Style::default().fg(palette.subtext0),
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_pull_requests(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
@@ -144,7 +230,7 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
         WorkProjection::Tickets => " ←/→ view PRs [tickets] agents   not yet available",
         WorkProjection::Agents => " ←/→ view PRs tickets [agents]   not yet available",
         WorkProjection::ReviewQueue => {
-            " ←/→ view PRs tickets agents [review queue]   not yet available"
+            " ←/→ view PRs tickets agents [review queue]   ↑/↓ move   f filter repo"
         }
     };
     let text = state
@@ -155,6 +241,34 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
         Paragraph::new(text).style(Style::default().fg(palette.subtext0)),
         area,
     );
+}
+
+fn format_review_queue_summary(awaiting: usize, in_review: usize, width: u16) -> String {
+    let left = format!("  awaiting review · {awaiting}");
+    let right = format!("ticket says \"In Review\" · {in_review}");
+    let width = usize::from(width);
+    let left_width = width.div_ceil(2);
+    format!(
+        "{}{}",
+        fit_cell(&left, left_width),
+        fit_cell(&right, width.saturating_sub(left_width))
+    )
+}
+
+fn format_review_queue_row(row: &WorkReviewQueueRow, width: u16) -> String {
+    let ticket_width = 11;
+    let state_width = 13;
+    let verdict_width = 13;
+    let fixed_width = 2 + 6 + 2 + 2 + ticket_width + 2 + state_width + 2 + verdict_width;
+    let title_width = usize::from(width).saturating_sub(fixed_width).max(8);
+    format!(
+        "  {:<6}  {}  {}  {}  {}",
+        row.number,
+        fit_cell(&row.title, title_width),
+        fit_cell(&row.ticket, ticket_width),
+        fit_cell(&row.ticket_state, state_width),
+        fit_cell(row.verdict.label(), verdict_width),
+    )
 }
 
 fn format_pull_request_row(row: &WorkPrRow, selected: bool, width: u16) -> String {
@@ -226,6 +340,19 @@ mod tests {
         }
     }
 
+    fn review_pr(
+        repo: &str,
+        number: u64,
+        title: &str,
+        tickets: &[&str],
+        ticket_state: Option<&str>,
+    ) -> WorkItem {
+        let mut item = pr(repo, number, tickets);
+        item.pr_title = Some(title.to_string());
+        item.ticket_state = ticket_state.map(str::to_string);
+        item
+    }
+
     fn snapshot(items: Vec<WorkItem>) -> Snapshot {
         Snapshot {
             items,
@@ -270,6 +397,85 @@ mod tests {
         let mut placeholder = WorkViewState::new(true, Some(snapshot(Vec::new())));
         placeholder.projection = WorkProjection::Tickets;
         assert!(rendered_text(&placeholder).contains("tickets not yet available"));
+    }
+
+    #[test]
+    fn review_queue_degraded_states_render_safely() {
+        let mut disabled = WorkViewState::new(false, None);
+        disabled.projection = WorkProjection::ReviewQueue;
+        assert!(rendered_text(&disabled).contains("work index disabled"));
+
+        let mut not_collected = WorkViewState::new(true, None);
+        not_collected.projection = WorkProjection::ReviewQueue;
+        assert!(rendered_text(&not_collected).contains("work index not yet collected"));
+
+        let mut unavailable = WorkViewState::new(
+            true,
+            Some(Snapshot {
+                items: Vec::new(),
+                unavailable: Some("unavailable".to_string()),
+                observed_at: SystemTime::UNIX_EPOCH,
+            }),
+        );
+        unavailable.projection = WorkProjection::ReviewQueue;
+        assert!(rendered_text(&unavailable).contains("unavailable"));
+    }
+
+    #[test]
+    fn review_queue_fixture_renders_all_verdicts_and_matching_counts() {
+        let mut state = WorkViewState::new(
+            true,
+            Some(snapshot(vec![
+                review_pr(
+                    "scalablev2",
+                    3226,
+                    "ci(preview): allowlist",
+                    &["SCA-2462"],
+                    Some("In Progress"),
+                ),
+                review_pr(
+                    "scalablev2",
+                    3214,
+                    "feat(image): restore prompt access",
+                    &["SCA-2462", "SCA-2463", "SCA-2464"],
+                    Some("In Progress"),
+                ),
+                review_pr(
+                    "scalablev2",
+                    3211,
+                    "fix(onboarding): retry dispatch",
+                    &[],
+                    None,
+                ),
+                review_pr(
+                    "scalablev2",
+                    2531,
+                    "fix(SCA-2462): renewal reconcile",
+                    &["SCA-2462"],
+                    Some("In Review"),
+                ),
+            ])),
+        );
+        state.projection = WorkProjection::ReviewQueue;
+        state.repo_filter = Some("scalablev2".to_string());
+
+        let text = rendered_text(&state);
+        assert!(text.contains("work · review queue · scalablev2"));
+        assert!(text.contains("awaiting review · 4"));
+        assert!(text.contains("ticket says \"In Review\" · 1"));
+        assert!(text.contains("3226"));
+        assert!(text.contains("SCA-2462"));
+        assert!(text.contains("3 tickets"));
+        assert!(text.contains("In Progress"));
+        assert!(text.contains("⚠ state drift"));
+        assert!(text.contains("no ticket"));
+        assert!(text.contains("⚠ untracked"));
+        assert!(text.contains("In Review"));
+        assert!(text.contains("✓"));
+        assert!(text.contains("drift 3 PRs awaiting review whose ticket is not In Review"));
+        assert!(text.contains("←/→ view PRs tickets agents [review queue]"));
+        assert!(text.contains("↑/↓ move"));
+        assert!(text.contains("f filter repo"));
     }
 
     #[test]
