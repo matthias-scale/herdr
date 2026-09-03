@@ -1152,6 +1152,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn gh_preview_urls_are_capped_and_pr_url_is_extracted() {
         let dir = fixture_dir("preview-cap");
