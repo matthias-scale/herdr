@@ -1137,7 +1137,16 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) -> bool {
-        self.handle_modified_url_click_with(source_id, mouse, crate::platform::open_url)
+        #[cfg(target_os = "macos")]
+        {
+            self.handle_modified_url_click_with(source_id, mouse, |url| {
+                crate::platform::open_url(url).map(|()| None)
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.handle_modified_url_click_with(source_id, mouse, crate::platform::open_url)
+        }
     }
 
     fn handle_modified_url_click_with(

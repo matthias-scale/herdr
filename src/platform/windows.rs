@@ -3318,9 +3318,9 @@ mod tests {
         ];
         let snapshot = super::ProcessSnapshot::new(entries);
 
-        let job = super::select_pane_foreground_job_with_runtime_inspection(
+        let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
             10,
-            &entries,
+            &snapshot,
             |_| panic!("Git Bash fallback must not run after normal detection succeeds"),
             |_| panic!("runtime marker must not be read after normal detection succeeds"),
         )
@@ -3363,11 +3363,12 @@ mod tests {
                 &[r"C:\npm\node_modules\@openai\codex\bin\codex.exe"],
             ),
         ];
+        let snapshot = super::ProcessSnapshot::new(entries);
         let mut inspected = Vec::new();
 
-        let job = super::select_pane_foreground_job_with_runtime_inspection(
+        let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
             10,
-            &entries,
+            &snapshot,
             |_| true,
             |entry| {
                 inspected.push(entry.pid);
@@ -3387,10 +3388,11 @@ mod tests {
             test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
             test_entry(20, 99, "codex.exe", &["codex.exe"]),
         ];
+        let snapshot = super::ProcessSnapshot::new(entries);
 
-        let job = super::select_pane_foreground_job_with_runtime_inspection(
+        let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
             10,
-            &entries,
+            &snapshot,
             |_| false,
             |_| panic!("runtime marker must not be read for non-Git-Bash panes"),
         )
@@ -3405,10 +3407,11 @@ mod tests {
             test_entry(10, 1, "bash.exe", &[r"C:\Program Files\Git\bin\bash.exe"]),
             test_entry(20, 99, "git.exe", &["git.exe", "status"]),
         ];
+        let snapshot = super::ProcessSnapshot::new(entries);
 
-        let job = super::select_pane_foreground_job_with_runtime_inspection(
+        let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
             10,
-            &entries,
+            &snapshot,
             |_| true,
             |_| panic!("runtime marker must not be read without an agent candidate"),
         )
@@ -3423,11 +3426,12 @@ mod tests {
             test_entry(10, 1, "bash.exe", &[r"C:\Program Files\Git\bin\bash.exe"]),
             test_entry(20, 99, "codex.exe", &["codex.exe"]),
         ];
+        let snapshot = super::ProcessSnapshot::new(entries);
 
         for shell_marker in [None, Some(String::new())] {
-            let job = super::select_pane_foreground_job_with_runtime_inspection(
+            let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
                 10,
-                &entries,
+                &snapshot,
                 |_| true,
                 |entry| {
                     if entry.pid == 10 {
@@ -3449,10 +3453,11 @@ mod tests {
             test_entry(10, 1, "bash.exe", &[r"C:\Program Files\Git\bin\bash.exe"]),
             test_entry(20, 99, "codex.exe", &["codex.exe"]),
         ];
+        let snapshot = super::ProcessSnapshot::new(entries);
 
-        let job = super::select_pane_foreground_job_with_runtime_inspection(
+        let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
             10,
-            &entries,
+            &snapshot,
             |_| true,
             |entry| Some(if entry.pid == 10 { "pane-a" } else { "pane-b" }.to_string()),
         )
@@ -3469,10 +3474,11 @@ mod tests {
             test_entry(20, 99, "codex.exe", &["codex.exe"]),
             test_entry(30, 98, "claude.exe", &["claude.exe"]),
         ];
+        let snapshot = super::ProcessSnapshot::new(entries);
 
-        let job = super::select_pane_foreground_job_with_runtime_inspection(
+        let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
             10,
-            &entries,
+            &snapshot,
             |_| true,
             |_| Some("pane-a".to_string()),
         )
@@ -4088,7 +4094,7 @@ mod tests {
     }
 
     #[test]
-    fn process_environment_variable_parser_reads_case_insensitive_marker() {
+    fn synced_process_environment_variable_parser_reads_case_insensitive_marker() {
         let environment: Vec<u16> = "PATH=C:\\Windows\0herdr_pane_runtime_id=pane-a\0\0"
             .encode_utf16()
             .collect();
@@ -4104,7 +4110,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_runtime_markers_are_distinct() {
+    fn synced_pane_runtime_markers_are_distinct() {
         let first = super::next_pane_runtime_marker();
         let second = super::next_pane_runtime_marker();
 
@@ -4112,7 +4118,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_runtime_marker_is_added_only_to_git_bash_environment() {
+    fn synced_pane_runtime_marker_is_added_only_to_git_bash_environment() {
         let root = std::env::temp_dir().join(format!(
             "herdr-git-bash-test-{}",
             super::next_pane_runtime_marker()
