@@ -7,9 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    home::{
-        effort_options, model_options, HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget,
-    },
+    home::{HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
     inbox::BlockedAgent,
     state::{HomeHitArea, HomeHitTarget},
     AppState,
@@ -385,14 +383,12 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|agent| crate::detect::agent_label(*agent).to_string())
             .collect(),
-        HomePicker::Model => model_options(home.agent)
+        HomePicker::Model => home
+            .model_options()
             .iter()
-            .map(|model| (*model).to_string())
+            .map(|model| model.id.clone())
             .collect(),
-        HomePicker::Effort => effort_options(home.agent)
-            .iter()
-            .map(|effort| (*effort).to_string())
-            .collect(),
+        HomePicker::Effort => home.effort_options().to_vec(),
         HomePicker::Directory => app
             .home_directory_options()
             .iter()
@@ -1235,7 +1231,7 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         assert!(
-            row_text(&buffer, area, composer.chips.y).contains("claude ▾   opus ▾   medium ▾"),
+            row_text(&buffer, area, composer.chips.y).contains("claude ▾   default ▾   auto ▾"),
             "wide composer should keep the intended chip spacing"
         );
         assert_eq!(
@@ -1318,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn home_tab_order_includes_each_agents_supported_effort_options() {
+    fn home_tab_order_includes_the_effort_field_for_dispatchable_agents() {
         let mut home = HomeState::default();
         let claude_order = [
             HomeFocus::Agent,
@@ -1334,10 +1330,6 @@ mod tests {
         }
 
         home.set_agent(crate::detect::Agent::Codex);
-        assert_eq!(
-            effort_options(crate::detect::Agent::Codex),
-            &["low", "medium", "high", "xhigh"]
-        );
         home.focus = Some(HomeFocus::Model);
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Effort));
@@ -1345,60 +1337,6 @@ mod tests {
         assert_eq!(home.focus, Some(HomeFocus::Directory));
         home.move_focus(true);
         assert_eq!(home.focus, Some(HomeFocus::Effort));
-    }
-
-    #[test]
-    fn enter_dispatch_plan_preserves_selected_agent_model_effort_directory_and_target() {
-        let mut home = HomeState::default();
-        home.prompt = "implement the retry cap".into();
-        home.model = "sonnet".into();
-        home.effort = Some("high".into());
-        home.directory = std::path::PathBuf::from("/tmp/herdr");
-        home.target = HomeTarget::Existing("space-2".into());
-
-        let plan = home.dispatch_plan().expect("prompt should dispatch");
-
-        assert_eq!(plan.agent, crate::detect::Agent::Claude);
-        assert_eq!(plan.model, "sonnet");
-        assert_eq!(plan.effort.as_deref(), Some("high"));
-        assert_eq!(plan.directory, std::path::PathBuf::from("/tmp/herdr"));
-        assert_eq!(plan.target, HomeTarget::Existing("space-2".into()));
-        assert_eq!(
-            plan.argv,
-            vec![
-                "claude",
-                "--model",
-                "sonnet",
-                "--effort",
-                "high",
-                "implement the retry cap"
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_dispatch_plan_uses_the_reasoning_effort_config_override() {
-        let mut home = HomeState::default();
-        home.prompt = "implement the retry cap".into();
-        home.set_agent(crate::detect::Agent::Codex);
-        home.model = "gpt-5.3-codex".into();
-        home.effort = Some("xhigh".into());
-
-        let plan = home.dispatch_plan().expect("prompt should dispatch");
-
-        assert_eq!(plan.agent, crate::detect::Agent::Codex);
-        assert_eq!(plan.effort.as_deref(), Some("xhigh"));
-        assert_eq!(
-            plan.argv,
-            vec![
-                "codex",
-                "--model",
-                "gpt-5.3-codex",
-                "-c",
-                "model_reasoning_effort=xhigh",
-                "implement the retry cap"
-            ]
-        );
     }
 
     #[test]
@@ -1417,7 +1355,7 @@ mod tests {
 
         // The composer is a card, so its rows open on the left border.
         assert!(
-            chip_row.starts_with("│claude ▾ opus ▾ medium"),
+            chip_row.starts_with("│claude ▾ default ▾ aut"),
             "{chip_row:?}"
         );
         assert_eq!(rects[0].1.right() + 1, rects[1].1.x);

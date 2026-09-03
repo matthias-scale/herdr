@@ -17,6 +17,7 @@ mod creation;
 pub(crate) mod foreground_process;
 mod git_refresh;
 pub(crate) mod home;
+pub(crate) mod home_catalog;
 mod ids;
 pub(crate) mod inbox;
 mod input;
