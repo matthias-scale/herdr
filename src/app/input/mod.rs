@@ -75,6 +75,14 @@ use super::App;
 // Key handling
 // ---------------------------------------------------------------------------
 
+/// The three staged pull request actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullRequestAction {
+    Approve,
+    Merge,
+    Close,
+}
+
 impl App {
     pub(super) async fn handle_key(
         &mut self,
@@ -154,10 +162,71 @@ impl App {
 
         let navigate = &self.state.keybinds.navigate;
         let event = key.as_key_event();
+
+        // A staged write owns the keyboard until it is confirmed or dropped, so
+        // nothing can leave herdr as a side effect of ordinary navigation.
+        if self.state.dock_pending_write.is_some() {
+            match event.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') if event.modifiers.is_empty() => {
+                    self.run_pending_dock_write();
+                }
+                KeyCode::Esc => {
+                    self.state.dock_pending_write = None;
+                    self.state.dock_write_notice = Some("cancelled".to_string());
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        // While a comment is being typed the keys belong to the draft, not to
+        // the action shortcuts.
+        if let Some(draft) = self.state.dock_comment_draft.as_mut() {
+            match event.code {
+                KeyCode::Esc => {
+                    self.state.dock_comment_draft = None;
+                }
+                KeyCode::Backspace => {
+                    draft.pop();
+                }
+                KeyCode::Enter if event.modifiers.is_empty() => {
+                    self.stage_dock_comment();
+                }
+                KeyCode::Char(character)
+                    if event.modifiers.is_empty()
+                        || event.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    draft.push(character);
+                }
+                _ => {}
+            }
+            return true;
+        }
+
         if event.code == KeyCode::Esc && event.modifiers.is_empty() {
             self.state.dock_home_focused = false;
             self.state.dock_scroll = 0;
             return true;
+        }
+
+        if event.modifiers.is_empty() {
+            match event.code {
+                KeyCode::Char('r') => {
+                    self.state.dock_comment_draft = Some(String::new());
+                    self.state.dock_write_notice = None;
+                    return true;
+                }
+                KeyCode::Char('a') => {
+                    return self.stage_pull_request_action(PullRequestAction::Approve)
+                }
+                KeyCode::Char('m') => {
+                    return self.stage_pull_request_action(PullRequestAction::Merge)
+                }
+                KeyCode::Char('x') => {
+                    return self.stage_pull_request_action(PullRequestAction::Close)
+                }
+                _ => {}
+            }
         }
         // Arrows only. `pane_left`/`pane_right`/`pane_up`/`pane_down` default to
         // bare `h`/`j`/`k`/`l`, and the dock is focused over a live shell, so
@@ -180,6 +249,101 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// Stage a pull request action for confirmation. Returns false when the
+    /// selection is not a pull request, so the key falls through unchanged.
+    fn stage_pull_request_action(&mut self, action: PullRequestAction) -> bool {
+        if self.state.dock_home_section != crate::app::state::DockHomeSection::Prs {
+            return false;
+        }
+        let Some(row) = self.state.dock_home_selected_row() else {
+            return false;
+        };
+        let (Some(number), repo) = (row.key.pr_number, row.key.repo.clone()) else {
+            return false;
+        };
+        if repo.is_empty() {
+            return false;
+        }
+        self.state.dock_pending_write = Some(match action {
+            PullRequestAction::Approve => {
+                crate::work_index::WorkItemWrite::ApprovePullRequest { repo, number }
+            }
+            PullRequestAction::Merge => {
+                crate::work_index::WorkItemWrite::MergePullRequest { repo, number }
+            }
+            PullRequestAction::Close => {
+                crate::work_index::WorkItemWrite::ClosePullRequest { repo, number }
+            }
+        });
+        self.state.dock_write_notice = None;
+        true
+    }
+
+    /// Turn the typed draft into a staged comment on whatever is selected.
+    fn stage_dock_comment(&mut self) {
+        let Some(body) = self
+            .state
+            .dock_comment_draft
+            .as_ref()
+            .map(|draft| draft.trim().to_string())
+            .filter(|draft| !draft.is_empty())
+        else {
+            return;
+        };
+        let write = match self.state.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => {
+                self.state.dock_home_selected_row().and_then(|row| {
+                    let number = row.key.pr_number?;
+                    (!row.key.repo.is_empty()).then(|| {
+                        crate::work_index::WorkItemWrite::CommentOnPullRequest {
+                            repo: row.key.repo.clone(),
+                            number,
+                            body: body.clone(),
+                        }
+                    })
+                })
+            }
+            crate::app::state::DockHomeSection::Tickets => {
+                let projection = self.state.dock_home_projection();
+                self.state
+                    .dock_home_selected_ticket_index(&projection)
+                    .and_then(|index| projection.ticket_rows.get(index))
+                    .map(|row| crate::work_index::WorkItemWrite::CommentOnTicket {
+                        identifier: row.ticket.identifier.clone(),
+                        body: body.clone(),
+                    })
+            }
+            crate::app::state::DockHomeSection::XPolls => None,
+        };
+        let Some(write) = write else {
+            self.state.dock_write_notice = Some("nothing selected to comment on".to_string());
+            return;
+        };
+        self.state.dock_pending_write = Some(write);
+    }
+
+    /// Run the staged write. The draft survives a failure: text a human typed is
+    /// not thrown away because a network call did not land.
+    fn run_pending_dock_write(&mut self) {
+        let Some(write) = self.state.dock_pending_write.take() else {
+            return;
+        };
+        let gh = self.work_index_gh_program();
+        let linearis = self.work_index_linearis_program();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        match crate::work_index::run_work_item_write(&write, &gh, &linearis, deadline) {
+            Ok(message) => {
+                self.state.dock_write_notice = Some(message);
+                self.state.dock_comment_draft = None;
+                // Drop the cached detail so the next refresh shows the result.
+                if let Some(key) = write.target() {
+                    self.state.work_item_detail_cache.remove(&key);
+                }
+            }
+            Err(message) => self.state.dock_write_notice = Some(message),
+        }
     }
 
     /// Dock home is attach-local presentation layered over a focused pane, so
@@ -1726,6 +1890,75 @@ mod tests {
                 .expect("valid work context");
         }
         app
+    }
+
+    #[tokio::test]
+    async fn staging_a_pull_request_action_does_not_run_it() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        // A program that would fail loudly if it were ever invoked.
+        app.work_index_gh_program_override =
+            Some(std::path::Path::new("/usr/bin/false").to_path_buf());
+
+        assert!(
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()))
+        );
+
+        let staged = app
+            .state
+            .dock_pending_write
+            .as_ref()
+            .expect("merge should be staged");
+        assert!(
+            matches!(
+                staged,
+                crate::work_index::WorkItemWrite::MergePullRequest { .. }
+            ),
+            "{staged:?}"
+        );
+        assert!(
+            staged.describe().contains("squash-merge"),
+            "the confirmation must say what it will do: {}",
+            staged.describe()
+        );
+        assert!(
+            app.state.dock_write_notice.is_none(),
+            "staging must not have run anything"
+        );
+
+        // Escape drops it without running.
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.dock_pending_write.is_none());
+        assert_eq!(app.state.dock_write_notice.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn a_typed_comment_is_staged_rather_than_posted() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        app.work_index_gh_program_override =
+            Some(std::path::Path::new("/usr/bin/false").to_path_buf());
+
+        assert!(
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        );
+        for character in "ship it".chars() {
+            assert!(app.handle_dock_home_key(&TerminalKey::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty()
+            )));
+        }
+        assert_eq!(app.state.dock_comment_draft.as_deref(), Some("ship it"));
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty())));
+        let staged = app
+            .state
+            .dock_pending_write
+            .as_ref()
+            .expect("the comment should be staged, not posted");
+        assert!(matches!(
+            staged,
+            crate::work_index::WorkItemWrite::CommentOnPullRequest { body, .. } if body == "ship it"
+        ));
+        assert!(app.state.dock_write_notice.is_none());
     }
 
     #[tokio::test]

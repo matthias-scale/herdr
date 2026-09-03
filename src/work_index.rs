@@ -139,6 +139,13 @@ impl WorkItemDetailCache {
         self.entries.get(key).map(|cached| &cached.detail)
     }
 
+    /// Forget one entry, so the next refresh re-reads it. Used after a write,
+    /// where the cached copy is known to be stale the moment it succeeds.
+    pub(crate) fn remove(&mut self, key: &crate::app::state::WorkItemKey) {
+        self.entries.remove(key);
+        self.order.retain(|entry| entry != key);
+    }
+
     pub(crate) fn insert(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
         self.insert_at(key, detail, Instant::now());
     }
@@ -1267,7 +1274,7 @@ pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()>
 }
 
 impl crate::app::App {
-    fn work_index_gh_program(&self) -> std::path::PathBuf {
+    pub(crate) fn work_index_gh_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_gh_program_override.as_ref() {
             return program.clone();
@@ -1275,7 +1282,7 @@ impl crate::app::App {
         Path::new("gh").to_path_buf()
     }
 
-    fn work_index_linearis_program(&self) -> std::path::PathBuf {
+    pub(crate) fn work_index_linearis_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_linearis_program_override.as_ref() {
             return program.clone();
@@ -2281,4 +2288,142 @@ esac
                 .expect("valid JSON");
         assert!(value.get("items").is_some());
     }
+}
+
+/// A write a human asked for against a work item.
+///
+/// Each variant maps to exactly one CLI invocation. They are kept together so
+/// the confirm-then-run flow has a single vocabulary, and so it is obvious at a
+/// glance which of them change something outside herdr.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkItemWrite {
+    CommentOnPullRequest {
+        repo: String,
+        number: u64,
+        body: String,
+    },
+    CommentOnTicket {
+        identifier: String,
+        body: String,
+    },
+    ApprovePullRequest {
+        repo: String,
+        number: u64,
+    },
+    MergePullRequest {
+        repo: String,
+        number: u64,
+    },
+    ClosePullRequest {
+        repo: String,
+        number: u64,
+    },
+}
+
+impl WorkItemWrite {
+    /// What the user is about to do, for the confirmation line. Phrased as the
+    /// action and its target so a mis-aimed write is visible before it runs.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::CommentOnPullRequest { repo, number, .. } => {
+                format!("comment on {repo}#{number}")
+            }
+            Self::CommentOnTicket { identifier, .. } => format!("comment on {identifier}"),
+            Self::ApprovePullRequest { repo, number } => format!("approve {repo}#{number}"),
+            Self::MergePullRequest { repo, number } => {
+                format!("squash-merge {repo}#{number}")
+            }
+            Self::ClosePullRequest { repo, number } => format!("close {repo}#{number}"),
+        }
+    }
+
+    /// The work item this write targets, so its cached detail can be dropped
+    /// once the write lands and the next refresh shows the result.
+    pub(crate) fn target(&self) -> Option<crate::app::state::WorkItemKey> {
+        match self {
+            Self::CommentOnPullRequest { repo, number, .. }
+            | Self::ApprovePullRequest { repo, number }
+            | Self::MergePullRequest { repo, number }
+            | Self::ClosePullRequest { repo, number } => Some(crate::app::state::WorkItemKey {
+                repo: repo.clone(),
+                pr_number: Some(*number),
+                pr_url: None,
+                ticket_id: None,
+            }),
+            Self::CommentOnTicket { .. } => None,
+        }
+    }
+}
+
+/// Run one authorized write. Returns the message to show the user either way.
+pub(crate) fn run_work_item_write(
+    write: &WorkItemWrite,
+    gh_program: &Path,
+    linearis_program: &Path,
+    deadline: Instant,
+) -> Result<String, String> {
+    let (command, stdin) = match write {
+        WorkItemWrite::CommentOnPullRequest { repo, number, body } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            // `--body-file -` rather than `--body`: a multi-line markdown comment
+            // has no business going through argv quoting or its length limit.
+            command.args([
+                "pr",
+                "comment",
+                &number.to_string(),
+                "-R",
+                repo,
+                "--body-file",
+                "-",
+            ]);
+            (command, Some(body.clone().into_bytes()))
+        }
+        WorkItemWrite::CommentOnTicket { identifier, body } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args(["issues", "discuss", identifier, "--body", body]);
+            (command, None)
+        }
+        WorkItemWrite::ApprovePullRequest { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "review", &number.to_string(), "-R", repo, "--approve"]);
+            (command, None)
+        }
+        WorkItemWrite::MergePullRequest { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "merge", &number.to_string(), "-R", repo, "--squash"]);
+            (command, None)
+        }
+        WorkItemWrite::ClosePullRequest { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "close", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+    };
+
+    let output = match stdin {
+        Some(stdin) => {
+            crate::noninteractive_process::output_with_stdin_and_deadline(command, stdin, deadline)
+        }
+        None => crate::noninteractive_process::output_with_deadline(command, deadline),
+    }
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            format!("{} timed out", write.describe())
+        } else {
+            format!("{} could not be run", write.describe())
+        }
+    })?;
+
+    if output.status.success() {
+        return Ok(format!("{} done", write.describe()));
+    }
+    // The CLI's own message says why far better than a generic failure would.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("no reason given")
+        .trim()
+        .to_string();
+    Err(format!("{} failed: {reason}", write.describe()))
 }

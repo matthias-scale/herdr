@@ -38,7 +38,21 @@ pub(crate) fn curl_command() -> Command {
 /// return, dropping the Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates any
 /// still-live associated descendants.
 pub(crate) fn output_with_deadline(command: Command, deadline: Instant) -> io::Result<Output> {
-    output_with_deadline_inner(command, deadline, None)
+    output_with_deadline_inner(command, deadline, None, None)
+}
+
+/// As [`output_with_deadline`], with `stdin` written to the child and the pipe
+/// then closed so it sees EOF.
+///
+/// Writing from its own thread matters: a body large enough to fill the pipe
+/// buffer would otherwise block this thread while the child blocks writing its
+/// own output, and neither side would ever move.
+pub(crate) fn output_with_stdin_and_deadline(
+    command: Command,
+    stdin: Vec<u8>,
+    deadline: Instant,
+) -> io::Result<Output> {
+    output_with_deadline_inner(command, deadline, None, Some(stdin))
 }
 
 pub(crate) fn output_with_deadline_limited(
@@ -46,13 +60,14 @@ pub(crate) fn output_with_deadline_limited(
     deadline: Instant,
     max_output_bytes: usize,
 ) -> io::Result<Output> {
-    output_with_deadline_inner(command, deadline, Some(max_output_bytes))
+    output_with_deadline_inner(command, deadline, Some(max_output_bytes), None)
 }
 
 fn output_with_deadline_inner(
     mut command: Command,
     deadline: Instant,
     max_output_bytes: Option<usize>,
+    stdin: Option<Vec<u8>>,
 ) -> io::Result<Output> {
     if Instant::now() >= deadline {
         return Err(io::Error::new(
@@ -62,6 +77,9 @@ fn output_with_deadline_inner(
     }
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -93,6 +111,22 @@ fn output_with_deadline_inner(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("subprocess stderr pipe was unavailable after spawn"))?;
+    let stdin_writer = match stdin {
+        Some(bytes) => {
+            let mut pipe = child.stdin.take().ok_or_else(|| {
+                io::Error::other("subprocess stdin pipe was unavailable after spawn")
+            })?;
+            Some(thread::spawn(move || {
+                use std::io::Write;
+                // A closed pipe means the child exited early; that is its result
+                // to report, not an error to raise here.
+                let _ = pipe.write_all(&bytes);
+                let _ = pipe.flush();
+                drop(pipe);
+            }))
+        }
+        None => None,
+    };
     let output_limit =
         max_output_bytes.map(|max_output_bytes| Arc::new(OutputReadLimit::new(max_output_bytes)));
     let stdout_reader = thread::spawn({
@@ -162,6 +196,12 @@ fn output_with_deadline_inner(
         }
         thread::sleep(PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
     };
+
+    // The child has exited, so the pipe is closed and the writer cannot still be
+    // blocked; joining it here keeps the thread from outliving this call.
+    if let Some(writer) = stdin_writer {
+        let _ = writer.join();
+    }
 
     // The child exited in time, but a surviving descendant may still hold the output
     // pipes open; reader completion stays bounded by the same deadline.

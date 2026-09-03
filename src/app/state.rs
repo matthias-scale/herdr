@@ -1793,6 +1793,13 @@ pub struct AppState {
     pub(crate) dock_home_selection: Option<WorkItemKey>,
     pub(crate) dock_home_ticket_selection: Option<WorkItemKey>,
     pub(crate) dock_home_poll_selection: Option<WorkItemKey>,
+    /// A comment being typed against the selected work item.
+    pub(crate) dock_comment_draft: Option<String>,
+    /// A write staged by a button but not yet confirmed. Nothing leaves herdr
+    /// until the user presses the confirm key with this set.
+    pub(crate) dock_pending_write: Option<crate::work_index::WorkItemWrite>,
+    /// The outcome of the last write, shown until the next one is staged.
+    pub(crate) dock_write_notice: Option<String>,
     pub(crate) dock_home_section: DockHomeSection,
     pub(crate) dock_home_detail_tab: DockHomeDetailTab,
     pub(crate) dock_home_focused: bool,
@@ -2699,6 +2706,9 @@ impl AppState {
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
+            dock_comment_draft: None,
+            dock_pending_write: None,
+            dock_write_notice: None,
             dock_home_section: DockHomeSection::Prs,
             dock_home_detail_tab: DockHomeDetailTab::Overview,
             dock_home_focused: false,
