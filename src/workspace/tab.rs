@@ -247,11 +247,7 @@ impl Tab {
         }
     }
 
-    fn pane_is_agent(
-        &self,
-        pane: PaneId,
-        terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> bool {
+    fn pane_is_agent(&self, pane: PaneId, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
         self.terminal_id(pane)
             .and_then(|terminal_id| terminals.get(terminal_id))
             .is_some_and(TerminalState::is_agent_terminal)
@@ -272,7 +268,10 @@ impl Tab {
     /// active (ties, including agents that have never reported activity,
     /// resolve to the last in layout order). A window with no agent pane at
     /// all is unaffected — it still names its focused pane.
-    pub(crate) fn title_source_pane(&self, terminals: &HashMap<TerminalId, TerminalState>) -> PaneId {
+    pub(crate) fn title_source_pane(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> PaneId {
         let focused = self.layout.focused();
         if self.pane_is_agent(focused, terminals) {
             return focused;
@@ -976,8 +975,8 @@ impl Tab {
 mod title_source_tests {
     use crate::app::AppState;
     use crate::detect::Agent;
-    use ratatui::layout::Direction;
     use crate::workspace::Workspace;
+    use ratatui::layout::Direction;
 
     /// A window that holds a running agent must keep naming that agent's
     /// session while the human types in a shell next to it. Before this, the
