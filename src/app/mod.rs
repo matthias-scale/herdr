@@ -367,6 +367,13 @@ fn sibling_theme_names(name: &str) -> (String, String) {
         "one-dark" | "onedark" | "one-light" | "onelight" => {
             ("one-dark".to_string(), "one-light".to_string())
         }
+        "github-dark-high-contrast"
+        | "github-dark-hc"
+        | "github-light-high-contrast"
+        | "github-light-hc" => (
+            "github-dark-high-contrast".to_string(),
+            "github-light-high-contrast".to_string(),
+        ),
         "solarized" | "solarized-dark" | "solarized-light" => {
             ("solarized".to_string(), "solarized-light".to_string())
         }

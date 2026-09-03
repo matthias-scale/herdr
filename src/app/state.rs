@@ -402,6 +402,52 @@ impl Palette {
         }
     }
 
+    /// GitHub Dark High Contrast — Primer's accessible dark palette.
+    pub fn github_dark_high_contrast() -> Self {
+        Self {
+            accent: Color::Rgb(113, 183, 255),
+            panel_bg: Color::Rgb(10, 12, 16),
+            sidebar_bg: Color::Reset,
+            surface0: Color::Rgb(39, 43, 51),
+            surface1: Color::Rgb(82, 89, 100),
+            surface_dim: Color::Rgb(1, 4, 9),
+            overlay0: Color::Rgb(122, 130, 142),
+            overlay1: Color::Rgb(158, 167, 179),
+            text: Color::Rgb(240, 243, 246),
+            subtext0: Color::Rgb(189, 196, 204),
+            mauve: Color::Rgb(203, 158, 255),
+            green: Color::Rgb(38, 205, 77),
+            yellow: Color::Rgb(240, 183, 47),
+            red: Color::Rgb(255, 148, 146),
+            blue: Color::Rgb(113, 183, 255),
+            teal: Color::Rgb(57, 197, 207),
+            peach: Color::Rgb(255, 183, 87),
+        }
+    }
+
+    /// GitHub Light High Contrast — Primer's accessible light palette.
+    pub fn github_light_high_contrast() -> Self {
+        Self {
+            accent: Color::Rgb(3, 73, 180),
+            panel_bg: Color::Rgb(255, 255, 255),
+            sidebar_bg: Color::Reset,
+            surface0: Color::Rgb(231, 236, 240),
+            surface1: Color::Rgb(172, 182, 192),
+            surface_dim: Color::Rgb(231, 236, 240),
+            overlay0: Color::Rgb(136, 146, 157),
+            overlay1: Color::Rgb(102, 112, 123),
+            text: Color::Rgb(14, 17, 22),
+            subtext0: Color::Rgb(75, 83, 93),
+            mauve: Color::Rgb(98, 44, 188),
+            green: Color::Rgb(5, 93, 32),
+            yellow: Color::Rgb(116, 69, 0),
+            red: Color::Rgb(160, 17, 31),
+            blue: Color::Rgb(3, 73, 180),
+            teal: Color::Rgb(27, 124, 131),
+            peach: Color::Rgb(112, 44, 0),
+        }
+    }
+
     /// Solarized Dark — Ethan Schoonover's classic.
     pub fn solarized() -> Self {
         Self {
@@ -577,6 +623,12 @@ impl Palette {
             "gruvbox-light" => Some(Self::gruvbox_light()),
             "one-dark" | "onedark" => Some(Self::one_dark()),
             "one-light" | "onelight" => Some(Self::one_light()),
+            "github-dark-high-contrast" | "github-dark-hc" => {
+                Some(Self::github_dark_high_contrast())
+            }
+            "github-light-high-contrast" | "github-light-hc" => {
+                Some(Self::github_light_high_contrast())
+            }
             "solarized" | "solarized-dark" => Some(Self::solarized()),
             "solarized-light" => Some(Self::solarized_light()),
             "kanagawa" => Some(Self::kanagawa()),
@@ -1280,6 +1332,8 @@ pub const THEME_NAMES: &[&str] = &[
     "gruvbox-light",
     "one-dark",
     "one-light",
+    "github-dark-high-contrast",
+    "github-light-high-contrast",
     "solarized",
     "solarized-light",
     "kanagawa",
