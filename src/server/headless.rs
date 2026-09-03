@@ -2922,6 +2922,7 @@ impl HeadlessServer {
         }
         if let Some(presentation) = &mut dock_presentation {
             self.app.state.swap_dock_presentation(presentation);
+            self.app.state.reconcile_dock_home_with_focused_pane();
         }
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
@@ -4398,6 +4399,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    self.app.state.reconcile_dock_home_with_focused_pane();
                     self.app.state.reconcile_sidebar_presentation();
                     self.app
                         .state
@@ -4871,6 +4873,9 @@ impl HeadlessServer {
                         }
                         crate::app::state::DockHomeSection::Tickets => {
                             presentation.home_ticket_selection.clone()
+                        }
+                        crate::app::state::DockHomeSection::XPolls => {
+                            presentation.home_poll_selection.clone()
                         }
                     },
                     !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
@@ -5999,8 +6004,11 @@ mod tests {
                 editor_focused,
                 home_selection: None,
                 home_ticket_selection: None,
+                home_poll_selection: None,
                 home_section: crate::app::state::DockHomeSection::Prs,
+                home_detail_tab: crate::app::state::DockHomeDetailTab::Overview,
                 home_focused: false,
+                home_followed_pane: None,
             };
             server.clients.insert(client_id, client);
         }
@@ -9283,6 +9291,154 @@ next_tab = ""
         assert_eq!(
             server.app.state.settings.section,
             crate::app::state::SettingsSection::Integrations
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_headless_dock_navigation_intercepts_arrow_but_forwards_bare_letter() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = [10_u64, 20]
+            .into_iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        let focused_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+        server.app.state.workspaces[0].insert_test_runtime(focused_pane, runtime);
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        for (ws_idx, number) in [10_u64, 20].into_iter().enumerate() {
+            let pane_id = server.app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = server.app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let first_key = server.app.state.dock_home_projection().rows[0].key.clone();
+
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = crate::app::DockTab::Home;
+        client.dock_presentation.home_focused = true;
+        client.dock_presentation.home_selection = Some(first_key);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[B".to_vec(),
+        }));
+        assert_eq!(
+            server.clients[&1]
+                .dock_presentation
+                .home_selection
+                .as_ref()
+                .and_then(|key| key.pr_number),
+            Some(20)
+        );
+        assert!(input_rx.try_recv().is_err());
+
+        let selection = server.clients[&1].dock_presentation.home_selection.clone();
+        let _ = server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"j".to_vec(),
+        });
+        assert_eq!(
+            server.clients[&1].dock_presentation.home_selection,
+            selection
+        );
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("bare letter reaches focused pane"),
+            Bytes::from_static(b"j")
+        );
+    }
+
+    #[test]
+    fn raw_headless_input_workspace_focus_follows_bound_pr_in_its_dock_presentation() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = [10_u64, 20]
+            .into_iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        for (ws_idx, number) in [10_u64, 20].into_iter().enumerate() {
+            let pane_id = server.app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = server.app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        server.app.state.mode = crate::app::Mode::Navigate;
+        let first_key = server.app.state.dock_home_projection().rows[0].key.clone();
+
+        let mut client = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(true),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        client.dock_presentation.home_selection = Some(first_key);
+        client.dock_presentation.home_section = crate::app::state::DockHomeSection::Tickets;
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"2".to_vec(),
+        }));
+
+        assert_eq!(server.app.state.active, Some(1));
+        let presentation = &server.clients[&1].dock_presentation;
+        assert_eq!(
+            presentation
+                .home_selection
+                .as_ref()
+                .and_then(|key| key.pr_url.as_deref()),
+            Some("https://github.com/owner/repo/pull/20")
+        );
+        assert_eq!(
+            presentation.home_section,
+            crate::app::state::DockHomeSection::Prs
+        );
+        assert_eq!(
+            presentation
+                .home_followed_pane
+                .as_ref()
+                .map(|target| target.pane_id),
+            Some(server.app.state.workspaces[1].tabs[0].root_pane)
         );
     }
 

@@ -8,10 +8,11 @@ use ratatui::{
     Frame,
 };
 
-use super::super::text::{display_width, middle_elide, truncate_end};
+use super::super::markdown;
+use super::super::text::{display_width, truncate_end};
 use crate::{
     app::{
-        state::{DockHomeSection, WorkItemKey},
+        state::{DockHomeDetailTab, DockHomeSection, WorkItemKey},
         AppState,
     },
     work_index::{WorkItem, WorkItemDetail},
@@ -20,98 +21,223 @@ use crate::{
 
 const TAB_ROWS: u16 = 2;
 const FOOTER_ROWS: u16 = 4;
-const BODY_LINE_LIMIT: usize = 6;
-const MIN_LEGIBLE_TAB_WIDTH: u16 = 3;
+/// One row under the footer for actions, a draft, or a confirmation.
+const WRITE_BAR_ROWS: u16 = 1;
 
 fn tab_label(row: &DockHomeRow) -> String {
     format!("{} #{}", row.glyph, row.number)
 }
 
-/// A tab keeps one trailing column so neighbouring labels always show a gap:
-/// the equal-share allocator can hand a tab exactly its label width, which
-/// renders `SCA-2456SCA-2577` with nothing between the two identifiers. At the
-/// legibility floor there is no column to spare, and labels are already elided
-/// to `●…`, so the ellipsis does the separating instead.
-fn label_width(tab_area: Rect) -> usize {
-    let width = usize::from(tab_area.width);
-    if tab_area.width > MIN_LEGIBLE_TAB_WIDTH {
-        width.saturating_sub(1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HiddenTabCount {
+    count: usize,
+    area: Rect,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TabWindow {
+    pub(crate) tabs: Vec<(usize, Rect)>,
+    leading_hidden: Option<HiddenTabCount>,
+    trailing_hidden: Option<HiddenTabCount>,
+}
+
+fn hidden_count_label(count: usize, leading: bool) -> String {
+    if leading {
+        format!("‹ {count}")
     } else {
-        width
+        format!("{count} ›")
     }
 }
 
-/// The PR strip uses the dock tab bar's natural-width/equal-share allocator.
-/// If equal shares would lose the state glyph or PR-number suffix, it shows a
-/// selection-following window instead; hidden tabs remain reachable by keys.
+fn hidden_count_width(count: usize, leading: bool) -> u16 {
+    let gap = usize::from(leading);
+    u16::try_from(display_width(&hidden_count_label(count, leading)).saturating_add(gap))
+        .unwrap_or(u16::MAX)
+}
+
+/// Returns a contiguous selection-following window. Every admitted tab gets
+/// its complete label plus a separating column. Hidden-count labels are part
+/// of the fit calculation, so the strip never claims space it cannot render.
+fn selection_following_tab_window(
+    tab_bar: Rect,
+    label_widths: &[u16],
+    selected: usize,
+) -> TabWindow {
+    if label_widths.is_empty() || tab_bar.width == 0 || tab_bar.height == 0 {
+        return TabWindow::default();
+    }
+
+    let selected = selected.min(label_widths.len() - 1);
+    let mut best: Option<(usize, usize, usize)> = None;
+    for start in 0..=selected {
+        for end in selected + 1..=label_widths.len() {
+            let tabs_width = label_widths[start..end]
+                .iter()
+                .copied()
+                .fold(0u16, u16::saturating_add);
+            let leading_width = if start > 0 {
+                hidden_count_width(start, true)
+            } else {
+                0
+            };
+            let trailing_count = label_widths.len().saturating_sub(end);
+            let trailing_width = if trailing_count > 0 {
+                hidden_count_width(trailing_count, false)
+            } else {
+                0
+            };
+            if tabs_width
+                .saturating_add(leading_width)
+                .saturating_add(trailing_width)
+                > tab_bar.width
+            {
+                continue;
+            }
+            let count = end - start;
+            let imbalance = (selected - start).abs_diff(end - selected - 1);
+            if best.is_none_or(|(best_start, best_end, best_imbalance)| {
+                count > best_end - best_start
+                    || (count == best_end - best_start && imbalance < best_imbalance)
+                    || (count == best_end - best_start
+                        && imbalance == best_imbalance
+                        && start > best_start)
+            }) {
+                best = Some((start, end, imbalance));
+            }
+        }
+    }
+
+    let Some((start, end, _)) = best else {
+        return TabWindow::default();
+    };
+    let mut x = tab_bar.x;
+    let leading_hidden = (start > 0).then(|| {
+        let width = hidden_count_width(start, true);
+        let hidden = HiddenTabCount {
+            count: start,
+            area: Rect::new(x, tab_bar.y, width, 1),
+        };
+        x = x.saturating_add(width);
+        hidden
+    });
+    let tabs = label_widths[start..end]
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(offset, width)| {
+            let area = Rect::new(x, tab_bar.y, width, 1);
+            x = x.saturating_add(width);
+            (start + offset, area)
+        })
+        .collect();
+    let trailing_count = label_widths.len().saturating_sub(end);
+    let trailing_hidden = (trailing_count > 0).then(|| HiddenTabCount {
+        count: trailing_count,
+        area: Rect::new(x, tab_bar.y, hidden_count_width(trailing_count, false), 1),
+    });
+    TabWindow {
+        tabs,
+        leading_hidden,
+        trailing_hidden,
+    }
+}
+
+fn tab_cell_width(label: &str) -> u16 {
+    u16::try_from(display_width(label).saturating_add(1)).unwrap_or(u16::MAX)
+}
+
 pub(crate) fn tab_layouts(
     app: &AppState,
     projection: &DockHomeProjection,
     area: Rect,
-) -> Vec<(usize, Rect)> {
-    if projection.rows.is_empty() {
-        return Vec::new();
-    }
-    let tab_bar = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
-    let capacity = usize::from((area.width / MIN_LEGIBLE_TAB_WIDTH).max(1));
-    let visible_count = projection.rows.len().min(capacity);
-    let selected = app.dock_home_selected_index(projection).unwrap_or(0);
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(visible_count)
-        .min(projection.rows.len().saturating_sub(visible_count));
-    let visible = &projection.rows[start..start.saturating_add(visible_count)];
-    let widths = visible
+) -> TabWindow {
+    let widths = projection
+        .rows
         .iter()
-        .map(|row| {
-            u16::try_from(display_width(&tab_label(row)).saturating_add(1)).unwrap_or(u16::MAX)
-        })
+        .map(|row| tab_cell_width(&tab_label(row)))
         .collect::<Vec<_>>();
-    crate::ui::horizontal_tab_hit_areas(tab_bar, &widths)
-        .into_iter()
-        .enumerate()
-        .map(|(offset, area)| (start.saturating_add(offset), area))
-        .collect()
+    selection_following_tab_window(
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        &widths,
+        app.dock_home_selected_index(projection).unwrap_or(0),
+    )
+}
+
+pub(crate) fn poll_tab_layouts(
+    app: &AppState,
+    projection: &DockHomeProjection,
+    area: Rect,
+) -> TabWindow {
+    let widths = projection
+        .poll_rows
+        .iter()
+        .map(|row| tab_cell_width(&poll_tab_label(row)))
+        .collect::<Vec<_>>();
+    selection_following_tab_window(
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        &widths,
+        app.dock_home_selected_poll_index(projection).unwrap_or(0),
+    )
+}
+
+/// A poll's tab reads `<agent> N`, which is short enough for the strip and
+/// still says which agent is waiting.
+pub(crate) fn poll_tab_label(row: &crate::work_projection::DockHomePollRow) -> String {
+    format!("{} {}", row.agent_label, row.item.n)
 }
 
 pub(crate) fn ticket_tab_layouts(
     app: &AppState,
     projection: &DockHomeProjection,
     area: Rect,
-) -> Vec<(usize, Rect)> {
-    if projection.ticket_rows.is_empty() {
-        return Vec::new();
-    }
-    let tab_bar = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
-    let capacity = usize::from((area.width / MIN_LEGIBLE_TAB_WIDTH).max(1));
-    let visible_count = projection.ticket_rows.len().min(capacity);
-    let selected = app.dock_home_selected_ticket_index(projection).unwrap_or(0);
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(visible_count)
-        .min(projection.ticket_rows.len().saturating_sub(visible_count));
-    let visible = &projection.ticket_rows[start..start.saturating_add(visible_count)];
-    let widths = visible
+) -> TabWindow {
+    let widths = projection
+        .ticket_rows
         .iter()
-        .map(|row| {
-            u16::try_from(display_width(&row.ticket.identifier).saturating_add(1))
-                .unwrap_or(u16::MAX)
-        })
+        .map(|row| tab_cell_width(&row.ticket.identifier))
         .collect::<Vec<_>>();
-    crate::ui::horizontal_tab_hit_areas(tab_bar, &widths)
-        .into_iter()
-        .enumerate()
-        .map(|(offset, area)| (start.saturating_add(offset), area))
-        .collect()
+    selection_following_tab_window(
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        &widths,
+        app.dock_home_selected_ticket_index(projection).unwrap_or(0),
+    )
 }
 
-pub(crate) fn section_layouts(area: Rect) -> [Rect; 2] {
+pub(crate) fn section_layouts(area: Rect) -> [Rect; 3] {
     let row = Rect::new(area.x, area.y, area.width, 1);
-    let areas = crate::ui::horizontal_tab_hit_areas(row, &[4, 8]);
+    let areas = crate::ui::horizontal_tab_hit_areas(row, &[4, 8, 8]);
     [
         areas.first().copied().unwrap_or_default(),
         areas.get(1).copied().unwrap_or_default(),
+        areas.get(2).copied().unwrap_or_default(),
     ]
+}
+
+pub(crate) fn detail_tab_layouts(area: Rect) -> [Rect; 6] {
+    let mut x = area.x;
+    let mut y = area.y.saturating_add(3);
+    std::array::from_fn(|index| {
+        let label = DockHomeDetailTab::ALL[index].label();
+        let padding = usize::from(index + 1 < DockHomeDetailTab::ALL.len());
+        let width = u16::try_from(display_width(label).saturating_add(padding)).unwrap_or(u16::MAX);
+        if x > area.x && x.saturating_add(width) > area.right() {
+            x = area.x;
+            y = y.saturating_add(1);
+        }
+        let visible_width = width.min(area.right().saturating_sub(x));
+        let rect = Rect::new(x, y, visible_width, 1);
+        x = x.saturating_add(width);
+        rect
+    })
+}
+
+fn pr_detail_pinned_rows(area: Rect) -> u16 {
+    detail_tab_layouts(area)
+        .iter()
+        .map(|rect| rect.bottom())
+        .max()
+        .unwrap_or_else(|| area.y.saturating_add(3))
+        .saturating_sub(area.y)
 }
 
 fn work_item_for_key<'a>(app: &'a AppState, key: &WorkItemKey) -> Option<&'a WorkItem> {
@@ -193,10 +319,24 @@ fn status_line(app: &AppState, detail: &WorkItemDetail) -> Line<'static> {
     }
 }
 
+/// Colour for a check-run conclusion. GitHub's vocabulary is small and stable,
+/// so an unknown value stays neutral rather than guessing.
+fn action_state_color(app: &AppState, state: &str) -> ratatui::style::Color {
+    match state.to_ascii_uppercase().as_str() {
+        "SUCCESS" | "NEUTRAL" => app.palette.green,
+        "FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED" => app.palette.red,
+        "CANCELLED" | "SKIPPED" | "STALE" => app.palette.overlay0,
+        "IN_PROGRESS" | "QUEUED" | "PENDING" | "WAITING" | "REQUESTED" => app.palette.yellow,
+        _ => app.palette.text,
+    }
+}
+
 fn heading(app: &AppState, text: impl Into<String>) -> Line<'static> {
     Line::from(Span::styled(
         text.into(),
-        Style::default().fg(app.palette.overlay0),
+        Style::default()
+            .fg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -236,97 +376,6 @@ fn link_color(app: &AppState, value: &str) -> ratatui::style::Color {
     }
 }
 
-fn strip_html_comments(text: &str) -> String {
-    let mut remaining = text;
-    let mut output = String::new();
-    while let Some(start) = remaining.find("<!--") {
-        output.push_str(&remaining[..start]);
-        let after_start = &remaining[start + 4..];
-        let Some(end) = after_start.find("-->") else {
-            return output;
-        };
-        remaining = &after_start[end + 3..];
-    }
-    output.push_str(remaining);
-    output
-}
-
-fn readable_markdown_line(line: &str) -> &str {
-    let trimmed = line.trim();
-    let heading = trimmed.trim_start_matches('#').trim_start();
-    if heading.len() != trimmed.len() {
-        return heading;
-    }
-    for marker in ["- ", "* ", "+ "] {
-        if let Some(value) = trimmed.strip_prefix(marker) {
-            return value;
-        }
-    }
-    trimmed
-}
-
-fn wrap_line(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for ch in normalized.chars() {
-        let ch_width = display_width(&ch.to_string());
-        if current_width.saturating_add(ch_width) > width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-            current_width = 0;
-        }
-        if current.is_empty() && ch == ' ' {
-            continue;
-        }
-        current.push(ch);
-        current_width = current_width.saturating_add(ch_width);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
-fn body_lines(body: Option<&str>, width: usize) -> Vec<String> {
-    let Some(body) = body.filter(|body| !body.trim().is_empty()) else {
-        return vec!["—".to_string()];
-    };
-    let cleaned = strip_html_comments(body);
-    let mut lines = Vec::new();
-    for source_line in cleaned.lines() {
-        let readable = readable_markdown_line(source_line);
-        if readable.is_empty() {
-            if lines.last().is_some_and(|line: &String| !line.is_empty()) {
-                lines.push(String::new());
-            }
-        } else {
-            lines.extend(wrap_line(readable, width));
-        }
-    }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        return vec!["—".to_string()];
-    }
-    if lines.len() > BODY_LINE_LIMIT {
-        lines.truncate(BODY_LINE_LIMIT);
-        if let Some(last) = lines.last_mut() {
-            let prefix = truncate_end(last, width.saturating_sub(2));
-            *last = format!("{prefix} …");
-        }
-    }
-    lines
-}
-
 fn loaded_detail_lines(
     app: &AppState,
     row: &DockHomeRow,
@@ -338,10 +387,6 @@ fn loaded_detail_lines(
     }
     let item = work_item_for_key(app, &row.key);
     let now = SystemTime::now();
-    let number = detail
-        .number
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "—".to_string());
     let ticket = if row.ticket_ids.is_empty() {
         "—".to_string()
     } else {
@@ -366,12 +411,6 @@ fn loaded_detail_lines(
         .map(|checks| format!("{} failing of {}", checks.failing, checks.total))
         .unwrap_or_else(|| "—".to_string());
     let mut lines = vec![
-        Line::from(Span::styled(
-            format!("#{number}  overview"),
-            Style::default()
-                .fg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
         status_line(app, detail),
         value_line(app, missing(detail.title.as_deref())),
         field_line(
@@ -408,14 +447,7 @@ fn loaded_detail_lines(
             app,
             [(" pr        ".into(), pr_url.into(), link_color(app, pr_url))],
         ),
-        Line::default(),
-        heading(app, "what it does"),
     ];
-    lines.extend(
-        body_lines(detail.body.as_deref(), width)
-            .into_iter()
-            .map(|line| value_line(app, line)),
-    );
     lines.push(Line::default());
     lines.push(heading(app, "tickets"));
     match row.ticket_ids.as_slice() {
@@ -452,6 +484,14 @@ fn loaded_detail_lines(
         app,
         [("● checks  ".into(), checks, check_color)],
     ));
+    lines.push(Line::default());
+    lines.push(heading(app, "what it does"));
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        detail.body.as_deref(),
+        width.saturating_sub(1),
+        " ",
+    ));
     lines
 }
 
@@ -461,8 +501,245 @@ fn detail_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<Line<'st
     }
     app.work_item_detail_cache
         .get(&row.key)
-        .map(|detail| loaded_detail_lines(app, row, detail, width))
+        .map(|detail| detail_tab_lines(app, row, detail, width))
         .unwrap_or_else(|| vec![value_line(app, "loading…")])
+}
+
+fn subtab_lines(
+    app: &AppState,
+    heading_text: &str,
+    values: impl IntoIterator<Item = Line<'static>>,
+    empty: &str,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::default(), heading(app, heading_text)];
+    let values = values.into_iter().collect::<Vec<_>>();
+    if values.is_empty() {
+        lines.push(value_line(app, format!(" {empty}")));
+    } else {
+        lines.extend(values);
+    }
+    lines
+}
+
+fn detail_tab_lines(
+    app: &AppState,
+    row: &DockHomeRow,
+    detail: &WorkItemDetail,
+    width: usize,
+) -> Vec<Line<'static>> {
+    if let Some(reason) = detail.unavailable.as_deref() {
+        return vec![value_line(app, format!("unavailable: {reason}"))];
+    }
+    match app.dock_home_detail_tab {
+        DockHomeDetailTab::Overview => loaded_detail_lines(app, row, detail, width),
+        DockHomeDetailTab::Comments => subtab_lines(
+            app,
+            "comments",
+            detail
+                .comments
+                .iter()
+                .flat_map(|comment| comment_lines(app, comment, width, SystemTime::now())),
+            "no comments",
+        ),
+        DockHomeDetailTab::Actions => subtab_lines(
+            app,
+            "actions",
+            detail.actions.iter().map(|action| {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {:<14}", action.state.to_ascii_lowercase()),
+                        Style::default()
+                            .fg(action_state_color(app, &action.state))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(action.name.clone(), Style::default().fg(app.palette.text)),
+                ])
+            }),
+            "no check runs",
+        ),
+        DockHomeDetailTab::Files => subtab_lines(
+            app,
+            "files",
+            detail.files.iter().map(|file| {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" +{:<5}", file.additions),
+                        Style::default().fg(app.palette.green),
+                    ),
+                    Span::styled(
+                        format!("-{:<5}", file.deletions),
+                        Style::default().fg(app.palette.red),
+                    ),
+                    Span::styled(file.path.clone(), Style::default().fg(app.palette.text)),
+                ])
+            }),
+            "no changed files",
+        ),
+        DockHomeDetailTab::Commits => subtab_lines(
+            app,
+            "commits",
+            detail.commits.iter().map(|commit| {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {}  ", commit.short_id),
+                        Style::default().fg(app.palette.mauve),
+                    ),
+                    Span::styled(
+                        commit.subject.clone(),
+                        Style::default().fg(app.palette.text),
+                    ),
+                ])
+            }),
+            "no commits",
+        ),
+        DockHomeDetailTab::Ticket => ticket_subtab_lines(app, row, width),
+    }
+}
+
+fn ticket_subtab_lines(app: &AppState, row: &DockHomeRow, width: usize) -> Vec<Line<'static>> {
+    if row.ticket_ids.is_empty() {
+        return subtab_lines(app, "ticket", Vec::new(), "no linked ticket");
+    }
+    let Some(item) = work_item_for_key(app, &row.key) else {
+        return vec![value_line(
+            app,
+            "unavailable: linked ticket detail is absent from the work index",
+        )];
+    };
+    if item.ticket_details.is_empty() {
+        return vec![value_line(
+            app,
+            "unavailable: Linear returned no linked ticket detail",
+        )];
+    }
+    subtab_lines(
+        app,
+        "ticket",
+        item.ticket_details.iter().flat_map(|ticket| {
+            let mut lines = vec![value_line(
+                app,
+                format!(
+                    " {}  {}",
+                    ticket.identifier,
+                    missing(ticket.title.as_deref())
+                ),
+            )];
+            lines.extend(markdown::body_lines(
+                &app.palette,
+                ticket.description.as_deref(),
+                width.saturating_sub(1),
+                " ",
+            ));
+            lines
+        }),
+        "no linked ticket",
+    )
+}
+
+/// One poll: the gate's own question, its options and its default, plus the
+/// pane that raised it. The question and options run through the markdown
+/// renderer, so an `(a-rec)` block keeps its emphasis.
+fn poll_detail_lines(
+    app: &AppState,
+    row: &crate::work_projection::DockHomePollRow,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let item = &row.item;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{}  {}", item.n, item.label),
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        field_line(
+            app,
+            [
+                ("agent ".into(), row.agent_label.clone(), app.palette.text),
+                (
+                    "space ".into(),
+                    row.workspace_label.clone(),
+                    app.palette.text,
+                ),
+            ],
+        ),
+        Line::default(),
+        heading(app, "asks"),
+    ];
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        Some(item.text.as_str()),
+        width.saturating_sub(1),
+        " ",
+    ));
+    lines.push(Line::default());
+    lines.push(heading(app, "default"));
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        item.default.as_deref(),
+        width.saturating_sub(1),
+        " ",
+    ));
+    lines.push(Line::default());
+    lines.push(heading(app, "links"));
+    lines.push(field_line(
+        app,
+        [(
+            "pr ".into(),
+            item.pr
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| "—".to_string()),
+            app.palette.text,
+        )],
+    ));
+    lines.push(field_line(
+        app,
+        [(
+            "ticket ".into(),
+            missing(item.ticket.as_deref()).to_string(),
+            app.palette.text,
+        )],
+    ));
+    lines.push(field_line(
+        app,
+        [(
+            "url ".into(),
+            missing(item.url.as_deref()).to_string(),
+            link_color(app, missing(item.url.as_deref())),
+        )],
+    ));
+    lines
+}
+
+/// One comment: who wrote it and how long ago, then its body as markdown.
+fn comment_lines(
+    app: &AppState,
+    comment: &crate::work_index::WorkItemComment,
+    width: usize,
+    now: SystemTime,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![field_line(
+        app,
+        [
+            (
+                " ".into(),
+                missing(comment.author.as_deref()).to_string(),
+                app.palette.mauve,
+            ),
+            (
+                "  ".into(),
+                elapsed_from(comment.created_at, now),
+                app.palette.overlay0,
+            ),
+        ],
+    )];
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        Some(&comment.body),
+        width.saturating_sub(1),
+        " ",
+    ));
+    lines
 }
 
 fn ticket_detail_lines(
@@ -531,14 +808,7 @@ fn ticket_detail_lines(
             app,
             [(" pr        ".into(), pr_url.into(), link_color(app, pr_url))],
         ),
-        Line::default(),
-        heading(app, "what it does"),
     ];
-    lines.extend(
-        body_lines(ticket.description.as_deref(), width)
-            .into_iter()
-            .map(|line| value_line(app, line)),
-    );
     lines.push(Line::default());
     lines.push(heading(app, "parent"));
     lines.push(value_line(
@@ -556,6 +826,42 @@ fn ticket_detail_lines(
                 .iter()
                 .map(|relation| value_line(app, format!(" {relation}"))),
         );
+    }
+    lines.push(Line::default());
+    lines.push(heading(app, "what it does"));
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        ticket.description.as_deref(),
+        width.saturating_sub(1),
+        " ",
+    ));
+
+    // Comments arrive from a separate linearis read, so they are absent until
+    // the detail refresh lands. Say which of the two it is rather than showing
+    // an empty heading.
+    lines.push(Line::default());
+    lines.push(heading(app, "comments"));
+    match app.work_item_detail_cache.get(&row.key) {
+        Some(detail) if !detail.comments.is_empty() => {
+            let now = SystemTime::now();
+            for comment in &detail.comments {
+                lines.extend(comment_lines(app, comment, width, now));
+                lines.push(Line::default());
+            }
+            lines.pop();
+        }
+        Some(detail) => lines.push(value_line(
+            app,
+            detail
+                .unavailable
+                .clone()
+                .map(|reason| format!(" unavailable: {reason}"))
+                .unwrap_or_else(|| " no comments".to_string()),
+        )),
+        None if app.work_item_detail_loading.contains(&row.key) => {
+            lines.push(value_line(app, " loading…"))
+        }
+        None => lines.push(value_line(app, " —")),
     }
     lines
 }
@@ -590,6 +896,83 @@ fn render_line(frame: &mut Frame, area: Rect, y: u16, text: String, style: Style
         ))),
         Rect::new(area.x, y, area.width, 1),
     );
+}
+
+fn render_hidden_tab_counts(app: &AppState, frame: &mut Frame, window: &TabWindow) {
+    for (hidden, leading) in [
+        (window.leading_hidden, true),
+        (window.trailing_hidden, false),
+    ] {
+        let Some(hidden) = hidden else {
+            continue;
+        };
+        frame.render_widget(
+            Paragraph::new(hidden_count_label(hidden.count, leading))
+                .style(Style::default().fg(app.palette.overlay0)),
+            hidden.area,
+        );
+    }
+}
+
+/// The write bar: what you can do to the selected item, what is staged, and how
+/// the last write went.
+///
+/// A staged write is never run by the key that staged it. It sits here with an
+/// explicit confirm, so nothing leaves herdr as a side effect of a keystroke.
+fn render_write_bar(app: &AppState, frame: &mut Frame, area: Rect, y: u16) {
+    if y >= area.bottom() {
+        return;
+    }
+    if let Some(write) = app.dock_pending_write.as_ref() {
+        render_line(
+            frame,
+            area,
+            y,
+            format!("confirm {}?  y to run · esc to cancel", write.describe()),
+            Style::default()
+                .fg(app.palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+        return;
+    }
+    if let Some(draft) = app.dock_comment_draft.as_ref() {
+        render_line(
+            frame,
+            area,
+            y,
+            format!("> {draft}_"),
+            Style::default().fg(app.palette.text),
+        );
+        return;
+    }
+    if let Some(notice) = app.dock_write_notice.as_ref() {
+        render_line(
+            frame,
+            area,
+            y,
+            notice.clone(),
+            Style::default().fg(if notice.ends_with("done") {
+                app.palette.green
+            } else {
+                app.palette.red
+            }),
+        );
+        return;
+    }
+    let actions = match app.dock_home_section {
+        DockHomeSection::Prs => "r reply · a approve · m merge · x close",
+        DockHomeSection::Tickets => "r reply",
+        DockHomeSection::XPolls => "",
+    };
+    if !actions.is_empty() {
+        render_line(
+            frame,
+            area,
+            y,
+            actions.to_string(),
+            Style::default().fg(app.palette.overlay0),
+        );
+    }
 }
 
 fn render_footer(
@@ -651,6 +1034,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             "tickets",
             section_layouts(area)[1],
         ),
+        (DockHomeSection::XPolls, "x-polls", section_layouts(area)[2]),
     ] {
         let style = if app.dock_home_section == section {
             Style::default()
@@ -668,6 +1052,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
     let active_empty = match app.dock_home_section {
         DockHomeSection::Prs => projection.rows.is_empty(),
         DockHomeSection::Tickets => projection.ticket_rows.is_empty(),
+        DockHomeSection::XPolls => projection.poll_rows.is_empty(),
     };
     if active_empty {
         let reason = if let Some(reason) = projection.unavailable.as_deref() {
@@ -679,6 +1064,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                     "tickets off — set work_index.linear_team"
                 }
                 DockHomeSection::Tickets => "no matching tickets",
+                DockHomeSection::XPolls => "no open polls",
             }
             .to_string()
         };
@@ -690,10 +1076,23 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.subtext0),
         );
         if app.dock_home_section == DockHomeSection::Prs {
+            // Even with no pull request bound, say which repository this session
+            // is in; a blank panel says nothing about where you are.
+            let mut next = area.y.saturating_add(TAB_ROWS + 1);
+            if let Some(repo) = app.focused_repo_slug() {
+                render_line(
+                    frame,
+                    area,
+                    next,
+                    format!("repo  https://github.com/{repo}"),
+                    Style::default().fg(app.palette.blue),
+                );
+                next = next.saturating_add(1);
+            }
             render_line(
                 frame,
                 area,
-                area.y.saturating_add(TAB_ROWS + 1),
+                next,
                 "bind: herdr tab create --pr <url> --role review".to_string(),
                 Style::default().fg(app.palette.overlay0),
             );
@@ -710,9 +1109,12 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let selected_pr = app.dock_home_selected_index(&projection);
     let selected_ticket = app.dock_home_selected_ticket_index(&projection);
+    let selected_poll = app.dock_home_selected_poll_index(&projection);
     match app.dock_home_section {
         DockHomeSection::Prs => {
-            for (index, tab_area) in tab_layouts(app, &projection, area) {
+            let window = tab_layouts(app, &projection, area);
+            render_hidden_tab_counts(app, frame, &window);
+            for (index, tab_area) in window.tabs {
                 let row = &projection.rows[index];
                 let style = if selected_pr == Some(index) {
                     Style::default()
@@ -721,15 +1123,16 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                 } else {
                     Style::default().fg(app.palette.overlay0)
                 };
-                let label = middle_elide(&tab_label(row), label_width(tab_area));
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(label, style))),
+                    Paragraph::new(Line::from(Span::styled(tab_label(row), style))),
                     tab_area,
                 );
             }
         }
         DockHomeSection::Tickets => {
-            for (index, tab_area) in ticket_tab_layouts(app, &projection, area) {
+            let window = ticket_tab_layouts(app, &projection, area);
+            render_hidden_tab_counts(app, frame, &window);
+            for (index, tab_area) in window.tabs {
                 let row = &projection.ticket_rows[index];
                 let style = if selected_ticket == Some(index) {
                     Style::default()
@@ -738,18 +1141,85 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
                 } else {
                     Style::default().fg(app.palette.overlay0)
                 };
-                let label = middle_elide(&row.ticket.identifier, label_width(tab_area));
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(label, style))),
+                    Paragraph::new(Line::from(Span::styled(
+                        row.ticket.identifier.clone(),
+                        style,
+                    ))),
+                    tab_area,
+                );
+            }
+        }
+        DockHomeSection::XPolls => {
+            let window = poll_tab_layouts(app, &projection, area);
+            render_hidden_tab_counts(app, frame, &window);
+            for (index, tab_area) in window.tabs {
+                let row = &projection.poll_rows[index];
+                let style = if selected_poll == Some(index) {
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.palette.overlay0)
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(poll_tab_label(row), style))),
                     tab_area,
                 );
             }
         }
     }
 
-    let detail_y = area.y.saturating_add(TAB_ROWS);
-    let footer_y = area.bottom().saturating_sub(FOOTER_ROWS).max(detail_y);
-    let detail_height = footer_y.saturating_sub(detail_y);
+    if app.dock_home_section == DockHomeSection::Prs {
+        if let Some(row) = selected_pr.and_then(|index| projection.rows.get(index)) {
+            let identifier = row
+                .key
+                .pr_number
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| "#—".to_string());
+            render_line(
+                frame,
+                area,
+                area.y.saturating_add(TAB_ROWS),
+                identifier,
+                Style::default()
+                    .fg(app.palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            for (tab, tab_area) in DockHomeDetailTab::ALL
+                .into_iter()
+                .zip(detail_tab_layouts(area))
+            {
+                let style = if app.dock_home_detail_tab == tab {
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.palette.overlay0)
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(tab.label(), style))),
+                    tab_area,
+                );
+            }
+        }
+    }
+
+    let detail_y = area
+        .y
+        .saturating_add(if app.dock_home_section == DockHomeSection::Prs {
+            pr_detail_pinned_rows(area)
+        } else {
+            TAB_ROWS
+        });
+    // The footer follows the content rather than the pane floor, so a short
+    // detail does not leave a gap between the last row and the legend. It only
+    // reaches the floor when the body actually fills the available height.
+    let footer_floor = area
+        .bottom()
+        .saturating_sub(FOOTER_ROWS + WRITE_BAR_ROWS)
+        .max(detail_y);
+    let detail_height = footer_floor.saturating_sub(detail_y);
     let lines = match app.dock_home_section {
         DockHomeSection::Prs => selected_pr
             .and_then(|index| projection.rows.get(index))
@@ -757,7 +1227,31 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         DockHomeSection::Tickets => selected_ticket
             .and_then(|index| projection.ticket_rows.get(index))
             .map(|row| ticket_detail_lines(app, row, usize::from(area.width))),
+        DockHomeSection::XPolls => selected_poll
+            .and_then(|index| projection.poll_rows.get(index))
+            .map(|row| poll_detail_lines(app, row, usize::from(area.width))),
     };
+    // Other sessions may have work items while this pane has none. Rather than
+    // leave the previous item on screen, say where this session actually is.
+    let lines = lines.or_else(|| {
+        (app.dock_home_section == DockHomeSection::Prs).then(|| {
+            let mut lines = vec![value_line(app, " no pull request for this pane")];
+            if let Some(repo) = app.focused_repo_slug() {
+                lines.push(Line::default());
+                lines.push(heading(app, "repo"));
+                lines.push(field_line(
+                    app,
+                    [(
+                        " ".into(),
+                        format!("https://github.com/{repo}"),
+                        app.palette.blue,
+                    )],
+                ));
+            }
+            lines
+        })
+    });
+    let mut rendered_rows = 0u16;
     if let Some(lines) = lines {
         let max_scroll = lines.len().saturating_sub(usize::from(detail_height));
         let scroll = usize::from(app.dock_scroll).min(max_scroll);
@@ -767,6 +1261,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             .take(usize::from(detail_height))
             .enumerate()
         {
+            rendered_rows = rendered_rows.saturating_add(1);
             frame.render_widget(
                 Paragraph::new(line),
                 Rect::new(
@@ -778,7 +1273,9 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             );
         }
     }
+    let footer_y = detail_y.saturating_add(rendered_rows).min(footer_floor);
     render_footer(app, &projection, frame, area, footer_y);
+    render_write_bar(app, frame, area, footer_y.saturating_add(FOOTER_ROWS));
 }
 
 #[cfg(test)]
@@ -808,6 +1305,24 @@ mod tests {
                 failing: 2,
                 total: 8,
             }),
+            comments: vec![crate::work_index::WorkItemComment {
+                author: Some("reviewer".into()),
+                body: "Please keep the body scrollable.".into(),
+                created_at: None,
+            }],
+            actions: vec![crate::work_index::WorkItemAction {
+                name: "test".into(),
+                state: "FAILURE".into(),
+            }],
+            files: vec![crate::work_index::WorkItemFile {
+                path: "src/ui/dock/home.rs".into(),
+                additions: 42,
+                deletions: 6,
+            }],
+            commits: vec![crate::work_index::WorkItemCommit {
+                short_id: "abc1234".into(),
+                subject: "fix dock detail".into(),
+            }],
             unresolved_review_threads: None,
             unavailable: None,
             observed_at: SystemTime::now(),
@@ -829,6 +1344,10 @@ mod tests {
             review_decision: None,
             is_draft: None,
             checks: None,
+            comments: Vec::new(),
+            actions: Vec::new(),
+            files: Vec::new(),
+            commits: Vec::new(),
             unresolved_review_threads: None,
             unavailable: None,
             observed_at: SystemTime::now(),
@@ -872,7 +1391,20 @@ mod tests {
                     ticket_ids: vec!["MAT-125".into()],
                     ticket_title: None,
                     ticket_state: None,
-                    ticket_details: Vec::new(),
+                    ticket_details: vec![crate::work_index::WorkTicket {
+                        identifier: "MAT-125".into(),
+                        title: Some("linked ticket".into()),
+                        description: Some("Ticket body from Linear.".into()),
+                        state: Some("In Progress".into()),
+                        assignee: None,
+                        created_at: None,
+                        updated_at: None,
+                        branch: None,
+                        labels: Vec::new(),
+                        url: None,
+                        parent: None,
+                        relations: Vec::new(),
+                    }],
                     branch: None,
                     preview_urls: Vec::new(),
                     panes: vec![crate::work_index::WorkItemPane {
@@ -996,6 +1528,52 @@ mod tests {
         app
     }
 
+    fn ticket_app_with_identifiers(identifiers: &[&str]) -> AppState {
+        let mut app = ticket_app(false);
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: identifiers
+                .iter()
+                .map(|identifier| {
+                    let ticket = crate::work_index::WorkTicket {
+                        identifier: (*identifier).into(),
+                        title: None,
+                        description: None,
+                        state: None,
+                        assignee: None,
+                        created_at: None,
+                        updated_at: None,
+                        branch: None,
+                        labels: Vec::new(),
+                        url: None,
+                        parent: None,
+                        relations: Vec::new(),
+                    };
+                    crate::work_index::WorkItem {
+                        repo: "owner/repo".into(),
+                        pr_number: None,
+                        pr_url: None,
+                        pr_title: None,
+                        pr_state: None,
+                        draft: false,
+                        review_decision: None,
+                        created_at: None,
+                        ticket_ids: vec![ticket.identifier.clone()],
+                        ticket_title: None,
+                        ticket_state: None,
+                        ticket_details: vec![ticket],
+                        branch: None,
+                        preview_urls: Vec::new(),
+                        panes: Vec::new(),
+                        source: crate::work_index::WorkItemSource::default(),
+                    }
+                })
+                .collect(),
+            unavailable: None,
+            observed_at: SystemTime::now(),
+        });
+        app
+    }
+
     fn selected_with_detail(
         mut app: AppState,
         detail: Option<crate::work_index::WorkItemDetail>,
@@ -1062,12 +1640,122 @@ mod tests {
         assert!(text.contains("bind: herdr tab create --pr"), "{text:?}");
     }
 
+    fn app_with_gate() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("root terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Gate".to_string(),
+            text: "Rotate the **shared** token?".to_string(),
+            pr: Some(42),
+            ticket: Some("SCA-100".to_string()),
+            url: None,
+            default: Some("none".to_string()),
+            default_at: None,
+        }];
+        app.dock_home_section = DockHomeSection::XPolls;
+        app
+    }
+
+    #[test]
+    fn the_x_polls_section_is_selectable_beside_prs_and_tickets() {
+        let body_width = crate::ui::DOCK_DEFAULT_WIDTH.saturating_sub(2);
+        let terminal = render(&AppState::test_new(), Rect::new(0, 0, body_width, 12));
+        assert!(line_text(&terminal, 0).contains("x-polls"));
+        assert_eq!(section_layouts(Rect::new(0, 0, body_width, 12)).len(), 3);
+    }
+
+    #[test]
+    fn an_empty_x_polls_section_says_there_are_no_open_polls() {
+        let mut app = AppState::test_new();
+        app.dock_home_section = DockHomeSection::XPolls;
+        let terminal = render(&app, Rect::new(0, 0, 60, 12));
+        assert!(text(&terminal).contains("no open polls"));
+    }
+
+    #[test]
+    fn a_poll_detail_names_the_ask_its_default_and_its_links() {
+        let app = app_with_gate();
+        let terminal = render(&app, Rect::new(0, 0, 60, 24));
+        let rendered = text(&terminal);
+
+        assert!(rendered.contains("Gate"), "{rendered}");
+        assert!(rendered.contains("asks"), "{rendered}");
+        // The markdown renderer drops the emphasis markers rather than printing them.
+        assert!(rendered.contains("Rotate the shared token?"), "{rendered}");
+        assert!(rendered.contains("default"), "{rendered}");
+        assert!(rendered.contains("#42"), "{rendered}");
+        assert!(rendered.contains("SCA-100"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unbound_pane_shows_its_repository_instead_of_the_previous_pull_request() {
+        let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let rendered = text(&render(&app, Rect::new(0, 0, 80, 24)));
+        assert!(
+            rendered.contains("detail panel for every pull request"),
+            "a bound pane shows its pull request: {rendered:?}"
+        );
+
+        // Focus moves to a pane carrying no work item.
+        app.dock_home_focus_unbound = true;
+        let rendered = text(&render(&app, Rect::new(0, 0, 80, 24)));
+
+        assert!(
+            !rendered.contains("detail panel for every pull request"),
+            "the previous pull request must not linger: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("no pull request for this pane"),
+            "{rendered:?}"
+        );
+    }
+
     #[test]
     fn section_selector_defaults_to_prs() {
         let app = AppState::test_new();
         assert_eq!(app.dock_home_section, DockHomeSection::Prs);
         let terminal = render(&app, Rect::new(0, 0, 30, 10));
         assert!(line_text(&terminal, 0).starts_with("prs tickets"));
+    }
+
+    #[test]
+    fn a_ticket_shows_its_comments_below_its_description() {
+        let mut app = bound_app(true);
+        app.dock_home_section = DockHomeSection::Tickets;
+        let key = app
+            .dock_home_projection()
+            .ticket_rows
+            .first()
+            .map(|row| row.key.clone())
+            .expect("a bound ticket row");
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.comments = vec![crate::work_index::WorkItemComment {
+            author: Some("Ada".into()),
+            body: "the **fix** landed".into(),
+            created_at: None,
+        }];
+        app.work_item_detail_cache.insert(key, detail);
+
+        let rendered = text(&render(&app, Rect::new(0, 0, 80, 40)));
+        let body = rendered.find("what it does").expect("description heading");
+        let comments = rendered.find("comments").expect("comments heading");
+
+        assert!(body < comments, "comments belong below the description");
+        assert!(rendered.contains("Ada"), "{rendered:?}");
+        // Rendered as markdown, so the emphasis markers do not survive.
+        assert!(rendered.contains("the fix landed"), "{rendered:?}");
     }
 
     #[test]
@@ -1184,6 +1872,7 @@ mod tests {
         let projection = DockHomeProjection {
             rows: Vec::new(),
             ticket_rows: Vec::new(),
+            poll_rows: Vec::new(),
             unbound_prs: None,
             unbound_tickets: None,
             observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
@@ -1213,12 +1902,18 @@ mod tests {
         let terminal = render(&app, Rect::new(0, 0, 100, 40));
         let buffer = terminal.backend().buffer();
 
-        let header = text_position(&terminal, "#125  overview");
+        let header = (0, 2);
+        assert!(line_text(&terminal, header.1).starts_with("#125"));
         assert_eq!(buffer[header].fg, app.palette.accent);
         assert!(buffer[header].modifier.contains(Modifier::BOLD));
 
         let heading = text_position(&terminal, "links");
-        assert_eq!(buffer[heading].fg, app.palette.overlay0);
+        assert_eq!(buffer[heading].fg, app.palette.accent);
+        assert!(buffer[heading].modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            buffer[(heading.0, heading.1.saturating_sub(1))].symbol(),
+            " "
+        );
 
         let url = text_position(&terminal, "https://github.com/herdrdev/herdr/pull/125");
         assert_eq!(buffer[url].fg, app.palette.blue);
@@ -1276,6 +1971,7 @@ mod tests {
         ]);
         let projection = app.dock_home_projection();
         let areas = tab_layouts(&app, &projection, Rect::new(4, 7, 30, 10))
+            .tabs
             .into_iter()
             .map(|(_, area)| area)
             .collect::<Vec<_>>();
@@ -1284,24 +1980,54 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_sits_directly_under_a_short_detail_instead_of_the_pane_floor() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let terminal = render(&app, Rect::new(0, 0, 60, 40));
+        let (_, rule_y) = text_position(&terminal, "unbound");
+        let last_content = (0..rule_y)
+            .rev()
+            .find(|y| !line_text(&terminal, *y).trim().is_empty())
+            .expect("a content row above the footer");
+
+        assert_eq!(
+            rule_y,
+            last_content.saturating_add(1),
+            "the footer rule should start on the row after the last content row"
+        );
+        assert!(
+            rule_y < 40 - FOOTER_ROWS - WRITE_BAR_ROWS,
+            "a short detail must not pin the footer to the pane floor"
+        );
+    }
+
+    #[test]
+    fn a_detail_that_fills_the_pane_keeps_the_footer_at_the_floor() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let terminal = render(&app, Rect::new(0, 0, 60, 12));
+        let (_, rule_y) = text_position(&terminal, "unbound");
+
+        assert_eq!(rule_y, 12 - FOOTER_ROWS - WRITE_BAR_ROWS + 1);
+    }
+
+    #[test]
     fn renders_full_pull_request_detail_in_ghx_field_order() {
         let app = selected_with_detail(bound_app(true), Some(full_detail()));
         let terminal = render(&app, Rect::new(0, 0, 60, 40));
         let text = text(&terminal);
-        let overview = text.find("#125  overview").expect("overview");
+        let overview = text.find("overview comments").expect("overview sub-tab");
         let links = text.find("links").expect("links");
-        let body = text.find("what it does").expect("body heading");
-        let tickets = body
-            + text[body..]
-                .find("tickets")
-                .expect("tickets heading after body");
+        let tickets = text[links..]
+            .find("tickets")
+            .map(|offset| links + offset)
+            .expect("tickets heading");
         let review = text
             .find("review threads  unknown")
             .expect("review threads");
         let checks = text.find("checks  2 failing of 8").expect("checks");
+        let body = text.find("what it does").expect("body heading");
 
-        assert!(overview < links && links < body && body < tickets);
-        assert!(tickets < review && review < checks);
+        assert!(overview < links && links < tickets && tickets < review);
+        assert!(review < checks && checks < body);
         assert!(text.contains("feat/pr-detail"));
         assert!(text.contains("preview   —"));
         assert!(!text.contains("template instructions"));
@@ -1313,7 +2039,8 @@ mod tests {
         let terminal = render(&app, Rect::new(0, 0, 50, 35));
         let text = text(&terminal);
 
-        assert!(text.contains("#—  overview"), "{text:?}");
+        assert!(line_text(&terminal, 2).starts_with("#125"), "{text:?}");
+        assert!(line_text(&terminal, 3).starts_with("overview"), "{text:?}");
         assert!(text.contains("opened — · updated —"), "{text:?}");
         assert!(text.contains("review threads  unknown"), "{text:?}");
         assert!(text.contains("checks  —"), "{text:?}");
@@ -1332,7 +2059,11 @@ mod tests {
         let app = selected_with_detail(bound_app(true), Some(full_detail()));
         let rendered = text(&render(&app, Rect::new(0, 0, 60, 40)));
 
-        assert!(rendered.contains("#125  overview"), "{rendered:?}");
+        assert!(
+            rendered.contains("overview comments actions"),
+            "{rendered:?}"
+        );
+        assert!(line_text(&render(&app, Rect::new(0, 0, 60, 40)), 2).starts_with("#125"));
         assert!(!rendered.contains("loading…"), "{rendered:?}");
     }
 
@@ -1355,17 +2086,29 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_height_detail_scroll_reaches_checks_and_tickets() {
+    fn ordinary_height_detail_scroll_reaches_body_after_summary_fields() {
         let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
-        let area = Rect::new(0, 0, 40, 24);
-        let initial = text(&render(&app, area));
-        assert!(!initial.contains("checks  2 failing of 8"), "{initial:?}");
+        // One row taller than before: the write bar now occupies a row that used
+        // to hold detail, and this test is about scrolling, not that trade.
+        let area = Rect::new(0, 0, 40, 25);
+        let initial_terminal = render(&app, area);
+        let initial = text(&initial_terminal);
+        assert!(initial.contains("checks  2 failing of 8"), "{initial:?}");
+        assert!(!initial.contains("Keeps long body content"), "{initial:?}");
 
         app.dock_scroll = u16::MAX;
-        let scrolled = text(&render(&app, area));
-        assert!(scrolled.contains("tickets"), "{scrolled:?}");
-        assert!(scrolled.contains("review threads  unknown"), "{scrolled:?}");
-        assert!(scrolled.contains("checks  2 failing of 8"), "{scrolled:?}");
+        let scrolled_terminal = render(&app, area);
+        let scrolled = text(&scrolled_terminal);
+        assert!(scrolled.contains("what it does"), "{scrolled:?}");
+        assert!(scrolled.contains("Keeps long body content"), "{scrolled:?}");
+        assert_eq!(
+            line_text(&scrolled_terminal, 2),
+            line_text(&initial_terminal, 2)
+        );
+        assert_eq!(
+            line_text(&scrolled_terminal, 3),
+            line_text(&initial_terminal, 3)
+        );
     }
 
     #[test]
@@ -1384,8 +2127,9 @@ mod tests {
         app.work_item_detail_cache.insert(selected, detail);
 
         let rendered = text(&render(&app, Rect::new(0, 0, 60, 40)));
-        assert!(rendered.contains("#128  overview"), "{rendered:?}");
-        assert!(!rendered.contains("#129  overview"), "{rendered:?}");
+        let terminal = render(&app, Rect::new(0, 0, 60, 40));
+        assert!(line_text(&terminal, 2).starts_with("#128"), "{rendered:?}");
+        assert!(!line_text(&terminal, 2).contains("#129"), "{rendered:?}");
     }
 
     #[test]
@@ -1424,47 +2168,217 @@ mod tests {
     }
 
     #[test]
-    fn minimum_width_windows_overflow_before_tabs_become_illegible() {
+    fn high_count_pr_window_keeps_full_labels_and_reports_hidden_counts() {
         let mut app = bound_app_with_prs(&[
-            (129, crate::detect::AgentState::Working),
-            (128, crate::detect::AgentState::Working),
-            (3487, crate::detect::AgentState::Blocked),
-            (3488, crate::detect::AgentState::Idle),
-            (3360, crate::detect::AgentState::Unknown),
-            (3359, crate::detect::AgentState::Working),
+            (2412, crate::detect::AgentState::Working),
+            (2413, crate::detect::AgentState::Working),
+            (2414, crate::detect::AgentState::Blocked),
+            (2415, crate::detect::AgentState::Idle),
+            (2416, crate::detect::AgentState::Unknown),
+            (2417, crate::detect::AgentState::Working),
         ]);
-        // The dock's divider and handle consume two columns at DOCK_MIN_WIDTH.
         let body_width = crate::ui::DOCK_MIN_WIDTH.saturating_sub(2);
         let area = Rect::new(0, 0, body_width, 12);
         let projection = app.dock_home_projection();
-        let first_layouts = tab_layouts(&app, &projection, area);
-        assert_eq!(projection.rows.len(), 6);
-        assert_eq!(first_layouts.len(), 5);
-        assert_eq!(first_layouts[0].0, 0);
-
-        app.dock_home_selection = projection.rows.last().map(|row| row.key.clone());
-        let layouts = tab_layouts(&app, &projection, area);
-        assert_eq!(layouts.len(), 5);
-        assert_eq!(layouts[0].0, 1);
-        assert_eq!(layouts.last().map(|(index, _)| *index), Some(5));
-        let terminal = render(&app, area);
-
+        let initial = tab_layouts(&app, &projection, area);
+        assert_eq!(initial.leading_hidden, None);
+        assert_eq!(initial.trailing_hidden.map(|hidden| hidden.count), Some(5));
         assert_eq!(
-            layouts.iter().map(|(_, area)| area.width).sum::<u16>(),
-            body_width
+            initial
+                .tabs
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![0]
         );
-        assert!(layouts
-            .iter()
-            .all(|(_, area)| area.height == 1 && area.width >= MIN_LEGIBLE_TAB_WIDTH));
-        for (index, tab_area) in layouts {
+        assert!(line_text(&render(&app, area), 1).contains("5 ›"));
+
+        app.move_dock_home_selection(5);
+        let window = tab_layouts(&app, &projection, area);
+        assert_eq!(window.leading_hidden.map(|hidden| hidden.count), Some(5));
+        assert_eq!(window.trailing_hidden, None);
+        assert_eq!(
+            window
+                .tabs
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+        let terminal = render(&app, area);
+        let strip = line_text(&terminal, 1);
+        assert!(strip.contains("‹ 5"), "{strip:?}");
+        assert!(strip.contains("#2417"), "{strip:?}");
+        assert!(!strip.contains('…'), "{strip:?}");
+
+        for (index, tab_area) in window.tabs {
             let row = &projection.rows[index];
             let actual = (tab_area.x..tab_area.right())
                 .map(|x| terminal.backend().buffer()[(x, tab_area.y)].symbol())
                 .collect::<String>();
-            let expected = middle_elide(&tab_label(row), label_width(tab_area));
-            assert_eq!(actual.trim_end(), expected, "tab #{}", row.number);
-            assert_eq!(actual.chars().next(), row.glyph.chars().next());
-            assert!(actual.contains('…'));
+            assert_eq!(tab_area.width, tab_cell_width(&tab_label(row)));
+            assert_eq!(actual.trim_end(), tab_label(row), "tab #{}", row.number);
         }
+    }
+
+    #[test]
+    fn high_count_ticket_window_uses_the_same_full_identifier_rule() {
+        let mut app = ticket_app_with_identifiers(&[
+            "SCA-2412", "SCA-2413", "SCA-2414", "SCA-2415", "SCA-2416", "SCA-2417",
+        ]);
+        let area = Rect::new(0, 0, crate::ui::DOCK_MIN_WIDTH.saturating_sub(2), 12);
+        let projection = app.dock_home_projection();
+
+        let initial = ticket_tab_layouts(&app, &projection, area);
+        assert_eq!(initial.tabs.len(), 1);
+        assert_eq!(initial.trailing_hidden.map(|hidden| hidden.count), Some(5));
+        assert_eq!(initial.tabs[0].1.width, tab_cell_width("SCA-2412"));
+
+        app.move_dock_home_selection(5);
+        let window = ticket_tab_layouts(&app, &projection, area);
+        assert_eq!(
+            window
+                .tabs
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+        assert_eq!(window.leading_hidden.map(|hidden| hidden.count), Some(5));
+        let strip = line_text(&render(&app, area), 1);
+        assert!(strip.contains("‹ 5"), "{strip:?}");
+        assert!(strip.contains("SCA-2417"), "{strip:?}");
+        assert!(!strip.contains('…'), "{strip:?}");
+    }
+
+    #[test]
+    fn allocator_omits_a_tab_when_its_full_identifier_cannot_fit() {
+        let window = selection_following_tab_window(Rect::new(0, 0, 7, 1), &[9], 0);
+        assert!(window.tabs.is_empty());
+    }
+
+    #[test]
+    fn full_body_scroll_reaches_last_line_and_keeps_pinned_rows() {
+        let mut detail = full_detail();
+        detail.body = Some(
+            (0..30)
+                .map(|index| format!("body-line-{index:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let mut app = selected_with_detail(bound_app(true), Some(detail));
+        let area = Rect::new(0, 0, 60, 28);
+        let initial = render(&app, area);
+        assert!(text(&initial).contains("body-line-00"));
+        assert!(!text(&initial).contains("body-line-29"));
+        let pinned_header = line_text(&initial, 2);
+        let pinned_tabs = line_text(&initial, 3);
+
+        app.dock_scroll = u16::MAX;
+        let scrolled = render(&app, area);
+        assert!(text(&scrolled).contains("body-line-29"));
+        assert_eq!(line_text(&scrolled, 2), pinned_header);
+        assert_eq!(line_text(&scrolled, 3), pinned_tabs);
+    }
+
+    #[test]
+    fn sub_tab_rows_are_colour_coded_rather_than_plain_text() {
+        let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
+        app.dock_home_detail_tab = DockHomeDetailTab::Actions;
+        let terminal = render(&app, Rect::new(0, 0, 80, 24));
+        let buffer = terminal.backend().buffer();
+
+        let failed = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| buffer[(x, y)].style().fg == Some(app.palette.red))
+        });
+        assert!(failed, "a failing check run should be red");
+
+        app.dock_home_detail_tab = DockHomeDetailTab::Files;
+        let terminal = render(&app, Rect::new(0, 0, 80, 24));
+        let buffer = terminal.backend().buffer();
+        let added = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| buffer[(x, y)].style().fg == Some(app.palette.green))
+        });
+        assert!(added, "additions should be green");
+    }
+
+    #[test]
+    fn every_fetched_sub_tab_renders_loaded_data() {
+        for (tab, expected) in [
+            (
+                DockHomeDetailTab::Comments,
+                "Please keep the body scrollable.",
+            ),
+            // The state, counts and short id are colour-coded and column-aligned,
+            // so each row is scannable rather than a run of plain text.
+            (DockHomeDetailTab::Actions, "failure"),
+            (DockHomeDetailTab::Files, "src/ui/dock/home.rs"),
+            (DockHomeDetailTab::Commits, "abc1234"),
+            (DockHomeDetailTab::Ticket, "MAT-125  linked ticket"),
+        ] {
+            let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
+            app.dock_home_detail_tab = tab;
+            let rendered = text(&render(&app, Rect::new(0, 0, 80, 24)));
+            assert!(rendered.contains(expected), "{tab:?}: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn detail_sub_tabs_wrap_at_default_width_without_elision() {
+        let app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let area = Rect::new(0, 0, crate::ui::DOCK_DEFAULT_WIDTH.saturating_sub(2), 20);
+        let terminal = render(&app, area);
+
+        for (tab, tab_area) in DockHomeDetailTab::ALL
+            .into_iter()
+            .zip(detail_tab_layouts(area))
+        {
+            let rendered = (tab_area.x..tab_area.right())
+                .map(|x| terminal.backend().buffer()[(x, tab_area.y)].symbol())
+                .collect::<String>();
+            assert_eq!(rendered.trim_end(), tab.label(), "{tab:?}");
+        }
+    }
+
+    #[test]
+    fn every_fetched_sub_tab_names_loading_and_empty_states() {
+        for tab in [
+            DockHomeDetailTab::Comments,
+            DockHomeDetailTab::Actions,
+            DockHomeDetailTab::Files,
+            DockHomeDetailTab::Commits,
+            DockHomeDetailTab::Ticket,
+        ] {
+            let mut loading = selected_with_detail(bound_app(true), None);
+            loading.dock_home_detail_tab = tab;
+            assert!(
+                text(&render(&loading, Rect::new(0, 0, 80, 16))).contains("loading…"),
+                "{tab:?}"
+            );
+        }
+
+        let mut empty_detail = full_detail();
+        empty_detail.comments.clear();
+        empty_detail.actions.clear();
+        empty_detail.files.clear();
+        empty_detail.commits.clear();
+        for (tab, expected) in [
+            (DockHomeDetailTab::Comments, "no comments"),
+            (DockHomeDetailTab::Actions, "no check runs"),
+            (DockHomeDetailTab::Files, "no changed files"),
+            (DockHomeDetailTab::Commits, "no commits"),
+        ] {
+            let mut app = selected_with_detail(bound_app(true), Some(empty_detail.clone()));
+            app.dock_home_detail_tab = tab;
+            let rendered = text(&render(&app, Rect::new(0, 0, 80, 16)));
+            assert!(rendered.contains(expected), "{tab:?}: {rendered:?}");
+        }
+
+        let mut no_ticket = selected_with_detail(
+            bound_app_with_prs(&[(125, crate::detect::AgentState::Working)]),
+            Some(empty_detail),
+        );
+        no_ticket.dock_home_detail_tab = DockHomeDetailTab::Ticket;
+        assert!(text(&render(&no_ticket, Rect::new(0, 0, 80, 16))).contains("no linked ticket"));
     }
 }

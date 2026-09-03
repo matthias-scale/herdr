@@ -11,6 +11,8 @@ use crate::terminal::TerminalRuntimeRegistry;
 mod editor;
 mod home;
 
+pub(crate) use home::detail_tab_layouts as home_detail_tab_layouts;
+pub(crate) use home::poll_tab_layouts as home_poll_tab_layouts;
 pub(crate) use home::section_layouts as home_section_layouts;
 pub(crate) use home::tab_layouts as home_tab_layouts;
 pub(crate) use home::ticket_tab_layouts as home_ticket_tab_layouts;

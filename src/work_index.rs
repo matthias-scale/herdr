@@ -37,6 +37,32 @@ pub(crate) struct WorkItemCheckSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemComment {
+    pub(crate) author: Option<String>,
+    pub(crate) body: String,
+    pub(crate) created_at: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemAction {
+    pub(crate) name: String,
+    pub(crate) state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemFile {
+    pub(crate) path: String,
+    pub(crate) additions: u64,
+    pub(crate) deletions: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkItemCommit {
+    pub(crate) short_id: String,
+    pub(crate) subject: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkItemDetail {
     pub(crate) number: Option<u64>,
     pub(crate) title: Option<String>,
@@ -51,6 +77,10 @@ pub(crate) struct WorkItemDetail {
     pub(crate) review_decision: Option<String>,
     pub(crate) is_draft: Option<bool>,
     pub(crate) checks: Option<WorkItemCheckSummary>,
+    pub(crate) comments: Vec<WorkItemComment>,
+    pub(crate) actions: Vec<WorkItemAction>,
+    pub(crate) files: Vec<WorkItemFile>,
+    pub(crate) commits: Vec<WorkItemCommit>,
     /// GitHub's `gh pr view --json` payload does not expose review threads.
     /// Keep the absence explicit rather than substituting review count data.
     pub(crate) unresolved_review_threads: Option<usize>,
@@ -59,6 +89,13 @@ pub(crate) struct WorkItemDetail {
 }
 
 impl WorkItemDetail {
+    /// An otherwise blank detail, for a source that fills only some fields.
+    pub(crate) fn empty() -> Self {
+        let mut detail = Self::unavailable(String::new());
+        detail.unavailable = None;
+        detail
+    }
+
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
             number: None,
@@ -74,6 +111,10 @@ impl WorkItemDetail {
             review_decision: None,
             is_draft: None,
             checks: None,
+            comments: Vec::new(),
+            actions: Vec::new(),
+            files: Vec::new(),
+            commits: Vec::new(),
             unresolved_review_threads: None,
             unavailable: Some(message.into()),
             observed_at: SystemTime::now(),
@@ -96,6 +137,13 @@ struct CachedWorkItemDetail {
 impl WorkItemDetailCache {
     pub(crate) fn get(&self, key: &crate::app::state::WorkItemKey) -> Option<&WorkItemDetail> {
         self.entries.get(key).map(|cached| &cached.detail)
+    }
+
+    /// Forget one entry, so the next refresh re-reads it. Used after a write,
+    /// where the cached copy is known to be stale the moment it succeeds.
+    pub(crate) fn remove(&mut self, key: &crate::app::state::WorkItemKey) {
+        self.entries.remove(key);
+        self.order.retain(|entry| entry != key);
     }
 
     pub(crate) fn insert(&mut self, key: crate::app::state::WorkItemKey, detail: WorkItemDetail) {
@@ -532,7 +580,7 @@ fn fetch_github_pull_requests(
 }
 
 const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
-    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup";
+    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,comments,files,commits";
 
 fn fetch_github_pull_request_detail(
     repo: &str,
@@ -599,10 +647,164 @@ fn fetch_github_pull_request_detail(
         review_decision: value_text(value.get("reviewDecision")),
         is_draft: value.get("isDraft").and_then(Value::as_bool),
         checks: status_check_summary(value.get("statusCheckRollup")),
+        comments: github_comments(value.get("comments")),
+        actions: github_actions(value.get("statusCheckRollup")),
+        files: github_files(value.get("files")),
+        commits: github_commits(value.get("commits")),
         unresolved_review_threads: None,
         unavailable: None,
         observed_at: SystemTime::now(),
     })
+}
+
+/// Read one Linear issue with its comment threads.
+///
+/// Reuses `WorkItemDetail` so the LRU cache, the loading set and the generation
+/// guard that already serve pull requests apply to tickets unchanged.
+fn fetch_linear_ticket_detail(
+    identifier: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<WorkItemDetail, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "issues",
+        "read",
+        identifier,
+        "--with-comment-threads",
+        "--compact",
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("linearis could not be run ({})", program.display()))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(format!(
+            "linearis issues read failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| RefreshError::Failed("linearis returned invalid JSON".to_string()))?;
+
+    let mut detail = WorkItemDetail::empty();
+    detail.title = value_text(value.get("title"));
+    detail.body = value_text(value.get("description"));
+    detail.url = value_text(value.get("url"));
+    detail.created_at = value_time(value.get("createdAt"));
+    detail.updated_at = value_time(value.get("updatedAt"));
+    detail.comments = linear_comments(value.get("comments"));
+    Ok(detail)
+}
+
+/// Flatten Linear's comment threads: a root comment followed by its replies, in
+/// the order they were written, so a thread reads top to bottom.
+fn linear_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
+    fn author(comment: &Value) -> Option<String> {
+        let user = comment.get("user")?;
+        user.get("displayName")
+            .or_else(|| user.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+    fn push(comment: &Value, out: &mut Vec<WorkItemComment>) {
+        let Some(body) = value_text(comment.get("body")) else {
+            return;
+        };
+        out.push(WorkItemComment {
+            author: author(comment),
+            body,
+            created_at: value_time(comment.get("createdAt")),
+        });
+        let replies = comment
+            .get("replies")
+            .and_then(|replies| replies.get("nodes").or(Some(replies)))
+            .and_then(Value::as_array);
+        for reply in replies.into_iter().flatten() {
+            push(reply, out);
+        }
+    }
+
+    let nodes = value
+        .and_then(|value| value.get("nodes").or(Some(value)))
+        .and_then(Value::as_array);
+    let mut out = Vec::new();
+    for comment in nodes.into_iter().flatten() {
+        push(comment, &mut out);
+    }
+    out
+}
+
+fn github_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|comment| {
+            let body = value_text(comment.get("body"))?;
+            Some(WorkItemComment {
+                author: comment
+                    .get("author")
+                    .and_then(|author| author.get("login"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                body,
+                created_at: value_time(comment.get("createdAt")),
+            })
+        })
+        .collect()
+}
+
+fn github_actions(value: Option<&Value>) -> Vec<WorkItemAction> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| {
+            let name =
+                value_text(action.get("name")).or_else(|| value_text(action.get("context")))?;
+            let state = value_text(action.get("conclusion"))
+                .filter(|state| !state.is_empty())
+                .or_else(|| value_text(action.get("status")))
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(WorkItemAction { name, state })
+        })
+        .collect()
+}
+
+fn github_files(value: Option<&Value>) -> Vec<WorkItemFile> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            Some(WorkItemFile {
+                path: value_text(file.get("path"))?,
+                additions: file.get("additions").and_then(Value::as_u64).unwrap_or(0),
+                deletions: file.get("deletions").and_then(Value::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+fn github_commits(value: Option<&Value>) -> Vec<WorkItemCommit> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|commit| {
+            let oid = value_text(commit.get("oid"))?;
+            Some(WorkItemCommit {
+                short_id: oid.chars().take(7).collect(),
+                subject: value_text(commit.get("messageHeadline")).unwrap_or_else(|| "—".into()),
+            })
+        })
+        .collect()
 }
 
 fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
@@ -960,6 +1162,12 @@ fn fetch_ticket_attachments(
         .collect())
 }
 
+fn value_time(value: Option<&Value>) -> Option<SystemTime> {
+    value
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_system_time)
+}
+
 fn value_text(value: Option<&Value>) -> Option<String> {
     value.and_then(|value| {
         value.as_str().map(str::to_string).or_else(|| {
@@ -1083,21 +1291,65 @@ pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()>
     std::fs::write(path, bytes)
 }
 
+/// Locate a CLI herdr shells out to.
+///
+/// The server does not always inherit an interactive shell's `PATH` — started
+/// from launchd, a desktop launcher or a login-less session it gets a bare one
+/// — so relying on the bare name means the tool silently "could not be run" on
+/// exactly the machines where it is installed. Search `PATH` first, then the
+/// usual install locations, and fall back to the bare name so the error still
+/// names the program rather than a guessed path.
+fn resolve_program(name: &str) -> std::path::PathBuf {
+    let executable = |path: &Path| -> bool {
+        std::fs::metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+    };
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join(name);
+            if executable(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    // Ordered by how these tools are actually installed here: user bin first,
+    // then Homebrew, then a global npm prefix.
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = home {
+        for relative in ["bin", ".local/bin", ".npm-global/bin", ".bun/bin"] {
+            candidates.push(home.join(relative).join(name));
+        }
+    }
+    for absolute in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        candidates.push(Path::new(absolute).join(name));
+    }
+    for candidate in candidates {
+        if executable(&candidate) {
+            return candidate;
+        }
+    }
+    Path::new(name).to_path_buf()
+}
+
 impl crate::app::App {
-    fn work_index_gh_program(&self) -> std::path::PathBuf {
+    pub(crate) fn work_index_gh_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_gh_program_override.as_ref() {
             return program.clone();
         }
-        Path::new("gh").to_path_buf()
+        resolve_program("gh")
     }
 
-    fn work_index_linearis_program(&self) -> std::path::PathBuf {
+    pub(crate) fn work_index_linearis_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_linearis_program_override.as_ref() {
             return program.clone();
         }
-        Path::new("linearis").to_path_buf()
+        resolve_program("linearis")
     }
 
     pub(crate) fn work_index_refresh_deadline(&self) -> Option<Instant> {
@@ -1226,8 +1478,8 @@ impl crate::app::App {
             return;
         }
         let mut keys = self.state.dock_home_keys_for_section(section);
-        if let Some(selection) = selection {
-            if let Some(index) = keys.iter().position(|key| key == &selection) {
+        if let Some(selection) = selection.as_ref() {
+            if let Some(index) = keys.iter().position(|key| key == selection) {
                 let selection = keys.remove(index);
                 keys.insert(0, selection);
             }
@@ -1235,8 +1487,17 @@ impl crate::app::App {
         keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
         let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         keys.retain(|key| {
-            key.pr_number.is_some()
-                && !key.repo.is_empty()
+            // Pull requests are prefetched across the whole section: one `gh`
+            // call each, and the tab strip gets walked often. A ticket costs a
+            // separate `linearis` read, so only the one actually being looked
+            // at is worth fetching - prefetching the section would mean a
+            // process per ticket for detail nobody has asked to see.
+            let fetchable = if key.pr_number.is_some() {
+                !key.repo.is_empty()
+            } else {
+                key.ticket_id.is_some() && selection.as_ref() == Some(key)
+            };
+            fetchable
                 && !self
                     .state
                     .work_item_detail_cache
@@ -1261,6 +1522,7 @@ impl crate::app::App {
             .extend(keys.iter().cloned());
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
+        let linearis_program = self.work_index_linearis_program();
         let _ = std::thread::Builder::new()
             .name("herdr-work-item-details".into())
             .spawn(move || {
@@ -1272,16 +1534,40 @@ impl crate::app::App {
                             .map(|key| {
                                 let key = key.clone();
                                 let gh_program = gh_program.clone();
+                                let linearis_program = linearis_program.clone();
                                 scope.spawn(move || {
-                                    let detail = match fetch_github_pull_request_detail(
-                                        &key.repo,
-                                        key.pr_number.unwrap_or_default(),
-                                        &gh_program,
-                                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
-                                    ) {
+                                    let target =
+                                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT);
+                                    let (result, what) = match (key.pr_number, &key.ticket_id) {
+                                        (Some(number), _) => (
+                                            fetch_github_pull_request_detail(
+                                                &key.repo,
+                                                number,
+                                                &gh_program,
+                                                target,
+                                            ),
+                                            "GitHub PR detail",
+                                        ),
+                                        (None, Some(ticket)) => (
+                                            fetch_linear_ticket_detail(
+                                                ticket,
+                                                &linearis_program,
+                                                target,
+                                            ),
+                                            "Linear ticket detail",
+                                        ),
+                                        (None, None) => (
+                                            Err(RefreshError::Failed(
+                                                "work item has neither a pull request nor a ticket"
+                                                    .to_string(),
+                                            )),
+                                            "work item detail",
+                                        ),
+                                    };
+                                    let detail = match result {
                                         Ok(detail) => detail,
                                         Err(RefreshError::TimedOut) => WorkItemDetail::unavailable(
-                                            "GitHub PR detail observation timed out",
+                                            format!("{what} observation timed out"),
                                         ),
                                         Err(RefreshError::Failed(message)) => {
                                             WorkItemDetail::unavailable(message)
@@ -1347,6 +1633,74 @@ impl crate::app::App {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[test]
+    fn resolve_program_finds_a_tool_on_path_and_names_it_when_missing() {
+        let dir = std::env::temp_dir().join(format!("herdr-resolve-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tool = dir.join("herdr-fake-tool");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("write fake tool");
+
+        let previous = std::env::var_os("PATH");
+        // SAFETY: single-threaded test, restored before returning.
+        unsafe { std::env::set_var("PATH", &dir) };
+        let found = resolve_program("herdr-fake-tool");
+        let missing = resolve_program("herdr-tool-that-does-not-exist");
+        match previous {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        assert_eq!(found, tool, "a tool on PATH resolves to its full path");
+        assert_eq!(
+            missing,
+            Path::new("herdr-tool-that-does-not-exist"),
+            "an unfound tool keeps its bare name so the error can name it"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn linear_comment_threads_flatten_to_root_then_replies() {
+        let value: Value = serde_json::from_str(
+            r#"{"nodes":[
+                 {"body":"root one","createdAt":"2026-09-01T10:00:00.000Z",
+                  "user":{"displayName":"Ada"},
+                  "replies":{"nodes":[{"body":"a reply","user":{"name":"Grace"}}]}},
+                 {"body":"root two","user":{"displayName":"Alan"}}
+               ]}"#,
+        )
+        .expect("fixture");
+
+        let comments = linear_comments(Some(&value));
+        let rendered: Vec<(Option<&str>, &str)> = comments
+            .iter()
+            .map(|comment| (comment.author.as_deref(), comment.body.as_str()))
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                (Some("Ada"), "root one"),
+                (Some("Grace"), "a reply"),
+                (Some("Alan"), "root two"),
+            ],
+            "a thread reads root first, then its replies"
+        );
+        assert!(
+            comments[0].created_at.is_some(),
+            "a comment keeps the time it was written"
+        );
+        assert!(comments[1].created_at.is_none());
+    }
+
+    #[test]
+    fn linear_comments_tolerate_an_absent_or_empty_field() {
+        assert!(linear_comments(None).is_empty());
+        let empty: Value = serde_json::from_str(r#"{"nodes":[]}"#).expect("fixture");
+        assert!(linear_comments(Some(&empty)).is_empty());
+    }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1497,7 +1851,7 @@ printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"r
             &format!(
                 r#"#!/bin/sh
 test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
-printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"conclusion":"FAILURE"}},{{"conclusion":"SUCCESS"}}]}}'
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}]}}'
 "#
             ),
             "#!/bin/sh\nprintf '%s' '[]'\n",
@@ -1521,6 +1875,17 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
                 total: 2
             })
         );
+        assert_eq!(detail.comments[0].author.as_deref(), Some("reviewer"));
+        assert_eq!(detail.comments[0].body, "Looks good");
+        assert_eq!(detail.actions[0].name, "test");
+        assert_eq!(detail.actions[0].state, "FAILURE");
+        assert_eq!(detail.files[0].path, "src/lib.rs");
+        assert_eq!(
+            (detail.files[0].additions, detail.files[0].deletions),
+            (4, 2)
+        );
+        assert_eq!(detail.commits[0].short_id, "abcdef0");
+        assert_eq!(detail.commits[0].subject, "fix detail");
     }
 
     #[test]
@@ -2041,4 +2406,142 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
                 .expect("valid JSON");
         assert!(value.get("items").is_some());
     }
+}
+
+/// A write a human asked for against a work item.
+///
+/// Each variant maps to exactly one CLI invocation. They are kept together so
+/// the confirm-then-run flow has a single vocabulary, and so it is obvious at a
+/// glance which of them change something outside herdr.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkItemWrite {
+    CommentOnPullRequest {
+        repo: String,
+        number: u64,
+        body: String,
+    },
+    CommentOnTicket {
+        identifier: String,
+        body: String,
+    },
+    ApprovePullRequest {
+        repo: String,
+        number: u64,
+    },
+    MergePullRequest {
+        repo: String,
+        number: u64,
+    },
+    ClosePullRequest {
+        repo: String,
+        number: u64,
+    },
+}
+
+impl WorkItemWrite {
+    /// What the user is about to do, for the confirmation line. Phrased as the
+    /// action and its target so a mis-aimed write is visible before it runs.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::CommentOnPullRequest { repo, number, .. } => {
+                format!("comment on {repo}#{number}")
+            }
+            Self::CommentOnTicket { identifier, .. } => format!("comment on {identifier}"),
+            Self::ApprovePullRequest { repo, number } => format!("approve {repo}#{number}"),
+            Self::MergePullRequest { repo, number } => {
+                format!("squash-merge {repo}#{number}")
+            }
+            Self::ClosePullRequest { repo, number } => format!("close {repo}#{number}"),
+        }
+    }
+
+    /// The work item this write targets, so its cached detail can be dropped
+    /// once the write lands and the next refresh shows the result.
+    pub(crate) fn target(&self) -> Option<crate::app::state::WorkItemKey> {
+        match self {
+            Self::CommentOnPullRequest { repo, number, .. }
+            | Self::ApprovePullRequest { repo, number }
+            | Self::MergePullRequest { repo, number }
+            | Self::ClosePullRequest { repo, number } => Some(crate::app::state::WorkItemKey {
+                repo: repo.clone(),
+                pr_number: Some(*number),
+                pr_url: None,
+                ticket_id: None,
+            }),
+            Self::CommentOnTicket { .. } => None,
+        }
+    }
+}
+
+/// Run one authorized write. Returns the message to show the user either way.
+pub(crate) fn run_work_item_write(
+    write: &WorkItemWrite,
+    gh_program: &Path,
+    linearis_program: &Path,
+    deadline: Instant,
+) -> Result<String, String> {
+    let (command, stdin) = match write {
+        WorkItemWrite::CommentOnPullRequest { repo, number, body } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            // `--body-file -` rather than `--body`: a multi-line markdown comment
+            // has no business going through argv quoting or its length limit.
+            command.args([
+                "pr",
+                "comment",
+                &number.to_string(),
+                "-R",
+                repo,
+                "--body-file",
+                "-",
+            ]);
+            (command, Some(body.clone().into_bytes()))
+        }
+        WorkItemWrite::CommentOnTicket { identifier, body } => {
+            let mut command = crate::noninteractive_process::command(linearis_program);
+            command.args(["issues", "discuss", identifier, "--body", body]);
+            (command, None)
+        }
+        WorkItemWrite::ApprovePullRequest { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "review", &number.to_string(), "-R", repo, "--approve"]);
+            (command, None)
+        }
+        WorkItemWrite::MergePullRequest { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "merge", &number.to_string(), "-R", repo, "--squash"]);
+            (command, None)
+        }
+        WorkItemWrite::ClosePullRequest { repo, number } => {
+            let mut command = crate::noninteractive_process::command(gh_program);
+            command.args(["pr", "close", &number.to_string(), "-R", repo]);
+            (command, None)
+        }
+    };
+
+    let output = match stdin {
+        Some(stdin) => {
+            crate::noninteractive_process::output_with_stdin_and_deadline(command, stdin, deadline)
+        }
+        None => crate::noninteractive_process::output_with_deadline(command, deadline),
+    }
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            format!("{} timed out", write.describe())
+        } else {
+            format!("{} could not be run", write.describe())
+        }
+    })?;
+
+    if output.status.success() {
+        return Ok(format!("{} done", write.describe()));
+    }
+    // The CLI's own message says why far better than a generic failure would.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("no reason given")
+        .trim()
+        .to_string();
+    Err(format!("{} failed: {reason}", write.describe()))
 }
