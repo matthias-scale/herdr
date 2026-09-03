@@ -1243,6 +1243,12 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(OsStr::from_bytes(&vip_path[..nul])))
 }
 
+/// Platform parity with the Linux snapshot path. Only Linux pays a
+/// full-`/proc`-scan per call, so elsewhere this is the uncached function.
+pub fn session_processes_cached(child_pid: u32) -> Vec<u32> {
+    session_processes(child_pid)
+}
+
 pub fn session_processes(child_pid: u32) -> Vec<u32> {
     if child_pid == 0 {
         return Vec::new();

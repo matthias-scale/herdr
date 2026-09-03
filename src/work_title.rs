@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn ac25_turn_hook_extracts_only_valid_preview_urls() {
+    fn ac25_turn_hook_keeps_the_bare_preview_root_and_the_full_url() {
         let request = request_from_turn_start(
             WorkTitleProvider::Codex,
             Some("w1:p1"),
@@ -724,9 +724,16 @@ mod tests {
         )
         .expect("guarded turn hook should produce metadata");
 
+        // A non-Vercel host is still rejected outright. A recognised host keeps
+        // both forms: the bare root as the stable address, and the URL as
+        // written, whose query carries the bypass token the preview needs.
         assert_eq!(
             request.work_context.expect("work context").preview_urls,
-            vec!["https://demo-preview.vercel.app"]
+            vec![
+                "https://demo-preview.vercel.app",
+                "https://second.vercel.app",
+                "https://second.vercel.app?token=secret"
+            ]
         );
     }
 

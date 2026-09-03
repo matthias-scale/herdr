@@ -386,6 +386,7 @@ impl AppState {
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             self.sync_copy_mode_with_focus();
+            self.reconcile_dock_home_with_focused_pane();
             return true;
         }
         false
@@ -1282,8 +1283,12 @@ impl AppState {
             }
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
+            let focus_changed = previous_focus != self.current_pane_focus_target();
             self.record_pane_focus_after_navigation(previous_focus);
             self.sync_selection_after_focus_navigation();
+            if focus_changed {
+                self.reconcile_dock_home_with_focused_pane();
+            }
         }
     }
 
@@ -1317,8 +1322,12 @@ impl AppState {
         }
         self.tab_scroll_follow_active = true;
         self.refresh_tab_bar_view();
+        let focus_changed = previous_focus != self.current_pane_focus_target();
         self.record_pane_focus_after_navigation(previous_focus);
         self.sync_selection_after_focus_navigation();
+        if focus_changed {
+            self.reconcile_dock_home_with_focused_pane();
+        }
         true
     }
 
@@ -2093,6 +2102,7 @@ impl AppState {
             tab.layout.focus_pane(target.pane_id);
             self.previous_pane_focus = current;
             self.mark_session_dirty();
+            self.reconcile_dock_home_with_focused_pane();
         }
     }
 
@@ -3325,7 +3335,9 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
-            AppEvent::WorkIndexRefreshed { .. } => Vec::new(),
+            AppEvent::WorkIndexRefreshed { .. } | AppEvent::WorkItemDetailRefreshed { .. } => {
+                Vec::new()
+            }
             AppEvent::ForegroundProcessesRefreshed { .. } => Vec::new(),
             AppEvent::ClaudeSubagentsRefreshed { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),

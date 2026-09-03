@@ -178,6 +178,12 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
 }
 
 /// Unsupported platform stub.
+/// Platform parity with the Linux snapshot path. Only Linux pays a
+/// full-`/proc`-scan per call, so elsewhere this is the uncached function.
+pub fn session_processes_cached(_child_pid: u32) -> Vec<u32> {
+    session_processes(_child_pid)
+}
+
 pub fn session_processes(_child_pid: u32) -> Vec<u32> {
     Vec::new()
 }
