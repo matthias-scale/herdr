@@ -1718,6 +1718,50 @@ mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
 
+    fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {
+        crate::app::home_catalog::parse_codex_catalog(
+            format!(
+                r#"{{"models":[{{"slug":"{model}","visibility":"list","priority":1,"supported_reasoning_levels":[{{"effort":"high"}}]}}]}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("valid Codex catalog")
+    }
+
+    #[test]
+    fn refreshed_home_catalog_updates_the_open_view_and_the_next_open() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.toggle_home();
+
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::HomeCatalogRefreshed {
+                catalog: codex_catalog("refreshed-model"),
+            })
+        );
+        let home = app.state.home.as_mut().expect("open Home");
+        home.set_agent(Agent::Codex);
+        assert!(home
+            .model_options()
+            .iter()
+            .any(|model| model.id == "refreshed-model"));
+
+        app.state.toggle_home();
+        app.state.toggle_home();
+        let home = app.state.home.as_mut().expect("reopened Home");
+        home.set_agent(Agent::Codex);
+        assert!(home
+            .model_options()
+            .iter()
+            .any(|model| model.id == "refreshed-model"));
+    }
+
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
         let status = std::process::Command::new("git")

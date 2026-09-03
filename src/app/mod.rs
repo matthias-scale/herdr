@@ -647,7 +647,11 @@ impl App {
             work_view: None,
             inbox: None,
             home: None,
-            home_catalog: crate::app::home_catalog::cached_home_catalog_for_current_profile(),
+            home_catalog: if cfg!(test) {
+                crate::app::home_catalog::HomeCatalog::fallback()
+            } else {
+                crate::app::home_catalog::cached_home_catalog_for_current_profile()
+            },
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,

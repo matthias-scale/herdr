@@ -84,13 +84,17 @@ fn entry(id: &str, efforts: &[&str]) -> HomeModelCatalogEntry {
 }
 
 fn claude_catalog() -> HomeProviderCatalog {
-    const EFFORTS: &[&str] = &[AUTO_EFFORT, "low", "medium", "high", "xhigh", "max"];
+    const AUTO_ONLY: &[&str] = &[AUTO_EFFORT];
+    const ADAPTIVE_EFFORTS: &[&str] = &[AUTO_EFFORT, "low", "medium", "high", "xhigh", "max"];
     HomeProviderCatalog {
         agent: Agent::Claude,
-        models: [DEFAULT_MODEL, "fable", "opus", "sonnet", "haiku"]
-            .into_iter()
-            .map(|id| entry(id, EFFORTS))
-            .collect(),
+        models: vec![
+            entry(DEFAULT_MODEL, AUTO_ONLY),
+            entry("fable", ADAPTIVE_EFFORTS),
+            entry("opus", ADAPTIVE_EFFORTS),
+            entry("sonnet", ADAPTIVE_EFFORTS),
+            entry("haiku", AUTO_ONLY),
+        ],
     }
 }
 
@@ -292,6 +296,22 @@ mod tests {
         assert_eq!(
             catalog.model("later").expect("later model").efforts,
             [AUTO_EFFORT, "low"]
+        );
+    }
+
+    #[test]
+    fn claude_effort_options_follow_the_selected_model() {
+        let catalog = HomeCatalog::fallback();
+        let claude = catalog.provider(Agent::Claude).expect("Claude catalog");
+
+        assert_eq!(
+            claude.model(DEFAULT_MODEL).expect("Default").efforts,
+            [AUTO_EFFORT]
+        );
+        assert_eq!(claude.model("haiku").expect("Haiku").efforts, [AUTO_EFFORT]);
+        assert_eq!(
+            claude.model("fable").expect("Fable").efforts,
+            [AUTO_EFFORT, "low", "medium", "high", "xhigh", "max"]
         );
     }
 
