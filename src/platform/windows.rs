@@ -4096,62 +4096,6 @@ mod tests {
     }
 
     #[test]
-    fn synced_process_environment_variable_parser_reads_case_insensitive_marker() {
-        let environment: Vec<u16> = "PATH=C:\\Windows\0herdr_pane_runtime_id=pane-a\0\0"
-            .encode_utf16()
-            .collect();
-
-        assert_eq!(
-            super::environment_variable_from_utf16(
-                &environment,
-                super::PANE_RUNTIME_MARKER_ENV_VAR,
-            )
-            .as_deref(),
-            Some("pane-a")
-        );
-    }
-
-    #[test]
-    fn synced_pane_runtime_markers_are_distinct() {
-        let first = super::next_pane_runtime_marker();
-        let second = super::next_pane_runtime_marker();
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn synced_pane_runtime_marker_is_added_only_to_git_bash_environment() {
-        let root = std::env::temp_dir().join(format!(
-            "herdr-git-bash-test-{}",
-            super::next_pane_runtime_marker()
-        ));
-        fs::create_dir_all(root.join("bin")).expect("create Git Bash bin fixture");
-        fs::create_dir_all(root.join("usr").join("bin")).expect("create Git Bash usr/bin fixture");
-        fs::create_dir_all(root.join("cmd")).expect("create Git Bash cmd fixture");
-        fs::write(root.join("bin").join("bash.exe"), []).expect("create Bash fixture");
-        fs::write(root.join("usr").join("bin").join("msys-2.0.dll"), [])
-            .expect("create MSYS runtime fixture");
-        fs::write(root.join("cmd").join("git.exe"), []).expect("create Git fixture");
-
-        let mut git_bash = portable_pty::CommandBuilder::new(root.join("bin").join("bash.exe"));
-        super::apply_pane_runtime_marker_platform(&mut git_bash);
-        let mut path_resolved_git_bash = portable_pty::CommandBuilder::new("bash.exe");
-        path_resolved_git_bash.env("PATH", root.join("bin"));
-        super::apply_pane_runtime_marker_platform(&mut path_resolved_git_bash);
-        let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-        super::apply_pane_runtime_marker_platform(&mut cmd);
-
-        assert!(git_bash
-            .get_env(super::PANE_RUNTIME_MARKER_ENV_VAR)
-            .is_some_and(|value| !value.is_empty()));
-        assert!(path_resolved_git_bash
-            .get_env(super::PANE_RUNTIME_MARKER_ENV_VAR)
-            .is_some_and(|value| !value.is_empty()));
-        assert!(cmd.get_env(super::PANE_RUNTIME_MARKER_ENV_VAR).is_none());
-        fs::remove_dir_all(root).expect("remove Git Bash fixture");
-    }
-
-    #[test]
     fn process_environment_variable_parser_reads_case_insensitive_marker() {
         let environment: Vec<u16> = "PATH=C:\\Windows\0herdr_pane_runtime_id=pane-a\0\0"
             .encode_utf16()
