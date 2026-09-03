@@ -21,6 +21,8 @@ use crate::{
 
 const TAB_ROWS: u16 = 2;
 const FOOTER_ROWS: u16 = 4;
+/// One row under the footer for actions, a draft, or a confirmation.
+const WRITE_BAR_ROWS: u16 = 1;
 
 fn tab_label(row: &DockHomeRow) -> String {
     format!("{} #{}", row.glyph, row.number)
@@ -912,6 +914,67 @@ fn render_hidden_tab_counts(app: &AppState, frame: &mut Frame, window: &TabWindo
     }
 }
 
+/// The write bar: what you can do to the selected item, what is staged, and how
+/// the last write went.
+///
+/// A staged write is never run by the key that staged it. It sits here with an
+/// explicit confirm, so nothing leaves herdr as a side effect of a keystroke.
+fn render_write_bar(app: &AppState, frame: &mut Frame, area: Rect, y: u16) {
+    if y >= area.bottom() {
+        return;
+    }
+    if let Some(write) = app.dock_pending_write.as_ref() {
+        render_line(
+            frame,
+            area,
+            y,
+            format!("confirm {}?  y to run · esc to cancel", write.describe()),
+            Style::default()
+                .fg(app.palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+        return;
+    }
+    if let Some(draft) = app.dock_comment_draft.as_ref() {
+        render_line(
+            frame,
+            area,
+            y,
+            format!("> {draft}_"),
+            Style::default().fg(app.palette.text),
+        );
+        return;
+    }
+    if let Some(notice) = app.dock_write_notice.as_ref() {
+        render_line(
+            frame,
+            area,
+            y,
+            notice.clone(),
+            Style::default().fg(if notice.ends_with("done") {
+                app.palette.green
+            } else {
+                app.palette.red
+            }),
+        );
+        return;
+    }
+    let actions = match app.dock_home_section {
+        DockHomeSection::Prs => "r reply · a approve · m merge · x close",
+        DockHomeSection::Tickets => "r reply",
+        DockHomeSection::XPolls => "",
+    };
+    if !actions.is_empty() {
+        render_line(
+            frame,
+            area,
+            y,
+            actions.to_string(),
+            Style::default().fg(app.palette.overlay0),
+        );
+    }
+}
+
 fn render_footer(
     app: &AppState,
     projection: &DockHomeProjection,
@@ -1139,7 +1202,10 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
     // The footer follows the content rather than the pane floor, so a short
     // detail does not leave a gap between the last row and the legend. It only
     // reaches the floor when the body actually fills the available height.
-    let footer_floor = area.bottom().saturating_sub(FOOTER_ROWS).max(detail_y);
+    let footer_floor = area
+        .bottom()
+        .saturating_sub(FOOTER_ROWS + WRITE_BAR_ROWS)
+        .max(detail_y);
     let detail_height = footer_floor.saturating_sub(detail_y);
     let lines = match app.dock_home_section {
         DockHomeSection::Prs => selected_pr
@@ -1176,6 +1242,7 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
     }
     let footer_y = detail_y.saturating_add(rendered_rows).min(footer_floor);
     render_footer(app, &projection, frame, area, footer_y);
+    render_write_bar(app, frame, area, footer_y.saturating_add(FOOTER_ROWS));
 }
 
 #[cfg(test)]
@@ -1872,7 +1939,7 @@ mod tests {
             "the footer rule should start on the row after the last content row"
         );
         assert!(
-            rule_y < 40 - FOOTER_ROWS,
+            rule_y < 40 - FOOTER_ROWS - WRITE_BAR_ROWS,
             "a short detail must not pin the footer to the pane floor"
         );
     }
@@ -1883,7 +1950,7 @@ mod tests {
         let terminal = render(&app, Rect::new(0, 0, 60, 12));
         let (_, rule_y) = text_position(&terminal, "unbound");
 
-        assert_eq!(rule_y, 12 - FOOTER_ROWS + 1);
+        assert_eq!(rule_y, 12 - FOOTER_ROWS - WRITE_BAR_ROWS + 1);
     }
 
     #[test]
@@ -1965,7 +2032,9 @@ mod tests {
     #[test]
     fn ordinary_height_detail_scroll_reaches_body_after_summary_fields() {
         let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
-        let area = Rect::new(0, 0, 40, 24);
+        // One row taller than before: the write bar now occupies a row that used
+        // to hold detail, and this test is about scrolling, not that trade.
+        let area = Rect::new(0, 0, 40, 25);
         let initial_terminal = render(&app, area);
         let initial = text(&initial_terminal);
         assert!(initial.contains("checks  2 failing of 8"), "{initial:?}");
