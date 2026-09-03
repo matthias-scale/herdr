@@ -40,6 +40,7 @@ pub(crate) struct WorkItemCheckSummary {
 pub(crate) struct WorkItemComment {
     pub(crate) author: Option<String>,
     pub(crate) body: String,
+    pub(crate) created_at: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +89,13 @@ pub(crate) struct WorkItemDetail {
 }
 
 impl WorkItemDetail {
+    /// An otherwise blank detail, for a source that fills only some fields.
+    pub(crate) fn empty() -> Self {
+        let mut detail = Self::unavailable(String::new());
+        detail.unavailable = None;
+        detail
+    }
+
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
             number: None,
@@ -624,6 +632,89 @@ fn fetch_github_pull_request_detail(
     })
 }
 
+/// Read one Linear issue with its comment threads.
+///
+/// Reuses `WorkItemDetail` so the LRU cache, the loading set and the generation
+/// guard that already serve pull requests apply to tickets unchanged.
+fn fetch_linear_ticket_detail(
+    identifier: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<WorkItemDetail, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "issues",
+        "read",
+        identifier,
+        "--with-comment-threads",
+        "--compact",
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed("linearis could not be run".to_string())
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(format!(
+            "linearis issues read failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| RefreshError::Failed("linearis returned invalid JSON".to_string()))?;
+
+    let mut detail = WorkItemDetail::empty();
+    detail.title = value_text(value.get("title"));
+    detail.body = value_text(value.get("description"));
+    detail.url = value_text(value.get("url"));
+    detail.created_at = value_time(value.get("createdAt"));
+    detail.updated_at = value_time(value.get("updatedAt"));
+    detail.comments = linear_comments(value.get("comments"));
+    Ok(detail)
+}
+
+/// Flatten Linear's comment threads: a root comment followed by its replies, in
+/// the order they were written, so a thread reads top to bottom.
+fn linear_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
+    fn author(comment: &Value) -> Option<String> {
+        let user = comment.get("user")?;
+        user.get("displayName")
+            .or_else(|| user.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+    fn push(comment: &Value, out: &mut Vec<WorkItemComment>) {
+        let Some(body) = value_text(comment.get("body")) else {
+            return;
+        };
+        out.push(WorkItemComment {
+            author: author(comment),
+            body,
+            created_at: value_time(comment.get("createdAt")),
+        });
+        let replies = comment
+            .get("replies")
+            .and_then(|replies| replies.get("nodes").or(Some(replies)))
+            .and_then(Value::as_array);
+        for reply in replies.into_iter().flatten() {
+            push(reply, out);
+        }
+    }
+
+    let nodes = value
+        .and_then(|value| value.get("nodes").or(Some(value)))
+        .and_then(Value::as_array);
+    let mut out = Vec::new();
+    for comment in nodes.into_iter().flatten() {
+        push(comment, &mut out);
+    }
+    out
+}
+
 fn github_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
     value
         .and_then(Value::as_array)
@@ -638,6 +729,7 @@ fn github_comments(value: Option<&Value>) -> Vec<WorkItemComment> {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 body,
+                created_at: value_time(comment.get("createdAt")),
             })
         })
         .collect()
@@ -1045,6 +1137,12 @@ fn fetch_ticket_attachments(
         .collect())
 }
 
+fn value_time(value: Option<&Value>) -> Option<SystemTime> {
+    value
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_system_time)
+}
+
 fn value_text(value: Option<&Value>) -> Option<String> {
     value.and_then(|value| {
         value.as_str().map(str::to_string).or_else(|| {
@@ -1311,8 +1409,8 @@ impl crate::app::App {
             return;
         }
         let mut keys = self.state.dock_home_keys_for_section(section);
-        if let Some(selection) = selection {
-            if let Some(index) = keys.iter().position(|key| key == &selection) {
+        if let Some(selection) = selection.as_ref() {
+            if let Some(index) = keys.iter().position(|key| key == selection) {
                 let selection = keys.remove(index);
                 keys.insert(0, selection);
             }
@@ -1320,8 +1418,17 @@ impl crate::app::App {
         keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
         let interval = Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         keys.retain(|key| {
-            key.pr_number.is_some()
-                && !key.repo.is_empty()
+            // Pull requests are prefetched across the whole section: one `gh`
+            // call each, and the tab strip gets walked often. A ticket costs a
+            // separate `linearis` read, so only the one actually being looked
+            // at is worth fetching - prefetching the section would mean a
+            // process per ticket for detail nobody has asked to see.
+            let fetchable = if key.pr_number.is_some() {
+                !key.repo.is_empty()
+            } else {
+                key.ticket_id.is_some() && selection.as_ref() == Some(key)
+            };
+            fetchable
                 && !self
                     .state
                     .work_item_detail_cache
@@ -1346,6 +1453,7 @@ impl crate::app::App {
             .extend(keys.iter().cloned());
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
+        let linearis_program = self.work_index_linearis_program();
         let _ = std::thread::Builder::new()
             .name("herdr-work-item-details".into())
             .spawn(move || {
@@ -1357,16 +1465,40 @@ impl crate::app::App {
                             .map(|key| {
                                 let key = key.clone();
                                 let gh_program = gh_program.clone();
+                                let linearis_program = linearis_program.clone();
                                 scope.spawn(move || {
-                                    let detail = match fetch_github_pull_request_detail(
-                                        &key.repo,
-                                        key.pr_number.unwrap_or_default(),
-                                        &gh_program,
-                                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
-                                    ) {
+                                    let target =
+                                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT);
+                                    let (result, what) = match (key.pr_number, &key.ticket_id) {
+                                        (Some(number), _) => (
+                                            fetch_github_pull_request_detail(
+                                                &key.repo,
+                                                number,
+                                                &gh_program,
+                                                target,
+                                            ),
+                                            "GitHub PR detail",
+                                        ),
+                                        (None, Some(ticket)) => (
+                                            fetch_linear_ticket_detail(
+                                                ticket,
+                                                &linearis_program,
+                                                target,
+                                            ),
+                                            "Linear ticket detail",
+                                        ),
+                                        (None, None) => (
+                                            Err(RefreshError::Failed(
+                                                "work item has neither a pull request nor a ticket"
+                                                    .to_string(),
+                                            )),
+                                            "work item detail",
+                                        ),
+                                    };
+                                    let detail = match result {
                                         Ok(detail) => detail,
                                         Err(RefreshError::TimedOut) => WorkItemDetail::unavailable(
-                                            "GitHub PR detail observation timed out",
+                                            format!("{what} observation timed out"),
                                         ),
                                         Err(RefreshError::Failed(message)) => {
                                             WorkItemDetail::unavailable(message)
@@ -1432,6 +1564,47 @@ impl crate::app::App {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[test]
+    fn linear_comment_threads_flatten_to_root_then_replies() {
+        let value: Value = serde_json::from_str(
+            r#"{"nodes":[
+                 {"body":"root one","createdAt":"2026-09-01T10:00:00.000Z",
+                  "user":{"displayName":"Ada"},
+                  "replies":{"nodes":[{"body":"a reply","user":{"name":"Grace"}}]}},
+                 {"body":"root two","user":{"displayName":"Alan"}}
+               ]}"#,
+        )
+        .expect("fixture");
+
+        let comments = linear_comments(Some(&value));
+        let rendered: Vec<(Option<&str>, &str)> = comments
+            .iter()
+            .map(|comment| (comment.author.as_deref(), comment.body.as_str()))
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                (Some("Ada"), "root one"),
+                (Some("Grace"), "a reply"),
+                (Some("Alan"), "root two"),
+            ],
+            "a thread reads root first, then its replies"
+        );
+        assert!(
+            comments[0].created_at.is_some(),
+            "a comment keeps the time it was written"
+        );
+        assert!(comments[1].created_at.is_none());
+    }
+
+    #[test]
+    fn linear_comments_tolerate_an_absent_or_empty_field() {
+        assert!(linear_comments(None).is_empty());
+        let empty: Value = serde_json::from_str(r#"{"nodes":[]}"#).expect("fixture");
+        assert!(linear_comments(Some(&empty)).is_empty());
+    }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
