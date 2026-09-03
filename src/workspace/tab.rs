@@ -247,12 +247,58 @@ impl Tab {
         }
     }
 
+    fn pane_is_agent(&self, pane: PaneId, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
+        self.terminal_id(pane)
+            .and_then(|terminal_id| terminals.get(terminal_id))
+            .is_some_and(TerminalState::is_agent_terminal)
+    }
+
+    /// The pane this window is named after.
+    ///
+    /// The focused pane wins whenever it can name the window itself, and an
+    /// agent pane always can. A plain shell cannot: it has no session name and
+    /// no work context, and its own terminal title is rejected below because
+    /// only an agent's title is ever novel enough to render. So focusing a
+    /// shell next to a running agent used to throw away the one pane in the
+    /// window that had something to say and fall back to the bare tab number.
+    ///
+    /// When the focused pane is not an agent, the window therefore keeps
+    /// naming the agent session that was last in view: the pane focus came
+    /// from if that was an agent, else the agent pane that was most recently
+    /// active (ties, including agents that have never reported activity,
+    /// resolve to the last in layout order). A window with no agent pane at
+    /// all is unaffected — it still names its focused pane.
+    pub(crate) fn title_source_pane(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> PaneId {
+        let focused = self.layout.focused();
+        if self.pane_is_agent(focused, terminals) {
+            return focused;
+        }
+        if let Some(previous) = self.layout.prev_focused() {
+            if previous != focused && self.pane_is_agent(previous, terminals) {
+                return previous;
+            }
+        }
+        self.layout
+            .pane_ids()
+            .into_iter()
+            .filter(|pane| self.pane_is_agent(*pane, terminals))
+            .max_by_key(|pane| {
+                self.terminal_id(*pane)
+                    .and_then(|terminal_id| terminals.get(terminal_id))
+                    .and_then(TerminalState::agent_activity_at)
+            })
+            .unwrap_or(focused)
+    }
+
     pub(crate) fn work_context_display_projection(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
     ) -> Option<TabDisplayProjection> {
         let terminal = self
-            .terminal_id(self.layout.focused())
+            .terminal_id(self.title_source_pane(terminals))
             .and_then(|terminal_id| terminals.get(terminal_id))?;
         let context = terminal.effective_work_context();
         let agent = terminal
@@ -922,5 +968,100 @@ impl Tab {
         terminal_runtimes
             .get(terminal_id)
             .and_then(|rt| rt.foreground_cwd())
+    }
+}
+
+#[cfg(test)]
+mod title_source_tests {
+    use crate::app::AppState;
+    use crate::detect::Agent;
+    use crate::workspace::Workspace;
+    use ratatui::layout::Direction;
+
+    /// A window that holds a running agent must keep naming that agent's
+    /// session while the human types in a shell next to it. Before this, the
+    /// projection resolved the focused pane only, and a shell has no session
+    /// name, no work context and no title the filters will accept — so the
+    /// window label collapsed to its bare tab number.
+    #[test]
+    fn shell_focus_keeps_the_agent_session_title() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("w");
+        let agent_pane = ws.tabs[0].root_pane;
+        let shell_pane = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(shell_pane);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        let agent_terminal = app.workspaces[0].tabs[0].panes[&agent_pane]
+            .attached_terminal_id
+            .clone();
+        let shell_terminal = app.workspaces[0].tabs[0].panes[&shell_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&agent_terminal).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.manual_label = Some("rename the pane".to_string());
+        app.terminals.get_mut(&shell_terminal).unwrap().manual_label = None;
+
+        let label = app.workspaces[0].tabs[0]
+            .work_context_display_projection(&app.terminals)
+            .map(|projection| projection.full_label());
+        assert_eq!(
+            label.as_deref(),
+            Some("rename the pane"),
+            "a focused shell must not erase the agent session next to it"
+        );
+    }
+
+    /// The focused pane still wins whenever it can name the window itself, so
+    /// moving between two agents keeps following focus rather than sticking to
+    /// whichever one was active longest ago.
+    #[test]
+    fn focused_agent_pane_still_wins() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("w");
+        let first = ws.tabs[0].root_pane;
+        let second = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(second);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        for (pane, label) in [(first, "first agent"), (second, "second agent")] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.manual_label = Some(label.to_string());
+        }
+
+        let label = app.workspaces[0].tabs[0]
+            .work_context_display_projection(&app.terminals)
+            .map(|projection| projection.full_label());
+        assert_eq!(label.as_deref(), Some("second agent"));
+    }
+
+    /// A window with no agent in it at all is untouched: it still names its
+    /// focused pane, and falls back to the tab number when that pane has
+    /// nothing to say.
+    #[test]
+    fn shell_only_window_is_unchanged() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("w");
+        let shell = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(shell);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        assert!(
+            app.workspaces[0].tabs[0]
+                .work_context_display_projection(&app.terminals)
+                .is_none(),
+            "a window of plain shells must not invent a title"
+        );
     }
 }

@@ -123,6 +123,15 @@ impl TileLayout {
         self.focus
     }
 
+    /// The pane focus came from, when focus has moved at least once.
+    ///
+    /// Single-slot on purpose: it answers "what was I just looking at", which
+    /// is what the window label needs when focus lands on a pane that cannot
+    /// name the window itself.
+    pub fn prev_focused(&self) -> Option<PaneId> {
+        self.prev_focus
+    }
+
     pub fn pane_count(&self) -> usize {
         count_panes(&self.root)
     }

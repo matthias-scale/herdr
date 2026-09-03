@@ -138,7 +138,9 @@ fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segm
 
 fn focused_pane_title(app: &AppState) -> Option<String> {
     let workspace = app.active.and_then(|ws_idx| app.workspaces.get(ws_idx))?;
-    let pane_id = workspace.focused_pane_id()?;
+    // Same source as the window label: a plain shell focused next to a
+    // running agent must not replace the agent's subject with its own title.
+    let pane_id = workspace.title_source_pane_id(&app.terminals)?;
     let terminal = app.terminals.get(workspace.terminal_id(pane_id)?)?;
     let title = terminal
         .terminal_title_stripped()
