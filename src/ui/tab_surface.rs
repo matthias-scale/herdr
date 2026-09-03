@@ -356,8 +356,10 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            // One-line mobile Space → direct tab/window projection.
-            "983de3aa8afbad44e73f904d6b1dbcdc4254020471ca8f125e2e07dfdb28fe68"
+            // One-line mobile Space → direct tab/window projection. Digest
+            // covers style, so it moved when the active title stopped being
+            // darkened on a dark panel (`active_sidebar_title_color`).
+            "4862ecd03de63bdb4b36a72e5d784c8917d2c8d5d4430f3f2a734088e23a4b9e"
         );
     }
 }
