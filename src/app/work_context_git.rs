@@ -16,7 +16,7 @@ pub(crate) const WORK_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(6
 // and it is also the in-flight lifetime: a shorter scheduler deadline would let a
 // successor supersede a worker that is still producing valid observations.
 pub(crate) const WORK_CONTEXT_TARGET_TIMEOUT: Duration = Duration::from_secs(2);
-pub(crate) const WORK_CONTEXT_BATCH_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const WORK_CONTEXT_BATCH_TIMEOUT: Duration = Duration::from_secs(45);
 // Cache GitHub metadata for repeated refresh requests within a short window.
 pub(crate) const WORK_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -48,6 +48,11 @@ pub(crate) struct GitWorkContextInput {
     /// frequently not the repository the pane is working on. It therefore
     /// enters the lowest work-context tier and any declaration outranks it.
     pub(crate) repo: Option<String>,
+    /// True when `origin` exists but is not a plain github.com URL — an SSH
+    /// host alias such as `git@github.com-scale:owner/repo.git`. Only then is
+    /// it worth spending a `gh` call to resolve the slug; a checkout with no
+    /// origin at all has nothing to resolve.
+    pub(crate) origin_unparsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -340,7 +345,6 @@ fn refresh_git_work_contexts(
         // Clamp to the batch ceiling so the per-target budget can extend a probe
         // but never outlive the refresh as a whole.
         let target_git_deadline = (Instant::now() + target_timeout).min(git_deadline);
-        let target_gh_deadline = (Instant::now() + target_timeout).min(gh_deadline);
         let input = if let Some(input) = discovered.get(&target.cwd) {
             input.clone()
         } else {
@@ -349,8 +353,23 @@ fn refresh_git_work_contexts(
             input
         };
         let Some(input) = input else {
+            tracing::debug!(cwd = ?target.cwd, "git work context: discovery produced nothing");
             continue;
         };
+        // Measured only once git discovery is done. Sharing one instant with the
+        // git budget let a slow checkout spend gh's entire window, so gh was
+        // skipped outright and the pane reported a branch with no pull request.
+        let target_gh_deadline = (Instant::now() + target_timeout).min(gh_deadline);
+
+        let mut input = input;
+        if input.repo.is_none() && input.origin_unparsed {
+            if let Some(repo_root) = input.repo_root.as_deref() {
+                input.repo = gh_repo_slug(repo_root, target_gh_deadline, gh_program);
+                // Remember it so sibling panes in the same checkout do not each
+                // pay for another gh call.
+                discovered.insert(target.cwd.clone(), Some(input.clone()));
+            }
+        }
 
         let context = match (&input.repo_root, &input.branch) {
             (Some(repo_root), Some(branch)) => {
@@ -366,6 +385,7 @@ fn refresh_git_work_contexts(
                     let context = git_work_context_for_branch(
                         branch,
                         repo_root,
+                        input.repo.as_deref(),
                         target_gh_deadline,
                         gh_program,
                     );
@@ -378,7 +398,27 @@ fn refresh_git_work_contexts(
                     context
                 }
             }
-            _ => crate::work_context::PaneWorkContext::default(),
+            // A pane with no branch (detached HEAD during a bisect, rebase or
+            // `gh pr checkout`) used to overwrite its tier with an empty
+            // context, silently dropping a pull request it had already found.
+            // Reporting nothing new leaves the previous observation standing.
+            _ => {
+                tracing::debug!(
+                    cwd = ?target.cwd,
+                    repo_root = ?input.repo_root,
+                    "git work context: no branch, keeping the previous observation"
+                );
+                let context = crate::work_context::PaneWorkContext {
+                    repo: input.repo.clone(),
+                    ..crate::work_context::PaneWorkContext::default()
+                };
+                observations.push(GitWorkContextObservation {
+                    pane_id: target.pane_id,
+                    input,
+                    context,
+                });
+                continue;
+            }
         };
         // Applied outside the branch cache so a detached HEAD, which produces
         // no branch and therefore no cache key, still reports its repository.
@@ -424,6 +464,7 @@ fn discover_git_input(
                 repo_root: None,
                 branch: None,
                 repo: None,
+                origin_unparsed: false,
             });
         }
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return None,
@@ -433,6 +474,7 @@ fn discover_git_input(
                 repo_root: None,
                 branch: None,
                 repo: None,
+                origin_unparsed: false,
             });
         }
     };
@@ -447,6 +489,7 @@ fn discover_git_input(
             repo_root: None,
             branch: None,
             repo: None,
+            origin_unparsed: false,
         });
     };
 
@@ -467,13 +510,14 @@ fn discover_git_input(
         Err(_) => None,
     };
 
-    let repo = discover_origin_repo(cwd, deadline, git_program);
+    let (repo, origin_unparsed) = discover_origin_repo(cwd, deadline, git_program);
 
     Some(GitWorkContextInput {
         cwd: cwd.to_path_buf(),
         repo_root: Some(repo_root),
         branch,
         repo,
+        origin_unparsed,
     })
 }
 
@@ -483,23 +527,68 @@ fn discover_git_input(
 /// simply yields no observation: an absent repository is always safer than a
 /// wrong one, because a wrong one would route the pane into another
 /// repository's space.
-fn discover_origin_repo(cwd: &Path, deadline: Instant, git_program: &Path) -> Option<String> {
+/// Returns the `owner/repo` slug and whether an unparseable origin was seen.
+fn discover_origin_repo(
+    cwd: &Path,
+    deadline: Instant,
+    git_program: &Path,
+) -> (Option<String>, bool) {
     let mut command = crate::noninteractive_process::command(git_program);
     command
         .arg("-C")
         .arg(cwd)
         .args(["config", "--get", "remote.origin.url"]);
+    let Ok(output) = crate::noninteractive_process::output_with_deadline(command, deadline) else {
+        return (None, false);
+    };
+    if !output.status.success() {
+        return (None, false);
+    }
+    let Ok(remote) = String::from_utf8(output.stdout) else {
+        return (None, false);
+    };
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return (None, false);
+    }
+    if let Ok(slug) = crate::work_context::normalize_repo_slug(remote) {
+        return (Some(slug), false);
+    }
+    tracing::debug!(
+        remote,
+        "git work context: origin remote is not a plain github.com URL"
+    );
+    (None, true)
+}
+
+/// Resolve the repository slug for a checkout whose `origin` uses an SSH host
+/// alias (`git@github.com-scale:owner/repo.git`), which is not a github.com URL
+/// and so cannot be parsed directly. `gh` already understands the alias.
+fn gh_repo_slug(repo_root: &Path, deadline: Instant, gh_program: &Path) -> Option<String> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let mut command = crate::noninteractive_process::command(gh_program);
+    command.current_dir(repo_root).args([
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+        "-q",
+        ".nameWithOwner",
+    ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
     if !output.status.success() {
         return None;
     }
-    let remote = String::from_utf8(output.stdout).ok()?;
-    crate::work_context::normalize_repo_slug(remote.trim()).ok()
+    let slug = String::from_utf8(output.stdout).ok()?;
+    crate::work_context::normalize_repo_slug(slug.trim()).ok()
 }
 
 fn git_work_context_for_branch(
     branch: &str,
     repo_root: &Path,
+    repo: Option<&str>,
     deadline: Instant,
     gh_program: &Path,
 ) -> crate::work_context::PaneWorkContext {
@@ -510,18 +599,29 @@ fn git_work_context_for_branch(
     };
 
     if Instant::now() >= deadline {
+        tracing::debug!(branch, "git work context: gh budget spent before the query");
         return context;
     }
 
     let mut command = crate::noninteractive_process::command(gh_program);
-    command.current_dir(repo_root).args(gh_pr_view_args(branch));
+    command
+        .current_dir(repo_root)
+        .args(gh_pr_view_args(branch, repo));
     let Ok(output) = crate::noninteractive_process::output_with_deadline(command, deadline) else {
+        tracing::debug!(branch, "git work context: gh did not run to completion");
         return context;
     };
     if !output.status.success() {
+        tracing::debug!(
+            branch,
+            status = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "git work context: gh exited non-zero"
+        );
         return context;
     }
     let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) else {
+        tracing::debug!(branch, "git work context: gh output was not JSON");
         return context;
     };
     let Some(prs) = value.as_array() else {
@@ -544,25 +644,31 @@ fn git_work_context_for_branch(
     }
     let mut preview_urls = Vec::new();
     collect_preview_urls(pr, &mut preview_urls);
-    context.preview_urls =
-        crate::work_context::normalize_preview_urls(preview_urls).unwrap_or_default();
+    // Already host-validated by extraction. Running them back through
+    // `normalize_preview_urls` would reject every URL carrying a path and throw
+    // the whole list away, which is what it used to do.
+    preview_urls.truncate(crate::work_context::MAX_PREVIEW_URLS);
+    context.preview_urls = preview_urls;
     context
 }
 
-fn gh_pr_view_args(branch: &str) -> Vec<String> {
-    [
-        "pr",
-        "list",
-        "--head",
-        branch,
-        "--json",
-        "url,statusCheckRollup,isCrossRepository",
-        "--limit",
-        "10",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+fn gh_pr_view_args(branch: &str, repo: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = ["pr", "list", "--head", branch]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if let Some(repo) = repo {
+        args.push("--repo".to_string());
+        args.push(repo.to_string());
+    }
+    // `body` and `comments` are where a preview URL actually lives: Vercel and
+    // our own `post-preview-urls` workflow post the alias as a comment, while
+    // `statusCheckRollup` only ever carries a vercel.com dashboard link.
+    args.push("--json".to_string());
+    args.push("url,statusCheckRollup,isCrossRepository,body,comments".to_string());
+    args.push("--limit".to_string());
+    args.push("10".to_string());
+    args
 }
 
 fn collect_preview_urls(value: &Value, urls: &mut Vec<String>) {
@@ -727,7 +833,7 @@ positionals=0
 for arg
 do
     case "$arg" in
-        --head|--json|--limit)
+        --head|--json|--limit|--repo)
             [ "$after_separator" -eq 0 ] || exit 2
             [ -z "$expecting" ] || exit 2
             expecting="$arg"
@@ -747,6 +853,7 @@ do
                     --head) head="$arg" ;;
                     --json) json="$arg" ;;
                     --limit) limit="$arg" ;;
+                    --repo) repo_arg="$arg" ;;
                 esac
                 expecting=
             elif [ "$after_separator" -eq 1 ]; then
@@ -761,7 +868,7 @@ done
 [ -z "$expecting" ] || exit 2
 [ "$positionals" -eq 0 ] || exit 2
 [ "$head" = feat/MAT-27-branch-qualified ] || exit 2
-[ "$json" = url,statusCheckRollup,isCrossRepository ] || exit 2
+[ "$json" = url,statusCheckRollup,isCrossRepository,body,comments ] || exit 2
 [ "$limit" = 10 ] || exit 2
 printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]'
 "#,
@@ -1008,6 +1115,39 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
         assert!(context.pr_urls.is_empty());
         assert!(context.preview_urls.is_empty());
         assert_eq!(context.branch.as_deref(), Some("master"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_urls_come_from_the_pull_request_comments_that_actually_carry_them() {
+        let dir = fixture_dir("preview-from-comments");
+        let git = dir.join("git");
+        let gh = dir.join("gh");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).expect("create repo fixture");
+        fake_git(&git, &repo, "feat/studio-resize");
+
+        // The shape GitHub and Vercel really produce: statusCheckRollup carries
+        // only a vercel.com dashboard link, while the deployment alias is posted
+        // as a comment by the preview workflow, with a bypass token in its query.
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://github.com/o/r/pull/9\",\"isCrossRepository\":false,\"statusCheckRollup\":[{\"__typename\":\"StatusContext\",\"context\":\"Vercel\",\"targetUrl\":\"https://vercel.com/scalableso/scalablev2/5tLT6NxeWv7d\"},{\"__typename\":\"CheckRun\",\"name\":\"Vercel Preview Comments\",\"detailsUrl\":\"https://vercel.com/github\"}],\"body\":\"nothing here\",\"comments\":[{\"body\":\"Preview: https://app-git-studio-resize-team.vercel.app/auth?x-vercel-protection-bypass=abc123\"}]}]'\n",
+        );
+
+        let output = refresh_one(&git, &gh, &repo, Instant::now() + Duration::from_secs(5));
+        let context = &output.observations[0].context;
+        assert_eq!(context.pr_urls, vec!["https://github.com/o/r/pull/9"]);
+        assert_eq!(
+            context.preview_urls,
+            vec![
+                "https://app-git-studio-resize-team.vercel.app",
+                "https://app-git-studio-resize-team.vercel.app/auth?x-vercel-protection-bypass=abc123",
+            ],
+            "the bare root and the full URL must both survive, and vercel.com dashboard links must not"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1263,6 +1403,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 pane_id,
                 input: GitWorkContextInput {
                     repo: None,
+                    origin_unparsed: false,
                     cwd: cwd.clone(),
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1295,6 +1436,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 pane_id,
                 input: GitWorkContextInput {
                     repo: None,
+                    origin_unparsed: false,
                     cwd: cwd.clone(),
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1310,6 +1452,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 pane_id,
                 input: GitWorkContextInput {
                     repo: None,
+                    origin_unparsed: false,
                     cwd,
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1383,6 +1526,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 pane_id,
                 input: GitWorkContextInput {
                     repo: None,
+                    origin_unparsed: false,
                     cwd,
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1456,6 +1600,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 pane_id,
                 input: GitWorkContextInput {
                     repo: None,
+                    origin_unparsed: false,
                     cwd,
                     repo_root: Some(key.repo_root.clone()),
                     branch: Some(key.branch.clone()),
@@ -1516,6 +1661,7 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                     pane_id,
                     input: GitWorkContextInput {
                         repo: None,
+                        origin_unparsed: false,
                         cwd,
                         repo_root: None,
                         branch: None,
