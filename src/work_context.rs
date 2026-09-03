@@ -771,6 +771,44 @@ pub fn extract_pr_urls(text: &str) -> Vec<String> {
     urls
 }
 
+/// Split an observed preview URL into its bare root and the full URL as written.
+///
+/// Deliberately more permissive than [`normalize_preview_url`], which stays the
+/// strict gate for URLs a human declares. Text observed on a pull request
+/// routinely carries a path and a query — Vercel's own bot posts
+/// `…vercel.app/auth?x-vercel-protection-bypass=…` — and rejecting those was why
+/// preview extraction never produced anything. The host allowlist is unchanged:
+/// a single DNS label under `.vercel.app`, no userinfo, no port.
+fn split_preview_url(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim().trim_end_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '!' | '.' | '\'' | '"'
+        )
+    });
+    let rest = trimmed.strip_prefix("https://")?;
+    if rest.is_empty() || rest.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return None;
+    }
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, tail) = rest.split_at(host_end);
+    if host.contains(['@', ':']) {
+        return None;
+    }
+    let host = host.to_ascii_lowercase();
+    let subdomain = host.strip_suffix(".vercel.app")?;
+    if !valid_vercel_subdomain(subdomain) {
+        return None;
+    }
+    let bare = format!("https://{subdomain}.vercel.app");
+    let full = format!("{bare}{tail}");
+    Some((bare, full))
+}
+
+/// Preview URLs observed in pull request text, bare root first and the full URL
+/// second whenever they differ. The bare root is the stable address; the full
+/// one carries the path and any bypass token the deployment needs, so both are
+/// worth having in front of a reviewer.
 pub fn extract_preview_urls(text: &str) -> Vec<String> {
     const PREFIX: &str = "https://";
 
@@ -783,13 +821,15 @@ pub fn extract_preview_urls(text: &str) -> Vec<String> {
         let Some(candidate) = bounded_candidate(&text[start..], MAX_PREVIEW_CANDIDATE_BYTES) else {
             continue;
         };
-        let Ok(url) = normalize_preview_url(candidate) else {
+        let Some((bare, full)) = split_preview_url(candidate) else {
             continue;
         };
-        if seen.insert(url.clone()) {
-            urls.push(url);
-            if urls.len() == MAX_PREVIEW_URLS {
-                break;
+        for url in [bare, full] {
+            if seen.insert(url.clone()) {
+                urls.push(url);
+                if urls.len() == MAX_PREVIEW_URLS {
+                    return urls;
+                }
             }
         }
     }
