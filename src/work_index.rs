@@ -661,7 +661,7 @@ fn fetch_linear_ticket_detail(
             if error.kind() == std::io::ErrorKind::TimedOut {
                 RefreshError::TimedOut
             } else {
-                RefreshError::Failed("linearis could not be run".to_string())
+                RefreshError::Failed(format!("linearis could not be run ({})", program.display()))
             }
         },
     )?;
@@ -1273,13 +1273,57 @@ pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()>
     std::fs::write(path, bytes)
 }
 
+/// Locate a CLI herdr shells out to.
+///
+/// The server does not always inherit an interactive shell's `PATH` — started
+/// from launchd, a desktop launcher or a login-less session it gets a bare one
+/// — so relying on the bare name means the tool silently "could not be run" on
+/// exactly the machines where it is installed. Search `PATH` first, then the
+/// usual install locations, and fall back to the bare name so the error still
+/// names the program rather than a guessed path.
+fn resolve_program(name: &str) -> std::path::PathBuf {
+    let executable = |path: &Path| -> bool {
+        std::fs::metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+    };
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join(name);
+            if executable(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    // Ordered by how these tools are actually installed here: user bin first,
+    // then Homebrew, then a global npm prefix.
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = home {
+        for relative in ["bin", ".local/bin", ".npm-global/bin", ".bun/bin"] {
+            candidates.push(home.join(relative).join(name));
+        }
+    }
+    for absolute in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        candidates.push(Path::new(absolute).join(name));
+    }
+    for candidate in candidates {
+        if executable(&candidate) {
+            return candidate;
+        }
+    }
+    Path::new(name).to_path_buf()
+}
+
 impl crate::app::App {
     pub(crate) fn work_index_gh_program(&self) -> std::path::PathBuf {
         #[cfg(test)]
         if let Some(program) = self.work_index_gh_program_override.as_ref() {
             return program.clone();
         }
-        Path::new("gh").to_path_buf()
+        resolve_program("gh")
     }
 
     pub(crate) fn work_index_linearis_program(&self) -> std::path::PathBuf {
@@ -1287,7 +1331,7 @@ impl crate::app::App {
         if let Some(program) = self.work_index_linearis_program_override.as_ref() {
             return program.clone();
         }
-        Path::new("linearis").to_path_buf()
+        resolve_program("linearis")
     }
 
     pub(crate) fn work_index_refresh_deadline(&self) -> Option<Instant> {
@@ -1571,6 +1615,33 @@ impl crate::app::App {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[test]
+    fn resolve_program_finds_a_tool_on_path_and_names_it_when_missing() {
+        let dir = std::env::temp_dir().join(format!("herdr-resolve-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tool = dir.join("herdr-fake-tool");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("write fake tool");
+
+        let previous = std::env::var_os("PATH");
+        // SAFETY: single-threaded test, restored before returning.
+        unsafe { std::env::set_var("PATH", &dir) };
+        let found = resolve_program("herdr-fake-tool");
+        let missing = resolve_program("herdr-tool-that-does-not-exist");
+        match previous {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        assert_eq!(found, tool, "a tool on PATH resolves to its full path");
+        assert_eq!(
+            missing,
+            Path::new("herdr-tool-that-does-not-exist"),
+            "an unfound tool keeps its bare name so the error can name it"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn linear_comment_threads_flatten_to_root_then_replies() {
