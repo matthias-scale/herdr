@@ -166,14 +166,28 @@ impl HomeState {
             .is_some_and(|provider| provider.model(&self.model).is_some());
         if !selected_model_exists {
             self.set_agent(self.agent);
-            return;
+        } else {
+            let selected_effort_exists = self
+                .effort
+                .as_deref()
+                .is_some_and(|effort| self.effort_options().iter().any(|known| known == effort));
+            if !selected_effort_exists {
+                self.effort = self.effort_options().first().cloned();
+            }
         }
-        let selected_effort_exists = self
-            .effort
-            .as_deref()
-            .is_some_and(|effort| self.effort_options().iter().any(|known| known == effort));
-        if !selected_effort_exists {
-            self.effort = self.effort_options().first().cloned();
+
+        let picker_len = match self.picker {
+            Some(HomePicker::Model) => Some(self.model_options().len()),
+            Some(HomePicker::Effort) => Some(self.effort_options().len()),
+            _ => None,
+        };
+        if let Some(picker_len) = picker_len {
+            if picker_len == 0 {
+                self.picker = None;
+                self.picker_selected = 0;
+            } else {
+                self.picker_selected = self.picker_selected.min(picker_len - 1);
+            }
         }
     }
 
@@ -899,6 +913,25 @@ mod tests {
 
         assert_eq!(home.model, DEFAULT_MODEL);
         assert_eq!(home.effort.as_deref(), Some(AUTO_EFFORT));
+    }
+
+    #[test]
+    fn catalog_refresh_clamps_an_open_picker_to_the_new_options() {
+        let mut home = home_with_codex_catalog();
+        home.set_agent(Agent::Codex);
+        home.picker = Some(HomePicker::Model);
+        home.picker_selected = home.model_options().len() - 1;
+        let replacement = super::super::home_catalog::parse_codex_catalog(
+            br#"{"models":[
+                {"slug":"new-model","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"high"}]}
+            ]}"#,
+        )
+        .expect("replacement catalog");
+
+        home.replace_provider_catalog(replacement);
+
+        assert_eq!(home.picker, Some(HomePicker::Model));
+        assert_eq!(home.picker_selected, home.model_options().len() - 1);
     }
 
     #[test]
