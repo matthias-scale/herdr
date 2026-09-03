@@ -1435,6 +1435,18 @@ impl Workspace {
         self.active_tab().map(|tab| tab.layout.focused())
     }
 
+    /// The pane the active tab is named after — the focused pane, unless it is
+    /// a plain shell in a window that also holds an agent session, in which
+    /// case the agent session last in view keeps the name. See
+    /// `Tab::title_source_pane`.
+    pub fn title_source_pane_id(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<PaneId> {
+        self.active_tab()
+            .map(|tab| tab.title_source_pane(terminals))
+    }
+
     pub fn focused_cwd_from(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
