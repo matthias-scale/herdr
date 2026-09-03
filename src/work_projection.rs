@@ -706,6 +706,23 @@ impl crate::app::state::AppState {
         bindings
     }
 
+    /// `owner/repo` of the focused pane's checkout, when git observed one.
+    ///
+    /// The prs section is otherwise blank in a session that has not opened a
+    /// pull request yet, which says nothing about where you are.
+    pub(crate) fn focused_repo_slug(&self) -> Option<String> {
+        let focused = self.current_pane_focus_target()?;
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == focused.workspace_id)?;
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(focused.pane_id))
+            .and_then(|terminal_id| self.terminals.get(terminal_id))
+            .and_then(|terminal| terminal.effective_work_context().repo.clone())
+    }
+
     pub(crate) fn dock_home_projection(&self) -> DockHomeProjection {
         let mut projection = project_dock_home(
             &self.dock_home_bindings(),
@@ -770,7 +787,7 @@ impl crate::app::state::AppState {
         &self,
         projection: &DockHomeProjection,
     ) -> Option<usize> {
-        if projection.poll_rows.is_empty() {
+        if projection.poll_rows.is_empty() || self.dock_home_focus_unbound {
             return None;
         }
         self.dock_home_poll_selection
@@ -811,6 +828,9 @@ impl crate::app::state::AppState {
             return;
         };
 
+        // Assume the new pane carries no work item until one is found, so a
+        // tab switch cannot leave the previous item on screen.
+        self.dock_home_focus_unbound = true;
         let projection = self.dock_home_projection();
         if let Some(pr_url) = context.primary_pr() {
             if let Some(key) = projection
@@ -826,6 +846,7 @@ impl crate::app::state::AppState {
             {
                 self.dock_home_selection = Some(key);
                 self.dock_home_section = crate::app::state::DockHomeSection::Prs;
+                self.dock_home_focus_unbound = false;
                 self.dock_scroll = 0;
                 return;
             }
@@ -849,6 +870,7 @@ impl crate::app::state::AppState {
 
         self.dock_home_ticket_selection = Some(key);
         self.dock_home_section = crate::app::state::DockHomeSection::Tickets;
+        self.dock_home_focus_unbound = false;
         self.dock_scroll = 0;
     }
 
@@ -858,7 +880,7 @@ impl crate::app::state::AppState {
         &self,
         projection: &DockHomeProjection,
     ) -> Option<usize> {
-        if projection.rows.is_empty() {
+        if projection.rows.is_empty() || self.dock_home_focus_unbound {
             return None;
         }
         self.dock_home_selection
@@ -868,6 +890,9 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn move_dock_home_selection(&mut self, delta: i64) {
+        // Moving the cursor is a deliberate choice: it overrides the focused
+        // pane having nothing bound.
+        self.dock_home_focus_unbound = false;
         let projection = self.dock_home_projection();
         match self.dock_home_section {
             crate::app::state::DockHomeSection::Prs => {
@@ -904,7 +929,7 @@ impl crate::app::state::AppState {
         &self,
         projection: &DockHomeProjection,
     ) -> Option<usize> {
-        if projection.ticket_rows.is_empty() {
+        if projection.ticket_rows.is_empty() || self.dock_home_focus_unbound {
             return None;
         }
         self.dock_home_ticket_selection
@@ -1511,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_home_focus_on_unbound_pane_preserves_selection_and_section() {
+    fn dock_home_focus_on_unbound_pane_shows_nothing_but_remembers_the_selection() {
         let mut state = state_with_bound_prs(&[10, 20]);
         state
             .workspaces
@@ -1524,11 +1549,24 @@ mod tests {
         let unbound = state.workspaces[2].tabs[0].root_pane;
         assert!(state.focus_pane_in_workspace(2, unbound));
 
+        // The stored selection survives, so returning to a bound pane restores
+        // it, but nothing is displayed: a pane with no work item must not leave
+        // the previous one on screen as though it were the current one.
         assert_eq!(state.dock_home_selection, Some(selected));
         assert_eq!(
             state.dock_home_section,
             crate::app::state::DockHomeSection::Tickets
         );
+        assert!(state.dock_home_focus_unbound);
+        let projection = state.dock_home_projection();
+        assert_eq!(state.dock_home_selected_index(&projection), None);
+        assert_eq!(state.dock_home_selected_ticket_index(&projection), None);
+
+        // Moving the cursor is deliberate, so it brings the view back.
+        state.move_dock_home_selection(0);
+        assert!(!state.dock_home_focus_unbound);
+        let projection = state.dock_home_projection();
+        assert!(state.dock_home_selected_index(&projection).is_some());
     }
 
     #[test]

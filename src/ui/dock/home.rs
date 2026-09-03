@@ -1076,10 +1076,23 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.subtext0),
         );
         if app.dock_home_section == DockHomeSection::Prs {
+            // Even with no pull request bound, say which repository this session
+            // is in; a blank panel says nothing about where you are.
+            let mut next = area.y.saturating_add(TAB_ROWS + 1);
+            if let Some(repo) = app.focused_repo_slug() {
+                render_line(
+                    frame,
+                    area,
+                    next,
+                    format!("repo  https://github.com/{repo}"),
+                    Style::default().fg(app.palette.blue),
+                );
+                next = next.saturating_add(1);
+            }
             render_line(
                 frame,
                 area,
-                area.y.saturating_add(TAB_ROWS + 1),
+                next,
                 "bind: herdr tab create --pr <url> --role review".to_string(),
                 Style::default().fg(app.palette.overlay0),
             );
@@ -1218,6 +1231,26 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
             .and_then(|index| projection.poll_rows.get(index))
             .map(|row| poll_detail_lines(app, row, usize::from(area.width))),
     };
+    // Other sessions may have work items while this pane has none. Rather than
+    // leave the previous item on screen, say where this session actually is.
+    let lines = lines.or_else(|| {
+        (app.dock_home_section == DockHomeSection::Prs).then(|| {
+            let mut lines = vec![value_line(app, " no pull request for this pane")];
+            if let Some(repo) = app.focused_repo_slug() {
+                lines.push(Line::default());
+                lines.push(heading(app, "repo"));
+                lines.push(field_line(
+                    app,
+                    [(
+                        " ".into(),
+                        format!("https://github.com/{repo}"),
+                        app.palette.blue,
+                    )],
+                ));
+            }
+            lines
+        })
+    });
     let mut rendered_rows = 0u16;
     if let Some(lines) = lines {
         let max_scroll = lines.len().saturating_sub(usize::from(detail_height));
@@ -1664,6 +1697,29 @@ mod tests {
         assert!(rendered.contains("default"), "{rendered}");
         assert!(rendered.contains("#42"), "{rendered}");
         assert!(rendered.contains("SCA-100"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unbound_pane_shows_its_repository_instead_of_the_previous_pull_request() {
+        let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
+        let rendered = text(&render(&app, Rect::new(0, 0, 80, 24)));
+        assert!(
+            rendered.contains("detail panel for every pull request"),
+            "a bound pane shows its pull request: {rendered:?}"
+        );
+
+        // Focus moves to a pane carrying no work item.
+        app.dock_home_focus_unbound = true;
+        let rendered = text(&render(&app, Rect::new(0, 0, 80, 24)));
+
+        assert!(
+            !rendered.contains("detail panel for every pull request"),
+            "the previous pull request must not linger: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("no pull request for this pane"),
+            "{rendered:?}"
+        );
     }
 
     #[test]
