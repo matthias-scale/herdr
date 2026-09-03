@@ -2,18 +2,17 @@ use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use crate::app::{
-    home::{
-        effort_options, model_options, HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget,
-    },
+    home::{HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
     inbox::BlockedAgent,
     state::{HomeHitArea, HomeHitTarget},
     AppState,
 };
+use crate::ui::text::{display_width, truncate_end};
 
 /// How long this agent has been waiting, in the sidebar's own age vocabulary.
 fn waited_label(agent: &BlockedAgent) -> String {
@@ -153,6 +152,7 @@ struct LensBands {
     title: Rect,
     output: Rect,
     reply: Rect,
+    new_task: Rect,
     detach: Rect,
 }
 
@@ -170,8 +170,10 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
-/// The composer card: a border row, three input rows, a border row.
-const COMPOSER_CARD_ROWS: u16 = 5;
+/// The normal composer card has a border, a three-row prompt, two control rows,
+/// and a closing border. Short frames fall back to the previous one-row prompt.
+const NORMAL_COMPOSER_CARD_ROWS: u16 = 7;
+const COMPACT_COMPOSER_CARD_ROWS: u16 = 5;
 
 /// Rows the queue needs, clamped so the trailing bands always fit.
 fn body_rows(area: Rect, queue_rows: usize, trailing: u16) -> u16 {
@@ -211,10 +213,26 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
             detach_width,
             title.height,
         );
+        let action_gap = u16::from(inner.width > detach_width);
+        let new_task_width = 12.min(
+            inner
+                .width
+                .saturating_sub(detach_width)
+                .saturating_sub(action_gap),
+        );
+        let new_task = Rect::new(
+            detach.x.saturating_sub(action_gap + new_task_width),
+            title.y,
+            new_task_width,
+            title.height,
+        );
+        let actions_width = detach_width
+            .saturating_add(action_gap)
+            .saturating_add(new_task_width);
         let title = Rect::new(
             title.x,
             title.y,
-            title.width.saturating_sub(detach_width.saturating_add(1)),
+            title.width.saturating_sub(actions_width.saturating_add(1)),
             title.height,
         );
         HomeBands {
@@ -227,27 +245,34 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
                 title,
                 output,
                 reply,
+                new_task,
                 detach,
             }),
             hint,
         }
     } else if !lens_requested && area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
+        let normal = area.height
+            >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT
+                .saturating_add(NORMAL_COMPOSER_CARD_ROWS - COMPACT_COMPOSER_CARD_ROWS);
+        let card_rows = if normal {
+            NORMAL_COMPOSER_CARD_ROWS
+        } else {
+            COMPACT_COMPOSER_CARD_ROWS
+        };
         // The composer sits directly under the queue; the slack goes below it,
         // so a short queue no longer strands the prompt at the pane floor.
-        // The composer is a card directly under the queue: one border row above
-        // and below the three input rows, with the slack beneath it.
         let [header, gap, body, frame, _slack, hint] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(body_rows(area, queue_rows, COMPOSER_CARD_ROWS + 1)),
-            Constraint::Length(COMPOSER_CARD_ROWS),
+            Constraint::Length(body_rows(area, queue_rows, card_rows + 1)),
+            Constraint::Length(card_rows),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .areas(area);
         let inner = frame.inner(Margin::new(1, 1));
         let [prompt, chips, target] = Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(if normal { 3 } else { 1 }),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -305,51 +330,135 @@ fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
     let mut specs = vec![
         (
             HomeFocus::Agent,
-            format!("{} ▾", crate::detect::agent_label(home.agent)),
+            format!("Agent {} ▾", crate::detect::agent_label(home.agent)),
         ),
-        (HomeFocus::Model, format!("{} ▾", home.model)),
+        (HomeFocus::Model, format!("Model {} ▾", home.model)),
     ];
     if let Some(effort) = &home.effort {
-        specs.push((HomeFocus::Effort, format!("{} ▾", effort)));
+        specs.push((HomeFocus::Effort, format!("Effort {} ▾", effort)));
     }
-    specs.push((
-        HomeFocus::Directory,
-        format!("{} ▾", display_path(&home.directory)),
-    ));
     specs
 }
 
 fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
     let specs = chip_specs(home);
-    let label_width = specs
+    let preferred_widths = specs
         .iter()
-        .map(|(_, label)| label.chars().count())
-        .sum::<usize>();
+        .map(|(_, label)| display_width(label))
+        .collect::<Vec<_>>();
+    let minimum_widths = specs
+        .iter()
+        .map(|(focus, _)| match focus {
+            HomeFocus::Agent | HomeFocus::Model => 5usize,
+            HomeFocus::Effort => 6,
+            _ => 0,
+        })
+        .collect::<Vec<_>>();
     let gaps = specs.len().saturating_sub(1);
-    let gap = if label_width.saturating_add(gaps.saturating_mul(3)) <= area.width as usize {
+    let preferred_total = preferred_widths.iter().sum::<usize>();
+    let gap = if preferred_total.saturating_add(gaps.saturating_mul(3)) <= area.width as usize {
         3
     } else {
         1
     };
+    let mut widths = preferred_widths.clone();
+    let available = (area.width as usize).saturating_sub(gaps.saturating_mul(gap));
+    if preferred_total > available {
+        widths = minimum_widths
+            .iter()
+            .scan(available, |remaining, minimum| {
+                let width = (*minimum).min(*remaining);
+                *remaining = remaining.saturating_sub(width);
+                Some(width)
+            })
+            .collect();
+        let mut remaining = available.saturating_sub(widths.iter().sum::<usize>());
+        while remaining > 0 {
+            let mut grew = false;
+            for (width, preferred) in widths.iter_mut().zip(&preferred_widths) {
+                if *width < *preferred && remaining > 0 {
+                    *width += 1;
+                    remaining -= 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+    }
     let mut x = area.x;
     let right = area.right();
     specs
         .into_iter()
-        .filter_map(|(focus, label)| {
+        .zip(widths)
+        .filter_map(|((focus, _), requested_width)| {
             if x >= right {
                 return None;
             }
-            let width = u16::try_from(label.chars().count())
+            let width = u16::try_from(requested_width)
                 .unwrap_or(u16::MAX)
                 .min(right - x);
             if width == 0 {
                 return None;
             }
             let rect = Rect::new(x, area.y, width, area.height);
-            x = x.saturating_add(width).saturating_add(gap);
+            x = x.saturating_add(width).saturating_add(gap as u16);
             Some((focus, rect))
         })
         .collect()
+}
+
+fn secondary_specs(app: &AppState, home: &HomeState) -> [(HomeFocus, String); 2] {
+    [
+        (
+            HomeFocus::Directory,
+            format!("Folder {} ▾", display_path(&home.directory)),
+        ),
+        (
+            HomeFocus::Target,
+            format!("Start in {} ▾", target_label(app, &home.target)),
+        ),
+    ]
+}
+
+fn secondary_rects(app: &AppState, home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
+    let specs = secondary_specs(app, home);
+    let preferred = specs
+        .iter()
+        .map(|(_, label)| display_width(label))
+        .collect::<Vec<_>>();
+    let gap = if preferred.iter().sum::<usize>().saturating_add(3) <= area.width as usize {
+        3
+    } else {
+        1
+    };
+    let available = (area.width as usize).saturating_sub(gap);
+    let minimum = [6usize, 8usize];
+    let target_width = preferred[1]
+        .min(available.saturating_sub(minimum[0]))
+        .max(minimum[1].min(available));
+    let target_width = u16::try_from(target_width)
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let target_x = area.right().saturating_sub(target_width);
+    let folder_width = u16::try_from(preferred[0])
+        .unwrap_or(u16::MAX)
+        .min(target_x.saturating_sub(area.x).saturating_sub(gap as u16));
+    let mut rects = Vec::with_capacity(2);
+    if folder_width > 0 {
+        rects.push((
+            specs[0].0,
+            Rect::new(area.x, area.y, folder_width, area.height),
+        ));
+    }
+    if target_width > 0 {
+        rects.push((
+            specs[1].0,
+            Rect::new(target_x, area.y, target_width, area.height),
+        ));
+    }
+    rects
 }
 
 fn display_path(path: &std::path::Path) -> String {
@@ -385,14 +494,12 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|agent| crate::detect::agent_label(*agent).to_string())
             .collect(),
-        HomePicker::Model => model_options(home.agent)
+        HomePicker::Model => home
+            .model_options()
             .iter()
-            .map(|model| (*model).to_string())
+            .map(|model| model.id.clone())
             .collect(),
-        HomePicker::Effort => effort_options(home.agent)
-            .iter()
-            .map(|effort| (*effort).to_string())
-            .collect(),
+        HomePicker::Effort => home.effort_options().to_vec(),
         HomePicker::Directory => app
             .home_directory_options()
             .iter()
@@ -407,6 +514,7 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
 }
 
 fn composer_field_rect(
+    app: &AppState,
     home: &HomeState,
     composer: ComposerBands,
     focus: HomeFocus,
@@ -414,8 +522,10 @@ fn composer_field_rect(
     if focus == HomeFocus::Prompt {
         return (composer.prompt.width > 0).then_some(composer.prompt);
     }
-    if focus == HomeFocus::Target {
-        return (composer.target.width > 0).then_some(composer.target);
+    if matches!(focus, HomeFocus::Directory | HomeFocus::Target) {
+        return secondary_rects(app, home, composer.target)
+            .into_iter()
+            .find_map(|(field_focus, rect)| (field_focus == focus).then_some(rect));
     }
     chip_rects(home, composer.chips)
         .into_iter()
@@ -582,6 +692,14 @@ fn render_lens(
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
+            truncate_end("new task [n]", bands.new_task.width as usize),
+            Style::default().fg(app.palette.accent),
+        )))
+        .style(Style::default().bg(app.palette.panel_bg)),
+        bands.new_task,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
             truncate("detach [d] →", bands.detach.width as usize),
             Style::default().fg(app.palette.accent),
         )))
@@ -597,14 +715,14 @@ fn picker_popup_rect(
     area: Rect,
 ) -> Option<Rect> {
     let picker = home.picker?;
-    let field = composer_field_rect(home, composer, home.focus?)?;
+    let field = composer_field_rect(app, home, composer, home.focus?)?;
     let labels = picker_labels(app, home, picker);
     if labels.is_empty() || area.width == 0 || area.height == 0 {
         return None;
     }
     let width = labels
         .iter()
-        .map(|label| label.chars().count())
+        .map(|label| display_width(label))
         .max()
         .unwrap_or(0)
         .saturating_add(2)
@@ -629,6 +747,23 @@ fn picker_popup_rect(
     }
     let x = field.x.min(area.right().saturating_sub(width));
     Some(Rect::new(x, y, width, height))
+}
+
+fn picker_viewport(
+    app: &AppState,
+    home: &HomeState,
+    composer: ComposerBands,
+    area: Rect,
+) -> Option<(Rect, usize)> {
+    let popup = picker_popup_rect(app, home, composer, area)?;
+    let option_count = picker_labels(app, home, home.picker?).len();
+    let visible = popup.height as usize;
+    let max_start = option_count.saturating_sub(visible);
+    let start = home
+        .picker_selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(max_start);
+    Some((popup, start))
 }
 
 fn queue_row_hit_areas(
@@ -679,10 +814,10 @@ pub(super) fn home_hit_areas(
     let layout = home_bands(app, queue, area);
     let mut hits = Vec::new();
     if let Some(composer) = layout.composer {
-        if let Some(popup) = picker_popup_rect(app, home, composer, area) {
+        if let Some((popup, start)) = picker_viewport(app, home, composer, area) {
             for offset in 0..popup.height {
                 hits.push(HomeHitArea {
-                    target: HomeHitTarget::PickerOption(offset as usize),
+                    target: HomeHitTarget::PickerOption(start + offset as usize),
                     rect: Rect::new(popup.x, popup.y + offset, popup.width, 1),
                 });
             }
@@ -701,22 +836,20 @@ pub(super) fn home_hit_areas(
                 rect: composer.prompt,
             });
         }
-        for (focus, rect) in chip_rects(home, composer.chips) {
+        for (focus, rect) in chip_rects(home, composer.chips)
+            .into_iter()
+            .chain(secondary_rects(app, home, composer.target))
+        {
             hits.push(HomeHitArea {
                 target: match focus {
                     HomeFocus::Agent => HomeHitTarget::Agent,
                     HomeFocus::Model => HomeHitTarget::Model,
                     HomeFocus::Effort => HomeHitTarget::Effort,
                     HomeFocus::Directory => HomeHitTarget::Directory,
-                    HomeFocus::Reply | HomeFocus::Prompt | HomeFocus::Target => continue,
+                    HomeFocus::Target => HomeHitTarget::Target,
+                    HomeFocus::Reply | HomeFocus::Prompt => continue,
                 },
                 rect,
-            });
-        }
-        if composer.target.width > 0 {
-            hits.push(HomeHitArea {
-                target: HomeHitTarget::Target,
-                rect: composer.target,
             });
         }
     } else if let Some(lens) = layout.lens {
@@ -732,6 +865,12 @@ pub(super) fn home_hit_areas(
             hits.push(HomeHitArea {
                 target: HomeHitTarget::Reply,
                 rect: lens.reply,
+            });
+        }
+        if lens.new_task.width > 0 {
+            hits.push(HomeHitArea {
+                target: HomeHitTarget::NewTask,
+                rect: lens.new_task,
             });
         }
         if lens.detach.width > 0 {
@@ -834,14 +973,17 @@ pub(super) fn render_home(
         } else {
             ""
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("> {prompt}{prompt_suffix}"),
-                prompt_style,
-            )))
-            .style(Style::default().bg(app.palette.panel_bg)),
-            composer.prompt,
-        );
+        let prompt = Paragraph::new(Line::from(Span::styled(
+            format!("> {prompt}{prompt_suffix}"),
+            prompt_style,
+        )))
+        .style(Style::default().bg(app.palette.panel_bg))
+        .wrap(Wrap { trim: false });
+        let prompt_scroll = prompt
+            .line_count(composer.prompt.width.max(1))
+            .saturating_sub(composer.prompt.height as usize)
+            .min(u16::MAX as usize) as u16;
+        frame.render_widget(prompt.scroll((prompt_scroll, 0)), composer.prompt);
 
         for (focus, rect) in chip_rects(home, composer.chips) {
             let label = chip_specs(home)
@@ -856,28 +998,39 @@ pub(super) fn render_home(
             } else {
                 Style::default().fg(app.palette.subtext0)
             };
-            frame.render_widget(Paragraph::new(label).style(style), rect);
+            frame.render_widget(
+                Paragraph::new(truncate_end(&label, rect.width as usize)).style(style),
+                rect,
+            );
         }
 
-        let target_style = if home.focus == Some(HomeFocus::Target) {
-            Style::default()
-                .fg(app.palette.text)
-                .bg(app.palette.surface1)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.palette.subtext0)
-        };
-        frame.render_widget(
-            Paragraph::new(format!("→ {} ▾", target_label(app, &home.target))).style(target_style),
-            composer.target,
-        );
+        for (focus, rect) in secondary_rects(app, home, composer.target) {
+            let label = secondary_specs(app, home)
+                .into_iter()
+                .find_map(|(candidate, label)| (candidate == focus).then_some(label))
+                .unwrap_or_default();
+            let style = if home.focus == Some(focus) {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.palette.subtext0)
+            };
+            frame.render_widget(
+                Paragraph::new(truncate_end(&label, rect.width as usize)).style(style),
+                rect,
+            );
+        }
 
-        if let Some(popup) = picker_popup_rect(app, home, composer, area) {
+        if let Some((popup, start)) = picker_viewport(app, home, composer, area) {
             if let Some(picker) = home.picker {
                 let labels = picker_labels(app, home, picker);
                 let lines = labels
                     .into_iter()
                     .enumerate()
+                    .skip(start)
+                    .take(popup.height as usize)
                     .map(|(index, label)| {
                         let style = if index == home.picker_selected {
                             Style::default()
@@ -1171,7 +1324,8 @@ mod tests {
         let composer = layout.composer.expect("composer should fit");
         let buffer = draw_home(&app, &queue, area);
 
-        assert_eq!(composer.frame.height, COMPOSER_CARD_ROWS);
+        assert_eq!(composer.frame.height, NORMAL_COMPOSER_CARD_ROWS);
+        assert_eq!(composer.prompt.height, 3);
         assert_eq!(buffer[(composer.frame.x, composer.frame.y)].symbol(), "┌");
         assert_eq!(
             buffer[(composer.frame.right() - 1, composer.frame.y)].symbol(),
@@ -1181,11 +1335,12 @@ mod tests {
             buffer[(composer.frame.x, composer.frame.bottom() - 1)].symbol(),
             "└"
         );
-        // The three input rows sit inside the border, not on it.
+        // The prompt and two control rows sit inside the border, not on it.
         assert!(composer.prompt.y > composer.frame.y);
         assert!(composer.target.y < composer.frame.bottom() - 1);
         // And the card follows the queue rather than the pane floor.
         assert_eq!(composer.frame.y, layout.body.bottom());
+        assert!(composer.frame.bottom() <= layout.hint.y);
     }
 
     #[test]
@@ -1200,7 +1355,8 @@ mod tests {
         let layout = bands(area, queue.len());
         let composer = layout.composer.expect("composer should fit");
         let home = app.home.as_ref().expect("home");
-        let field = composer_field_rect(home, composer, HomeFocus::Agent).expect("agent field");
+        let field =
+            composer_field_rect(&app, home, composer, HomeFocus::Agent).expect("agent field");
         let popup = picker_popup_rect(&app, home, composer, area).expect("an open picker");
 
         assert_eq!(
@@ -1225,8 +1381,8 @@ mod tests {
 
         assert_eq!(buffer[(area.x + 1, layout.body.y)].symbol(), "▸");
         assert_eq!(buffer[(area.x + 1, composer.prompt.y)].symbol(), ">");
-        assert_eq!(buffer[(area.x + 1, composer.chips.y)].symbol(), "c");
-        assert_eq!(buffer[(area.x + 1, composer.target.y)].symbol(), "→");
+        assert_eq!(buffer[(area.x + 1, composer.chips.y)].symbol(), "A");
+        assert_eq!(buffer[(area.x + 1, composer.target.y)].symbol(), "F");
         assert_eq!(composer.prompt.x, area.x + 1);
         assert_eq!(composer.chips.x, area.x + 1);
         assert_eq!(composer.target.x, area.x + 1);
@@ -1235,7 +1391,8 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         assert!(
-            row_text(&buffer, area, composer.chips.y).contains("claude ▾   opus ▾   medium ▾"),
+            row_text(&buffer, area, composer.chips.y)
+                .contains("Agent claude ▾   Model default ▾   Effort auto ▾"),
             "wide composer should keep the intended chip spacing"
         );
         assert_eq!(
@@ -1248,15 +1405,21 @@ mod tests {
             hits.iter()
                 .find(|hit| hit.target == HomeHitTarget::Target)
                 .map(|hit| hit.rect),
-            Some(composer.target)
+            secondary_rects(&app, home, composer.target)
+                .into_iter()
+                .find_map(|(focus, rect)| (focus == HomeFocus::Target).then_some(rect))
         );
-        for (focus, rect) in chip_rects(home, composer.chips) {
+        for (focus, rect) in chip_rects(home, composer.chips)
+            .into_iter()
+            .chain(secondary_rects(&app, home, composer.target))
+        {
             let target = match focus {
                 HomeFocus::Agent => HomeHitTarget::Agent,
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Directory => HomeHitTarget::Directory,
-                HomeFocus::Reply | HomeFocus::Prompt | HomeFocus::Target => continue,
+                HomeFocus::Target => HomeHitTarget::Target,
+                HomeFocus::Reply | HomeFocus::Prompt => continue,
             };
             assert_eq!(
                 hits.iter()
@@ -1318,6 +1481,58 @@ mod tests {
     }
 
     #[test]
+    fn a_compact_composer_keeps_one_prompt_row_without_overlapping_queue_or_hint() {
+        let area = Rect::new(0, 0, 60, crate::app::home::HOME_COMPOSER_MIN_HEIGHT);
+        let layout = bands(area, 1);
+        let composer = layout.composer.expect("compact composer should fit");
+
+        assert_eq!(composer.frame.height, COMPACT_COMPOSER_CARD_ROWS);
+        assert_eq!(composer.prompt.height, 1);
+        assert_eq!(layout.body.bottom(), composer.frame.y);
+        assert!(composer.frame.bottom() <= layout.hint.y);
+        assert_eq!(layout.hint.bottom(), area.bottom());
+    }
+
+    #[test]
+    fn the_prompt_hit_area_matches_all_three_normal_rows() {
+        let mut app = AppState::test_new();
+        app.home = Some(HomeState::default());
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 60, 14);
+        let layout = bands(area, queue.len());
+        let prompt = layout.composer.expect("normal composer").prompt;
+        let hit = home_hit_areas(&app, &queue, area)
+            .into_iter()
+            .find(|hit| hit.target == HomeHitTarget::Prompt)
+            .expect("prompt hit area");
+
+        assert_eq!(prompt.height, 3);
+        assert_eq!(hit.rect, prompt);
+    }
+
+    #[test]
+    fn a_wrapped_unicode_prompt_keeps_its_tail_and_cursor_visible() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::default();
+        home.prompt = "开始 重构用户认证模块 继续检查边界 最后尾部".into();
+        app.home = Some(home);
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 20, 14);
+        let composer = bands(area, queue.len()).composer.expect("normal composer");
+        let buffer = draw_home(&app, &queue, area);
+        let prompt_text = (composer.prompt.y..composer.prompt.bottom())
+            .map(|row| row_text(&buffer, area, row))
+            .collect::<String>();
+        let compact_text = prompt_text
+            .chars()
+            .filter(|character| !matches!(character, ' ' | '│'))
+            .collect::<String>();
+
+        assert!(compact_text.contains("尾部_"), "{prompt_text:?}");
+        assert!(!compact_text.contains("开始"), "{prompt_text:?}");
+    }
+
+    #[test]
     fn home_tab_order_includes_each_agents_supported_effort_options() {
         let mut home = HomeState::default();
         let claude_order = [
@@ -1334,10 +1549,6 @@ mod tests {
         }
 
         home.set_agent(crate::detect::Agent::Codex);
-        assert_eq!(
-            effort_options(crate::detect::Agent::Codex),
-            &["low", "medium", "high", "xhigh"]
-        );
         home.focus = Some(HomeFocus::Model);
         home.move_focus(false);
         assert_eq!(home.focus, Some(HomeFocus::Effort));
@@ -1345,60 +1556,6 @@ mod tests {
         assert_eq!(home.focus, Some(HomeFocus::Directory));
         home.move_focus(true);
         assert_eq!(home.focus, Some(HomeFocus::Effort));
-    }
-
-    #[test]
-    fn enter_dispatch_plan_preserves_selected_agent_model_effort_directory_and_target() {
-        let mut home = HomeState::default();
-        home.prompt = "implement the retry cap".into();
-        home.model = "sonnet".into();
-        home.effort = Some("high".into());
-        home.directory = std::path::PathBuf::from("/tmp/herdr");
-        home.target = HomeTarget::Existing("space-2".into());
-
-        let plan = home.dispatch_plan().expect("prompt should dispatch");
-
-        assert_eq!(plan.agent, crate::detect::Agent::Claude);
-        assert_eq!(plan.model, "sonnet");
-        assert_eq!(plan.effort.as_deref(), Some("high"));
-        assert_eq!(plan.directory, std::path::PathBuf::from("/tmp/herdr"));
-        assert_eq!(plan.target, HomeTarget::Existing("space-2".into()));
-        assert_eq!(
-            plan.argv,
-            vec![
-                "claude",
-                "--model",
-                "sonnet",
-                "--effort",
-                "high",
-                "implement the retry cap"
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_dispatch_plan_uses_the_reasoning_effort_config_override() {
-        let mut home = HomeState::default();
-        home.prompt = "implement the retry cap".into();
-        home.set_agent(crate::detect::Agent::Codex);
-        home.model = "gpt-5.3-codex".into();
-        home.effort = Some("xhigh".into());
-
-        let plan = home.dispatch_plan().expect("prompt should dispatch");
-
-        assert_eq!(plan.agent, crate::detect::Agent::Codex);
-        assert_eq!(plan.effort.as_deref(), Some("xhigh"));
-        assert_eq!(
-            plan.argv,
-            vec![
-                "codex",
-                "--model",
-                "gpt-5.3-codex",
-                "-c",
-                "model_reasoning_effort=xhigh",
-                "implement the retry cap"
-            ]
-        );
     }
 
     #[test]
@@ -1416,10 +1573,9 @@ mod tests {
         let chip_row = row_text(&buffer, area, composer.chips.y);
 
         // The composer is a card, so its rows open on the left border.
-        assert!(
-            chip_row.starts_with("│claude ▾ opus ▾ medium"),
-            "{chip_row:?}"
-        );
+        assert!(chip_row.contains("Agent"), "{chip_row:?}");
+        assert!(chip_row.contains("Model"), "{chip_row:?}");
+        assert!(chip_row.contains("Effort"), "{chip_row:?}");
         assert_eq!(rects[0].1.right() + 1, rects[1].1.x);
         assert!(rects.windows(2).all(|pair| pair[0].1.right() < pair[1].1.x));
         assert!(rects.iter().all(|(_, rect)| rect.right() <= area.right()));
@@ -1431,7 +1587,8 @@ mod tests {
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
                 HomeFocus::Directory => HomeHitTarget::Directory,
-                HomeFocus::Reply | HomeFocus::Prompt | HomeFocus::Target => continue,
+                HomeFocus::Target => HomeHitTarget::Target,
+                HomeFocus::Reply | HomeFocus::Prompt => continue,
             };
             assert_eq!(
                 hits.iter()
@@ -1440,6 +1597,70 @@ mod tests {
                 Some(rect)
             );
         }
+    }
+
+    #[test]
+    fn a_long_picker_keeps_selection_visible_and_uses_absolute_hit_indexes() {
+        let mut app = AppState::test_new();
+        for index in 0..12 {
+            let mut workspace = Workspace::test_new(&format!("picker-{index}"));
+            workspace.identity_cwd = format!("/tmp/home-picker-{index}").into();
+            app.workspaces.push(workspace);
+        }
+        let mut home = HomeState::default();
+        home.focus = Some(HomeFocus::Directory);
+        home.picker = Some(HomePicker::Directory);
+        home.picker_selected = app.home_directory_options().len().saturating_sub(1);
+        let selected = home.picker_selected;
+        app.home = Some(home);
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 50, 12);
+        let composer = bands(area, queue.len()).composer.expect("composer");
+        let home = app.home.as_ref().expect("home");
+        let (popup, start) = picker_viewport(&app, home, composer, area).expect("picker");
+        let hits = home_hit_areas(&app, &queue, area);
+        let option_hits = hits
+            .iter()
+            .filter_map(|hit| match hit.target {
+                HomeHitTarget::PickerOption(index) => Some((index, hit.rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(start > 0);
+        assert_eq!(option_hits.first().map(|(index, _)| *index), Some(start));
+        assert_eq!(option_hits.last().map(|(index, _)| *index), Some(selected));
+        assert_eq!(option_hits.len(), popup.height as usize);
+
+        let body = bands(area, queue.len()).body;
+        assert!(body.y >= popup.y && body.y < popup.bottom());
+        assert!(matches!(
+            hits.iter()
+                .find(|hit| {
+                    hit.rect.x <= popup.x
+                        && popup.x < hit.rect.right()
+                        && hit.rect.y <= body.y
+                        && body.y < hit.rect.bottom()
+                })
+                .map(|hit| hit.target),
+            Some(HomeHitTarget::PickerOption(_))
+        ));
+    }
+
+    #[test]
+    fn unicode_model_labels_do_not_push_effort_out_of_a_narrow_row() {
+        let mut home = HomeState::default();
+        home.model = "模型六点一".into();
+        let area = Rect::new(0, 0, 24, 1);
+        let rects = chip_rects(&home, area);
+
+        assert_eq!(rects.len(), 3);
+        assert_eq!(
+            rects.last().map(|(focus, _)| *focus),
+            Some(HomeFocus::Effort)
+        );
+        assert!(rects.windows(2).all(|pair| pair[0].1.right() < pair[1].1.x));
+        assert!(rects.iter().all(|(_, rect)| rect.right() <= area.right()));
     }
 
     #[test]
@@ -1499,6 +1720,27 @@ mod tests {
 
         assert!(expected.contains("which do you want?"), "{expected:?}");
         assert!(rendered.contains("which do you want?"), "{rendered:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_lens_renders_a_clickable_new_task_action() {
+        let app = app_with_lens_screen(b"which do you want?\r\n");
+        let queue = app.blocked_agents();
+        let area = Rect::new(0, 0, 90, 12);
+        let buffer = draw_home(&app, &queue, area);
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let action = home_hit_areas(&app, &queue, area)
+            .into_iter()
+            .find(|hit| hit.target == HomeHitTarget::NewTask)
+            .expect("new task hit area");
+
+        assert!(rendered.contains("new task [n]"), "{rendered:?}");
+        assert_eq!(action.rect.height, 1);
+        assert_eq!(action.rect.width, 12);
     }
 
     #[test]

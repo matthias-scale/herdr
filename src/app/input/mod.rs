@@ -71,6 +71,57 @@ use self::{
 use super::state::{AppState, Mode};
 use super::App;
 
+impl AppState {
+    pub(super) fn home_dismiss_picker(&mut self) {
+        if let Some(home) = self.home.as_mut() {
+            home.picker = None;
+        }
+    }
+
+    pub(super) fn home_focus_prompt(&mut self) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            home.focus = Some(crate::app::home::HomeFocus::Prompt);
+        }
+    }
+
+    pub(super) fn home_focus_reply(&mut self) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            home.focus = Some(crate::app::home::HomeFocus::Reply);
+        }
+    }
+
+    pub(super) fn home_focus_picker(&mut self, picker: crate::app::home::HomePicker) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            home.focus = Some(match picker {
+                crate::app::home::HomePicker::Agent => crate::app::home::HomeFocus::Agent,
+                crate::app::home::HomePicker::Model => crate::app::home::HomeFocus::Model,
+                crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
+                crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
+                crate::app::home::HomePicker::Target => crate::app::home::HomeFocus::Target,
+            });
+        }
+        self.home_open_picker(picker);
+    }
+
+    pub(super) fn home_move_composer_focus(&mut self, backwards: bool, queue_empty: bool) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            if home.focus.is_none() {
+                home.focus = Some(if queue_empty {
+                    crate::app::home::HomeFocus::Prompt
+                } else {
+                    crate::app::home::HomeFocus::Reply
+                });
+            } else {
+                home.move_focus(backwards);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Key handling
 // ---------------------------------------------------------------------------
@@ -386,6 +437,14 @@ impl App {
             .is_some_and(|home| home.picker.is_some())
         {
             match event.code {
+                KeyCode::Tab if event.modifiers.is_empty() => {
+                    let queue_empty = self.state.blocked_agents().is_empty();
+                    self.state.home_move_composer_focus(false, queue_empty);
+                }
+                KeyCode::BackTab => {
+                    let queue_empty = self.state.blocked_agents().is_empty();
+                    self.state.home_move_composer_focus(true, queue_empty);
+                }
                 KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() => {
                     self.state.home_move_picker(-1);
                 }
@@ -396,9 +455,7 @@ impl App {
                     self.state.home_accept_picker();
                 }
                 KeyCode::Esc => {
-                    if let Some(home) = self.state.home.as_mut() {
-                        home.picker = None;
-                    }
+                    self.state.home_dismiss_picker();
                 }
                 _ => {}
             }
@@ -410,30 +467,10 @@ impl App {
 
         match event.code {
             KeyCode::Tab if event.modifiers.is_empty() => {
-                if let Some(home) = self.state.home.as_mut() {
-                    if focus.is_none() {
-                        home.focus = Some(if queue.is_empty() {
-                            crate::app::home::HomeFocus::Prompt
-                        } else {
-                            crate::app::home::HomeFocus::Reply
-                        });
-                    } else {
-                        home.move_focus(false);
-                    }
-                }
+                self.state.home_move_composer_focus(false, queue.is_empty());
             }
             KeyCode::BackTab => {
-                if let Some(home) = self.state.home.as_mut() {
-                    if focus.is_none() {
-                        home.focus = Some(if queue.is_empty() {
-                            crate::app::home::HomeFocus::Prompt
-                        } else {
-                            crate::app::home::HomeFocus::Reply
-                        });
-                    } else {
-                        home.move_focus(true);
-                    }
-                }
+                self.state.home_move_composer_focus(true, queue.is_empty());
             }
             KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() && focus.is_none() => {
                 if let Some(home) = self.state.home.as_mut() {
@@ -474,6 +511,11 @@ impl App {
                 if event.modifiers.is_empty() && focus.is_none() && !queue.is_empty() =>
             {
                 self.state.jump_to_selected_home_agent(&queue);
+            }
+            KeyCode::Char('n')
+                if event.modifiers.is_empty() && focus.is_none() && !queue.is_empty() =>
+            {
+                self.state.home_focus_prompt();
             }
             KeyCode::Backspace
                 if event.modifiers.is_empty()
@@ -2254,6 +2296,158 @@ navigate_workspace_down = "ctrl+j"
             .expect("chip click must not close home");
         assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Agent));
         assert_eq!(home.picker, Some(crate::app::home::HomePicker::Agent));
+    }
+
+    #[tokio::test]
+    async fn clicking_the_prompt_closes_a_picker_and_the_next_key_edits_the_draft() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.prompt = "keep ".into();
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let prompt = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Prompt)
+            .expect("prompt should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: prompt.x,
+                row: prompt.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('界'), KeyModifiers::empty()))
+            .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert!(home.picker.is_none());
+        assert_eq!(home.prompt, "keep 界");
+    }
+
+    #[tokio::test]
+    async fn clicking_another_home_field_replaces_the_open_picker() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let model = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Model)
+            .expect("model should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: model.x,
+                row: model.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Model));
+        assert_eq!(home.picker, Some(crate::app::home::HomePicker::Model));
+    }
+
+    #[tokio::test]
+    async fn clicking_blank_home_space_dismisses_the_picker_and_preserves_the_draft() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.prompt = "do not lose this".into();
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let area = app.state.view.terminal_area;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: area.x + 1,
+                row: area.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert!(home.picker.is_none());
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Agent));
+        assert_eq!(home.prompt, "do not lose this");
+    }
+
+    #[tokio::test]
+    async fn clicking_new_task_in_the_lens_focuses_the_preserved_prompt() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.prompt = "continue here".into();
+        home.focus = None;
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let new_task = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::NewTask)
+            .expect("new task should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: new_task.x,
+                row: new_task.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert_eq!(home.prompt, "continue here");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn n_opens_the_composer_from_the_home_lens() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        app.state.home.as_mut().expect("home").focus = None;
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(
+            app.state.home.as_ref().and_then(|home| home.focus),
+            Some(crate::app::home::HomeFocus::Prompt)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tab_closes_a_picker_and_moves_focus_without_opening_the_next_picker() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+
+        app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Model));
+        assert!(home.picker.is_none());
     }
 
     #[test]

@@ -149,39 +149,35 @@ impl AppState {
                             }
                             self.home_accept_picker();
                         }
+                        HomeHitTarget::NewTask | HomeHitTarget::Prompt => {
+                            self.home_focus_prompt();
+                        }
                         HomeHitTarget::Reply => {
-                            if let Some(home) = self.home.as_mut() {
-                                home.focus = Some(crate::app::home::HomeFocus::Reply);
-                            }
+                            self.home_focus_reply();
                         }
                         HomeHitTarget::Detach => {
                             let queue = self.blocked_agents();
                             self.jump_to_selected_home_agent(&queue);
                         }
                         target => {
-                            let focus = match target {
-                                HomeHitTarget::Prompt => crate::app::home::HomeFocus::Prompt,
-                                HomeHitTarget::Agent => crate::app::home::HomeFocus::Agent,
-                                HomeHitTarget::Model => crate::app::home::HomeFocus::Model,
-                                HomeHitTarget::Effort => crate::app::home::HomeFocus::Effort,
-                                HomeHitTarget::Directory => crate::app::home::HomeFocus::Directory,
-                                HomeHitTarget::Target => crate::app::home::HomeFocus::Target,
+                            let picker = match target {
+                                HomeHitTarget::Agent => crate::app::home::HomePicker::Agent,
+                                HomeHitTarget::Model => crate::app::home::HomePicker::Model,
+                                HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
+                                HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
+                                HomeHitTarget::Target => crate::app::home::HomePicker::Target,
                                 HomeHitTarget::QueueRow(_)
+                                | HomeHitTarget::NewTask
                                 | HomeHitTarget::Reply
                                 | HomeHitTarget::Detach
-                                | HomeHitTarget::PickerOption(_) => {
-                                    return None;
-                                }
+                                | HomeHitTarget::Prompt
+                                | HomeHitTarget::PickerOption(_) => return None,
                             };
-                            let picker = crate::app::home::HomePicker::for_focus(focus);
-                            if let Some(home) = self.home.as_mut() {
-                                home.focus = Some(focus);
-                            }
-                            if let Some(picker) = picker {
-                                self.home_open_picker(picker);
-                            }
+                            self.home_focus_picker(picker);
                         }
                     }
+                } else {
+                    self.home_dismiss_picker();
                 }
             }
             return None;

@@ -982,6 +982,7 @@ impl DockTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeHitTarget {
     QueueRow(usize),
+    NewTask,
     Reply,
     Detach,
     Prompt,
@@ -1706,6 +1707,8 @@ pub struct AppState {
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
+    /// Provider choices resolved outside `HomeState`, ready for the next Home open.
+    pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
     /// Unsent text typed by a human in each pane. Home replies must not touch a
     /// pane while this draft exists because the terminal owns that edit buffer.
     pub(crate) pending_human_drafts: std::collections::HashMap<PaneId, String>,
@@ -2621,6 +2624,7 @@ impl AppState {
             work_view: None,
             inbox: None,
             home: None,
+            home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
