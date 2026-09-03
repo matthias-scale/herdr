@@ -533,20 +533,10 @@ fn detail_tab_lines(
         DockHomeDetailTab::Comments => subtab_lines(
             app,
             "comments",
-            detail.comments.iter().flat_map(|comment| {
-                let author = missing(comment.author.as_deref()).to_string();
-                let mut lines = vec![field_line(
-                    app,
-                    [(" author ".into(), author, app.palette.text)],
-                )];
-                lines.extend(markdown::body_lines(
-                    &app.palette,
-                    Some(&comment.body),
-                    width.saturating_sub(1),
-                    " ",
-                ));
-                lines
-            }),
+            detail
+                .comments
+                .iter()
+                .flat_map(|comment| comment_lines(app, comment, width, SystemTime::now())),
             "no comments",
         ),
         DockHomeDetailTab::Actions => subtab_lines(
@@ -719,6 +709,37 @@ fn poll_detail_lines(
     lines
 }
 
+/// One comment: who wrote it and how long ago, then its body as markdown.
+fn comment_lines(
+    app: &AppState,
+    comment: &crate::work_index::WorkItemComment,
+    width: usize,
+    now: SystemTime,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![field_line(
+        app,
+        [
+            (
+                " ".into(),
+                missing(comment.author.as_deref()).to_string(),
+                app.palette.mauve,
+            ),
+            (
+                "  ".into(),
+                elapsed_from(comment.created_at, now),
+                app.palette.overlay0,
+            ),
+        ],
+    )];
+    lines.extend(markdown::body_lines(
+        &app.palette,
+        Some(&comment.body),
+        width.saturating_sub(1),
+        " ",
+    ));
+    lines
+}
+
 fn ticket_detail_lines(
     app: &AppState,
     row: &DockHomeTicketRow,
@@ -812,6 +833,34 @@ fn ticket_detail_lines(
         width.saturating_sub(1),
         " ",
     ));
+
+    // Comments arrive from a separate linearis read, so they are absent until
+    // the detail refresh lands. Say which of the two it is rather than showing
+    // an empty heading.
+    lines.push(Line::default());
+    lines.push(heading(app, "comments"));
+    match app.work_item_detail_cache.get(&row.key) {
+        Some(detail) if !detail.comments.is_empty() => {
+            let now = SystemTime::now();
+            for comment in &detail.comments {
+                lines.extend(comment_lines(app, comment, width, now));
+                lines.push(Line::default());
+            }
+            lines.pop();
+        }
+        Some(detail) => lines.push(value_line(
+            app,
+            detail
+                .unavailable
+                .clone()
+                .map(|reason| format!(" unavailable: {reason}"))
+                .unwrap_or_else(|| " no comments".to_string()),
+        )),
+        None if app.work_item_detail_loading.contains(&row.key) => {
+            lines.push(value_line(app, " loading…"))
+        }
+        None => lines.push(value_line(app, " —")),
+    }
     lines
 }
 
@@ -1159,6 +1208,7 @@ mod tests {
             comments: vec![crate::work_index::WorkItemComment {
                 author: Some("reviewer".into()),
                 body: "Please keep the body scrollable.".into(),
+                created_at: None,
             }],
             actions: vec![crate::work_index::WorkItemAction {
                 name: "test".into(),
@@ -1555,6 +1605,34 @@ mod tests {
         assert_eq!(app.dock_home_section, DockHomeSection::Prs);
         let terminal = render(&app, Rect::new(0, 0, 30, 10));
         assert!(line_text(&terminal, 0).starts_with("prs tickets"));
+    }
+
+    #[test]
+    fn a_ticket_shows_its_comments_below_its_description() {
+        let mut app = bound_app(true);
+        app.dock_home_section = DockHomeSection::Tickets;
+        let key = app
+            .dock_home_projection()
+            .ticket_rows
+            .first()
+            .map(|row| row.key.clone())
+            .expect("a bound ticket row");
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.comments = vec![crate::work_index::WorkItemComment {
+            author: Some("Ada".into()),
+            body: "the **fix** landed".into(),
+            created_at: None,
+        }];
+        app.work_item_detail_cache.insert(key, detail);
+
+        let rendered = text(&render(&app, Rect::new(0, 0, 80, 40)));
+        let body = rendered.find("what it does").expect("description heading");
+        let comments = rendered.find("comments").expect("comments heading");
+
+        assert!(body < comments, "comments belong below the description");
+        assert!(rendered.contains("Ada"), "{rendered:?}");
+        // Rendered as markdown, so the emphasis markers do not survive.
+        assert!(rendered.contains("the fix landed"), "{rendered:?}");
     }
 
     #[test]
