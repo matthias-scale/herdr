@@ -16,7 +16,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::{app::inbox::BlockedAgent, detect::Agent};
 
-pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 7;
+pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 9;
 pub(crate) const HOME_LENS_MIN_HEIGHT: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -140,6 +140,8 @@ fn hint_line(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ComposerBands {
+    /// The card drawn around the composer, border included.
+    frame: Rect,
     prompt: Rect,
     chips: Rect,
     target: Rect,
@@ -168,6 +170,9 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
+/// The composer card: a border row, three input rows, a border row.
+const COMPOSER_CARD_ROWS: u16 = 5;
+
 /// Rows the queue needs, clamped so the trailing bands always fit.
 fn body_rows(area: Rect, queue_rows: usize, trailing: u16) -> u16 {
     let available = area
@@ -229,25 +234,30 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
     } else if !lens_requested && area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
         // The composer sits directly under the queue; the slack goes below it,
         // so a short queue no longer strands the prompt at the pane floor.
-        let [header, gap, body, prompt, chips, target, _slack, hint] = Layout::vertical([
+        // The composer is a card directly under the queue: one border row above
+        // and below the three input rows, with the slack beneath it.
+        let [header, gap, body, frame, _slack, hint] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(body_rows(area, queue_rows, 4)),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(body_rows(area, queue_rows, COMPOSER_CARD_ROWS + 1)),
+            Constraint::Length(COMPOSER_CARD_ROWS),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .areas(area);
-        let prompt = prompt.inner(Margin::new(1, 0));
-        let chips = chips.inner(Margin::new(1, 0));
-        let target = target.inner(Margin::new(1, 0));
+        let inner = frame.inner(Margin::new(1, 1));
+        let [prompt, chips, target] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
         HomeBands {
             header,
             gap,
             body,
             composer: Some(ComposerBands {
+                frame,
                 prompt,
                 chips,
                 target,
@@ -604,15 +614,15 @@ fn picker_popup_rect(
     let wanted: u16 = labels.len().try_into().unwrap_or(u16::MAX).min(area.height);
     let above = field.y.saturating_sub(area.y);
     let below = area.bottom().saturating_sub(field.y.saturating_add(1));
-    // Opening upward is preferred, but now that the composer sits directly under
-    // the queue there is often no room above it. Falling back downward keeps
-    // every option reachable instead of silently truncating the list.
-    let (height, y) = if wanted <= above {
-        (wanted, field.y.saturating_sub(wanted))
-    } else if below >= above {
-        (wanted.min(below), field.y.saturating_add(1))
+    // Dropdowns open downward. Opening upward is only a fallback for when there
+    // is genuinely more room above, which with the composer near the top of the
+    // pane is rare.
+    let (height, y) = if wanted <= below {
+        (wanted, field.y.saturating_add(1))
+    } else if above > below {
+        (wanted.min(above), field.y.saturating_sub(wanted.min(above)))
     } else {
-        (above, field.y.saturating_sub(above))
+        (below, field.y.saturating_add(1))
     };
     if width == 0 || height == 0 {
         return None;
@@ -792,6 +802,20 @@ pub(super) fn render_home(
         let Some(home) = app.home.as_ref() else {
             return;
         };
+        // The card, drawn first so the input rows sit inside it. Focused
+        // borders take the accent so the composer reads as active.
+        let focused = home.focus.is_some();
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if focused {
+                    app.palette.accent
+                } else {
+                    app.palette.surface_dim
+                }))
+                .style(Style::default().bg(app.palette.panel_bg)),
+            composer.frame,
+        );
         let prompt = if home.prompt.is_empty() {
             "type a prompt".to_string()
         } else {
@@ -1138,6 +1162,56 @@ mod tests {
     }
 
     #[test]
+    fn the_composer_is_drawn_as_a_card_around_its_three_rows() {
+        let mut app = AppState::test_new();
+        app.home = Some(HomeState::default());
+        let queue = vec![blocked(0)];
+        let area = Rect::new(0, 0, 60, 14);
+        let layout = bands(area, queue.len());
+        let composer = layout.composer.expect("composer should fit");
+        let buffer = draw_home(&app, &queue, area);
+
+        assert_eq!(composer.frame.height, COMPOSER_CARD_ROWS);
+        assert_eq!(buffer[(composer.frame.x, composer.frame.y)].symbol(), "┌");
+        assert_eq!(
+            buffer[(composer.frame.right() - 1, composer.frame.y)].symbol(),
+            "┐"
+        );
+        assert_eq!(
+            buffer[(composer.frame.x, composer.frame.bottom() - 1)].symbol(),
+            "└"
+        );
+        // The three input rows sit inside the border, not on it.
+        assert!(composer.prompt.y > composer.frame.y);
+        assert!(composer.target.y < composer.frame.bottom() - 1);
+        // And the card follows the queue rather than the pane floor.
+        assert_eq!(composer.frame.y, layout.body.bottom());
+    }
+
+    #[test]
+    fn dropdowns_open_downward_from_their_field() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::default();
+        home.focus = Some(HomeFocus::Agent);
+        home.picker = Some(HomePicker::Agent);
+        app.home = Some(home);
+        let queue = [blocked(0)];
+        let area = Rect::new(0, 0, 60, 24);
+        let layout = bands(area, queue.len());
+        let composer = layout.composer.expect("composer should fit");
+        let home = app.home.as_ref().expect("home");
+        let field = composer_field_rect(home, composer, HomeFocus::Agent).expect("agent field");
+        let popup = picker_popup_rect(&app, home, composer, area).expect("an open picker");
+
+        assert_eq!(
+            popup.y,
+            field.y + 1,
+            "a dropdown opens below its field, not above it"
+        );
+        assert!(popup.bottom() <= area.bottom());
+    }
+
+    #[test]
     fn composer_inset_matches_queue_content_and_click_targets() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
@@ -1341,8 +1415,9 @@ mod tests {
         let buffer = draw_home(&app, &queue, area);
         let chip_row = row_text(&buffer, area, composer.chips.y);
 
+        // The composer is a card, so its rows open on the left border.
         assert!(
-            chip_row.starts_with(" claude ▾ opus ▾ medium"),
+            chip_row.starts_with("│claude ▾ opus ▾ medium"),
             "{chip_row:?}"
         );
         assert_eq!(rects[0].1.right() + 1, rects[1].1.x);

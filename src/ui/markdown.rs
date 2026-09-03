@@ -63,7 +63,7 @@ pub(crate) fn body_lines(
             continue;
         }
         if fenced {
-            let words = parse_words(source_line.trim_end(), Block::Code);
+            let words = split_wide_words(parse_words(source_line.trim_end(), Block::Code), width);
             for line in wrap_words(&words, width) {
                 lines.push(styled_line(palette, Block::Code, indent, line));
             }
@@ -87,6 +87,7 @@ pub(crate) fn body_lines(
             });
         }
         words.extend(parse_words(content, block));
+        let words = split_wide_words(words, width);
 
         for line in wrap_words(&words, width) {
             lines.push(styled_line(palette, block, indent, line));
@@ -214,6 +215,46 @@ fn parse_words(content: &str, block: Block) -> Vec<Word> {
     }
     flush(&mut current, emphasis, &mut words);
     words
+}
+
+/// Break any word wider than the line into chunks that fit.
+///
+/// A long URL has no space to break at, so without this it overflows its row
+/// and is clipped by the surrounding fixed-height rect.
+fn split_wide_words(words: Vec<Word>, width: usize) -> Vec<Word> {
+    if width == 0 {
+        return words;
+    }
+    let mut out = Vec::with_capacity(words.len());
+    for word in words {
+        if word.width <= width {
+            out.push(word);
+            continue;
+        }
+        let mut chunk = String::new();
+        let mut chunk_width = 0usize;
+        for character in word.text.chars() {
+            let character_width = display_width(&character.to_string());
+            if chunk_width + character_width > width && !chunk.is_empty() {
+                out.push(Word {
+                    width: chunk_width,
+                    text: std::mem::take(&mut chunk),
+                    emphasis: word.emphasis,
+                });
+                chunk_width = 0;
+            }
+            chunk.push(character);
+            chunk_width += character_width;
+        }
+        if !chunk.is_empty() {
+            out.push(Word {
+                width: chunk_width,
+                text: chunk,
+                emphasis: word.emphasis,
+            });
+        }
+    }
+    out
 }
 
 /// Greedily pack words into rows no wider than `width`.
@@ -411,6 +452,22 @@ mod tests {
         );
         assert_eq!(text(&lines), vec!["before", "just check", "after"]);
         assert_eq!(lines[1].spans[0].style.fg, Some(palette().mauve));
+    }
+
+    #[test]
+    fn a_long_url_is_broken_so_it_never_overflows_its_line() {
+        let url = "https://scalablev2-git-feat-studio-resize-window-blend-scalableso.vercel.app/auth?x-vercel-protection-bypass=abc";
+        let lines = body_lines(&palette(), Some(url), 30, "");
+
+        assert!(lines.len() > 1, "an over-wide URL must be broken up");
+        assert!(
+            lines.iter().all(|line| line.width() <= 30),
+            "{:?}",
+            lines.iter().map(|line| line.width()).collect::<Vec<_>>()
+        );
+        // Broken across rows, but not a character lost.
+        let rejoined: String = text(&lines).join("");
+        assert_eq!(rejoined, url);
     }
 
     #[test]
