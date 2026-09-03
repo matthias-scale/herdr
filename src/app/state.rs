@@ -930,6 +930,7 @@ impl DockTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeHitTarget {
     QueueRow(usize),
+    NewTask,
     Reply,
     Detach,
     Prompt,
