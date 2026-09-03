@@ -463,7 +463,7 @@ impl crate::app::state::AppState {
                 // Home and the inbox both want the whole frame; opening one puts
                 // the other away rather than stacking two overlays.
                 self.inbox = None;
-                Some(HomeState::default())
+                Some(HomeState::with_catalog(self.home_catalog.clone()))
             }
         };
     }
@@ -476,7 +476,7 @@ impl crate::app::state::AppState {
     /// is a concern of the thing that starts a session, not of the constructor.
     pub(crate) fn open_home_on_launch(&mut self, config: &crate::config::Config) {
         if config.ui.show_home_on_start {
-            self.home = Some(HomeState::default());
+            self.home = Some(HomeState::with_catalog(self.home_catalog.clone()));
             self.inbox = None;
         }
     }

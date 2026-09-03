@@ -3071,7 +3071,8 @@ impl AppState {
             AppEvent::LoopRunHistoryChanged => Vec::new(),
             AppEvent::StatusMetricsRefreshed { .. }
             | AppEvent::ProviderUsageRefreshed { .. }
-            | AppEvent::ConnectivityProbed { .. } => Vec::new(),
+            | AppEvent::ConnectivityProbed { .. }
+            | AppEvent::HomeCatalogRefreshed { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()

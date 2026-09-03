@@ -95,6 +95,15 @@ impl App {
                 self.connectivity_probe_in_flight = false;
                 self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
             }
+            AppEvent::HomeCatalogRefreshed { catalog } => {
+                self.state.home_catalog.replace(catalog.clone());
+                if let Some(home) = self.state.home.as_mut() {
+                    home.replace_provider_catalog(catalog);
+                    true
+                } else {
+                    false
+                }
+            }
             AppEvent::GitStatusRefreshed {
                 generation,
                 results,
@@ -221,6 +230,14 @@ impl App {
         if let AppEvent::ConnectivityProbed { reachable } = ev {
             self.connectivity_probe_in_flight = false;
             self.state.connectivity.observe(reachable);
+            return None;
+        }
+
+        if let AppEvent::HomeCatalogRefreshed { catalog } = ev {
+            self.state.home_catalog.replace(catalog.clone());
+            if let Some(home) = self.state.home.as_mut() {
+                home.replace_provider_catalog(catalog);
+            }
             return None;
         }
 

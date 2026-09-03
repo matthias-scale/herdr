@@ -647,6 +647,7 @@ impl App {
             work_view: None,
             inbox: None,
             home: None,
+            home_catalog: crate::app::home_catalog::cached_home_catalog_for_current_profile(),
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,
@@ -924,6 +925,14 @@ impl App {
             let manifest_update_tx = event_tx.clone();
             std::thread::spawn(move || {
                 crate::detect::manifest_update::auto_update(manifest_update_tx)
+            });
+        }
+        if !cfg!(test) {
+            let catalog_tx = event_tx.clone();
+            std::thread::spawn(move || {
+                if let Some(catalog) = crate::app::home_catalog::refresh_codex_catalog() {
+                    let _ = catalog_tx.blocking_send(AppEvent::HomeCatalogRefreshed { catalog });
+                }
             });
         }
         crate::symphony::start_poller(event_tx.clone());
