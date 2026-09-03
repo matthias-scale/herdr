@@ -168,13 +168,27 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
-fn bands_for(area: Rect, lens_requested: bool) -> HomeBands {
+/// Rows the queue needs, clamped so the trailing bands always fit.
+fn body_rows(area: Rect, queue_rows: usize, trailing: u16) -> u16 {
+    let available = area
+        .height
+        .saturating_sub(2)
+        .saturating_sub(trailing)
+        .max(1);
+    // At least one row, so the "nothing is waiting on you" line keeps its place.
+    u16::try_from(queue_rows.max(1))
+        .unwrap_or(u16::MAX)
+        .clamp(1, available)
+}
+
+fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
     if lens_requested && area.height >= crate::app::home::HOME_LENS_MIN_HEIGHT {
-        let [header, gap, body, frame, hint] = Layout::vertical([
+        let [header, gap, body, frame, _slack, hint] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Length(body_rows(area, queue_rows, 7)),
             Constraint::Length(6),
+            Constraint::Min(0),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -213,13 +227,16 @@ fn bands_for(area: Rect, lens_requested: bool) -> HomeBands {
             hint,
         }
     } else if !lens_requested && area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
-        let [header, gap, body, prompt, chips, target, hint] = Layout::vertical([
+        // The composer sits directly under the queue; the slack goes below it,
+        // so a short queue no longer strands the prompt at the pane floor.
+        let [header, gap, body, prompt, chips, target, _slack, hint] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Length(body_rows(area, queue_rows, 4)),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Min(0),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -258,8 +275,8 @@ fn bands_for(area: Rect, lens_requested: bool) -> HomeBands {
 }
 
 #[cfg(test)]
-fn bands(area: Rect) -> HomeBands {
-    bands_for(area, false)
+fn bands(area: Rect, queue_rows: usize) -> HomeBands {
+    bands_for(area, false, queue_rows)
 }
 
 fn lens_requested(app: &AppState, queue: &[BlockedAgent]) -> bool {
@@ -271,7 +288,7 @@ fn lens_requested(app: &AppState, queue: &[BlockedAgent]) -> bool {
 }
 
 fn home_bands(app: &AppState, queue: &[BlockedAgent], area: Rect) -> HomeBands {
-    bands_for(area, lens_requested(app, queue))
+    bands_for(area, lens_requested(app, queue), queue.len())
 }
 
 fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
@@ -584,17 +601,24 @@ fn picker_popup_rect(
         .try_into()
         .unwrap_or(u16::MAX)
         .min(area.width);
-    let height = labels
-        .len()
-        .try_into()
-        .unwrap_or(u16::MAX)
-        .min(field.y)
-        .min(area.height);
+    let wanted: u16 = labels.len().try_into().unwrap_or(u16::MAX).min(area.height);
+    let above = field.y.saturating_sub(area.y);
+    let below = area.bottom().saturating_sub(field.y.saturating_add(1));
+    // Opening upward is preferred, but now that the composer sits directly under
+    // the queue there is often no room above it. Falling back downward keeps
+    // every option reachable instead of silently truncating the list.
+    let (height, y) = if wanted <= above {
+        (wanted, field.y.saturating_sub(wanted))
+    } else if below >= above {
+        (wanted.min(below), field.y.saturating_add(1))
+    } else {
+        (above, field.y.saturating_sub(above))
+    };
     if width == 0 || height == 0 {
         return None;
     }
     let x = field.x.min(area.right().saturating_sub(width));
-    Some(Rect::new(x, field.y - height, width, height))
+    Some(Rect::new(x, y, width, height))
 }
 
 fn queue_row_hit_areas(
@@ -1119,7 +1143,7 @@ mod tests {
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
         let area = Rect::new(0, 0, 100, 12);
-        let layout = bands(area);
+        let layout = bands(area, queue.len());
         let composer = layout.composer.expect("composer should fit");
         let home = app.home.as_ref().expect("home");
         let buffer = draw_home(&app, &queue, area);
@@ -1179,7 +1203,7 @@ mod tests {
         app.home = Some(home);
         let queue = vec![blocked(0)];
         let area = Rect::new(0, 0, 100, 12);
-        let layout = bands(area);
+        let layout = bands(area, queue.len());
         let composer = layout.composer.expect("composer should fit");
         let home = app.home.as_ref().expect("home");
         let popup = picker_popup_rect(&app, home, composer, area).expect("picker should fit");
@@ -1212,7 +1236,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(bands(area).composer.is_none());
+        assert!(bands(area, queue.len()).composer.is_none());
         assert!(hits
             .iter()
             .all(|hit| matches!(hit.target, HomeHitTarget::QueueRow(_))));
@@ -1309,7 +1333,9 @@ mod tests {
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
         let area = Rect::new(0, 0, 24, 12);
-        let composer = bands(area).composer.expect("composer should fit");
+        let composer = bands(area, queue.len())
+            .composer
+            .expect("composer should fit");
         let home = app.home.as_ref().expect("home");
         let rects = chip_rects(home, composer.chips);
         let buffer = draw_home(&app, &queue, area);

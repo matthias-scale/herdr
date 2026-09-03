@@ -1112,17 +1112,30 @@ impl App {
                             self.install_recommended_integrations()
                         }
                     },
+                    // Home is a full-terminal overlay, but the sidebar sits
+                    // outside it and its clicks fall through. Picking a session
+                    // there used to move focus behind the overlay, leaving home
+                    // covering the pane the user had just chosen.
                     MouseAction::FocusWorkspace { ws_idx } => {
+                        self.state.clear_home();
                         self.focus_workspace_idx_via_api(ws_idx)
                     }
-                    MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
+                    MouseAction::FocusTab { tab_idx } => {
+                        self.state.clear_home();
+                        self.focus_tab_idx_via_api(tab_idx)
+                    }
                     MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
+                        self.state.clear_home();
                         self.focus_workspace_tab_via_api(ws_idx, tab_idx)
                     }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
+                        self.state.clear_home();
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
-                    MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
+                    MouseAction::FocusToastTarget => {
+                        self.state.clear_home();
+                        self.focus_toast_target_via_api()
+                    }
                     MouseAction::MoveWorkspace {
                         source_ws_idx,
                         insert_idx,
@@ -1914,6 +1927,45 @@ navigate_workspace_down = "ctrl+j"
 
         assert!(app.state.home.is_none(), "a jump leaves home");
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
+    }
+
+    #[tokio::test]
+    async fn selecting_a_session_in_the_sidebar_leaves_home() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("second"));
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        assert!(app.state.home.is_some(), "home should start open");
+
+        let sidebar = app.state.view.sidebar_rect;
+        assert!(sidebar.width > 0, "the sidebar must be visible");
+        let target = crate::ui::compute_workspace_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("a card for the second session");
+
+        // A workspace card commits on release, so the press alone is not a choice.
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: target.rect.x + 2,
+                    row: target.rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+            ))
+            .await;
+        }
+
+        assert!(
+            app.state.home.is_none(),
+            "choosing a session must leave home rather than focus a pane behind it"
+        );
     }
 
     #[tokio::test]
