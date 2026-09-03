@@ -791,6 +791,7 @@ impl App {
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
+            dock_home_focus_unbound: false,
             dock_comment_draft: None,
             dock_pending_write: None,
             dock_write_notice: None,

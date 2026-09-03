@@ -1794,6 +1794,11 @@ pub struct AppState {
     pub(crate) dock_home_ticket_selection: Option<WorkItemKey>,
     pub(crate) dock_home_poll_selection: Option<WorkItemKey>,
     /// A comment being typed against the selected work item.
+    /// True when the focused pane resolves to no pull request and no ticket.
+    /// Without this the selection falls back to the first row, so switching to
+    /// an unrelated tab kept showing the previous item as though it were the
+    /// current one.
+    pub(crate) dock_home_focus_unbound: bool,
     pub(crate) dock_comment_draft: Option<String>,
     /// A write staged by a button but not yet confirmed. Nothing leaves herdr
     /// until the user presses the confirm key with this set.
@@ -2706,6 +2711,7 @@ impl AppState {
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
+            dock_home_focus_unbound: false,
             dock_comment_draft: None,
             dock_pending_write: None,
             dock_write_notice: None,
