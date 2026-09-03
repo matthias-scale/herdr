@@ -317,6 +317,18 @@ fn status_line(app: &AppState, detail: &WorkItemDetail) -> Line<'static> {
     }
 }
 
+/// Colour for a check-run conclusion. GitHub's vocabulary is small and stable,
+/// so an unknown value stays neutral rather than guessing.
+fn action_state_color(app: &AppState, state: &str) -> ratatui::style::Color {
+    match state.to_ascii_uppercase().as_str() {
+        "SUCCESS" | "NEUTRAL" => app.palette.green,
+        "FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED" => app.palette.red,
+        "CANCELLED" | "SKIPPED" | "STALE" => app.palette.overlay0,
+        "IN_PROGRESS" | "QUEUED" | "PENDING" | "WAITING" | "REQUESTED" => app.palette.yellow,
+        _ => app.palette.text,
+    }
+}
+
 fn heading(app: &AppState, text: impl Into<String>) -> Line<'static> {
     Line::from(Span::styled(
         text.into(),
@@ -540,30 +552,52 @@ fn detail_tab_lines(
         DockHomeDetailTab::Actions => subtab_lines(
             app,
             "actions",
-            detail
-                .actions
-                .iter()
-                .map(|action| value_line(app, format!(" {}  {}", action.state, action.name))),
+            detail.actions.iter().map(|action| {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {:<14}", action.state.to_ascii_lowercase()),
+                        Style::default()
+                            .fg(action_state_color(app, &action.state))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(action.name.clone(), Style::default().fg(app.palette.text)),
+                ])
+            }),
             "no check runs",
         ),
         DockHomeDetailTab::Files => subtab_lines(
             app,
             "files",
             detail.files.iter().map(|file| {
-                value_line(
-                    app,
-                    format!(" +{} -{}  {}", file.additions, file.deletions, file.path),
-                )
+                Line::from(vec![
+                    Span::styled(
+                        format!(" +{:<5}", file.additions),
+                        Style::default().fg(app.palette.green),
+                    ),
+                    Span::styled(
+                        format!("-{:<5}", file.deletions),
+                        Style::default().fg(app.palette.red),
+                    ),
+                    Span::styled(file.path.clone(), Style::default().fg(app.palette.text)),
+                ])
             }),
             "no changed files",
         ),
         DockHomeDetailTab::Commits => subtab_lines(
             app,
             "commits",
-            detail
-                .commits
-                .iter()
-                .map(|commit| value_line(app, format!(" {}  {}", commit.short_id, commit.subject))),
+            detail.commits.iter().map(|commit| {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {}  ", commit.short_id),
+                        Style::default().fg(app.palette.mauve),
+                    ),
+                    Span::styled(
+                        commit.subject.clone(),
+                        Style::default().fg(app.palette.text),
+                    ),
+                ])
+            }),
             "no commits",
         ),
         DockHomeDetailTab::Ticket => ticket_subtab_lines(app, row, width),
@@ -2045,15 +2079,38 @@ mod tests {
     }
 
     #[test]
+    fn sub_tab_rows_are_colour_coded_rather_than_plain_text() {
+        let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
+        app.dock_home_detail_tab = DockHomeDetailTab::Actions;
+        let terminal = render(&app, Rect::new(0, 0, 80, 24));
+        let buffer = terminal.backend().buffer();
+
+        let failed = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| buffer[(x, y)].style().fg == Some(app.palette.red))
+        });
+        assert!(failed, "a failing check run should be red");
+
+        app.dock_home_detail_tab = DockHomeDetailTab::Files;
+        let terminal = render(&app, Rect::new(0, 0, 80, 24));
+        let buffer = terminal.backend().buffer();
+        let added = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| buffer[(x, y)].style().fg == Some(app.palette.green))
+        });
+        assert!(added, "additions should be green");
+    }
+
+    #[test]
     fn every_fetched_sub_tab_renders_loaded_data() {
         for (tab, expected) in [
             (
                 DockHomeDetailTab::Comments,
                 "Please keep the body scrollable.",
             ),
-            (DockHomeDetailTab::Actions, "FAILURE  test"),
-            (DockHomeDetailTab::Files, "+42 -6  src/ui/dock/home.rs"),
-            (DockHomeDetailTab::Commits, "abc1234  fix dock detail"),
+            // The state, counts and short id are colour-coded and column-aligned,
+            // so each row is scannable rather than a run of plain text.
+            (DockHomeDetailTab::Actions, "failure"),
+            (DockHomeDetailTab::Files, "src/ui/dock/home.rs"),
+            (DockHomeDetailTab::Commits, "abc1234"),
             (DockHomeDetailTab::Ticket, "MAT-125  linked ticket"),
         ] {
             let mut app = selected_with_detail(bound_app(true), Some(full_detail()));
