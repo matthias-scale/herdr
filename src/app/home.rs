@@ -12,12 +12,18 @@
 
 use std::path::PathBuf;
 
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
 use crate::{app::inbox::BlockedAgent, detect::Agent};
 
-pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 7;
+use super::home_catalog::{HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_MODEL};
+
+pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 9;
+pub(crate) const HOME_LENS_MIN_HEIGHT: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeFocus {
+    Reply,
     Prompt,
     Agent,
     Model,
@@ -29,6 +35,7 @@ pub(crate) enum HomeFocus {
 impl HomeFocus {
     pub(crate) fn next(self, effort_visible: bool) -> Self {
         match self {
+            Self::Reply => Self::Prompt,
             Self::Prompt => Self::Agent,
             Self::Agent => Self::Model,
             Self::Model if effort_visible => Self::Effort,
@@ -41,6 +48,7 @@ impl HomeFocus {
 
     pub(crate) fn previous(self, effort_visible: bool) -> Self {
         match self {
+            Self::Reply => Self::Target,
             Self::Prompt => Self::Target,
             Self::Agent => Self::Prompt,
             Self::Model => Self::Agent,
@@ -64,6 +72,7 @@ pub(crate) enum HomePicker {
 impl HomePicker {
     pub(crate) fn for_focus(focus: HomeFocus) -> Option<Self> {
         match focus {
+            HomeFocus::Reply => None,
             HomeFocus::Prompt => None,
             HomeFocus::Agent => Some(Self::Agent),
             HomeFocus::Model => Some(Self::Model),
@@ -95,21 +104,6 @@ fn default_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-pub(crate) fn model_options(agent: Agent) -> &'static [&'static str] {
-    match agent {
-        Agent::Claude => &["opus", "sonnet", "haiku"],
-        Agent::Codex => &["gpt-5.4", "gpt-5.3-codex"],
-        _ => &[],
-    }
-}
-
-pub(crate) fn effort_options(agent: Agent) -> &'static [&'static str] {
-    match agent {
-        Agent::Claude => &["low", "medium", "high"],
-        _ => &[],
-    }
-}
-
 pub(crate) fn dispatchable_agents() -> &'static [Agent] {
     &[Agent::Claude, Agent::Codex]
 }
@@ -117,9 +111,12 @@ pub(crate) fn dispatchable_agents() -> &'static [Agent] {
 /// Cursor and dispatch state for an open home view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeState {
+    catalog: HomeCatalog,
     selected: usize,
     pub(crate) focus: Option<HomeFocus>,
     pub(crate) prompt: String,
+    pub(crate) reply: String,
+    pub(crate) reply_error: Option<String>,
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
@@ -132,12 +129,15 @@ pub(crate) struct HomeState {
 impl Default for HomeState {
     fn default() -> Self {
         Self {
+            catalog: HomeCatalog::fallback(),
             selected: 0,
             focus: Some(HomeFocus::Prompt),
             prompt: String::new(),
+            reply: String::new(),
+            reply_error: None,
             agent: Agent::Claude,
-            model: "opus".into(),
-            effort: Some("medium".into()),
+            model: DEFAULT_MODEL.into(),
+            effort: Some(AUTO_EFFORT.into()),
             directory: default_directory(),
             target: HomeTarget::NewSpace,
             picker: None,
@@ -147,6 +147,65 @@ impl Default for HomeState {
 }
 
 impl HomeState {
+    pub(crate) fn with_catalog(catalog: HomeCatalog) -> Self {
+        Self {
+            catalog,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn replace_provider_catalog(&mut self, provider: HomeProviderCatalog) {
+        let selected_agent = provider.agent == self.agent;
+        self.catalog.replace(provider);
+        if !selected_agent {
+            return;
+        }
+        let selected_model_exists = self
+            .catalog
+            .provider(self.agent)
+            .is_some_and(|provider| provider.model(&self.model).is_some());
+        if !selected_model_exists {
+            self.set_agent(self.agent);
+        } else {
+            let selected_effort_exists = self
+                .effort
+                .as_deref()
+                .is_some_and(|effort| self.effort_options().iter().any(|known| known == effort));
+            if !selected_effort_exists {
+                self.effort = self.effort_options().first().cloned();
+            }
+        }
+
+        let picker_len = match self.picker {
+            Some(HomePicker::Model) => Some(self.model_options().len()),
+            Some(HomePicker::Effort) => Some(self.effort_options().len()),
+            _ => None,
+        };
+        if let Some(picker_len) = picker_len {
+            if picker_len == 0 {
+                self.picker = None;
+                self.picker_selected = 0;
+            } else {
+                self.picker_selected = self.picker_selected.min(picker_len - 1);
+            }
+        }
+    }
+
+    pub(crate) fn model_options(&self) -> &[super::home_catalog::HomeModelCatalogEntry] {
+        self.catalog
+            .provider(self.agent)
+            .map(|provider| provider.models.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn effort_options(&self) -> &[String] {
+        self.catalog
+            .provider(self.agent)
+            .and_then(|provider| provider.model(&self.model))
+            .map(|model| model.efforts.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// The row the cursor is on, or nothing when the queue is empty.
     ///
     /// The cursor is clamped on read rather than on every queue change: agents
@@ -165,6 +224,7 @@ impl HomeState {
     /// cursor move, so a stale index from a click is harmless.
     pub(crate) fn select(&mut self, index: usize) {
         self.selected = index;
+        self.reply_error = None;
     }
 
     /// Move down one row, stopping at the end.
@@ -173,6 +233,7 @@ impl HomeState {
     /// been waiting, so the ends mean something — arriving at the bottom should
     /// read as "that is all of them", not put you back on the oldest.
     pub(crate) fn select_next(&mut self, queue: &[BlockedAgent]) {
+        self.reply_error = None;
         if queue.is_empty() {
             self.selected = 0;
             return;
@@ -183,6 +244,7 @@ impl HomeState {
     /// Move up one row, stopping at the top.
     pub(crate) fn select_prev(&mut self, queue: &[BlockedAgent]) {
         self.selected = self.selected(queue).saturating_sub(1);
+        self.reply_error = None;
     }
 
     /// First visible row, given how many rows fit.
@@ -223,16 +285,54 @@ impl HomeState {
 
     pub(crate) fn set_agent(&mut self, agent: Agent) {
         self.agent = agent;
-        self.model = model_options(agent)
-            .first()
-            .copied()
+        self.model = self
+            .catalog
+            .provider(agent)
+            .and_then(|catalog| catalog.models.first())
+            .map(|model| model.id.as_str())
             .unwrap_or_default()
-            .into();
-        self.effort = effort_options(agent).first().copied().map(str::to_owned);
+            .to_string();
+        self.effort = self
+            .catalog
+            .provider(agent)
+            .and_then(|catalog| catalog.model(&self.model))
+            .and_then(|model| model.efforts.first())
+            .cloned();
+    }
+
+    pub(crate) fn set_model(&mut self, model: impl Into<String>) {
+        let model = model.into();
+        let efforts = self
+            .catalog
+            .provider(self.agent)
+            .and_then(|provider| provider.model(&model))
+            .map(|model| model.efforts.clone())
+            .unwrap_or_default();
+        if efforts.is_empty() {
+            return;
+        }
+        self.model = model;
+        if !self
+            .effort
+            .as_deref()
+            .is_some_and(|effort| efforts.iter().any(|known| known == effort))
+        {
+            self.effort = efforts.first().cloned();
+        }
     }
 
     pub(crate) fn append_prompt(&mut self, character: char) {
         self.prompt.push(character);
+    }
+
+    pub(crate) fn append_reply(&mut self, character: char) {
+        self.reply.push(character);
+        self.reply_error = None;
+    }
+
+    pub(crate) fn backspace_reply(&mut self) {
+        self.reply.pop();
+        self.reply_error = None;
     }
 
     pub(crate) fn backspace_prompt(&mut self) {
@@ -244,19 +344,35 @@ impl HomeState {
         if prompt.is_empty() {
             return Err("enter a prompt before dispatching".into());
         }
-        if model_options(self.agent).is_empty() {
+        let Some(catalog) = self.catalog.provider(self.agent) else {
             return Err("that agent cannot be dispatched from home".into());
+        };
+        let Some(model) = catalog.model(&self.model) else {
+            return Err("select a model supported by that agent".into());
+        };
+        let effort = self.effort.as_deref().unwrap_or(AUTO_EFFORT);
+        if !model.efforts.iter().any(|known| known == effort) {
+            return Err("select an effort supported by that model".into());
         }
 
         let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
         match self.agent {
             Agent::Claude => {
-                argv.extend(["--model".into(), self.model.clone()]);
-                if let Some(effort) = &self.effort {
-                    argv.extend(["--effort".into(), effort.clone()]);
+                if self.model != DEFAULT_MODEL {
+                    argv.extend(["--model".into(), self.model.clone()]);
+                }
+                if effort != AUTO_EFFORT {
+                    argv.extend(["--effort".into(), effort.into()]);
                 }
             }
-            Agent::Codex => argv.extend(["--model".into(), self.model.clone()]),
+            Agent::Codex => {
+                if self.model != DEFAULT_MODEL {
+                    argv.extend(["--model".into(), self.model.clone()]);
+                }
+                if effort != AUTO_EFFORT {
+                    argv.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
+                }
+            }
             _ => return Err("that agent cannot be dispatched from home".into()),
         }
         argv.push(prompt.into());
@@ -285,6 +401,75 @@ pub(crate) struct HomeCounts {
 }
 
 impl crate::app::state::AppState {
+    pub(crate) fn pane_id_for_terminal(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> Option<crate::layout::PaneId> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.iter())
+            .find_map(|(pane_id, pane)| {
+                (pane.attached_terminal_id == *terminal_id).then_some(*pane_id)
+            })
+    }
+
+    pub(crate) fn note_human_key(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        key: &crate::input::TerminalKey,
+    ) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        let has_terminal_modifier = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        if has_terminal_modifier {
+            return;
+        }
+        match key.code {
+            KeyCode::Char(character) => {
+                let character = key
+                    .shifted_codepoint
+                    .and_then(char::from_u32)
+                    .unwrap_or(character);
+                let draft = self.pending_human_drafts.entry(pane_id).or_default();
+                for _ in 0..key.repeat_count.max(1) {
+                    draft.push(character);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(draft) = self.pending_human_drafts.get_mut(&pane_id) {
+                    for _ in 0..key.repeat_count.max(1) {
+                        draft.pop();
+                    }
+                    if draft.is_empty() {
+                        self.pending_human_drafts.remove(&pane_id);
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                self.pending_human_drafts.remove(&pane_id);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn note_human_text(&mut self, pane_id: crate::layout::PaneId, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if text.contains(['\r', '\n']) {
+            self.pending_human_drafts.remove(&pane_id);
+            return;
+        }
+        self.pending_human_drafts
+            .entry(pane_id)
+            .or_default()
+            .push_str(text);
+    }
+
     pub(crate) fn toggle_home(&mut self) {
         self.home = match self.home.take() {
             Some(_) => None,
@@ -292,7 +477,7 @@ impl crate::app::state::AppState {
                 // Home and the inbox both want the whole frame; opening one puts
                 // the other away rather than stacking two overlays.
                 self.inbox = None;
-                Some(HomeState::default())
+                Some(HomeState::with_catalog(self.home_catalog.clone()))
             }
         };
     }
@@ -305,7 +490,7 @@ impl crate::app::state::AppState {
     /// is a concern of the thing that starts a session, not of the constructor.
     pub(crate) fn open_home_on_launch(&mut self, config: &crate::config::Config) {
         if config.ui.show_home_on_start {
-            self.home = Some(HomeState::default());
+            self.home = Some(HomeState::with_catalog(self.home_catalog.clone()));
             self.inbox = None;
         }
     }
@@ -371,12 +556,12 @@ impl crate::app::state::AppState {
             HomePicker::Model => self
                 .home
                 .as_ref()
-                .map(|home| model_options(home.agent).len())
+                .map(|home| home.model_options().len())
                 .unwrap_or(0),
             HomePicker::Effort => self
                 .home
                 .as_ref()
-                .map(|home| effort_options(home.agent).len())
+                .map(|home| home.effort_options().len())
                 .unwrap_or(0),
             HomePicker::Directory => self.home_directory_options().len(),
             HomePicker::Target => self.home_target_options().len(),
@@ -395,11 +580,12 @@ impl crate::app::state::AppState {
                 HomePicker::Agent => dispatchable_agents()
                     .iter()
                     .position(|agent| *agent == home.agent),
-                HomePicker::Model => model_options(home.agent)
+                HomePicker::Model => home
+                    .model_options()
                     .iter()
-                    .position(|model| *model == home.model),
+                    .position(|model| model.id == home.model),
                 HomePicker::Effort => home.effort.as_deref().and_then(|effort| {
-                    effort_options(home.agent)
+                    home.effort_options()
                         .iter()
                         .position(|option| *option == effort)
                 }),
@@ -457,12 +643,11 @@ impl crate::app::state::AppState {
                 let model = self
                     .home
                     .as_ref()
-                    .and_then(|home| model_options(home.agent).get(selected))
-                    .copied()
-                    .map(str::to_owned);
+                    .and_then(|home| home.model_options().get(selected))
+                    .map(|model| model.id.clone());
                 if let Some(model) = model {
                     if let Some(home) = self.home.as_mut() {
-                        home.model = model;
+                        home.set_model(model);
                     }
                 }
             }
@@ -470,9 +655,8 @@ impl crate::app::state::AppState {
                 let effort = self
                     .home
                     .as_ref()
-                    .and_then(|home| effort_options(home.agent).get(selected))
-                    .copied()
-                    .map(str::to_owned);
+                    .and_then(|home| home.effort_options().get(selected))
+                    .cloned();
                 if let Some(home) = self.home.as_mut() {
                     home.effort = effort;
                 }
@@ -519,6 +703,63 @@ impl crate::app::state::AppState {
     }
 }
 
+impl crate::app::App {
+    pub(crate) fn reply_to_selected_home_agent(&mut self) {
+        let queue = self.state.blocked_agents();
+        let Some((ws_idx, pane_id, reply)) = self.state.home.as_ref().and_then(|home| {
+            home.current(&queue)
+                .map(|agent| (agent.ws_idx, agent.pane_id, home.reply.clone()))
+        }) else {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("no blocked pane is selected".into());
+            }
+            return;
+        };
+        if reply.trim().is_empty() {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("type a reply first".into());
+            }
+            return;
+        }
+        if self
+            .state
+            .pending_human_drafts
+            .get(&pane_id)
+            .is_some_and(|draft| !draft.is_empty())
+        {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("human draft pending · clear it in the pane".into());
+            }
+            return;
+        }
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            if let Some(home) = self.state.home.as_mut() {
+                home.reply_error = Some("pane is no longer available".into());
+            }
+            return;
+        };
+        match self.try_send_text_to_pane(&public_pane_id, &format!("{reply}\r")) {
+            Ok(()) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.reply.clear();
+                    home.reply_error = None;
+                    home.focus = None;
+                }
+            }
+            Err(crate::app::api::PaneSendError::NotFound) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.reply_error = Some("pane is no longer available".into());
+                }
+            }
+            Err(crate::app::api::PaneSendError::Failed(error)) => {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.reply_error = Some(format!("reply failed · {error}"));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +778,17 @@ mod tests {
                 seq: None,
             })
             .collect()
+    }
+
+    fn home_with_codex_catalog() -> HomeState {
+        let codex = super::super::home_catalog::parse_codex_catalog(
+            br#"{"models":[
+                {"slug":"gpt-5.6-sol","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},
+                {"slug":"gpt-5.6-luna","visibility":"list","priority":2,"supported_reasoning_levels":[{"effort":"low"},{"effort":"max"}]}
+            ]}"#,
+        )
+        .expect("Codex fixture");
+        HomeState::with_catalog(HomeCatalog::with_codex(codex))
     }
 
     #[test]
@@ -614,5 +866,117 @@ mod tests {
     #[test]
     fn a_view_with_no_room_asks_for_no_scroll() {
         assert_eq!(HomeState::default().scroll(&queue(5), 0), 0);
+    }
+
+    #[test]
+    fn injected_catalog_exposes_provider_models_and_model_specific_efforts() {
+        let mut home = home_with_codex_catalog();
+        assert_eq!(
+            home.model_options()
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["default", "fable", "opus", "sonnet", "haiku"]
+        );
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        assert!(home.effort_options().iter().any(|effort| effort == "ultra"));
+        home.set_model("gpt-5.6-luna");
+        assert!(!home.effort_options().iter().any(|effort| effort == "ultra"));
+    }
+
+    #[test]
+    fn changing_model_reconciles_an_unsupported_effort_to_auto() {
+        let mut home = home_with_codex_catalog();
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        home.effort = Some("ultra".into());
+
+        home.set_model("gpt-5.6-luna");
+
+        assert_eq!(home.effort.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn catalog_refresh_reconciles_a_removed_selected_model() {
+        let mut home = home_with_codex_catalog();
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        let replacement = super::super::home_catalog::parse_codex_catalog(
+            br#"{"models":[
+                {"slug":"new-model","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"high"}]}
+            ]}"#,
+        )
+        .expect("replacement catalog");
+
+        home.replace_provider_catalog(replacement);
+
+        assert_eq!(home.model, DEFAULT_MODEL);
+        assert_eq!(home.effort.as_deref(), Some(AUTO_EFFORT));
+    }
+
+    #[test]
+    fn catalog_refresh_clamps_an_open_picker_to_the_new_options() {
+        let mut home = home_with_codex_catalog();
+        home.set_agent(Agent::Codex);
+        home.picker = Some(HomePicker::Model);
+        home.picker_selected = home.model_options().len() - 1;
+        let replacement = super::super::home_catalog::parse_codex_catalog(
+            br#"{"models":[
+                {"slug":"new-model","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"high"}]}
+            ]}"#,
+        )
+        .expect("replacement catalog");
+
+        home.replace_provider_catalog(replacement);
+
+        assert_eq!(home.picker, Some(HomePicker::Model));
+        assert_eq!(home.picker_selected, home.model_options().len() - 1);
+    }
+
+    #[test]
+    fn default_model_and_auto_effort_defer_to_the_provider() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "implement the retry cap".into();
+
+        let plan = home.dispatch_plan().expect("prompt should dispatch");
+
+        assert_eq!(home.model, "default");
+        assert_eq!(home.effort.as_deref(), Some("auto"));
+        assert_eq!(plan.argv, vec!["claude", "implement the retry cap"]);
+    }
+
+    #[test]
+    fn launch_argv_uses_exact_provider_flags_for_explicit_choices() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "implement the retry cap".into();
+        home.set_model("fable");
+        home.effort = Some("max".into());
+        assert_eq!(
+            home.dispatch_plan().expect("Claude plan").argv,
+            vec![
+                "claude",
+                "--model",
+                "fable",
+                "--effort",
+                "max",
+                "implement the retry cap",
+            ]
+        );
+
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        home.effort = Some("ultra".into());
+        assert_eq!(
+            home.dispatch_plan().expect("Codex plan").argv,
+            vec![
+                "codex",
+                "--model",
+                "gpt-5.6-sol",
+                "-c",
+                "model_reasoning_effort=ultra",
+                "implement the retry cap",
+            ]
+        );
     }
 }

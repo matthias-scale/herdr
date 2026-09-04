@@ -71,9 +71,68 @@ use self::{
 use super::state::{AppState, Mode};
 use super::App;
 
+impl AppState {
+    pub(super) fn home_dismiss_picker(&mut self) {
+        if let Some(home) = self.home.as_mut() {
+            home.picker = None;
+        }
+    }
+
+    pub(super) fn home_focus_prompt(&mut self) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            home.focus = Some(crate::app::home::HomeFocus::Prompt);
+        }
+    }
+
+    pub(super) fn home_focus_reply(&mut self) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            home.focus = Some(crate::app::home::HomeFocus::Reply);
+        }
+    }
+
+    pub(super) fn home_focus_picker(&mut self, picker: crate::app::home::HomePicker) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            home.focus = Some(match picker {
+                crate::app::home::HomePicker::Agent => crate::app::home::HomeFocus::Agent,
+                crate::app::home::HomePicker::Model => crate::app::home::HomeFocus::Model,
+                crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
+                crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
+                crate::app::home::HomePicker::Target => crate::app::home::HomeFocus::Target,
+            });
+        }
+        self.home_open_picker(picker);
+    }
+
+    pub(super) fn home_move_composer_focus(&mut self, backwards: bool, queue_empty: bool) {
+        self.home_dismiss_picker();
+        if let Some(home) = self.home.as_mut() {
+            if home.focus.is_none() {
+                home.focus = Some(if queue_empty {
+                    crate::app::home::HomeFocus::Prompt
+                } else {
+                    crate::app::home::HomeFocus::Reply
+                });
+            } else {
+                home.move_focus(backwards);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Key handling
 // ---------------------------------------------------------------------------
+
+/// The three staged pull request actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullRequestAction {
+    Approve,
+    Merge,
+    Close,
+}
 
 impl App {
     pub(super) async fn handle_key(
@@ -90,11 +149,17 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
+        if self.handle_work_view_key(key_event) {
+            return None;
+        }
         if self.state.home.is_some() && self.handle_home_key_event(key_event) {
             return None;
         }
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
+        }
+        if self.handle_dock_home_key(&key) {
+            return None;
         }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
@@ -137,10 +202,226 @@ impl App {
         None
     }
 
+    fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != crate::app::DockTab::Home
+            || !self.state.dock_home_focused
+        {
+            return false;
+        }
+
+        let navigate = &self.state.keybinds.navigate;
+        let event = key.as_key_event();
+
+        // A staged write owns the keyboard until it is confirmed or dropped, so
+        // nothing can leave herdr as a side effect of ordinary navigation.
+        if self.state.dock_pending_write.is_some() {
+            match event.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') if event.modifiers.is_empty() => {
+                    self.run_pending_dock_write();
+                }
+                KeyCode::Esc => {
+                    self.state.dock_pending_write = None;
+                    self.state.dock_write_notice = Some("cancelled".to_string());
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        // While a comment is being typed the keys belong to the draft, not to
+        // the action shortcuts.
+        if let Some(draft) = self.state.dock_comment_draft.as_mut() {
+            match event.code {
+                KeyCode::Esc => {
+                    self.state.dock_comment_draft = None;
+                }
+                KeyCode::Backspace => {
+                    draft.pop();
+                }
+                KeyCode::Enter if event.modifiers.is_empty() => {
+                    self.stage_dock_comment();
+                }
+                KeyCode::Char(character)
+                    if event.modifiers.is_empty()
+                        || event.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    draft.push(character);
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        if event.code == KeyCode::Esc && event.modifiers.is_empty() {
+            self.state.dock_home_focused = false;
+            self.state.dock_scroll = 0;
+            return true;
+        }
+
+        if event.modifiers.is_empty() {
+            match event.code {
+                KeyCode::Char('r') => {
+                    self.state.dock_comment_draft = Some(String::new());
+                    self.state.dock_write_notice = None;
+                    return true;
+                }
+                KeyCode::Char('a') => {
+                    return self.stage_pull_request_action(PullRequestAction::Approve)
+                }
+                KeyCode::Char('m') => {
+                    return self.stage_pull_request_action(PullRequestAction::Merge)
+                }
+                KeyCode::Char('x') => {
+                    return self.stage_pull_request_action(PullRequestAction::Close)
+                }
+                _ => {}
+            }
+        }
+        // Arrows only. `pane_left`/`pane_right`/`pane_up`/`pane_down` default to
+        // bare `h`/`j`/`k`/`l`, and the dock is focused over a live shell, so
+        // consuming those would swallow ordinary typing into the pane.
+        if navigate.workspace_up.matches_direct_key(key)
+            || matches!(event.code, KeyCode::Up | KeyCode::Left) && event.modifiers.is_empty()
+        {
+            self.state.move_dock_home_selection(-1);
+            return true;
+        }
+        if navigate.workspace_down.matches_direct_key(key)
+            || matches!(event.code, KeyCode::Down | KeyCode::Right) && event.modifiers.is_empty()
+        {
+            self.state.move_dock_home_selection(1);
+            return true;
+        }
+
+        if event.code == KeyCode::Enter && event.modifiers.is_empty() {
+            self.state.jump_to_dock_home_selection();
+            return true;
+        }
+        false
+    }
+
+    /// Stage a pull request action for confirmation. Returns false when the
+    /// selection is not a pull request, so the key falls through unchanged.
+    fn stage_pull_request_action(&mut self, action: PullRequestAction) -> bool {
+        if self.state.dock_home_section != crate::app::state::DockHomeSection::Prs {
+            return false;
+        }
+        let Some(row) = self.state.dock_home_selected_row() else {
+            return false;
+        };
+        let (Some(number), repo) = (row.key.pr_number, row.key.repo.clone()) else {
+            return false;
+        };
+        if repo.is_empty() {
+            return false;
+        }
+        self.state.dock_pending_write = Some(match action {
+            PullRequestAction::Approve => {
+                crate::work_index::WorkItemWrite::ApprovePullRequest { repo, number }
+            }
+            PullRequestAction::Merge => {
+                crate::work_index::WorkItemWrite::MergePullRequest { repo, number }
+            }
+            PullRequestAction::Close => {
+                crate::work_index::WorkItemWrite::ClosePullRequest { repo, number }
+            }
+        });
+        self.state.dock_write_notice = None;
+        true
+    }
+
+    /// Turn the typed draft into a staged comment on whatever is selected.
+    fn stage_dock_comment(&mut self) {
+        let Some(body) = self
+            .state
+            .dock_comment_draft
+            .as_ref()
+            .map(|draft| draft.trim().to_string())
+            .filter(|draft| !draft.is_empty())
+        else {
+            return;
+        };
+        let write = match self.state.dock_home_section {
+            crate::app::state::DockHomeSection::Prs => {
+                self.state.dock_home_selected_row().and_then(|row| {
+                    let number = row.key.pr_number?;
+                    (!row.key.repo.is_empty()).then(|| {
+                        crate::work_index::WorkItemWrite::CommentOnPullRequest {
+                            repo: row.key.repo.clone(),
+                            number,
+                            body: body.clone(),
+                        }
+                    })
+                })
+            }
+            crate::app::state::DockHomeSection::Tickets => {
+                let projection = self.state.dock_home_projection();
+                self.state
+                    .dock_home_selected_ticket_index(&projection)
+                    .and_then(|index| projection.ticket_rows.get(index))
+                    .map(|row| crate::work_index::WorkItemWrite::CommentOnTicket {
+                        identifier: row.ticket.identifier.clone(),
+                        body: body.clone(),
+                    })
+            }
+            crate::app::state::DockHomeSection::XPolls => None,
+        };
+        let Some(write) = write else {
+            self.state.dock_write_notice = Some("nothing selected to comment on".to_string());
+            return;
+        };
+        self.state.dock_pending_write = Some(write);
+    }
+
+    /// Run the staged write. The draft survives a failure: text a human typed is
+    /// not thrown away because a network call did not land.
+    fn run_pending_dock_write(&mut self) {
+        let Some(write) = self.state.dock_pending_write.take() else {
+            return;
+        };
+        let gh = self.work_index_gh_program();
+        let linearis = self.work_index_linearis_program();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        match crate::work_index::run_work_item_write(&write, &gh, &linearis, deadline) {
+            Ok(message) => {
+                self.state.dock_write_notice = Some(message);
+                self.state.dock_comment_draft = None;
+                // Drop the cached detail so the next refresh shows the result.
+                if let Some(key) = write.target() {
+                    self.state.work_item_detail_cache.remove(&key);
+                }
+            }
+            Err(message) => self.state.dock_write_notice = Some(message),
+        }
+    }
+
+    /// Dock home is attach-local presentation layered over a focused pane, so
+    /// the headless input path must offer it keys before choosing a pane target.
+    pub(crate) fn handle_dock_home_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_home_key(key)
+    }
+
     /// Home owns the full key stream so navigation never leaks into a pane.
     /// Headless mirror.
     pub(crate) fn handle_home_key_headless(&mut self, key: KeyEvent) -> bool {
         self.state.home.is_some() && self.handle_home_key_event(key)
+    }
+
+    fn handle_home_text_commit(&mut self, text: &str) -> bool {
+        let Some(home) = self.state.home.as_mut() else {
+            return false;
+        };
+        match home.focus {
+            Some(crate::app::home::HomeFocus::Prompt) => home.prompt.push_str(text),
+            Some(crate::app::home::HomeFocus::Reply) => {
+                home.reply.push_str(text);
+                home.reply_error = None;
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Handle a key while home is open. Returns whether home consumed it.
@@ -156,6 +437,14 @@ impl App {
             .is_some_and(|home| home.picker.is_some())
         {
             match event.code {
+                KeyCode::Tab if event.modifiers.is_empty() => {
+                    let queue_empty = self.state.blocked_agents().is_empty();
+                    self.state.home_move_composer_focus(false, queue_empty);
+                }
+                KeyCode::BackTab => {
+                    let queue_empty = self.state.blocked_agents().is_empty();
+                    self.state.home_move_composer_focus(true, queue_empty);
+                }
                 KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() => {
                     self.state.home_move_picker(-1);
                 }
@@ -166,9 +455,7 @@ impl App {
                     self.state.home_accept_picker();
                 }
                 KeyCode::Esc => {
-                    if let Some(home) = self.state.home.as_mut() {
-                        home.picker = None;
-                    }
+                    self.state.home_dismiss_picker();
                 }
                 _ => {}
             }
@@ -180,14 +467,10 @@ impl App {
 
         match event.code {
             KeyCode::Tab if event.modifiers.is_empty() => {
-                if let Some(home) = self.state.home.as_mut() {
-                    home.move_focus(false);
-                }
+                self.state.home_move_composer_focus(false, queue.is_empty());
             }
             KeyCode::BackTab => {
-                if let Some(home) = self.state.home.as_mut() {
-                    home.move_focus(true);
-                }
+                self.state.home_move_composer_focus(true, queue.is_empty());
             }
             KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() && focus.is_none() => {
                 if let Some(home) = self.state.home.as_mut() {
@@ -202,6 +485,9 @@ impl App {
             KeyCode::Enter if event.modifiers.is_empty() => match focus {
                 None => {
                     self.state.jump_to_selected_home_agent(&queue);
+                }
+                Some(crate::app::home::HomeFocus::Reply) => {
+                    self.reply_to_selected_home_agent();
                 }
                 Some(crate::app::home::HomeFocus::Prompt) => self.dispatch_home_prompt(),
                 Some(focus) => {
@@ -221,6 +507,16 @@ impl App {
                     self.state.mode = Mode::Terminal;
                 }
             }
+            KeyCode::Char('d')
+                if event.modifiers.is_empty() && focus.is_none() && !queue.is_empty() =>
+            {
+                self.state.jump_to_selected_home_agent(&queue);
+            }
+            KeyCode::Char('n')
+                if event.modifiers.is_empty() && focus.is_none() && !queue.is_empty() =>
+            {
+                self.state.home_focus_prompt();
+            }
             KeyCode::Backspace
                 if event.modifiers.is_empty()
                     && focus == Some(crate::app::home::HomeFocus::Prompt) =>
@@ -235,6 +531,22 @@ impl App {
             {
                 if let Some(home) = self.state.home.as_mut() {
                     home.append_prompt(character);
+                }
+            }
+            KeyCode::Backspace
+                if event.modifiers.is_empty()
+                    && focus == Some(crate::app::home::HomeFocus::Reply) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.backspace_reply();
+                }
+            }
+            KeyCode::Char(character)
+                if event.modifiers.is_empty()
+                    && focus == Some(crate::app::home::HomeFocus::Reply) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.append_reply(character);
                 }
             }
             _ => {}
@@ -368,6 +680,9 @@ impl App {
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
         use crate::app::state::StatusButtonAction;
         match action {
+            StatusButtonAction::Home => {
+                self.state.toggle_home();
+            }
             StatusButtonAction::BlockedFilter => {
                 self.state.blocked_filter = !self.state.blocked_filter;
                 self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -405,6 +720,85 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    pub(crate) fn toggle_work_view(&mut self) {
+        let enabled = self.work_index_config.enabled;
+        let snapshot = enabled.then(|| self.work_index_snapshot.clone()).flatten();
+        self.state.toggle_work_view(enabled, snapshot);
+    }
+
+    pub(crate) fn handle_work_view_key(&mut self, key: KeyEvent) -> bool {
+        let Some(state) = self.state.work_view.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.state.clear_work_view();
+                self.state.mode = Mode::Terminal;
+            }
+            KeyCode::Left if key.modifiers.is_empty() => {
+                state.rotate(false);
+                state.hint = None;
+            }
+            KeyCode::Right if key.modifiers.is_empty() => {
+                state.rotate(true);
+                state.hint = None;
+            }
+            KeyCode::Up if key.modifiers.is_empty() => {
+                state.move_selection(-1);
+                state.hint = None;
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                state.move_selection(1);
+                state.hint = None;
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.focus_work_view_selected_pane();
+            }
+            KeyCode::Char('f') if key.modifiers.is_empty() => {
+                self.cycle_work_view_repo_filter();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn focus_work_view_selected_pane(&mut self) {
+        let Some(row) = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|state| state.selected_row())
+        else {
+            return;
+        };
+        let Some(pane_id) = row.owner_pane_id else {
+            if let Some(state) = self.state.work_view.as_mut() {
+                state.hint = Some(format!("no owning pane for #{}", row.number));
+            }
+            return;
+        };
+        if self.parse_pane_id(&pane_id).is_none() {
+            if let Some(state) = self.state.work_view.as_mut() {
+                state.hint = Some(format!("owning pane {pane_id} is no longer open"));
+            }
+            return;
+        }
+        self.runtime_pane_focus("tui.work_view.focus_owner", pane_id);
+        self.state.clear_work_view();
+        self.state.mode = Mode::Terminal;
+    }
+
+    fn cycle_work_view_repo_filter(&mut self) {
+        let Some(state) = self.state.work_view.as_mut() else {
+            return;
+        };
+        let next = state.cycle_repo_filter();
+        state.hint = Some(
+            next.map(|repo| format!("filter repo: {repo}"))
+                .unwrap_or_else(|| "showing all repos".into()),
+        );
     }
 
     fn open_selected_symphony_workflow(&mut self) {
@@ -478,7 +872,12 @@ impl App {
     }
 
     pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
-        if text.is_empty() || self.state.symphony_detail.is_some() {
+        if text.is_empty() || self.state.symphony_detail.is_some() || self.state.work_view.is_some()
+        {
+            return;
+        }
+        if self.state.home.is_some() {
+            self.handle_home_text_commit(text);
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -513,12 +912,18 @@ impl App {
                 });
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                self.state.note_human_text(pane_id, text);
             }
         }
     }
 
     pub(super) async fn handle_text_commit(&mut self, text: String) {
-        if text.is_empty() || self.state.symphony_detail.is_some() {
+        if text.is_empty() || self.state.symphony_detail.is_some() || self.state.work_view.is_some()
+        {
+            return;
+        }
+        if self.state.home.is_some() {
+            self.handle_home_text_commit(&text);
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -547,18 +952,26 @@ impl App {
                 .state
                 .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
             {
-                runtime.send_bytes(Bytes::from(text)).await.is_ok()
+                runtime
+                    .send_bytes(Bytes::copy_from_slice(text.as_bytes()))
+                    .await
+                    .is_ok()
             } else {
                 false
             };
             if let (true, Some(pane_id)) = (sent, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                self.state.note_human_text(pane_id, &text);
             }
         }
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
-        if self.state.symphony_detail.is_some() {
+        if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
+            return;
+        }
+        if self.state.home.is_some() {
+            self.handle_home_text_commit(&text);
             return;
         }
         if self.state.popup_pane.is_some() {
@@ -585,6 +998,7 @@ impl App {
                 .workspaces
                 .get(ws_idx)
                 .and_then(|workspace| workspace.focused_pane_id());
+            let draft = text.clone();
             let has_text = !text.is_empty();
             let sent = if let Some(runtime) = self
                 .state
@@ -596,6 +1010,7 @@ impl App {
             };
             if let (true, Some(pane_id)) = (sent && has_text, pane_id) {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+                self.state.note_human_text(pane_id, &draft);
             }
         }
     }
@@ -729,7 +1144,7 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
-        if self.state.symphony_detail.is_some() {
+        if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
             return;
         }
         match mouse.kind {
@@ -903,17 +1318,30 @@ impl App {
                             self.install_recommended_integrations()
                         }
                     },
+                    // Home is a full-terminal overlay, but the sidebar sits
+                    // outside it and its clicks fall through. Picking a session
+                    // there used to move focus behind the overlay, leaving home
+                    // covering the pane the user had just chosen.
                     MouseAction::FocusWorkspace { ws_idx } => {
+                        self.state.clear_home();
                         self.focus_workspace_idx_via_api(ws_idx)
                     }
-                    MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
+                    MouseAction::FocusTab { tab_idx } => {
+                        self.state.clear_home();
+                        self.focus_tab_idx_via_api(tab_idx)
+                    }
                     MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
+                        self.state.clear_home();
                         self.focus_workspace_tab_via_api(ws_idx, tab_idx)
                     }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
+                        self.state.clear_home();
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
-                    MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
+                    MouseAction::FocusToastTarget => {
+                        self.state.clear_home();
+                        self.focus_toast_target_via_api()
+                    }
                     MouseAction::MoveWorkspace {
                         source_ws_idx,
                         insert_idx,
@@ -1049,6 +1477,7 @@ impl App {
         };
 
         self.state.dock_editor_focused = false;
+        self.state.dock_home_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
@@ -1473,6 +1902,251 @@ mod tests {
         )
     }
 
+    fn dock_home_test_app(pr_numbers: &[u64]) -> App {
+        let mut app = test_app();
+        app.state.workspaces = pr_numbers
+            .iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        app.state.ensure_test_terminals();
+        app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_home_focused = true;
+        for (ws_idx, number) in pr_numbers.iter().enumerate() {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn staging_a_pull_request_action_does_not_run_it() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        // A program that would fail loudly if it were ever invoked.
+        app.work_index_gh_program_override =
+            Some(std::path::Path::new("/usr/bin/false").to_path_buf());
+
+        assert!(
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()))
+        );
+
+        let staged = app
+            .state
+            .dock_pending_write
+            .as_ref()
+            .expect("merge should be staged");
+        assert!(
+            matches!(
+                staged,
+                crate::work_index::WorkItemWrite::MergePullRequest { .. }
+            ),
+            "{staged:?}"
+        );
+        assert!(
+            staged.describe().contains("squash-merge"),
+            "the confirmation must say what it will do: {}",
+            staged.describe()
+        );
+        assert!(
+            app.state.dock_write_notice.is_none(),
+            "staging must not have run anything"
+        );
+
+        // Escape drops it without running.
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.dock_pending_write.is_none());
+        assert_eq!(app.state.dock_write_notice.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn a_typed_comment_is_staged_rather_than_posted() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        app.work_index_gh_program_override =
+            Some(std::path::Path::new("/usr/bin/false").to_path_buf());
+
+        assert!(
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        );
+        for character in "ship it".chars() {
+            assert!(app.handle_dock_home_key(&TerminalKey::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty()
+            )));
+        }
+        assert_eq!(app.state.dock_comment_draft.as_deref(), Some("ship it"));
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty())));
+        let staged = app
+            .state
+            .dock_pending_write
+            .as_ref()
+            .expect("the comment should be staged, not posted");
+        assert!(matches!(
+            staged,
+            crate::work_index::WorkItemWrite::CommentOnPullRequest { body, .. } if body == "ship it"
+        ));
+        assert!(app.state.dock_write_notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn headless_dock_home_key_moves_selection_without_reaching_the_focused_pane() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+        app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+        assert!(app.terminal_input_context().is_some());
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("initial tab")
+                .number,
+            "10"
+        );
+
+        let key = TerminalKey::new(KeyCode::Down, KeyModifiers::empty());
+        app.route_client_events(
+            vec![
+                crate::raw_input::RawInputEvent::Key(key.clone()),
+                crate::raw_input::RawInputEvent::Key(
+                    key.clone()
+                        .with_kind(crossterm::event::KeyEventKind::Repeat),
+                ),
+                crate::raw_input::RawInputEvent::Key(
+                    key.with_kind(crossterm::event::KeyEventKind::Release),
+                ),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            app.state.dock_home_selected_row().expect("next tab").number,
+            "20"
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "dock-home presses and repeats must not reach the focused pane"
+        );
+        assert!(app.input_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn headless_dock_home_key_reaches_pane_outside_the_focused_open_home_tab() {
+        for guard in ["collapsed", "other tab", "unfocused"] {
+            let mut app = dock_home_test_app(&[10, 20]);
+            match guard {
+                "collapsed" => app.state.dock_collapsed = true,
+                "other tab" => app.state.dock_tab = crate::app::DockTab::Context,
+                "unfocused" => app.state.dock_home_focused = false,
+                _ => unreachable!(),
+            }
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+            app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+
+            app.route_client_events(
+                vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                    KeyCode::Char('j'),
+                    KeyModifiers::empty(),
+                ))],
+                false,
+            );
+
+            assert_eq!(
+                app.state
+                    .dock_home_selected_row()
+                    .expect("unchanged tab")
+                    .number,
+                "10",
+                "guard: {guard}"
+            );
+            assert_eq!(
+                input_rx.try_recv().expect("key forwarded to pane"),
+                bytes::Bytes::from_static(b"j"),
+                "guard: {guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn dock_home_navigate_keys_move_and_enter_jumps_to_the_selected_pane() {
+        let mut app = dock_home_test_app(&[10, 20]);
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Right, KeyModifiers::empty(),)));
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("second row")
+                .number,
+            "20"
+        );
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty(),)));
+        assert_eq!(app.state.active, Some(1));
+        assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn dock_home_escape_unfocuses_the_tab_strip() {
+        let mut app = dock_home_test_app(&[10]);
+
+        assert!(app.handle_dock_home_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
+        assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn dock_home_navigate_keys_honor_config_and_do_not_steal_other_focus() {
+        let mut app = dock_home_test_app(&[10, 20]);
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+navigate_workspace_down = "ctrl+j"
+"#,
+        )
+        .expect("valid config");
+        app.state.keybinds = config.keybinds();
+
+        // Bare letters always belong to the pane: the dock is focused over a
+        // live shell, so `h`/`j`/`k`/`l` must never be swallowed here.
+        assert!(!app
+            .handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty(),)));
+        assert!(!app
+            .handle_dock_home_key(&TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty(),)));
+        assert!(
+            app.handle_dock_home_key(&TerminalKey::new(KeyCode::Char('j'), KeyModifiers::CONTROL,))
+        );
+        assert_eq!(
+            app.state
+                .dock_home_selected_row()
+                .expect("second row")
+                .number,
+            "20"
+        );
+
+        app.state.dock_tab = crate::app::DockTab::Editor;
+        app.state.dock_editor_focused = true;
+        assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
+        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_home_focused = false;
+        assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
+    }
+
     fn app_with_blocked_home_rows(row_count: usize) -> (App, Vec<crate::layout::PaneId>) {
         assert!(row_count > 0);
         let mut app = test_app();
@@ -1531,6 +2205,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selecting_a_session_in_the_sidebar_leaves_home() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("second"));
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        assert!(app.state.home.is_some(), "home should start open");
+
+        let sidebar = app.state.view.sidebar_rect;
+        assert!(sidebar.width > 0, "the sidebar must be visible");
+        let target = crate::ui::compute_workspace_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("a card for the second session");
+
+        // A workspace card commits on release, so the press alone is not a choice.
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: target.rect.x + 2,
+                    row: target.rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+            ))
+            .await;
+        }
+
+        assert!(
+            app.state.home.is_none(),
+            "choosing a session must leave home rather than focus a pane behind it"
+        );
+    }
+
+    #[tokio::test]
     async fn clicking_off_the_home_rows_neither_jumps_nor_closes_home() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
@@ -1585,6 +2298,158 @@ mod tests {
         assert_eq!(home.picker, Some(crate::app::home::HomePicker::Agent));
     }
 
+    #[tokio::test]
+    async fn clicking_the_prompt_closes_a_picker_and_the_next_key_edits_the_draft() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.prompt = "keep ".into();
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let prompt = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Prompt)
+            .expect("prompt should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: prompt.x,
+                row: prompt.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('界'), KeyModifiers::empty()))
+            .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert!(home.picker.is_none());
+        assert_eq!(home.prompt, "keep 界");
+    }
+
+    #[tokio::test]
+    async fn clicking_another_home_field_replaces_the_open_picker() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let model = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Model)
+            .expect("model should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: model.x,
+                row: model.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Model));
+        assert_eq!(home.picker, Some(crate::app::home::HomePicker::Model));
+    }
+
+    #[tokio::test]
+    async fn clicking_blank_home_space_dismisses_the_picker_and_preserves_the_draft() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.prompt = "do not lose this".into();
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let area = app.state.view.terminal_area;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: area.x + 1,
+                row: area.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert!(home.picker.is_none());
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Agent));
+        assert_eq!(home.prompt, "do not lose this");
+    }
+
+    #[tokio::test]
+    async fn clicking_new_task_in_the_lens_focuses_the_preserved_prompt() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.prompt = "continue here".into();
+        home.focus = None;
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let new_task = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::NewTask)
+            .expect("new task should be clickable")
+            .rect;
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: new_task.x,
+                row: new_task.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Prompt));
+        assert_eq!(home.prompt, "continue here");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn n_opens_the_composer_from_the_home_lens() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        app.state.home.as_mut().expect("home").focus = None;
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(
+            app.state.home.as_ref().and_then(|home| home.focus),
+            Some(crate::app::home::HomeFocus::Prompt)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tab_closes_a_picker_and_moves_focus_without_opening_the_next_picker() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        let home = app.state.home.as_mut().expect("home");
+        home.focus = Some(crate::app::home::HomeFocus::Agent);
+        home.picker = Some(crate::app::home::HomePicker::Agent);
+
+        app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+
+        let home = app.state.home.as_ref().expect("home");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Model));
+        assert!(home.picker.is_none());
+    }
+
     #[test]
     fn home_row_hit_areas_are_dropped_as_soon_as_home_closes() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(2);
@@ -1636,6 +2501,71 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn pressing_enter_in_the_home_reply_sends_and_returns_focus_to_the_queue() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        app.state.toggle_home();
+        app.state.home.as_mut().expect("home overlay").focus = None;
+        app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+        assert_eq!(
+            app.state.home.as_ref().and_then(|home| home.focus),
+            Some(crate::app::home::HomeFocus::Reply)
+        );
+
+        for character in "answer".chars() {
+            app.handle_key(TerminalKey::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            ))
+            .await;
+        }
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(rx.recv().await.expect("reply bytes").as_ref(), b"answer\r");
+        assert_eq!(
+            app.state.home.as_ref().and_then(|home| home.focus),
+            None,
+            "a sent reply returns to queue focus"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pending_human_draft_rejects_a_home_reply_without_changing_the_draft() {
+        let (mut app, _terminal_id, mut rx) = terminal_app_with_blocked_hook();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state
+            .pending_human_drafts
+            .insert(pane_id, "human draft byte exact".into());
+        app.state.toggle_home();
+        let home = app.state.home.as_mut().expect("home overlay");
+        home.focus = Some(crate::app::home::HomeFocus::Reply);
+        home.reply = "answer anyway".into();
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(
+            app.state
+                .pending_human_drafts
+                .get(&pane_id)
+                .map(String::as_bytes),
+            Some(b"human draft byte exact".as_slice())
+        );
+        assert_eq!(
+            app.state
+                .home
+                .as_ref()
+                .and_then(|home| home.reply_error.as_deref()),
+            Some("human draft pending · clear it in the pane")
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the protected pane must not receive bytes"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn pressing_escape_leaves_the_composer_before_closing_home() {
         let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
 
@@ -1649,6 +2579,35 @@ mod tests {
             .await;
         assert!(app.state.home.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn clicking_detach_jumps_to_the_selected_pane_and_closes_home() {
+        let (mut app, pane_ids) = app_with_blocked_home_rows(2);
+        app.state.home.as_mut().expect("home overlay").focus = None;
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 120, 40));
+        let detach = app
+            .state
+            .view
+            .home_hit_areas
+            .iter()
+            .find(|hit| hit.target == crate::app::state::HomeHitTarget::Detach)
+            .expect("detach should be clickable")
+            .rect;
+        let target = pane_ids[0];
+
+        app.handle_raw_input_event(crate::raw_input::RawInputEvent::Mouse(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: detach.x,
+                row: detach.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+        .await;
+
+        assert!(app.state.home.is_none());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target));
     }
 
     #[tokio::test(flavor = "current_thread")]

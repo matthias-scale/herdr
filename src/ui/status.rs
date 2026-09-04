@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width, display_width_u16};
+use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{
@@ -72,6 +72,7 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(seg.text.clone(), style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), area);
+    render_focused_pane_title(app, frame, area, used);
 
     for button in &app.view.status_buttons {
         let style = if button.active {
@@ -89,6 +90,76 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// The focused pane's terminal title, rendered in the status row's otherwise
+/// empty middle. It starts at the sidebar's right edge so the title lines up
+/// with the column the pane itself occupies below, and it yields to both the
+/// left-hand buttons and the right-aligned segments rather than overlapping.
+fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segments_used: usize) {
+    const MIN_TITLE_WIDTH: u16 = 8;
+
+    let Some(title) = focused_pane_title(app) else {
+        return;
+    };
+    let sidebar = app.view.sidebar_rect;
+    let buttons_end = app
+        .view
+        .status_buttons
+        .iter()
+        .map(|button| button.rect.x.saturating_add(button.rect.width))
+        .max()
+        .unwrap_or(area.x);
+    let start = sidebar
+        .x
+        .saturating_add(sidebar.width)
+        .max(area.x)
+        .max(buttons_end);
+    let segments_start = area
+        .x
+        .saturating_add(area.width)
+        .saturating_sub(u16::try_from(segments_used).unwrap_or(u16::MAX));
+    // One blank column before the segments keeps the title from reading as part
+    // of the quota block.
+    let Some(width) = segments_start.saturating_sub(1).checked_sub(start) else {
+        return;
+    };
+    if width < MIN_TITLE_WIDTH {
+        return;
+    }
+
+    let text = truncate_end(&title, usize::from(width));
+    let style = Style::default()
+        .fg(app.palette.subtext0)
+        .bg(app.palette.panel_bg);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, style))),
+        Rect::new(start, area.y, width, 1),
+    );
+}
+
+fn focused_pane_title(app: &AppState) -> Option<String> {
+    let workspace = app.active.and_then(|ws_idx| app.workspaces.get(ws_idx))?;
+    // Same source as the window label: a plain shell focused next to a
+    // running agent must not replace the agent's subject with its own title.
+    let pane_id = workspace.title_source_pane_id(&app.terminals)?;
+    let terminal = app.terminals.get(workspace.terminal_id(pane_id)?)?;
+    let title = terminal
+        .terminal_title_stripped()
+        .or_else(|| terminal.terminal_title.clone())?;
+    let title = subject_of(title.trim());
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+/// Agents prefix their title with identity -- `cc · herdr · rename the pane`.
+/// The sidebar and the tab already name the agent and the workspace, so the
+/// status row keeps only the trailing subject: the one thing nothing else on
+/// screen says. A title without the separator is already its own subject.
+fn subject_of(title: &str) -> &str {
+    title
+        .rsplit(" · ")
+        .find(|part| !part.trim().is_empty())
+        .map_or(title, str::trim)
+}
+
 /// Left-aligned quick-access buttons. The status bar's own segments are
 /// right-aligned, so the left half is otherwise pure padding.
 ///
@@ -103,6 +174,11 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
         .filter(crate::ui::sidebar::entry_has_red_dot)
         .count();
     let specs = [
+        (
+            StatusButtonAction::Home,
+            " home ".to_string(),
+            app.home.is_some(),
+        ),
         (
             StatusButtonAction::BlockedFilter,
             if blocked > 0 {
@@ -1596,6 +1672,16 @@ mod tests {
         }
     }
 
+    /// Look a button up by what it does. Indexing by position makes every test
+    /// a hostage of the button order.
+    fn button_for(buttons: &[StatusButton], action: StatusButtonAction) -> StatusButton {
+        buttons
+            .iter()
+            .find(|button| button.action == action)
+            .unwrap_or_else(|| panic!("no {action:?} button in {buttons:?}"))
+            .clone()
+    }
+
     #[test]
     fn quick_buttons_sit_at_the_left_edge_in_a_stable_order() {
         let app = AppState::test_new();
@@ -1605,6 +1691,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                StatusButtonAction::Home,
                 StatusButtonAction::BlockedFilter,
                 StatusButtonAction::Dock,
                 StatusButtonAction::StatusDetail
@@ -1625,8 +1712,9 @@ mod tests {
         app.ensure_test_terminals();
 
         let idle = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(idle[0].label.trim(), "blocked");
-        assert!(!idle[0].active, "the filter starts disabled");
+        let idle = button_for(&idle, StatusButtonAction::BlockedFilter);
+        assert_eq!(idle.label.trim(), "blocked");
+        assert!(!idle.active, "the filter starts disabled");
 
         let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
         let terminal_id = app.workspaces[0]
@@ -1639,19 +1727,23 @@ mod tests {
             .state = AgentState::Blocked;
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
-        assert_eq!(blocked[0].label.trim(), "blocked 1");
-        assert!(!blocked[0].active);
+        let blocked = button_for(&blocked, StatusButtonAction::BlockedFilter);
+        assert_eq!(blocked.label.trim(), "blocked 1");
+        assert!(!blocked.active);
         app.blocked_filter = true;
-        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[0].active);
+        let filtered = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(button_for(&filtered, StatusButtonAction::BlockedFilter).active);
     }
 
     #[test]
     fn the_dock_button_lights_up_only_while_the_dock_is_showing() {
         let mut app = AppState::test_new();
         app.dock_collapsed = true;
-        assert!(!status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        let collapsed = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(!button_for(&collapsed, StatusButtonAction::Dock).active);
         app.dock_collapsed = false;
-        assert!(status_buttons(&app, Rect::new(0, 0, 120, 1))[1].active);
+        let showing = status_buttons(&app, Rect::new(0, 0, 120, 1));
+        assert!(button_for(&showing, StatusButtonAction::Dock).active);
     }
 
     #[test]
@@ -1672,5 +1764,81 @@ mod tests {
     fn a_zero_width_status_bar_registers_no_buttons() {
         let app = AppState::test_new();
         assert!(status_buttons(&app, Rect::new(0, 0, 0, 0)).is_empty());
+    }
+
+    #[test]
+    fn focused_pane_title_starts_where_the_sidebar_ends() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        const WIDTH: u16 = 200;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_collapsed = false;
+        app.sidebar_width = 40;
+        let terminal_id = app.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("root pane")
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .set_terminal_title(Some("Fix billing".into()));
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, WIDTH, 20),
+        );
+        let sidebar_end = usize::from(
+            app.view
+                .sidebar_rect
+                .x
+                .saturating_add(app.view.sidebar_rect.width),
+        );
+        assert!(sidebar_end > 0, "desktop layout must expose a sidebar");
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("status terminal");
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, Rect::new(0, 0, WIDTH, 1)))
+            .expect("render status");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        // The buffer mixes multi-byte glyphs, so slice by column, not by byte.
+        let columns = rendered.chars().collect::<Vec<_>>();
+        let at_sidebar_edge = columns[sidebar_end..].iter().collect::<String>();
+        assert!(
+            at_sidebar_edge.starts_with("Fix billing"),
+            "title must start at the sidebar's right edge: {rendered:?}"
+        );
+        assert_eq!(
+            columns[sidebar_end - 1],
+            ' ',
+            "nothing may run into the title column: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn the_pane_title_drops_the_agent_and_workspace_prefix() {
+        assert_eq!(
+            subject_of("cc · herdr · rename the pane"),
+            "rename the pane"
+        );
+        // A trailing empty segment falls back to the last one that says something.
+        assert_eq!(subject_of("cc · herdr ·   "), "herdr");
+        assert_eq!(subject_of("Fix billing"), "Fix billing");
+        // A bare separator is not the agent prefix shape and must survive.
+        assert_eq!(subject_of("a·b"), "a·b");
+        assert_eq!(subject_of("修复 · 标题"), "标题");
     }
 }

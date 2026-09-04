@@ -20,7 +20,9 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
+        # Nixpkgs 26.11 dropped x86_64-darwin. Intel macOS release binaries are
+        # built by cargo in release.yml, not by this flake, so no shipped
+        # artifact depends on it.
         "aarch64-darwin"
       ];
       forAllSystems = lib.genAttrs systems;

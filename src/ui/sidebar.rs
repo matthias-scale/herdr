@@ -516,16 +516,33 @@ pub(super) fn mobile_tab_row_layout(
     compact_row_layout(entry, now, width, prefix_width, true)
 }
 
+/// Foreground for the selected Space and the current tab title in the sidebar.
+///
+/// Emphasis is a step *away* from the panel background, so the same rule reads
+/// as emphasis in both appearances: one third darker than the authored text on
+/// a light panel, one third of the way to white on a dark one. A single
+/// darkening rule (herdr #17, which dropped the luminance guard added by #16)
+/// made the selected row the dimmest text in every dark theme -- under
+/// `github-dark-high-contrast` it rendered at `Rgb(160, 162, 164)`, below the
+/// `Rgb(189, 196, 204)` of the unselected rows around it.
 pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
-    if palette.panel_bg == Color::Reset {
+    let Color::Rgb(bg_r, bg_g, bg_b) = palette.panel_bg else {
         return palette.text;
-    }
+    };
+    // Rec. 601 luma, scaled by 1000 to stay in integer arithmetic.
+    let panel_luma = u32::from(bg_r) * 299 + u32::from(bg_g) * 587 + u32::from(bg_b) * 114;
+    let panel_is_dark = panel_luma < 128_000;
     match palette.text {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((u16::from(r) * 2) / 3) as u8,
-            ((u16::from(g) * 2) / 3) as u8,
-            ((u16::from(b) * 2) / 3) as u8,
-        ),
+        Color::Rgb(r, g, b) => {
+            let step = |channel: u8| -> u8 {
+                if panel_is_dark {
+                    channel + ((255 - channel) / 3)
+                } else {
+                    ((u16::from(channel) * 2) / 3) as u8
+                }
+            };
+            Color::Rgb(step(r), step(g), step(b))
+        }
         color => color,
     }
 }
@@ -1191,9 +1208,16 @@ fn append_recently_done_rows(
 
 fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) -> bool {
     entry.has_agent
-        && entry.state == AgentState::Idle
         && !entry.seen
         && !entry.stale
+        // Share the lifecycle definition of a stopped session. Hiding a row the
+        // sidebar would otherwise paint red is how a question stops being asked.
+        && crate::terminal::state::session_is_quiet(
+            entry.state,
+            entry_has_gate(entry) || entry.usage_limited,
+            entry.active_subagents,
+            entry.holds_shell,
+        )
         && entry.done_since.is_some_and(|done_since| {
             app.view_observed_at.saturating_duration_since(done_since) > app.hide_done_after
         })
@@ -2691,10 +2715,11 @@ mod tests {
     }
 
     #[test]
-    fn active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks() {
-        // ac3: selected titles are one-third darker than the authored text
-        // token in both shipped One themes. Bold supplies the emphasis while
-        // the foreground direction remains consistent across machines.
+    fn active_title_color_steps_away_from_the_panel_and_preserves_terminal_fallbacks() {
+        // ac3: the selected title moves one third away from the panel
+        // background -- darker on a light panel, brighter on a dark one -- so
+        // the same rule reads as emphasis in both appearances. Bold supplies
+        // the weight; the foreground supplies the contrast.
         let one_light = crate::app::state::Palette::one_light();
         assert_eq!(
             active_sidebar_title_color(&one_light),
@@ -2704,7 +2729,7 @@ mod tests {
         let one_dark = crate::app::state::Palette::one_dark();
         assert_eq!(
             active_sidebar_title_color(&one_dark),
-            Color::Rgb(114, 118, 127)
+            Color::Rgb(199, 203, 212)
         );
 
         let terminal = crate::app::state::Palette::terminal();
@@ -2714,6 +2739,38 @@ mod tests {
         custom_reset.panel_bg = Color::Reset;
         custom_reset.text = Color::Rgb(12, 34, 56);
         assert_eq!(active_sidebar_title_color(&custom_reset), custom_reset.text);
+    }
+
+    /// The regression this fixes: on every dark palette the selected Space and
+    /// the current tab title were the *dimmest* text in the sidebar, below the
+    /// unselected rows they had to stand out from.
+    #[test]
+    fn active_title_outshines_unselected_rows_on_every_dark_palette() {
+        let luminance = |color: Color| match color {
+            Color::Rgb(r, g, b) => u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114,
+            other => panic!("expected an rgb color, got {other:?}"),
+        };
+
+        for palette in [
+            crate::app::state::Palette::github_dark_high_contrast(),
+            crate::app::state::Palette::one_dark(),
+            crate::app::state::Palette::catppuccin(),
+        ] {
+            let selected = luminance(active_sidebar_title_color(&palette));
+            assert!(
+                selected > luminance(palette.subtext0),
+                "selected title must outshine the unselected rows"
+            );
+            assert!(
+                selected > luminance(palette.text),
+                "selected title must outshine the authored text token"
+            );
+        }
+
+        assert_eq!(
+            active_sidebar_title_color(&crate::app::state::Palette::github_dark_high_contrast()),
+            Color::Rgb(245, 247, 249)
+        );
     }
 
     #[test]
@@ -6289,6 +6346,46 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal.state = *state;
         }
         app
+    }
+
+    #[test]
+    fn a_pane_with_an_unanswered_gate_is_never_hidden_as_done() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.hide_done_after = std::time::Duration::from_secs(30 * 60);
+        app.terminals.get_mut(&terminal_id).unwrap().closing_gates =
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Choose the release path".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }];
+
+        app.view_observed_at =
+            done_since + app.hide_done_after + std::time::Duration::from_secs(60);
+        let rows = sidebar_rows(&app);
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader { title, .. } if *title == RECENTLY_DONE_SECTION_TITLE
+            )),
+            "a pane waiting on a human must not be filed under Recently done"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(row, SidebarRow::Tab { .. })),
+            "and it must stay visible as a row"
+        );
     }
 
     #[test]

@@ -347,6 +347,7 @@ pub struct Config {
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
+    pub work_index: WorkIndexConfig,
 }
 
 pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
@@ -467,6 +468,8 @@ pub struct KeysConfig {
     pub previous_agent: BindingConfig,
     /// Focus the next agent shown in the agent panel. Unset by default.
     pub next_agent: BindingConfig,
+    /// Focus the next pane registered for review work. Default: "prefix+ctrl+r".
+    pub next_review_agent: BindingConfig,
     /// Focus an agent by index 1-9. Unset by default.
     pub focus_agent: BindingConfig,
     /// Local-client shortcut that sends a clipboard image to a remote Herdr session. Default: "ctrl+v".
@@ -559,6 +562,8 @@ pub struct KeysConfig {
     pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
     pub symphony: BindingConfig,
+    /// Open the work projection view. Default: "prefix+ctrl+w"
+    pub work: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
@@ -638,6 +643,8 @@ pub(crate) struct KeysConfigOverlay {
     previous_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_agent: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_review_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -726,6 +733,8 @@ pub(crate) struct KeysConfigOverlay {
     toggle_info_panel: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symphony: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
     home: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -782,6 +791,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(next_workspace);
         apply_field!(previous_agent);
         apply_field!(next_agent);
+        apply_field!(next_review_agent);
         apply_field!(focus_agent);
         apply_field!(remote_image_paste);
         apply_field!(new_tab);
@@ -827,6 +837,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(show_scratchpad);
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
+        apply_field!(work);
         apply_field!(inbox);
         apply_field!(home);
         apply_field!(toggle_status_detail);
@@ -906,6 +917,7 @@ impl KeysConfig {
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
         copy_effective_action_field!(next_agent, keybinds.next_agent);
+        copy_effective_action_field!(next_review_agent, keybinds.next_review_agent);
         copy_effective_indexed_field!(focus_agent, keybinds.focus_agent);
         copy_user_field!(remote_image_paste);
         copy_effective_action_field!(new_tab, keybinds.new_tab);
@@ -951,6 +963,7 @@ impl KeysConfig {
         copy_effective_action_field!(show_scratchpad, keybinds.show_scratchpad);
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
+        copy_effective_action_field!(work, keybinds.work);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
         copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
@@ -1179,6 +1192,30 @@ impl Default for FleetConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WorkIndexConfig {
+    /// Enable repo-wide GitHub, Linear, and agent-pane work indexing. Default: false.
+    pub enabled: bool,
+    /// Refresh interval in seconds. Default: 300.
+    pub refresh_interval_seconds: u64,
+    /// Linear team key used for started-ticket discovery.
+    pub linear_team: Option<String>,
+    /// GitHub repositories to include as `owner/repo` values.
+    pub repos: Vec<String>,
+}
+
+impl Default for WorkIndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            refresh_interval_seconds: 300,
+            linear_team: None,
+            repos: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FleetHostConfig {
@@ -1271,6 +1308,7 @@ impl Default for KeysConfig {
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
             next_agent: BindingConfig::empty(),
+            next_review_agent: BindingConfig::one("prefix+ctrl+r"),
             focus_agent: BindingConfig::empty(),
             remote_image_paste: "ctrl+v".into(),
             new_tab: BindingConfig::one("prefix+c"),
@@ -1316,10 +1354,9 @@ impl Default for KeysConfig {
             show_scratchpad: BindingConfig::one("ctrl+alt+n"),
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
+            work: BindingConfig::one("prefix+ctrl+w"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
-            // Home is disabled for now: the overlay is unfinished and the blocked
-            // filter answers the same question in place. Restoring it is one line.
-            home: BindingConfig::empty(),
+            home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),

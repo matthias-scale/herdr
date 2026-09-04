@@ -31,6 +31,7 @@ pub(super) fn command() -> Command {
         .subcommand(status_command())
         .subcommand(config_command())
         .subcommand(fleet_command())
+        .subcommand(work_index_command())
         .subcommand(channel_command())
         .subcommand(server_command())
         .subcommand(api_command())
@@ -156,6 +157,16 @@ fn fleet_command() -> Command {
         )
 }
 
+fn work_index_command() -> Command {
+    Command::new("work-index")
+        .about("Inspect repo-wide GitHub, Linear, and agent work")
+        .subcommand(
+            Command::new("list")
+                .about("List indexed work items")
+                .arg(json_flag().help("Print structured rows as JSON")),
+        )
+}
+
 fn channel_command() -> Command {
     Command::new("channel")
         .about("Manage stable and preview update channels")
@@ -224,6 +235,14 @@ fn workspace_command() -> Command {
                 .about("Rename a workspace")
                 .arg(required("workspace_id", "WORKSPACE_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
+        )
+        .subcommand(
+            Command::new("bind")
+                .about("Bind a workspace to the repository whose work it collects")
+                .arg(required("workspace_id", "WORKSPACE_ID"))
+                .arg(Arg::new("repo").value_name("OWNER/REPO"))
+                .arg(flag("clear"))
+                .arg(flag("reconcile")),
         )
         .subcommand(
             Command::new("report-metadata")
@@ -564,6 +583,27 @@ fn pane_command() -> Command {
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(Arg::new("label").value_name("LABEL").num_args(1..))
                 .arg(flag("clear")),
+        )
+        .subcommand(
+            Command::new("work-context")
+                .about("Inspect or update pane work context")
+                .subcommand(id_command("get", "pane_id", "Show pane work context"))
+                .subcommand(
+                    Command::new("set")
+                        .about("Update pane work context")
+                        .arg(required("pane_id", "PANE_ID"))
+                        .arg(repeatable_option("ticket", "ID"))
+                        .arg(repeatable_option("pr", "URL"))
+                        .arg(option("branch", "BRANCH"))
+                        .arg(option("repo", "OWNER/REPO"))
+                        .arg(option("title", "TITLE"))
+                        .arg(
+                            option("role", "ROLE")
+                                .value_parser(["baseline", "repair", "ship", "review"]),
+                        )
+                        .arg(flag("active-owner").requires("role"))
+                        .arg(repeatable_option("clear", "FIELD")),
+                ),
         )
         .subcommand(
             Command::new("split")
@@ -990,6 +1030,7 @@ fn spawn_work_context_options() -> Vec<Arg> {
         repeatable_option("ticket", "ID"),
         option("pr", "URL"),
         option("branch", "BRANCH"),
+        option("repo", "OWNER/REPO"),
         option("role", "ROLE").value_parser(["baseline", "repair", "ship", "review"]),
         flag("active-owner"),
     ]
@@ -999,6 +1040,7 @@ fn worktree_work_context_options() -> Vec<Arg> {
     vec![
         repeatable_option("ticket", "ID"),
         option("pr", "URL"),
+        option("repo", "OWNER/REPO"),
         option("role", "ROLE").value_parser(["baseline", "repair", "ship", "review"]),
         flag("active-owner"),
     ]
@@ -1231,6 +1273,37 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn pane_work_context_active_owner_requires_role() {
+        let error = super::command()
+            .try_get_matches_from([
+                "herdr",
+                "pane",
+                "work-context",
+                "set",
+                "1-1",
+                "--active-owner",
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(super::command()
+            .try_get_matches_from([
+                "herdr",
+                "pane",
+                "work-context",
+                "set",
+                "1-1",
+                "--role",
+                "review",
+                "--active-owner",
+            ])
+            .is_ok());
     }
 
     #[test]

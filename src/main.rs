@@ -106,6 +106,8 @@ mod terminal_theme;
 mod ui;
 mod update;
 mod work_context;
+mod work_index;
+mod work_projection;
 mod work_title;
 mod workspace;
 mod worktree;
@@ -170,6 +172,16 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Check herdr.dev for remote agent-detection manifest updates in the background.
 # manifest_check = true
 
+[work_index]
+# Enable repo-wide GitHub, Linear, and agent-pane work indexing.
+# enabled = false
+# Refresh interval in seconds.
+# refresh_interval_seconds = 300
+# Linear team key, for example "SCA".
+# linear_team = "SCA"
+# GitHub repositories to include, for example ["owner/repo"].
+# repos = []
+
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
@@ -184,6 +196,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Prefix-mode actions
 # help = "prefix+?"
 # settings = "prefix+s"
+# home = "ctrl+alt+h"
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
@@ -233,6 +246,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # toggle_blocked_filter = "prefix+f"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
+# work = "prefix+ctrl+w"         # work projection view: PRs / tickets / agents / review
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

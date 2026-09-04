@@ -1,10 +1,11 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::Write,
     os::fd::RawFd,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
@@ -620,6 +621,83 @@ pub fn session_processes(child_pid: u32) -> Vec<u32> {
     pids
 }
 
+/// How long one `/proc` session snapshot is reused by the sidebar.
+///
+/// The sidebar refreshes far faster than this, and "does this pane still hold a
+/// shell" cannot meaningfully change inside a quarter second — so re-deriving it
+/// per pane per frame buys no accuracy, only syscalls.
+const SESSION_SNAPSHOT_TTL: Duration = Duration::from_millis(250);
+
+type SessionSnapshot = (Instant, HashMap<u32, i32>);
+
+fn session_snapshot_cell() -> &'static Mutex<Option<SessionSnapshot>> {
+    static CELL: OnceLock<Mutex<Option<SessionSnapshot>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn read_session_ids() -> HashMap<u32, i32> {
+    let mut map = HashMap::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let file_name = entry.file_name();
+        let Some(pid_str) = file_name.to_str() else {
+            continue;
+        };
+        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if let Some(session_id) = process_session_id(pid) {
+            map.insert(pid, session_id);
+        }
+    }
+    map
+}
+
+/// `session_processes` for read-only observation, answered from a snapshot of
+/// `/proc` that is at most `SESSION_SNAPSHOT_TTL` old.
+///
+/// `session_processes` walks every entry in `/proc` and reads each `stat` file —
+/// roughly 1,300 reads on a busy host. The sidebar called it twice per pane per
+/// refresh, so a 30-pane session issued ~78,000 `openat`+`read` pairs per frame
+/// and herdr burned half a core doing nothing else. Sharing one snapshot across
+/// every pane in a frame makes that cost O(processes) instead of
+/// O(panes x processes).
+///
+/// Deliberately NOT used by the shutdown path in `pane.rs`: signalling must see
+/// the live process table, because a stale snapshot can miss a child spawned
+/// microseconds ago or name a pid that has since been recycled. Staleness is
+/// only acceptable where the answer is drawn, never where it is signalled.
+pub fn session_processes_cached(child_pid: u32) -> Vec<u32> {
+    let Some(session_id) = process_session_id(child_pid) else {
+        return Vec::new();
+    };
+
+    let mut guard = match session_snapshot_cell().lock() {
+        Ok(guard) => guard,
+        // A panicking reader must not turn into a panicking sidebar; fall back
+        // to the uncached scan rather than propagating the poison.
+        Err(_) => return session_processes(child_pid),
+    };
+
+    let fresh = guard
+        .as_ref()
+        .is_some_and(|(taken, _)| taken.elapsed() < SESSION_SNAPSHOT_TTL);
+    if !fresh {
+        *guard = Some((Instant::now(), read_session_ids()));
+    }
+
+    let Some((_, sessions)) = guard.as_ref() else {
+        return Vec::new();
+    };
+    sessions
+        .iter()
+        .filter(|(_, sid)| **sid == session_id)
+        .map(|(pid, _)| *pid)
+        .collect()
+}
+
 pub fn signal_processes(pids: &[u32], signal: Signal) {
     let sig = match signal {
         Signal::Hangup => libc::SIGHUP,
@@ -953,12 +1031,64 @@ fn process_session_id(pid: u32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+
+    /// The snapshot is the whole point: within the TTL a newly spawned
+    /// same-session process must NOT appear, and after the TTL it must. The
+    /// first half proves we stopped re-scanning `/proc` per pane; the second
+    /// proves the cache still converges rather than pinning a stale answer.
+    ///
+    /// This is also the staleness contract that keeps the cached variant out of
+    /// the shutdown path in `pane.rs`, which must see the live table.
+    #[test]
+    fn session_snapshot_is_reused_within_ttl_and_refreshes_after_it() {
+        let self_pid = std::process::id();
+
+        // Prime the snapshot, and assert the cached view agrees with the live
+        // scan on the one pid we know for certain is in our session.
+        let cached = session_processes_cached(self_pid);
+        assert!(
+            cached.contains(&self_pid),
+            "cached session view must contain the calling process"
+        );
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child.id();
+
+        // The child inherits our session, so the *uncached* scan sees it at once.
+        assert!(
+            session_processes(self_pid).contains(&child_pid),
+            "uncached scan must see the freshly spawned child"
+        );
+        // ...while the snapshot taken microseconds ago does not.
+        assert!(
+            !session_processes_cached(self_pid).contains(&child_pid),
+            "snapshot within the TTL must not be re-derived"
+        );
+
+        std::thread::sleep(SESSION_SNAPSHOT_TTL + Duration::from_millis(50));
+        assert!(
+            session_processes_cached(self_pid).contains(&child_pid),
+            "snapshot must refresh once the TTL has elapsed"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    use std::sync::Mutex;
     use std::{cell::RefCell, collections::HashMap};
 
+    /// The process environment is one shared resource, so every test that
+    /// repoints it must take the *same* lock. A per-module lock excludes only
+    /// its own module and lets a test elsewhere move `XDG_CONFIG_HOME` mid-test.
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::test_config_env_lock()
     }
 
     #[test]
@@ -1203,7 +1333,9 @@ mod tests {
 
     #[test]
     fn clipboard_commands_prefer_wayland_when_available() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
             std::env::remove_var("DISPLAY");
@@ -1215,7 +1347,9 @@ mod tests {
 
     #[test]
     fn clipboard_commands_include_x11_fallbacks() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::remove_var("WAYLAND_DISPLAY");
             std::env::set_var("DISPLAY", ":0");
@@ -1228,7 +1362,9 @@ mod tests {
 
     #[test]
     fn read_clipboard_text_commands_include_session_backends() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
             std::env::set_var("DISPLAY", ":0");
@@ -1288,7 +1424,9 @@ mod tests {
 
     #[test]
     fn read_clipboard_image_rejects_xclip_text_served_for_image_target() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_dir =
             std::env::temp_dir().join(format!("herdr-fake-xclip-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
@@ -1340,7 +1478,9 @@ mod tests {
 
     #[test]
     fn read_clipboard_image_rejects_wayland_xclip_fallback_text_for_image_target() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_dir =
             std::env::temp_dir().join(format!("herdr-fake-wayland-xclip-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
@@ -1444,7 +1584,9 @@ mod tests {
 
     #[test]
     fn desktop_notification_separates_option_like_titles() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::remove_var("WAYLAND_DISPLAY");
             std::env::set_var("DISPLAY", ":0");

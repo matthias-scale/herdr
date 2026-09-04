@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
+    EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceBindParams,
+    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
     WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
@@ -118,6 +118,60 @@ impl App {
                 label: params.label,
             },
         });
+
+        encode_success(
+            id,
+            ResponseResult::WorkspaceInfo {
+                workspace: self.workspace_info(index),
+            },
+        )
+    }
+
+    /// Bind a workspace to a repository, or clear its binding.
+    ///
+    /// Binding is the durable half of repository organisation: without it the
+    /// grouping is a manual snapshot that decays as new panes land wherever
+    /// the session happened to be.
+    pub(super) fn handle_workspace_bind(
+        &mut self,
+        id: String,
+        params: WorkspaceBindParams,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        let repo = match params.repo.as_deref() {
+            Some(raw) => match crate::work_context::normalize_repo_slug(raw) {
+                Ok(repo) => Some(repo),
+                Err(message) => return encode_error(id, "invalid_repo", &message),
+            },
+            None => None,
+        };
+        // A repository belongs to exactly one workspace: two claimants would
+        // make routing arbitrary, which is the ambiguity this feature exists to
+        // remove.
+        if let Some(repo) = repo.as_deref() {
+            if let Some(existing) = self.workspace_bound_to_repo(repo) {
+                if existing != index {
+                    return encode_error(
+                        id,
+                        "repo_already_bound",
+                        format!(
+                            "{repo} is already bound to workspace {}",
+                            self.public_workspace_id(existing)
+                        ),
+                    );
+                }
+            }
+        }
+        let Some(ws) = self.state.workspaces.get_mut(index) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        ws.repo_binding = repo;
+        self.schedule_session_save();
+        if params.reconcile {
+            self.reconcile_repo_routing();
+        }
 
         encode_success(
             id,
@@ -360,6 +414,7 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::schema::WorkspaceBindParams;
     use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
@@ -717,5 +772,119 @@ mod tests {
         };
         assert_eq!(workspaces[0].workspace_id, moved_id);
         assert!(event_hub.events_after(0).is_empty());
+    }
+
+    fn bind_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app
+    }
+
+    fn bind(app: &mut App, index: usize, repo: Option<&str>) -> SuccessResponse {
+        let workspace_id = app.public_workspace_id(index);
+        let response = app.handle_workspace_bind(
+            "req".into(),
+            WorkspaceBindParams {
+                workspace_id,
+                repo: repo.map(str::to_string),
+                reconcile: false,
+            },
+        );
+        serde_json::from_str(&response).expect("bind must succeed")
+    }
+
+    #[test]
+    fn binding_canonicalizes_a_remote_url_and_survives_on_the_workspace() {
+        let mut app = bind_app();
+
+        let success = bind(&mut app, 0, Some("git@github.com:matthiasSchedel/ghx.git"));
+
+        let ResponseResult::WorkspaceInfo { workspace } = success.result else {
+            panic!("expected workspace info");
+        };
+        assert_eq!(
+            workspace.repo_binding.as_deref(),
+            Some("matthiasSchedel/ghx")
+        );
+        assert_eq!(
+            app.state.workspaces[0].repo_binding.as_deref(),
+            Some("matthiasSchedel/ghx")
+        );
+    }
+
+    #[test]
+    fn a_repository_cannot_be_claimed_by_two_workspaces() {
+        let mut app = bind_app();
+        bind(&mut app, 0, Some("owner/repo"));
+
+        let workspace_id = app.public_workspace_id(1);
+        let response = app.handle_workspace_bind(
+            "req".into(),
+            WorkspaceBindParams {
+                workspace_id,
+                repo: Some("OWNER/REPO".into()),
+                reconcile: false,
+            },
+        );
+
+        assert!(
+            response.contains("repo_already_bound"),
+            "a second claimant must be refused, got {response}"
+        );
+        assert_eq!(app.state.workspaces[1].repo_binding, None);
+    }
+
+    #[test]
+    fn rebinding_the_same_workspace_to_its_own_repository_is_allowed() {
+        let mut app = bind_app();
+        bind(&mut app, 0, Some("owner/repo"));
+
+        bind(&mut app, 0, Some("owner/repo"));
+
+        assert_eq!(
+            app.state.workspaces[0].repo_binding.as_deref(),
+            Some("owner/repo")
+        );
+    }
+
+    #[test]
+    fn an_invalid_repository_is_refused_rather_than_stored() {
+        let mut app = bind_app();
+        let workspace_id = app.public_workspace_id(0);
+
+        let response = app.handle_workspace_bind(
+            "req".into(),
+            WorkspaceBindParams {
+                workspace_id,
+                repo: Some("not a repo".into()),
+                reconcile: false,
+            },
+        );
+
+        assert!(response.contains("invalid_repo"), "got {response}");
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+    }
+
+    #[test]
+    fn clearing_a_binding_frees_the_repository_for_another_workspace() {
+        let mut app = bind_app();
+        bind(&mut app, 0, Some("owner/repo"));
+
+        bind(&mut app, 0, None);
+        bind(&mut app, 1, Some("owner/repo"));
+
+        assert_eq!(app.state.workspaces[0].repo_binding, None);
+        assert_eq!(
+            app.state.workspaces[1].repo_binding.as_deref(),
+            Some("owner/repo")
+        );
     }
 }

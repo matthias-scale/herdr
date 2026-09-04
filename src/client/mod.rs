@@ -2574,11 +2574,13 @@ fn init_logging() {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
+    /// The process environment is one shared resource, so every test that
+    /// repoints it must take the *same* lock. A per-module lock excludes only
+    /// its own module and lets a test elsewhere move `XDG_CONFIG_HOME` mid-test.
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::test_config_env_lock()
     }
 
     #[test]
@@ -2650,7 +2652,9 @@ mod tests {
 
     #[test]
     fn remote_client_uses_extended_handshake_timeout() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _remote = EnvVarGuard::set(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR, "local");
 
         assert_eq!(handshake_read_timeout(), REMOTE_HANDSHAKE_READ_TIMEOUT);
@@ -2666,7 +2670,9 @@ mod tests {
 
     #[test]
     fn host_cursor_policy_native_and_drawn_override_auto_detection() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = EnvVarGuard::set("TERM_PROGRAM", "WezTerm");
 
         assert!(!should_draw_host_cursor(
@@ -3398,7 +3404,9 @@ mod tests {
 
     #[test]
     fn client_error_display_detached_default_session_reattach_hint() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = EnvVarsRemovedGuard::new(&[
             crate::remote::REATTACH_COMMAND_ENV_VAR,
             crate::session::SESSION_ENV_VAR,
@@ -3415,7 +3423,9 @@ mod tests {
 
     #[test]
     fn client_error_display_detached_named_session_reattach_hint() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _remote_env = EnvVarsRemovedGuard::new(&[crate::remote::REATTACH_COMMAND_ENV_VAR]);
         let _session_env = EnvVarGuard::set(crate::session::SESSION_ENV_VAR, "work");
         let err = ClientError::ServerShutdown {
@@ -3430,7 +3440,9 @@ mod tests {
 
     #[test]
     fn client_error_display_detached_remote_reattach_hint_takes_precedence() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _remote_env = EnvVarGuard::set(
             crate::remote::REATTACH_COMMAND_ENV_VAR,
             "herdr --remote host --session work",
@@ -3448,7 +3460,9 @@ mod tests {
 
     #[test]
     fn client_error_display_connection_lost() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = EnvVarsRemovedGuard::new(&[crate::remote::REATTACH_COMMAND_ENV_VAR]);
         let err =
             ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
@@ -3461,7 +3475,9 @@ mod tests {
 
     #[test]
     fn client_error_display_remote_connection_lost_has_reattach_hint() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _remote_env = EnvVarGuard::set(
             crate::remote::REATTACH_COMMAND_ENV_VAR,
             "herdr --remote host --session work",
@@ -3506,14 +3522,10 @@ mod tests {
 
     #[test]
     fn reload_local_client_config_refreshes_local_client_presentation_state() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let _config_env = crate::config::TestConfigEnvGuard::acquire();
         let path = std::env::temp_dir().join(format!(
-            "herdr-client-config-reload-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "herdr-client-config-reload-{}.toml",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(
             &path,

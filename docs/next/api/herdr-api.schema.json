@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 20,
+  "protocol": 21,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1377,6 +1377,13 @@
               },
               "type": "array"
             },
+            "repo": {
+              "description": "Canonical `owner/repo` of the repository this pane actually works on.\n\nDeliberately NOT derived from prose: a repository named in a prompt is\nambient noise, not evidence of the work. It is either declared (manual\nor spawn binding) or observed from the checkout's `origin` remote, and\nthe declaration always outranks the observation — see `recompute`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "anyOf": [
                 {
@@ -1495,6 +1502,13 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repo_binding": {
+              "description": "Repository this workspace collects work for, if bound.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",
@@ -3771,6 +3785,13 @@
               },
               "type": "array"
             },
+            "repo": {
+              "description": "Canonical `owner/repo` of the repository this pane actually works on.\n\nDeliberately NOT derived from prose: a repository named in a prompt is\nambient noise, not evidence of the work. It is either declared (manual\nor spawn binding) or observed from the checkout's `origin` remote, and\nthe declaration always outranks the observation — see `recompute`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "anyOf": [
                 {
@@ -3810,12 +3831,21 @@
             "ticket_ids",
             "pr_urls",
             "branch",
-            "work_title"
+            "repo",
+            "work_title",
+            "role",
+            "active_owner"
           ],
           "type": "string"
         },
         "PaneWorkContextSetParams": {
           "properties": {
+            "active_owner": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "branch": {
               "type": [
                 "string",
@@ -3838,6 +3868,22 @@
               "type": [
                 "array",
                 "null"
+              ]
+            },
+            "repo": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PaneWorkRole"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "ticket_ids": {
@@ -4143,6 +4189,7 @@
             },
             "focus": {
               "default": false,
+              "description": "Opt in to moving the session focus to the new plugin pane. Defaults to\nfalse so an automated open never yanks the human's cursor. Placements\nthat exist to surface (`popup`, `overlay`, `zoomed`) surface regardless,\nso this only affects background `split` and `tab` opens.",
               "type": "boolean"
             },
             "height": {
@@ -4888,6 +4935,30 @@
           ],
           "type": "string"
         },
+        "WorkspaceBindParams": {
+          "description": "Bind a workspace to the repository whose work it collects.",
+          "properties": {
+            "reconcile": {
+              "default": false,
+              "description": "Route matching panes that already exist into this workspace. Never\ntakes focus, and never moves the pane the human is focused in.",
+              "type": "boolean"
+            },
+            "repo": {
+              "description": "`owner/repo`, a GitHub URL, or a git remote URL. `None` clears the\nbinding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceCreateParams": {
           "properties": {
             "cwd": {
@@ -5432,6 +5503,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.bind",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceBindParams"
             }
           },
           "required": [
@@ -8984,6 +9071,7 @@
               ]
             },
             "focused_pane_id": {
+              "description": "Focused pane of the destination tab layout, not the session's focused\npane. A move made without `focus: true` leaves the session focus where\nthe user left it; read `session.snapshot.focused_pane_id` for that.",
               "type": "string"
             },
             "pane": {
@@ -9326,6 +9414,13 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "repo": {
+              "description": "Canonical `owner/repo` of the repository this pane actually works on.\n\nDeliberately NOT derived from prose: a repository named in a prompt is\nambient noise, not evidence of the work. It is either declared (manual\nor spawn binding) or observed from the checkout's `origin` remote, and\nthe declaration always outranks the observation — see `recompute`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "role": {
               "anyOf": [
@@ -11431,6 +11526,13 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repo_binding": {
+              "description": "Repository this workspace collects work for, if bound.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",

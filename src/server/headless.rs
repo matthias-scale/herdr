@@ -2473,6 +2473,18 @@ impl HeadlessServer {
                 self.refresh_client_symphony_details();
                 changed || dashboard_open
             }
+            AppEvent::WorkIndexRefreshed { .. } => {
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                let view_open = self
+                    .clients
+                    .values()
+                    .any(|client| client.work_view.is_some());
+                self.refresh_client_work_views();
+                changed || view_open
+            }
+            AppEvent::WorkItemDetailRefreshed { .. } => {
+                self.app.handle_internal_event_with_render_impact(ev)
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }
@@ -2490,6 +2502,22 @@ impl HeadlessServer {
                 skipped_lines: history.skipped_lines,
             };
             detail.observed_at = std::time::SystemTime::now();
+        }
+    }
+
+    fn refresh_client_work_views(&mut self) {
+        let enabled = self.app.work_index_config.enabled;
+        let snapshot = self.app.work_index_snapshot.clone();
+        for client in self.clients.values_mut() {
+            let Some(view) = client.work_view.as_mut() else {
+                continue;
+            };
+            view.enabled = enabled;
+            if !enabled {
+                view.snapshot = None;
+            } else if let Some(snapshot) = snapshot.clone() {
+                view.replace_snapshot(snapshot);
+            }
         }
     }
 
@@ -2883,12 +2911,18 @@ impl HeadlessServer {
                 .get_mut(&client_id)
                 .and_then(|client| client.symphony_detail.take())
         });
+        let mut work_view = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .and_then(|client| client.work_view.take())
+        });
         if let Some(presentation) = &mut sidebar_presentation {
             self.app.state.swap_sidebar_presentation(presentation);
             self.app.state.reconcile_sidebar_presentation();
         }
         if let Some(presentation) = &mut dock_presentation {
             self.app.state.swap_dock_presentation(presentation);
+            self.app.state.reconcile_dock_home_with_focused_pane();
         }
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
@@ -2896,7 +2930,13 @@ impl HeadlessServer {
         if let Some(detail) = &mut symphony_detail {
             self.app.state.swap_symphony_detail(detail);
         }
+        if let Some(view) = &mut work_view {
+            self.app.state.swap_work_view(view);
+        }
         self.app.route_client_events_from(client_id, events, false);
+        if let Some(view) = &mut work_view {
+            self.app.state.swap_work_view(view);
+        }
         if let Some(detail) = &mut symphony_detail {
             self.app.state.swap_symphony_detail(detail);
         }
@@ -2925,8 +2965,14 @@ impl HeadlessServer {
                 client.symphony_detail = detail;
             }
         }
+        if let Some(view) = work_view {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.work_view = view;
+            }
+        }
         if self.app.take_config_reloaded_from_disk() {
             self.reload_server_config(false);
+            self.refresh_client_work_views();
         } else {
             self.sync_foreground_client_state();
         }
@@ -4338,6 +4384,10 @@ impl HeadlessServer {
                         .clients
                         .get_mut(&client_id)
                         .and_then(|client| client.symphony_detail.take());
+                    let mut work_view = self
+                        .clients
+                        .get_mut(&client_id)
+                        .and_then(|client| client.work_view.take());
                     self.app
                         .state
                         .swap_sidebar_presentation(&mut sidebar_presentation);
@@ -4349,11 +4399,13 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    self.app.state.reconcile_dock_home_with_focused_pane();
                     self.app.state.reconcile_sidebar_presentation();
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
+                    self.app.state.swap_work_view(&mut work_view);
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -4431,11 +4483,13 @@ impl HeadlessServer {
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
+                    self.app.state.swap_work_view(&mut work_view);
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
                         client.symphony_detail = symphony_detail;
+                        client.work_view = work_view;
                     }
                     frame
                 }
@@ -4672,11 +4726,12 @@ impl HeadlessServer {
             false
         };
         changed |= self.app.handle_loop_receipt_fallback(now);
-        changed |= if self.app.status_metrics_visible {
-            self.app.schedule_status_metrics(now)
+        if self.app.status_metrics_visible {
+            changed |= self.app.schedule_status_metrics(now);
+            self.app.schedule_status_side_signals(now);
         } else {
-            self.app.discard_stale_status_metrics(now)
-        };
+            changed |= self.app.discard_stale_status_metrics(now);
+        }
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -4799,6 +4854,37 @@ impl HeadlessServer {
                 .start_headless_foreground_process_refresh_if_due(now);
         }
         self.app.start_claude_subagent_refresh_if_due(now);
+        // The work index is a server-owned runtime fact, so it refreshes with or
+        // without an attached TUI. Omitting it here left every server-backed
+        // session with a permanently empty index while the interactive loop
+        // refreshed fine, which is the #119 defect class.
+        self.app.start_work_index_refresh_if_due(now);
+        let detail_request = self
+            .foreground_client_id
+            .and_then(|client_id| self.clients.get(&client_id))
+            .filter(|client| client.is_full_app_client())
+            .map(|client| {
+                let presentation = &client.dock_presentation;
+                (
+                    presentation.home_section,
+                    match presentation.home_section {
+                        crate::app::state::DockHomeSection::Prs => {
+                            presentation.home_selection.clone()
+                        }
+                        crate::app::state::DockHomeSection::Tickets => {
+                            presentation.home_ticket_selection.clone()
+                        }
+                        crate::app::state::DockHomeSection::XPolls => {
+                            presentation.home_poll_selection.clone()
+                        }
+                    },
+                    !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
+                )
+            });
+        let (section, selection, detail_visible) =
+            detail_request.unwrap_or((crate::app::state::DockHomeSection::Prs, None, false));
+        self.app
+            .start_work_item_detail_refresh_if_due(now, section, selection, detail_visible);
 
         if self
             .app
@@ -5368,14 +5454,10 @@ mod tests {
         app.local_terminal_notifications = false;
         app.local_input_source_switch = false;
 
-        let dir = std::env::temp_dir().join(format!(
-            "hh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        // A wall-clock suffix is not unique: two tests entering this helper in
+        // the same clock tick derive the same directory and race to bind the
+        // same socket, which surfaces as AddrInUse. A counter cannot collide.
+        let dir = std::env::temp_dir().join(format!("hh-{}", crate::config::test_unique_suffix()));
         let _ = fs::create_dir_all(&dir);
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
@@ -5920,6 +6002,13 @@ mod tests {
                 tab: crate::app::DockTab::Editor,
                 scroll: 0,
                 editor_focused,
+                home_selection: None,
+                home_ticket_selection: None,
+                home_poll_selection: None,
+                home_section: crate::app::state::DockHomeSection::Prs,
+                home_detail_tab: crate::app::state::DockHomeDetailTab::Overview,
+                home_focused: false,
+                home_followed_pane: None,
             };
             server.clients.insert(client_id, client);
         }
@@ -6187,16 +6276,12 @@ new_tab = "prefix+t"
     #[test]
     fn local_keybinding_client_keeps_local_keybindings_after_settings_save() {
         let path = std::env::temp_dir().join(format!(
-            "herdr-headless-settings-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            "herdr-headless-settings-{}.toml",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(&path, "onboarding = false\n").unwrap();
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut server = test_headless_server();
         let local_config: crate::config::Config = toml::from_str(
@@ -6246,7 +6331,7 @@ next_tab = ""
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("delivery = \"herdr\""));
 
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_file(path);
     }
 
@@ -6254,20 +6339,16 @@ next_tab = ""
     fn invalid_server_keybindings_apply_valid_subset_after_settings_save_without_caching_local_keybindings(
     ) {
         let path = std::env::temp_dir().join(format!(
-            "herdr-headless-invalid-settings-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            "herdr-headless-invalid-settings-{}.toml",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(
             &path,
             "onboarding = false\n[keys]\nnew_workspace = \"x\"\n[ui.toast]\ndelivery = \"off\"\n",
         )
         .unwrap();
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut server = test_headless_server();
         let previous_server_config: crate::config::Config =
@@ -6330,7 +6411,7 @@ next_tab = ""
             .any(|binding| binding.label == "prefix+n"));
         assert!(server.app.state.keybinds.new_workspace.bindings.is_empty());
 
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        drop(env);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7027,6 +7108,49 @@ next_tab = ""
         server.handle_scheduled_tasks_headless(Instant::now(), false);
 
         assert!(!server.app.status_metric_refresh.in_flight());
+    }
+
+    #[test]
+    fn headless_status_side_signals_require_a_renderable_app_client() {
+        let mut detached = test_headless_server();
+        detached.app.status_metric_refresh_enabled = true;
+        detached.app.provider_usage_refreshed_at = None;
+        detached.app.connectivity_probed_at = None;
+        let detached_now = Instant::now();
+
+        detached.handle_scheduled_tasks_headless(detached_now, false);
+
+        assert_eq!(detached.app.provider_usage_refreshed_at, None);
+        assert!(!detached.app.provider_usage_in_flight);
+        assert_eq!(detached.app.connectivity_probed_at, None);
+        assert!(!detached.app.connectivity_probe_in_flight);
+
+        let mut attached = test_headless_server();
+        attached.app.status_metric_refresh_enabled = true;
+        attached.app.provider_usage_refreshed_at = None;
+        attached.app.connectivity_probed_at = None;
+        let now = Instant::now();
+        assert!(attached.app.status_metric_refresh.begin(now));
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(attached.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 120,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+
+        attached.handle_scheduled_tasks_headless(now, false);
+
+        assert!(attached.app.status_metrics_visible);
+        assert_eq!(attached.app.provider_usage_refreshed_at, Some(now));
+        assert!(attached.app.provider_usage_in_flight);
+        assert_eq!(attached.app.connectivity_probed_at, Some(now));
+        assert!(attached.app.connectivity_probe_in_flight);
     }
 
     #[test]
@@ -9167,6 +9291,154 @@ next_tab = ""
         assert_eq!(
             server.app.state.settings.section,
             crate::app::state::SettingsSection::Integrations
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_headless_dock_navigation_intercepts_arrow_but_forwards_bare_letter() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = [10_u64, 20]
+            .into_iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        let focused_pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 2);
+        server.app.state.workspaces[0].insert_test_runtime(focused_pane, runtime);
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        for (ws_idx, number) in [10_u64, 20].into_iter().enumerate() {
+            let pane_id = server.app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = server.app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let first_key = server.app.state.dock_home_projection().rows[0].key.clone();
+
+        let mut client = test_app_client(Some(true), 1);
+        client.dock_presentation.collapsed = false;
+        client.dock_presentation.tab = crate::app::DockTab::Home;
+        client.dock_presentation.home_focused = true;
+        client.dock_presentation.home_selection = Some(first_key);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[B".to_vec(),
+        }));
+        assert_eq!(
+            server.clients[&1]
+                .dock_presentation
+                .home_selection
+                .as_ref()
+                .and_then(|key| key.pr_number),
+            Some(20)
+        );
+        assert!(input_rx.try_recv().is_err());
+
+        let selection = server.clients[&1].dock_presentation.home_selection.clone();
+        let _ = server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"j".to_vec(),
+        });
+        assert_eq!(
+            server.clients[&1].dock_presentation.home_selection,
+            selection
+        );
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("bare letter reaches focused pane"),
+            Bytes::from_static(b"j")
+        );
+    }
+
+    #[test]
+    fn raw_headless_input_workspace_focus_follows_bound_pr_in_its_dock_presentation() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = [10_u64, 20]
+            .into_iter()
+            .map(|number| crate::workspace::Workspace::test_new(&format!("pr-{number}")))
+            .collect();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        for (ws_idx, number) in [10_u64, 20].into_iter().enumerate() {
+            let pane_id = server.app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = server.app.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .expect("root terminal")
+                .clone();
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal state")
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    pr_urls: Some(vec![format!("https://github.com/owner/repo/pull/{number}")]),
+                    ..Default::default()
+                })
+                .expect("valid work context");
+        }
+        server.app.state.mode = crate::app::Mode::Navigate;
+        let first_key = server.app.state.dock_home_projection().rows[0].key.clone();
+
+        let mut client = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(true),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        client.dock_presentation.home_selection = Some(first_key);
+        client.dock_presentation.home_section = crate::app::state::DockHomeSection::Tickets;
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"2".to_vec(),
+        }));
+
+        assert_eq!(server.app.state.active, Some(1));
+        let presentation = &server.clients[&1].dock_presentation;
+        assert_eq!(
+            presentation
+                .home_selection
+                .as_ref()
+                .and_then(|key| key.pr_url.as_deref()),
+            Some("https://github.com/owner/repo/pull/20")
+        );
+        assert_eq!(
+            presentation.home_section,
+            crate::app::state::DockHomeSection::Prs
+        );
+        assert_eq!(
+            presentation
+                .home_followed_pane
+                .as_ref()
+                .map(|target| target.pane_id),
+            Some(server.app.state.workspaces[1].tabs[0].root_pane)
         );
     }
 

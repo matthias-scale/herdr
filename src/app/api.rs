@@ -16,6 +16,8 @@ mod tabs;
 mod workspaces;
 mod worktrees;
 
+pub(crate) use panes::PaneSendError;
+
 use super::{api_helpers::pane_agent_status_with_stale, App, Mode, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
 
@@ -93,6 +95,15 @@ impl App {
                 self.connectivity_probe_in_flight = false;
                 self.state.connectivity.observe(reachable) && self.state.status_bar_enabled
             }
+            AppEvent::HomeCatalogRefreshed { catalog } => {
+                self.state.home_catalog.replace(catalog.clone());
+                if let Some(home) = self.state.home.as_mut() {
+                    home.replace_provider_catalog(catalog);
+                    true
+                } else {
+                    false
+                }
+            }
             AppEvent::GitStatusRefreshed {
                 generation,
                 results,
@@ -103,6 +114,14 @@ impl App {
                 observations,
                 cache_updates,
             } => self.handle_git_work_context_refreshed(generation, observations, cache_updates),
+            AppEvent::WorkIndexRefreshed {
+                generation,
+                snapshot,
+            } => self.handle_work_index_refreshed(generation, snapshot),
+            AppEvent::WorkItemDetailRefreshed {
+                generation,
+                details,
+            } => self.handle_work_item_detail_refreshed(generation, details),
             AppEvent::ForegroundProcessesRefreshed {
                 generation,
                 observations,
@@ -214,6 +233,14 @@ impl App {
             return None;
         }
 
+        if let AppEvent::HomeCatalogRefreshed { catalog } = ev {
+            self.state.home_catalog.replace(catalog.clone());
+            if let Some(home) = self.state.home.as_mut() {
+                home.replace_provider_catalog(catalog);
+            }
+            return None;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -256,6 +283,24 @@ impl App {
         } = ev
         {
             self.handle_git_work_context_refreshed(generation, observations, cache_updates);
+            return None;
+        }
+
+        if let AppEvent::WorkIndexRefreshed {
+            generation,
+            snapshot,
+        } = ev
+        {
+            self.handle_work_index_refreshed(generation, snapshot);
+            return None;
+        }
+
+        if let AppEvent::WorkItemDetailRefreshed {
+            generation,
+            details,
+        } = ev
+        {
+            self.handle_work_item_detail_refreshed(generation, details);
             return None;
         }
 
@@ -1309,6 +1354,9 @@ impl App {
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
             }
+            Method::WorkspaceBind(params) => {
+                return self.handle_workspace_bind(request.id, params);
+            }
             Method::WorkspaceMove(params) => {
                 return self.handle_workspace_move(request.id, params);
             }
@@ -1669,6 +1717,50 @@ pub(super) mod test_support {
 mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
+
+    fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {
+        crate::app::home_catalog::parse_codex_catalog(
+            format!(
+                r#"{{"models":[{{"slug":"{model}","visibility":"list","priority":1,"supported_reasoning_levels":[{{"effort":"high"}}]}}]}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("valid Codex catalog")
+    }
+
+    #[test]
+    fn refreshed_home_catalog_updates_the_open_view_and_the_next_open() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.toggle_home();
+
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::HomeCatalogRefreshed {
+                catalog: codex_catalog("refreshed-model"),
+            })
+        );
+        let home = app.state.home.as_mut().expect("open Home");
+        home.set_agent(Agent::Codex);
+        assert!(home
+            .model_options()
+            .iter()
+            .any(|model| model.id == "refreshed-model"));
+
+        app.state.toggle_home();
+        app.state.toggle_home();
+        let home = app.state.home.as_mut().expect("reopened Home");
+        home.set_agent(Agent::Codex);
+        assert!(home
+            .model_options()
+            .iter()
+            .any(|model| model.id == "refreshed-model"));
+    }
 
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {

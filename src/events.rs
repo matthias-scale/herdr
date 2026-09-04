@@ -71,6 +71,10 @@ pub enum AppEvent {
     },
     /// A bounded background reachability probe completed.
     ConnectivityProbed { reachable: bool },
+    /// The local Codex CLI returned an updated account-aware model catalog.
+    HomeCatalogRefreshed {
+        catalog: crate::app::home_catalog::HomeProviderCatalog,
+    },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.
@@ -184,6 +188,19 @@ pub enum AppEvent {
         cache_updates: Vec<(
             crate::app::work_context_git::GitWorkContextCacheKey,
             crate::app::work_context_git::GitWorkContextCacheEntry,
+        )>,
+    },
+    /// Background repo-wide GitHub, Linear, and pane work observations completed.
+    WorkIndexRefreshed {
+        generation: u64,
+        snapshot: crate::work_index::Snapshot,
+    },
+    /// One bounded batch of GitHub detail observations completed.
+    WorkItemDetailRefreshed {
+        generation: u64,
+        details: Vec<(
+            crate::app::state::WorkItemKey,
+            crate::work_index::WorkItemDetail,
         )>,
     },
     /// Background foreground-process observations completed for live panes.

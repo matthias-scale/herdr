@@ -1106,9 +1106,15 @@ impl GhosttyPaneTerminal {
         });
         let previous = core.terminal.set_color_scheme(color_scheme);
 
+        // `None -> Some` counts. It is the attach case: a server that ran with no
+        // client had no appearance to report, so every pane kept the built-in dark
+        // default. Skipping the notification there leaves an already-running app --
+        // Neovim reads `background` from it -- pinned to that guess for the life of
+        // the process, while Herdr's own UI repaints in the appearance it just
+        // learned.
         let transitioned = matches!(
             (previous, color_scheme),
-            (Some(previous), Some(current)) if previous != current
+            (previous, Some(current)) if previous != Some(current)
         );
         if !transitioned
             || !core
@@ -5546,9 +5552,12 @@ mod tests {
         assert!(pane.apply_host_terminal_appearance(None).is_none());
         let unknown_query = pane.process_pty_bytes(pane_id, 0, b"\x1b[?996n", &tx);
         assert!(unknown_query.terminal_responses.is_empty());
-        assert!(pane
-            .apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark))
-            .is_none());
+        // Unknown becoming known is a change the pane must hear about: this is the
+        // attach case, and the app inside is still running on its startup guess.
+        assert_eq!(
+            pane.apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark)),
+            Some(Bytes::from_static(b"\x1b[?997;1n"))
+        );
 
         pane.process_pty_bytes(pane_id, 0, b"\x1bc", &tx);
         assert!(pane

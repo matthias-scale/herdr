@@ -27,6 +27,34 @@ use super::super::api_helpers::{
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
 
+#[derive(Debug)]
+pub(crate) enum PaneSendError {
+    NotFound,
+    Failed(String),
+}
+
+impl App {
+    pub(crate) fn try_send_text_to_pane(
+        &mut self,
+        public_pane_id: &str,
+        text: &str,
+    ) -> Result<(), PaneSendError> {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(public_pane_id) else {
+            return Err(PaneSendError::NotFound);
+        };
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return Err(PaneSendError::NotFound);
+        };
+        if let Err(err) = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes())) {
+            return Err(PaneSendError::Failed(err.to_string()));
+        }
+        if !text.is_empty() {
+            self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+        }
+        Ok(())
+    }
+}
+
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let work_context = match self.prepare_spawn_work_context(params.work_context.clone()) {
@@ -667,6 +695,7 @@ impl App {
                 .custom_name
                 .clone(),
             previous_worktree_space: self.state.workspaces[source_ws_idx].worktree_space.clone(),
+            previous_repo_binding: self.state.workspaces[source_ws_idx].repo_binding.clone(),
             identity_cwd: self.state.workspaces[source_ws_idx].identity_cwd.clone(),
         };
 
@@ -1076,6 +1105,7 @@ impl App {
             );
             workspace.id = context.previous_workspace_id;
             workspace.worktree_space = context.previous_worktree_space;
+            workspace.repo_binding = context.previous_repo_binding;
             let insert_idx = context.source_ws_idx.min(self.state.workspaces.len());
             if let Some(active) = self.state.active {
                 if active >= insert_idx {
@@ -1188,19 +1218,59 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
+        let mut patch = params.patch;
+        if patch.active_owner == Some(true) {
+            let requested_pr = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .ok_or_else(|| "pane terminal not found".to_string())
+                .and_then(|terminal| {
+                    let mut candidate = terminal.work_context.clone();
+                    candidate.apply_manual_patch(patch.clone())?;
+                    Ok(candidate.effective().primary_pr().map(str::to_string))
+                });
+            let requested_pr = match requested_pr {
+                Ok(requested_pr) => requested_pr,
+                Err(message) => return encode_error(id, "invalid_work_context", message),
+            };
+            if requested_pr.as_deref().is_some_and(|pr_url| {
+                self.state.workspaces.iter().any(|workspace| {
+                    workspace.tabs.iter().any(|tab| {
+                        tab.panes.values().any(|pane| {
+                            pane.attached_terminal_id != terminal_id
+                                && self
+                                    .state
+                                    .terminals
+                                    .get(&pane.attached_terminal_id)
+                                    .map(crate::terminal::TerminalState::effective_work_context)
+                                    .is_some_and(|existing| existing.is_active_owner_of(pr_url))
+                        })
+                    })
+                })
+            }) {
+                patch.active_owner = Some(false);
+            }
+        }
         let mutation = self
             .state
             .terminals
             .get_mut(&terminal_id)
             .ok_or_else(|| "pane terminal not found".to_string())
-            .and_then(|terminal| terminal.apply_manual_work_context_patch(params.patch));
+            .and_then(|terminal| terminal.apply_manual_work_context_patch(patch));
         let changed = match mutation {
             Ok(changed) => changed,
             Err(message) => return encode_error(id, "invalid_work_context", message),
         };
+        let mut ws_idx = ws_idx;
         if changed {
             self.state.mark_session_dirty();
             self.emit_pane_updated(ws_idx, pane_id);
+            // A declaration is the strongest repository evidence there is, so
+            // act on it immediately. The move never takes focus and never
+            // touches the pane the human is in.
+            self.route_pane_to_bound_workspace(ws_idx, pane_id);
+            ws_idx = self.workspace_index_for_pane(pane_id).unwrap_or(ws_idx);
         }
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &params.pane_id);
@@ -1430,14 +1500,21 @@ impl App {
             && applies_to_source.is_some()
             && agent_session_id.is_some();
         if let Some(context) = requested_hook_context.as_ref() {
+            // `repo` is refused on both hook shapes. The hook context is
+            // derived from prompt text, and a repository named in prose is
+            // ambient rather than evidence; letting it through would hand a
+            // prose mention the precedence of a declaration and misfile the
+            // pane. Repositories arrive by declaration or by observation only.
             let valid_work_title_context = work_title_request
                 && context.branch.is_none()
+                && context.repo.is_none()
                 && context.session_name.is_none()
                 && context.work_title == requested_work_title;
             let valid_session_name_context = session_name_request
                 && context.session_name.is_some()
                 && context.work_title.is_none()
                 && context.branch.is_none()
+                && context.repo.is_none()
                 && context.ticket_ids.is_empty()
                 && context.pr_urls.is_empty()
                 && context.preview_urls.is_empty()
@@ -1737,18 +1814,12 @@ impl App {
         id: String,
         params: PaneSendTextParams,
     ) -> String {
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
-        let has_bytes = !params.text.is_empty();
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
-            return encode_error(id, "pane_send_failed", err.to_string());
-        }
-        if has_bytes {
-            self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
+        match self.try_send_text_to_pane(&params.pane_id, &params.text) {
+            Ok(()) => {}
+            Err(PaneSendError::NotFound) => return pane_not_found(id, &params.pane_id),
+            Err(PaneSendError::Failed(error)) => {
+                return encode_error(id, "pane_send_failed", error);
+            }
         }
 
         encode_success(id, ResponseResult::Ok {})
@@ -2103,6 +2174,9 @@ struct PaneMoveRecoveryContext {
     previous_workspace_label: Option<String>,
     previous_tab_label: Option<String>,
     previous_worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
+    /// A failed move must not silently drop the source workspace's repository
+    /// binding; losing it would reintroduce the decay this feature prevents.
+    previous_repo_binding: Option<String>,
     identity_cwd: std::path::PathBuf,
 }
 
@@ -2223,10 +2297,13 @@ mod tests {
             PaneWorkContextSetParams {
                 pane_id: pane_id.clone(),
                 patch: crate::work_context::PaneWorkContextPatch {
+                    repo: None,
                     ticket_ids: Some(vec!["mat-7".into(), "SCA-2".into()]),
                     pr_urls: Some(vec!["https://github.com/o/r/pull/09".into()]),
                     branch: Some("feat/context".into()),
                     work_title: Some("Context model".into()),
+                    role: Some(crate::work_context::PaneWorkRole::Ship),
+                    active_owner: Some(true),
                     clear_fields: Vec::new(),
                 },
             },
@@ -2244,6 +2321,18 @@ mod tests {
         assert_eq!(
             pane.work_context.work_title.as_deref(),
             Some("Context model")
+        );
+        assert_eq!(
+            pane.work_context.role,
+            Some(crate::work_context::PaneWorkRole::Ship)
+        );
+        assert!(pane.work_context.active_owner);
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .work_context
+                .snapshot_tiers()
+                .manual,
+            pane.work_context
         );
         assert_eq!(app.collect_agent_infos()[0].work_context, pane.work_context);
         assert_eq!(pane_updated_events(&app), 1);
@@ -2264,10 +2353,13 @@ mod tests {
             PaneWorkContextSetParams {
                 pane_id: pane_id.clone(),
                 patch: crate::work_context::PaneWorkContextPatch {
+                    repo: None,
                     ticket_ids: Some(vec!["MAT-7".into(), "SCA-2".into()]),
                     pr_urls: Some(vec!["https://github.com/o/r/pull/9".into()]),
                     branch: Some("feat/context".into()),
                     work_title: Some("Context model".into()),
+                    role: Some(crate::work_context::PaneWorkRole::Ship),
+                    active_owner: Some(true),
                     clear_fields: Vec::new(),
                 },
             },
@@ -2281,6 +2373,7 @@ mod tests {
             PaneWorkContextSetParams {
                 pane_id,
                 patch: crate::work_context::PaneWorkContextPatch {
+                    repo: None,
                     ticket_ids: Some(vec!["SCA-99".into()]),
                     pr_urls: Some(vec!["https://evil.test/o/r/pull/1".into()]),
                     ..Default::default()
@@ -2290,6 +2383,72 @@ mod tests {
         assert_eq!(metadata_error_code(&invalid), "invalid_work_context");
         assert_eq!(app.pane_info(0, internal_pane_id).unwrap(), before);
         assert_eq!(pane_updated_events(&app), 1);
+    }
+
+    #[test]
+    fn live_work_context_claim_is_demoted_when_another_pane_owns_the_pr() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("owner"), Workspace::test_new("review")];
+        app.state.ensure_test_terminals();
+        let panes = app
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(ws_idx, workspace)| {
+                let pane_id = workspace.tabs[0].root_pane;
+                (
+                    app.public_pane_id(ws_idx, pane_id).unwrap(),
+                    workspace.terminal_id(pane_id).cloned().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let claim = |pane_id: String, role| PaneWorkContextSetParams {
+            pane_id,
+            patch: crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/o/r/pull/42".into()]),
+                role: Some(role),
+                active_owner: Some(true),
+                ..Default::default()
+            },
+        };
+
+        let first = app.handle_pane_work_context_set(
+            "owner".into(),
+            claim(panes[0].0.clone(), crate::work_context::PaneWorkRole::Ship),
+        );
+        assert!(serde_json::from_str::<SuccessResponse>(&first).is_ok());
+        let second = app.handle_pane_work_context_set(
+            "review".into(),
+            claim(
+                panes[1].0.clone(),
+                crate::work_context::PaneWorkRole::Review,
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&second).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+
+        let owner = app.state.terminals[&panes[0].1].effective_work_context();
+        assert_eq!(owner.role, Some(crate::work_context::PaneWorkRole::Ship));
+        assert!(owner.active_owner);
+        assert_eq!(
+            pane.work_context.role,
+            Some(crate::work_context::PaneWorkRole::Review)
+        );
+        assert!(!pane.work_context.active_owner);
+        assert_eq!(
+            app.state.terminals[&panes[1].1].effective_work_context(),
+            &pane.work_context
+        );
     }
 
     fn pane_updated_events(app: &App) -> usize {
@@ -3058,6 +3217,7 @@ mod tests {
             .get_mut(&source_terminal)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 ticket_ids: Some(vec!["MAT-42".into()]),
                 work_title: Some("Move context".into()),
                 ..Default::default()
@@ -3586,6 +3746,95 @@ mod tests {
         }
     }
 
+    // An API-initiated move must never yank the human's cursor: with
+    // `focus: false` the session focus stays in the source workspace even when
+    // the moved pane is the pane the user was sitting in.
+    #[test]
+    fn api_pane_move_to_new_workspace_without_focus_keeps_session_focus_in_source() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+        app.state.active = Some(0);
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let source_workspace = app.public_workspace_id(0);
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::NewWorkspace {
+                    label: Some("agent".into()),
+                    tab_label: None,
+                },
+                focus: false,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert!(move_result.changed);
+        assert_eq!(move_result.closed_workspace_id, None);
+        assert_eq!(app.public_workspace_id(0), source_workspace);
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "session focus must stay in the source workspace"
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), sibling);
+        assert_eq!(
+            move_result.created_workspace.as_ref().map(|ws| ws.focused),
+            Some(false)
+        );
+        assert_eq!(
+            move_result.created_tab.as_ref().map(|tab| tab.focused),
+            Some(false)
+        );
+        // `focused_pane_id` reports the destination layout, never session focus.
+        assert_eq!(
+            move_result.focused_pane_id,
+            move_result.target_layout.focused_pane_id
+        );
+        assert_eq!(move_result.focused_pane_id, move_result.pane.pane_id);
+    }
+
+    // The explicit opt-in keeps working: `focus: true` still moves the session.
+    #[test]
+    fn api_pane_move_to_new_workspace_with_focus_moves_session_focus() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let _sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(source);
+        app.state.active = Some(0);
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::NewWorkspace {
+                    label: Some("agent".into()),
+                    tab_label: None,
+                },
+                focus: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(
+            move_result.created_workspace.as_ref().map(|ws| ws.focused),
+            Some(true)
+        );
+    }
+
     #[test]
     fn api_pane_move_same_tab_returns_same_tab_noop() {
         let mut app = app_with_linked_worktree();
@@ -3708,6 +3957,7 @@ mod tests {
             previous_workspace_label: app.state.workspaces[0].custom_name.clone(),
             previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
             previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
+            previous_repo_binding: app.state.workspaces[0].repo_binding.clone(),
             identity_cwd: app.state.workspaces[0].identity_cwd.clone(),
         };
         let taken = app.state.workspaces[0]
@@ -5376,6 +5626,7 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 branch: Some("feat/SCA-88-context".into()),
                 ..Default::default()
             })
@@ -5490,6 +5741,7 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 ticket_ids: Some(vec!["MAT-500".into()]),
                 pr_urls: Some(vec!["https://github.com/manual/repo/pull/99".into()]),
                 work_title: Some("Manual context".into()),
@@ -5559,6 +5811,7 @@ mod tests {
             .get_mut(terminal_id)
             .unwrap()
             .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: None,
                 ticket_ids: Some(vec!["MAT-500".into()]),
                 pr_urls: Some(vec!["https://github.com/manual/repo/pull/99".into()]),
                 work_title: Some("Manual context".into()),
@@ -5627,19 +5880,13 @@ mod tests {
 
     #[cfg(unix)]
     fn save_and_restore_work_context(app: &mut App) -> crate::work_context::PaneWorkContext {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
         let config_home = std::env::temp_dir().join(format!(
-            "herdr-pr24-work-context-save-{}-{suffix}",
-            std::process::id()
+            "herdr-pr24-work-context-save-{}",
+            crate::config::test_unique_suffix()
         ));
-        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let original_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
 
         app.save_session_now();
         assert!(!app.state.session_dirty, "session save should complete");
@@ -5667,14 +5914,7 @@ mod tests {
             runtime.shutdown();
         }
 
-        match original_config_home {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match original_session {
-            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
-            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
-        }
+        drop(env);
         let _ = std::fs::remove_dir_all(config_home);
         context
     }

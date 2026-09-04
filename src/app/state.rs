@@ -402,6 +402,52 @@ impl Palette {
         }
     }
 
+    /// GitHub Dark High Contrast — Primer's accessible dark palette.
+    pub fn github_dark_high_contrast() -> Self {
+        Self {
+            accent: Color::Rgb(113, 183, 255),
+            panel_bg: Color::Rgb(10, 12, 16),
+            sidebar_bg: Color::Reset,
+            surface0: Color::Rgb(39, 43, 51),
+            surface1: Color::Rgb(82, 89, 100),
+            surface_dim: Color::Rgb(1, 4, 9),
+            overlay0: Color::Rgb(122, 130, 142),
+            overlay1: Color::Rgb(158, 167, 179),
+            text: Color::Rgb(240, 243, 246),
+            subtext0: Color::Rgb(189, 196, 204),
+            mauve: Color::Rgb(203, 158, 255),
+            green: Color::Rgb(38, 205, 77),
+            yellow: Color::Rgb(240, 183, 47),
+            red: Color::Rgb(255, 148, 146),
+            blue: Color::Rgb(113, 183, 255),
+            teal: Color::Rgb(57, 197, 207),
+            peach: Color::Rgb(255, 183, 87),
+        }
+    }
+
+    /// GitHub Light High Contrast — Primer's accessible light palette.
+    pub fn github_light_high_contrast() -> Self {
+        Self {
+            accent: Color::Rgb(3, 73, 180),
+            panel_bg: Color::Rgb(255, 255, 255),
+            sidebar_bg: Color::Reset,
+            surface0: Color::Rgb(231, 236, 240),
+            surface1: Color::Rgb(172, 182, 192),
+            surface_dim: Color::Rgb(231, 236, 240),
+            overlay0: Color::Rgb(136, 146, 157),
+            overlay1: Color::Rgb(102, 112, 123),
+            text: Color::Rgb(14, 17, 22),
+            subtext0: Color::Rgb(75, 83, 93),
+            mauve: Color::Rgb(98, 44, 188),
+            green: Color::Rgb(5, 93, 32),
+            yellow: Color::Rgb(116, 69, 0),
+            red: Color::Rgb(160, 17, 31),
+            blue: Color::Rgb(3, 73, 180),
+            teal: Color::Rgb(27, 124, 131),
+            peach: Color::Rgb(112, 44, 0),
+        }
+    }
+
     /// Solarized Dark — Ethan Schoonover's classic.
     pub fn solarized() -> Self {
         Self {
@@ -577,6 +623,12 @@ impl Palette {
             "gruvbox-light" => Some(Self::gruvbox_light()),
             "one-dark" | "onedark" => Some(Self::one_dark()),
             "one-light" | "onelight" => Some(Self::one_light()),
+            "github-dark-high-contrast" | "github-dark-hc" => {
+                Some(Self::github_dark_high_contrast())
+            }
+            "github-light-high-contrast" | "github-light-hc" => {
+                Some(Self::github_light_high_contrast())
+            }
             "solarized" | "solarized-dark" => Some(Self::solarized()),
             "solarized-light" => Some(Self::solarized_light()),
             "kanagawa" => Some(Self::kanagawa()),
@@ -702,6 +754,18 @@ pub(crate) struct DockPresentationState {
     pub(crate) tab: DockTab,
     pub(crate) scroll: u16,
     pub(crate) editor_focused: bool,
+    /// Selection inside the home tab. Stored as a work-item key, never an
+    /// index, so it survives snapshot refreshes and list reordering.
+    pub(crate) home_selection: Option<WorkItemKey>,
+    pub(crate) home_ticket_selection: Option<WorkItemKey>,
+    pub(crate) home_poll_selection: Option<WorkItemKey>,
+    pub(crate) home_section: DockHomeSection,
+    pub(crate) home_detail_tab: DockHomeDetailTab,
+    pub(crate) home_focused: bool,
+    /// Focus target last considered for automatic PR-tab selection. Keeping
+    /// this attach-local lets an explicit selection survive while pane focus
+    /// remains unchanged.
+    pub(crate) home_followed_pane: Option<PaneFocusTarget>,
 }
 
 impl Default for DockPresentationState {
@@ -709,9 +773,16 @@ impl Default for DockPresentationState {
         Self {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
-            tab: DockTab::Editor,
+            tab: DockTab::Home,
             scroll: 0,
             editor_focused: false,
+            home_selection: None,
+            home_ticket_selection: None,
+            home_poll_selection: None,
+            home_section: DockHomeSection::Prs,
+            home_detail_tab: DockHomeDetailTab::Overview,
+            home_focused: false,
+            home_followed_pane: None,
         }
     }
 }
@@ -869,6 +940,7 @@ pub enum ViewLayout {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockTab {
+    Home,
     Editor,
     Shortcuts,
     Context,
@@ -876,7 +948,8 @@ pub enum DockTab {
 }
 
 impl DockTab {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::Home,
         Self::Editor,
         Self::Shortcuts,
         Self::Context,
@@ -885,12 +958,13 @@ impl DockTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Editor => "Editor",
-            Self::Shortcuts => "Shortcuts",
-            Self::Context => "Context",
-            // Four labels plus one space each must fit the 32-column default dock;
-            // a longer name here truncates "Shortcuts" instead of itself.
-            Self::Scratchpad => "Note",
+            Self::Home => "home",
+            Self::Editor => "edit",
+            Self::Shortcuts => "keys",
+            Self::Context => "ctx",
+            // Five labels plus one space each must fit the 32-column default
+            // dock; longer names truncate their left neighbour instead.
+            Self::Scratchpad => "note",
         }
     }
 
@@ -908,6 +982,9 @@ impl DockTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeHitTarget {
     QueueRow(usize),
+    NewTask,
+    Reply,
+    Detach,
     Prompt,
     Agent,
     Model,
@@ -953,6 +1030,10 @@ pub struct ViewState {
     pub dock_divider_rect: Rect,
     pub dock_tab_bar_rect: Rect,
     pub dock_tab_hit_areas: Vec<Rect>,
+    pub dock_home_section_hit_areas: Vec<Rect>,
+    pub dock_home_tab_hit_areas: Vec<Rect>,
+    pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
+    pub dock_home_detail_tab_hit_areas: Vec<Rect>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -962,6 +1043,7 @@ pub struct ViewState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
+    Home,
     BlockedFilter,
     Dock,
     /// Expand or collapse the usage detail in the status row.
@@ -1250,6 +1332,8 @@ pub const THEME_NAMES: &[&str] = &[
     "gruvbox-light",
     "one-dark",
     "one-light",
+    "github-dark-high-contrast",
+    "github-light-high-contrast",
     "solarized",
     "solarized-light",
     "kanagawa",
@@ -1614,12 +1698,20 @@ pub struct AppState {
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     pub(crate) symphony_detail: Option<SymphonyDetail>,
+    /// Open work projection view. `Some` means the view owns the screen and the
+    /// keyboard, like the Symphony and loop-history details above it.
+    pub(crate) work_view: Option<WorkViewState>,
     /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
+    /// Provider choices resolved outside `HomeState`, ready for the next Home open.
+    pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
+    /// Unsent text typed by a human in each pane. Home replies must not touch a
+    /// pane while this draft exists because the terminal owns that edit buffer.
+    pub(crate) pending_human_drafts: std::collections::HashMap<PaneId, String>,
     /// Server-owned native metric snapshot consumed by pure rendering.
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
@@ -1753,6 +1845,44 @@ pub struct AppState {
     pub dock_tab: DockTab,
     pub dock_scroll: u16,
     pub(crate) dock_editor_focused: bool,
+    /// Selection inside the dock home tab, swapped per client through
+    /// `DockPresentationState`. A key, never an index.
+    pub(crate) dock_home_selection: Option<WorkItemKey>,
+    pub(crate) dock_home_ticket_selection: Option<WorkItemKey>,
+    pub(crate) dock_home_poll_selection: Option<WorkItemKey>,
+    /// A comment being typed against the selected work item.
+    /// True when the focused pane resolves to no pull request and no ticket.
+    /// Without this the selection falls back to the first row, so switching to
+    /// an unrelated tab kept showing the previous item as though it were the
+    /// current one.
+    pub(crate) dock_home_focus_unbound: bool,
+    pub(crate) dock_comment_draft: Option<String>,
+    /// A write staged by a button but not yet confirmed. Nothing leaves herdr
+    /// until the user presses the confirm key with this set.
+    pub(crate) dock_pending_write: Option<crate::work_index::WorkItemWrite>,
+    /// The outcome of the last write, shown until the next one is staged.
+    pub(crate) dock_write_notice: Option<String>,
+    pub(crate) dock_home_section: DockHomeSection,
+    pub(crate) dock_home_detail_tab: DockHomeDetailTab,
+    pub(crate) dock_home_focused: bool,
+    /// Focus target last considered for automatic dock-home selection, swapped
+    /// per client through `DockPresentationState`.
+    pub(crate) dock_home_followed_pane: Option<PaneFocusTarget>,
+    /// Server-global work index snapshot. Set on every applied
+    /// `WorkIndexRefreshed`; the dock home enriches rows from it.
+    pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Server-global on-demand detail facts, keyed by stable work identity.
+    /// Client-local selection decides which entry is rendered, but never owns
+    /// or duplicates the fetched data.
+    pub(crate) work_item_detail_cache: crate::work_index::WorkItemDetailCache,
+    /// Detail keys in the one bounded batch currently running. This is runtime
+    /// observation state, not a client-local loading flag inferred by render.
+    pub(crate) work_item_detail_loading: std::collections::HashSet<WorkItemKey>,
+    /// Whether the work index is configured on. Mirrored so the dock home can
+    /// distinguish "off" from "on but not observed yet" instead of rendering
+    /// one indistinguishable `unknown` for both.
+    pub(crate) work_index_enabled: bool,
+    pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
     /// A file the next editor spawn for this agent pane should open. Absent, the
@@ -1911,6 +2041,121 @@ impl SymphonyDetail {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkProjection {
+    PullRequests,
+    Tickets,
+    Agents,
+    ReviewQueue,
+}
+
+impl WorkProjection {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PullRequests => "PRs",
+            Self::Tickets => "tickets",
+            Self::Agents => "agents",
+            Self::ReviewQueue => "review queue",
+        }
+    }
+
+    pub(crate) fn rotate_left(self) -> Self {
+        match self {
+            Self::PullRequests => Self::ReviewQueue,
+            Self::Tickets => Self::PullRequests,
+            Self::Agents => Self::Tickets,
+            Self::ReviewQueue => Self::Agents,
+        }
+    }
+
+    pub(crate) fn rotate_right(self) -> Self {
+        match self {
+            Self::PullRequests => Self::Tickets,
+            Self::Tickets => Self::Agents,
+            Self::Agents => Self::ReviewQueue,
+            Self::ReviewQueue => Self::PullRequests,
+        }
+    }
+}
+
+/// Stable identity of a projected work row. Selection is stored as this key,
+/// not an index, so it survives snapshot refreshes and projection rotations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WorkItemKey {
+    pub(crate) repo: String,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) pr_url: Option<String>,
+    pub(crate) ticket_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DockHomeSection {
+    #[default]
+    Prs,
+    Tickets,
+    /// Closing-block gates across every pane: the questions waiting on a
+    /// human answer, gathered where the rest of the work lives.
+    XPolls,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DockHomeDetailTab {
+    #[default]
+    Overview,
+    Comments,
+    Actions,
+    Files,
+    Commits,
+    Ticket,
+}
+
+impl DockHomeDetailTab {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Overview,
+        Self::Comments,
+        Self::Actions,
+        Self::Files,
+        Self::Commits,
+        Self::Ticket,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Comments => "comments",
+            Self::Actions => "actions",
+            Self::Files => "files",
+            Self::Commits => "commits",
+            Self::Ticket => "ticket",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkViewState {
+    pub(crate) projection: WorkProjection,
+    /// `None` means "no explicit selection yet" and resolves to the first row.
+    pub(crate) selected: Option<WorkItemKey>,
+    pub(crate) repo_filter: Option<String>,
+    pub(crate) enabled: bool,
+    /// `None` means the enabled index has not been collected yet.
+    pub(crate) snapshot: Option<crate::work_index::Snapshot>,
+    pub(crate) hint: Option<String>,
+}
+
+impl WorkViewState {
+    pub(crate) fn new(enabled: bool, snapshot: Option<crate::work_index::Snapshot>) -> Self {
+        Self {
+            projection: WorkProjection::PullRequests,
+            selected: None,
+            repo_filter: None,
+            enabled,
+            snapshot,
+            hint: None,
+        }
+    }
+}
+
 impl AppState {
     pub(crate) fn swap_symphony_detail(&mut self, other: &mut Option<SymphonyDetail>) {
         std::mem::swap(&mut self.symphony_detail, other);
@@ -1930,6 +2175,26 @@ impl AppState {
 
     pub(crate) fn clear_symphony(&mut self) {
         self.symphony_detail = None;
+    }
+
+    pub(crate) fn swap_work_view(&mut self, other: &mut Option<WorkViewState>) {
+        std::mem::swap(&mut self.work_view, other);
+    }
+
+    pub(crate) fn toggle_work_view(
+        &mut self,
+        enabled: bool,
+        snapshot: Option<crate::work_index::Snapshot>,
+    ) {
+        if self.work_view.is_some() {
+            self.work_view = None;
+            return;
+        }
+        self.work_view = Some(WorkViewState::new(enabled, snapshot));
+    }
+
+    pub(crate) fn clear_work_view(&mut self) {
+        self.work_view = None;
     }
 
     pub(crate) fn swap_loop_run_history_detail(
@@ -2023,6 +2288,22 @@ impl AppState {
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
+        std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
+        std::mem::swap(
+            &mut self.dock_home_ticket_selection,
+            &mut other.home_ticket_selection,
+        );
+        std::mem::swap(
+            &mut self.dock_home_poll_selection,
+            &mut other.home_poll_selection,
+        );
+        std::mem::swap(&mut self.dock_home_section, &mut other.home_section);
+        std::mem::swap(&mut self.dock_home_detail_tab, &mut other.home_detail_tab);
+        std::mem::swap(&mut self.dock_home_focused, &mut other.home_focused);
+        std::mem::swap(
+            &mut self.dock_home_followed_pane,
+            &mut other.home_followed_pane,
+        );
     }
 
     pub(crate) fn reconcile_sidebar_presentation(&mut self) {
@@ -2340,8 +2621,11 @@ impl AppState {
             loop_run_history_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
+            work_view: None,
             inbox: None,
             home: None,
+            home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
+            pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
                 sampled_at: std::time::Instant::now(),
@@ -2448,6 +2732,10 @@ impl AppState {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_home_section_hit_areas: Vec::new(),
+                dock_home_tab_hit_areas: Vec::new(),
+                dock_home_tab_keys: Vec::new(),
+                dock_home_detail_tab_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -2475,9 +2763,25 @@ impl AppState {
             sidebar_max_width: 36,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: DockTab::Editor,
+            dock_tab: DockTab::Home,
             dock_scroll: 0,
             dock_editor_focused: false,
+            dock_home_selection: None,
+            dock_home_ticket_selection: None,
+            dock_home_poll_selection: None,
+            dock_home_focus_unbound: false,
+            dock_comment_draft: None,
+            dock_pending_write: None,
+            dock_write_notice: None,
+            dock_home_section: DockHomeSection::Prs,
+            dock_home_detail_tab: DockHomeDetailTab::Overview,
+            dock_home_focused: false,
+            dock_home_followed_pane: None,
+            work_index_snapshot: None,
+            work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
+            work_item_detail_loading: std::collections::HashSet::new(),
+            work_index_enabled: false,
+            work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
             dock_editor_requested_paths: std::collections::HashMap::new(),

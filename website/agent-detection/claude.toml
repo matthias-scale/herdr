@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.08.26.1001"
+version = "2026.08.31.1001"
 min_engine_version = 2
-updated_at = "2026-08-26T00:00:00Z"
+updated_at = "2026-08-31T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
@@ -119,6 +119,37 @@ priority = 980
 region = "whole_recent"
 visible_blocker = false
 contains = ["run a dynamic workflow?", "esc to cancel"]
+
+[[rules]]
+# These terminal failures leave the live prompt box visible. Priority 960 puts
+# them above idle (950) but below every working rule (965+) so recovery clears
+# the blocker even while the banner remains in the terminal buffer.
+id = "auth_failure"
+state = "blocked"
+priority = 960
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+line_regex = ['^\s*❯\s*$']
+any = [
+  { line_regex = ['(?i)^\s*Invalid API key\s*·?\s*Please run /login\s*$'] },
+  { line_regex = ['(?i)^\s*OAuth token (?:expired|revoked)\s*·?\s*Please run /login\s*$'] },
+  { line_regex = ['(?i)^\s*Your session has expired\. Please run /login to sign in again\.\s*$'] },
+  { line_regex = ['(?i)^\s*Credit balance (?:is )?too low\.?\s*$'] },
+  { line_regex = ['(?i)^\s*Your account does not have access to Claude\. Please login again or contact your administrator\.\s*$'] },
+]
+
+[[rules]]
+id = "api_error"
+state = "blocked"
+priority = 960
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+line_regex = ['^\s*❯\s*$']
+any = [
+  { line_regex = ['(?i)^\s*API Error(?::|\s*\().+$'] },
+  { line_regex = ['(?i)^\s*Request timed out\.?\s*$'] },
+  { line_regex = ['(?i)^\s*Agent terminated early due to an API error\.?\s*$'] },
+]
 
 [[rules]]
 # Plan usage exhausted: nobody can answer this, the agent resumes on its own

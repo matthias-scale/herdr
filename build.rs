@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -132,6 +133,26 @@ fn stamp_fork_build() {
 fn git_build_id() -> Option<String> {
     let head_path = git_output(&["rev-parse", "--git-path", "HEAD"])?;
     println!("cargo:rerun-if-changed={head_path}");
+
+    // On a checked-out branch `.git/HEAD` is a symref whose contents stay
+    // `ref: refs/heads/<branch>` while the branch advances, so watching it alone
+    // leaves the stamp pointing at whatever commit was current the last time
+    // something else forced a rerun. Watch the ref it resolves to as well, and
+    // packed-refs for the case where that loose ref has been packed away. Only
+    // emit paths that exist: a missing rerun-if-changed target makes cargo
+    // rebuild the crate on every invocation.
+    if let Some(symref) = git_output(&["symbolic-ref", "--quiet", "HEAD"]) {
+        if let Some(ref_path) = git_output(&["rev-parse", "--git-path", &symref]) {
+            if Path::new(&ref_path).exists() {
+                println!("cargo:rerun-if-changed={ref_path}");
+            }
+        }
+    }
+    if let Some(packed) = git_output(&["rev-parse", "--git-path", "packed-refs"]) {
+        if Path::new(&packed).exists() {
+            println!("cargo:rerun-if-changed={packed}");
+        }
+    }
 
     let sha = git_output(&["rev-parse", "--short=8", "HEAD"])?;
     let dirty = Command::new("git")

@@ -677,13 +677,13 @@ fn process_sidebar_observation(
     pane_pid: u32,
     agent_process_pid: Option<u32>,
 ) -> (bool, Option<(AgentState, bool)>) {
-    let session_pids = crate::platform::session_processes(pane_pid);
+    let session_pids = crate::platform::session_processes_cached(pane_pid);
     let holds_shell = session_pids
         .iter()
         .any(|candidate| *candidate != pane_pid && Some(*candidate) != agent_process_pid);
     let stale_resolution = Some(match agent_process_pid {
         None => (AgentState::Idle, false),
-        Some(agent_pid) if crate::platform::session_processes(agent_pid).len() > 1 => {
+        Some(agent_pid) if crate::platform::session_processes_cached(agent_pid).len() > 1 => {
             (AgentState::Working, true)
         }
         Some(_) => (AgentState::Idle, true),
@@ -3986,8 +3986,8 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", &bin);
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set("PATH", &bin);
 
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("fake-shell", crate::config::ShellModeConfig::Login),
@@ -4000,10 +4000,7 @@ mod tests {
             cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
             shell.to_str()
         );
-        match original_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
+        drop(env);
         let _ = std::fs::remove_dir_all(base);
     }
 

@@ -24,6 +24,7 @@ mod spec;
 mod status;
 mod tab;
 mod window;
+mod work_index;
 mod workspace;
 mod worktree;
 
@@ -93,6 +94,15 @@ pub(crate) fn parse_spawn_work_context_arg(
                 .branch = Some(value.clone());
             Ok(Some(index + 2))
         }
+        "--repo" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --repo".to_string())?;
+            context
+                .get_or_insert_with(crate::work_context::PaneWorkContext::default)
+                .repo = Some(value.clone());
+            Ok(Some(index + 2))
+        }
         "--role" => {
             let value = args
                 .get(index + 1)
@@ -149,6 +159,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
         "fleet" => fleet::run_fleet_command(&args[2..])?,
+        "work-index" => work_index::run_work_index_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,

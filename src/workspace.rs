@@ -207,6 +207,13 @@ pub struct Workspace {
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
+    /// Canonical `owner/repo` this workspace collects work for.
+    ///
+    /// Set by `herdr workspace bind`, persisted, and consulted when a pane
+    /// resolves the repository it works on. A workspace organised by
+    /// repository otherwise decays: new panes land wherever the session
+    /// happened to be, and the grouping has to be rebuilt by hand.
+    pub repo_binding: Option<String>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
@@ -273,6 +280,7 @@ impl Workspace {
             cached_git_ahead_behind: None,
             cached_git_space,
             worktree_space: None,
+            repo_binding: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -472,6 +480,7 @@ impl Workspace {
                 cached_git_ahead_behind: None,
                 cached_git_space,
                 worktree_space: None,
+                repo_binding: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
                 public_pane_numbers,
@@ -1426,6 +1435,18 @@ impl Workspace {
         self.active_tab().map(|tab| tab.layout.focused())
     }
 
+    /// The pane the active tab is named after — the focused pane, unless it is
+    /// a plain shell in a window that also holds an agent session, in which
+    /// case the agent session last in view keeps the name. See
+    /// `Tab::title_source_pane`.
+    pub fn title_source_pane_id(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<PaneId> {
+        self.active_tab()
+            .map(|tab| tab.title_source_pane(terminals))
+    }
+
     pub fn focused_cwd_from(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
@@ -1540,6 +1561,7 @@ impl Workspace {
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: None,
+            repo_binding: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,

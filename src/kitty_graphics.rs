@@ -68,6 +68,9 @@ impl HostCellSize {
 struct HostViewKey {
     workspace_index: usize,
     tab_index: usize,
+    /// Opening a full-terminal overlay is a view change: the placements from the
+    /// panes underneath must be cleared, not carried over.
+    overlay_open: bool,
 }
 
 #[derive(Debug)]
@@ -182,7 +185,12 @@ pub(crate) fn encode_local_pane_graphics(
     cell_size: HostCellSize,
     cache: &mut HostGraphicsCache,
 ) -> Vec<u8> {
-    let mode_ok = app.mode == Mode::Terminal;
+    // A full-terminal overlay covers the panes, but the graphics plane sits above
+    // the text and is not repainted by ratatui. Leaving placements up while home
+    // or the inbox is open lets a pane's image fight the overlay's text every
+    // frame, which reads as flicker.
+    let overlay_open = app.home.is_some() || app.inbox.is_some();
+    let mode_ok = app.mode == Mode::Terminal && !overlay_open;
     let cell_ok = cell_size.is_known();
     tracing::debug!(
         mode_ok,
@@ -518,6 +526,7 @@ fn active_view_key(app: &AppState) -> Option<HostViewKey> {
     Some(HostViewKey {
         workspace_index: ws_idx,
         tab_index: ws.active_tab_index(),
+        overlay_open: app.home.is_some() || app.inbox.is_some(),
     })
 }
 

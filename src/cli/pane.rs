@@ -164,6 +164,15 @@ fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSe
                 }
                 index += 2;
             }
+            "--repo" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --repo".into());
+                };
+                if patch.repo.replace(value.clone()).is_some() {
+                    return Err("--repo may only be provided once".into());
+                }
+                index += 2;
+            }
             "--title" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --title".into());
@@ -172,6 +181,22 @@ fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSe
                     return Err("--title may only be provided once".into());
                 }
                 index += 2;
+            }
+            "--role" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --role".into());
+                };
+                let role = value.parse()?;
+                if patch.role.replace(role).is_some() {
+                    return Err("--role may only be provided once".into());
+                }
+                index += 2;
+            }
+            "--active-owner" => {
+                if patch.active_owner.replace(true).is_some() {
+                    return Err("--active-owner may only be provided once".into());
+                }
+                index += 1;
             }
             "--clear" => {
                 let Some(value) = args.get(index + 1) else {
@@ -186,6 +211,9 @@ fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSe
     if patch.is_empty() {
         return Err("missing work-context field to set or clear".into());
     }
+    if patch.active_owner == Some(true) && patch.role.is_none() {
+        return Err("--active-owner requires --role".into());
+    }
     Ok(PaneWorkContextSetParams { pane_id, patch })
 }
 
@@ -198,15 +226,20 @@ fn parse_work_context_field(
         }
         "pr_urls" | "pr-urls" | "prs" => Ok(crate::work_context::PaneWorkContextField::PrUrls),
         "branch" => Ok(crate::work_context::PaneWorkContextField::Branch),
+        "repo" | "repository" => Ok(crate::work_context::PaneWorkContextField::Repo),
         "work_title" | "work-title" | "title" => {
             Ok(crate::work_context::PaneWorkContextField::WorkTitle)
+        }
+        "role" => Ok(crate::work_context::PaneWorkContextField::Role),
+        "active_owner" | "active-owner" | "owner" => {
+            Ok(crate::work_context::PaneWorkContextField::ActiveOwner)
         }
         _ => Err(format!("unknown work-context field: {value}")),
     }
 }
 
 fn work_context_set_usage() -> String {
-    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...".into()
+    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...".into()
 }
 
 fn pane_current(args: &[String]) -> std::io::Result<i32> {
@@ -812,7 +845,9 @@ fn parse_pane_move_args(args: &[String]) -> Result<PaneMoveParams, String> {
     let mut ratio = None;
     let mut label = None;
     let mut tab_label = None;
-    let mut focus = true;
+    // Socket-API/CLI moves must never steal the human's focus. Focus is
+    // strictly opt-in via `--focus`; interactive moves do not use this parser.
+    let mut focus = false;
 
     let mut index = 1;
     while index < args.len() {
@@ -1684,7 +1719,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]");
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane work-context get <pane_id>");
-    eprintln!("  herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--title TITLE] [--clear FIELD]...");
+    eprintln!("  herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
         "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--ticket ID] [--pr URL --branch BRANCH --role ROLE [--active-owner]] [--focus] [--no-focus]"
@@ -1738,6 +1773,9 @@ mod tests {
             "https://github.com/o/r/pull/9",
             "--title",
             "Manual title",
+            "--role",
+            "review",
+            "--active-owner",
             "--clear",
             "branch",
         ]))
@@ -1751,9 +1789,51 @@ mod tests {
         );
         assert_eq!(params.patch.work_title.as_deref(), Some("Manual title"));
         assert_eq!(
+            params.patch.role,
+            Some(crate::work_context::PaneWorkRole::Review)
+        );
+        assert_eq!(params.patch.active_owner, Some(true));
+        assert_eq!(
             params.patch.clear_fields,
             vec![crate::work_context::PaneWorkContextField::Branch]
         );
+    }
+
+    #[test]
+    fn work_context_set_rejects_active_owner_without_role() {
+        let error = parse_pane_work_context_set_args(&args(&[
+            "issue-1",
+            "--pr",
+            "https://github.com/o/r/pull/9",
+            "--active-owner",
+        ]))
+        .unwrap_err();
+
+        assert_eq!(error, "--active-owner requires --role");
+    }
+
+    #[test]
+    fn work_context_set_accepts_a_repo_declaration_and_its_clear() {
+        let params =
+            parse_pane_work_context_set_args(&args(&["issue-1", "--repo", "matthiasSchedel/ghx"]))
+                .expect("parse");
+        assert_eq!(params.patch.repo.as_deref(), Some("matthiasSchedel/ghx"));
+
+        let cleared = parse_pane_work_context_set_args(&args(&["issue-1", "--clear", "repo"]))
+            .expect("parse");
+        assert_eq!(
+            cleared.patch.clear_fields,
+            vec![crate::work_context::PaneWorkContextField::Repo]
+        );
+    }
+
+    #[test]
+    fn work_context_set_rejects_a_repeated_or_contradictory_repo() {
+        assert!(parse_pane_work_context_set_args(&args(&[
+            "issue-1", "--repo", "a/b", "--repo", "c/d"
+        ]))
+        .is_err());
+        assert!(parse_pane_work_context_set_args(&args(&["issue-1", "--repo"])).is_err());
     }
 
     #[test]
@@ -1917,6 +1997,32 @@ mod tests {
                 ratio: Some(0.25),
             }
         );
+    }
+
+    #[test]
+    fn parse_pane_move_args_default_does_not_steal_focus() {
+        for destination in [
+            vec!["issue-1", "--new-tab"],
+            vec!["issue-1", "--new-workspace"],
+            vec!["issue-1", "--tab", "issue:2", "--split", "right"],
+        ] {
+            let params = parse_pane_move_args(&args(&destination)).unwrap();
+            assert!(
+                !params.focus,
+                "socket-API pane move must not focus by default: {destination:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_pane_move_args_focus_flag_opts_into_focus() {
+        let params = parse_pane_move_args(&args(&["issue-1", "--new-tab", "--focus"])).unwrap();
+        assert!(params.focus);
+
+        let params =
+            parse_pane_move_args(&args(&["issue-1", "--new-tab", "--focus", "--no-focus"]))
+                .unwrap();
+        assert!(!params.focus);
     }
 
     #[test]

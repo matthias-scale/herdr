@@ -51,12 +51,16 @@ impl App {
             }
         }
 
+        let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let has_bytes = !input.bytes.is_empty();
         let sent = self
             .terminal_input_runtime(&input.target)
             .is_some_and(|runtime| runtime.try_send_bytes(input.bytes).is_ok());
         if sent && has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
+                self.state.note_human_key(pane_id, &key_for_draft);
+            }
             self.retire_blocked_hook_authority_for_terminal(
                 &input.target.terminal_id,
                 std::time::Instant::now(),
@@ -348,6 +352,9 @@ impl App {
             )
         };
         if sent && has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&target.terminal_id) {
+                self.state.note_human_key(pane_id, &key);
+            }
             self.retire_blocked_hook_authority_for_terminal(
                 &target.terminal_id,
                 std::time::Instant::now(),
@@ -373,6 +380,9 @@ impl App {
             )
         };
         if sent && has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&target.terminal_id) {
+                self.state.note_human_key(pane_id, &key);
+            }
             self.retire_blocked_hook_authority_for_terminal(
                 &target.terminal_id,
                 std::time::Instant::now(),
@@ -435,6 +445,7 @@ impl App {
             }
         }
 
+        let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(crate::app::LOCAL_INPUT_SOURCE, key)?;
         let has_bytes = !input.bytes.is_empty();
         let sent = if let Some(runtime) = self.terminal_input_runtime(&input.target) {
@@ -443,6 +454,9 @@ impl App {
             false
         };
         if sent && has_bytes {
+            if let Some(pane_id) = self.state.pane_id_for_terminal(&input.target.terminal_id) {
+                self.state.note_human_key(pane_id, &key_for_draft);
+            }
             self.retire_blocked_hook_authority_for_terminal(
                 &input.target.terminal_id,
                 std::time::Instant::now(),
@@ -1420,8 +1434,8 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         let output_path = unique_temp_path("direct-edit-scrollback");
-        let previous_editor = std::env::var_os("EDITOR");
-        std::env::set_var(
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(
             "EDITOR",
             format!("sh -c 'cp \"$1\" {}' sh", output_path.display()),
         );
@@ -1433,10 +1447,7 @@ mod tests {
         ))
         .await;
 
-        match previous_editor {
-            Some(value) => std::env::set_var("EDITOR", value),
-            None => std::env::remove_var("EDITOR"),
-        }
+        drop(env);
 
         let content = wait_for_file(&output_path);
         assert!(content.contains("alpha"));

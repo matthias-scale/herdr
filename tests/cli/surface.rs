@@ -249,6 +249,9 @@ fn ac1_pane_work_context_set_sends_one_atomic_patch() {
             "https://github.com/o/r/pull/9",
             "--title",
             "Context model",
+            "--role",
+            "ship",
+            "--active-owner",
             "--clear",
             "branch",
         ],
@@ -271,6 +274,8 @@ fn ac1_pane_work_context_set_sends_one_atomic_patch() {
         serde_json::json!(["https://github.com/o/r/pull/9"])
     );
     assert_eq!(request["params"]["work_title"], "Context model");
+    assert_eq!(request["params"]["role"], "ship");
+    assert_eq!(request["params"]["active_owner"], true);
     assert_eq!(
         request["params"]["clear_fields"],
         serde_json::json!(["branch"])

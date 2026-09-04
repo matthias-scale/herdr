@@ -23,7 +23,7 @@ pub use self::{
         ConfigReloadStatus, FleetConfig, FleetHostConfig, HostCursorModeConfig,
         NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
         TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
-        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        ToastHerdrPosition, UpdateChannelConfig, WorkIndexConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
@@ -55,6 +55,96 @@ pub(crate) fn app_dir_name() -> &'static str {
 pub(crate) fn test_config_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// A monotonically increasing, process-unique suffix for test scratch paths.
+///
+/// `SystemTime::now()` is not a unique-name source: its resolution is coarse
+/// enough that two threads starting in the same tick derive the same path, so
+/// two tests race on one directory or one socket. A counter cannot collide.
+#[cfg(test)]
+pub(crate) fn test_unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Serialises tests that read or write the process-global environment that
+/// resolves config, state, and socket paths.
+///
+/// `config_dir()`, `state_dir()`, and every socket path derived from them read
+/// `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`HERDR_CONFIG_PATH` at call time. Those
+/// are per-process, not per-test, so a test that repoints them moves the
+/// filesystem under every other test in the same binary. Holding this guard is
+/// the only way to make such a test's view of those paths stable.
+///
+/// The guard restores every variable it touched on drop, so a panicking test
+/// leaves the environment clean, and it recovers from mutex poisoning, so a
+/// panicking test does not turn one failure into a cascade of `PoisonError`s
+/// in unrelated tests.
+#[cfg(test)]
+pub(crate) struct TestConfigEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(String, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(test)]
+impl TestConfigEnvGuard {
+    /// Acquire the guard without changing anything, for tests that only *read*
+    /// env-derived paths and must not observe another test's override.
+    pub(crate) fn acquire() -> Self {
+        let lock = test_config_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            _lock: lock,
+            saved: Vec::new(),
+        }
+    }
+
+    fn remember(&mut self, key: &str) {
+        if self.saved.iter().any(|(saved, _)| saved == key) {
+            return;
+        }
+        self.saved.push((key.to_owned(), std::env::var_os(key)));
+    }
+
+    pub(crate) fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        self.remember(key);
+        std::env::set_var(key, value);
+    }
+
+    pub(crate) fn remove(&mut self, key: &str) {
+        self.remember(key);
+        std::env::remove_var(key);
+    }
+
+    /// Restore every variable this guard changed, keeping the lock held.
+    ///
+    /// Idempotent, so callers that need to run cleanup *after* the environment
+    /// is back to normal but *before* the lock is released can call it and
+    /// still rely on `Drop`.
+    pub(crate) fn restore(&mut self) {
+        for (key, previous) in self.saved.drain(..).rev() {
+            match previous {
+                Some(previous) => std::env::set_var(&key, previous),
+                None => std::env::remove_var(&key),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfigEnvGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 impl Config {

@@ -242,7 +242,7 @@ impl App {
             crate::raw_input::RawInputEvent::OuterFocusGained => {
                 #[cfg(not(windows))]
                 self.query_host_terminal_appearance();
-                if self.state.symphony_detail.is_none() {
+                if self.state.symphony_detail.is_none() && self.state.work_view.is_none() {
                     self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
                 }
                 if self.state.redraw_on_focus_gained {
@@ -254,7 +254,7 @@ impl App {
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
                 self.release_input_source(super::LOCAL_INPUT_SOURCE).await;
-                if self.state.symphony_detail.is_none() {
+                if self.state.symphony_detail.is_none() && self.state.work_view.is_none() {
                     self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
                 }
                 self.state.outer_terminal_focus = Some(false);
@@ -406,6 +406,15 @@ impl App {
         changed |= self.clear_due_selection_highlight(now);
 
         self.start_git_work_context_refresh_if_due(now);
+        self.start_work_index_refresh_if_due(now);
+        let detail_visible =
+            !self.state.dock_collapsed && self.state.dock_tab == crate::app::DockTab::Home;
+        self.start_work_item_detail_refresh_if_due(
+            now,
+            self.state.dock_home_section,
+            self.state.dock_home_active_selection(),
+            detail_visible,
+        );
         self.start_foreground_process_refresh_if_due(now);
         self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
@@ -545,6 +554,13 @@ impl App {
         {
             return;
         }
+        if cfg!(test) {
+            // Tests observe scheduling state without reading provider files or
+            // spawning the external Kimi helper.
+            self.provider_usage_in_flight = true;
+            self.provider_usage_refreshed_at = Some(now);
+            return;
+        }
         let tx = self.event_tx.clone();
         let spawned = std::thread::Builder::new()
             .name("herdr-provider-usage".into())
@@ -571,6 +587,12 @@ impl App {
                     .is_some_and(|elapsed| elapsed < crate::connectivity::PROBE_INTERVAL)
             })
         {
+            return;
+        }
+        if cfg!(test) {
+            // Tests record the probe cadence without opening a network socket.
+            self.connectivity_probe_in_flight = true;
+            self.connectivity_probed_at = Some(now);
             return;
         }
         let tx = self.event_tx.clone();
@@ -858,6 +880,8 @@ impl App {
             include_client_refresh
                 .then(|| self.git_work_context_refresh_deadline())
                 .flatten(),
+            self.work_index_refresh_deadline(),
+            self.work_item_detail_refresh_deadline(),
             include_client_refresh
                 .then(|| self.foreground_process_refresh_deadline())
                 .flatten(),

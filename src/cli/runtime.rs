@@ -38,6 +38,12 @@ pub(super) fn workspace_focus(workspace_id: String) -> std::io::Result<i32> {
     )
 }
 
+pub(super) fn workspace_bind(
+    params: crate::api::schema::WorkspaceBindParams,
+) -> std::io::Result<i32> {
+    print_method_response("cli:workspace:bind", Method::WorkspaceBind(params))
+}
+
 pub(super) fn workspace_rename(params: WorkspaceRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:workspace:rename", Method::WorkspaceRename(params))
 }
