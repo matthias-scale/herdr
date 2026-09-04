@@ -520,6 +520,9 @@ impl AppState {
                     self.dock_tab = tab;
                     self.dock_editor_focused = tab == crate::app::DockTab::Editor;
                     self.dock_home_focused = tab == crate::app::DockTab::Home;
+                    if self.dock_editor_focused {
+                        self.retry_dock_editor();
+                    }
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
