@@ -516,16 +516,33 @@ pub(super) fn mobile_tab_row_layout(
     compact_row_layout(entry, now, width, prefix_width, true)
 }
 
+/// Foreground for the selected Space and the current tab title in the sidebar.
+///
+/// Emphasis is a step *away* from the panel background, so the same rule reads
+/// as emphasis in both appearances: one third darker than the authored text on
+/// a light panel, one third of the way to white on a dark one. A single
+/// darkening rule (herdr #17, which dropped the luminance guard added by #16)
+/// made the selected row the dimmest text in every dark theme -- under
+/// `github-dark-high-contrast` it rendered at `Rgb(160, 162, 164)`, below the
+/// `Rgb(189, 196, 204)` of the unselected rows around it.
 pub(crate) fn active_sidebar_title_color(palette: &Palette) -> Color {
-    if palette.panel_bg == Color::Reset {
+    let Color::Rgb(bg_r, bg_g, bg_b) = palette.panel_bg else {
         return palette.text;
-    }
+    };
+    // Rec. 601 luma, scaled by 1000 to stay in integer arithmetic.
+    let panel_luma = u32::from(bg_r) * 299 + u32::from(bg_g) * 587 + u32::from(bg_b) * 114;
+    let panel_is_dark = panel_luma < 128_000;
     match palette.text {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((u16::from(r) * 2) / 3) as u8,
-            ((u16::from(g) * 2) / 3) as u8,
-            ((u16::from(b) * 2) / 3) as u8,
-        ),
+        Color::Rgb(r, g, b) => {
+            let step = |channel: u8| -> u8 {
+                if panel_is_dark {
+                    channel + ((255 - channel) / 3)
+                } else {
+                    ((u16::from(channel) * 2) / 3) as u8
+                }
+            };
+            Color::Rgb(step(r), step(g), step(b))
+        }
         color => color,
     }
 }
@@ -2691,10 +2708,11 @@ mod tests {
     }
 
     #[test]
-    fn active_title_color_darkens_rgb_themes_and_preserves_terminal_fallbacks() {
-        // ac3: selected titles are one-third darker than the authored text
-        // token in both shipped One themes. Bold supplies the emphasis while
-        // the foreground direction remains consistent across machines.
+    fn active_title_color_steps_away_from_the_panel_and_preserves_terminal_fallbacks() {
+        // ac3: the selected title moves one third away from the panel
+        // background -- darker on a light panel, brighter on a dark one -- so
+        // the same rule reads as emphasis in both appearances. Bold supplies
+        // the weight; the foreground supplies the contrast.
         let one_light = crate::app::state::Palette::one_light();
         assert_eq!(
             active_sidebar_title_color(&one_light),
@@ -2704,7 +2722,7 @@ mod tests {
         let one_dark = crate::app::state::Palette::one_dark();
         assert_eq!(
             active_sidebar_title_color(&one_dark),
-            Color::Rgb(114, 118, 127)
+            Color::Rgb(199, 203, 212)
         );
 
         let terminal = crate::app::state::Palette::terminal();
@@ -2714,6 +2732,38 @@ mod tests {
         custom_reset.panel_bg = Color::Reset;
         custom_reset.text = Color::Rgb(12, 34, 56);
         assert_eq!(active_sidebar_title_color(&custom_reset), custom_reset.text);
+    }
+
+    /// The regression this fixes: on every dark palette the selected Space and
+    /// the current tab title were the *dimmest* text in the sidebar, below the
+    /// unselected rows they had to stand out from.
+    #[test]
+    fn active_title_outshines_unselected_rows_on_every_dark_palette() {
+        let luminance = |color: Color| match color {
+            Color::Rgb(r, g, b) => u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114,
+            other => panic!("expected an rgb color, got {other:?}"),
+        };
+
+        for palette in [
+            crate::app::state::Palette::github_dark_high_contrast(),
+            crate::app::state::Palette::one_dark(),
+            crate::app::state::Palette::catppuccin(),
+        ] {
+            let selected = luminance(active_sidebar_title_color(&palette));
+            assert!(
+                selected > luminance(palette.subtext0),
+                "selected title must outshine the unselected rows"
+            );
+            assert!(
+                selected > luminance(palette.text),
+                "selected title must outshine the authored text token"
+            );
+        }
+
+        assert_eq!(
+            active_sidebar_title_color(&crate::app::state::Palette::github_dark_high_contrast()),
+            Color::Rgb(245, 247, 249)
+        );
     }
 
     #[test]
