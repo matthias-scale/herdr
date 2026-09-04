@@ -22,6 +22,23 @@ pub(crate) enum CompletionTier {
     StoppedUndeclared,
 }
 
+/// A session with nothing left running and nothing waiting on a human.
+///
+/// The single source of truth for "this session has stopped". Both the sidebar
+/// tier colours and the Done pane lifecycle key off it, so a pane can never be
+/// blocking in one place and reapable in the other.
+pub(crate) fn session_is_quiet(
+    state: AgentState,
+    open_blockers: bool,
+    active_subagents: Option<u32>,
+    holds_shell: bool,
+) -> bool {
+    state == AgentState::Idle
+        && !open_blockers
+        && active_subagents.unwrap_or_default() == 0
+        && !holds_shell
+}
+
 pub(crate) fn derive_completion_tier(
     state: AgentState,
     contract: Option<&str>,
@@ -32,11 +49,7 @@ pub(crate) fn derive_completion_tier(
     holds_shell: bool,
     has_closing_block_tokens: bool,
 ) -> Option<CompletionTier> {
-    let quiet = state == AgentState::Idle
-        && !open_blockers
-        && active_subagents.unwrap_or_default() == 0
-        && !holds_shell;
-    if !quiet {
+    if !session_is_quiet(state, open_blockers, active_subagents, holds_shell) {
         return None;
     }
     if contract.is_some_and(|contract| !contract.is_empty()) && contract_met == Some(true) {

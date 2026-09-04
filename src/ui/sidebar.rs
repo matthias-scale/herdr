@@ -1208,9 +1208,16 @@ fn append_recently_done_rows(
 
 fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) -> bool {
     entry.has_agent
-        && entry.state == AgentState::Idle
         && !entry.seen
         && !entry.stale
+        // Share the lifecycle definition of a stopped session. Hiding a row the
+        // sidebar would otherwise paint red is how a question stops being asked.
+        && crate::terminal::state::session_is_quiet(
+            entry.state,
+            entry_has_gate(entry) || entry.usage_limited,
+            entry.active_subagents,
+            entry.holds_shell,
+        )
         && entry.done_since.is_some_and(|done_since| {
             app.view_observed_at.saturating_duration_since(done_since) > app.hide_done_after
         })
@@ -6339,6 +6346,46 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal.state = *state;
         }
         app
+    }
+
+    #[test]
+    fn a_pane_with_an_unanswered_gate_is_never_hidden_as_done() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.hide_done_after = std::time::Duration::from_secs(30 * 60);
+        app.terminals.get_mut(&terminal_id).unwrap().closing_gates =
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Choose the release path".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }];
+
+        app.view_observed_at =
+            done_since + app.hide_done_after + std::time::Duration::from_secs(60);
+        let rows = sidebar_rows(&app);
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader { title, .. } if *title == RECENTLY_DONE_SECTION_TITLE
+            )),
+            "a pane waiting on a human must not be filed under Recently done"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(row, SidebarRow::Tab { .. })),
+            "and it must stay visible as a row"
+        );
     }
 
     #[test]
