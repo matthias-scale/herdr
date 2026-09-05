@@ -100,6 +100,8 @@ impl AppState {
                 crate::app::home::HomePicker::Model => crate::app::home::HomeFocus::Model,
                 crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
                 crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
+                crate::app::home::HomePicker::Workspace => crate::app::home::HomeFocus::Workspace,
+                crate::app::home::HomePicker::Ref => crate::app::home::HomeFocus::Ref,
                 crate::app::home::HomePicker::Target => crate::app::home::HomeFocus::Target,
             });
         }
@@ -505,6 +507,16 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if event.modifiers.is_empty() && focus.is_none() => {
                 if let Some(home) = self.state.home.as_mut() {
                     home.select_next(&queue);
+                }
+            }
+            // Shift+Enter is the newline, so plain Enter stays the submit key
+            // the composer already trained the operator on.
+            KeyCode::Enter
+                if event.modifiers == KeyModifiers::SHIFT
+                    && focus == Some(crate::app::home::HomeFocus::Prompt) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.append_prompt('\n');
                 }
             }
             KeyCode::Enter if event.modifiers.is_empty() => match focus {
@@ -2289,6 +2301,55 @@ navigate_workspace_down = "ctrl+j"
         assert!(app.state.home.is_some());
         // Home covers the panes, so the click must not reach the one behind it.
         assert_eq!(app.state.workspaces[0].focused_pane_id(), before);
+    }
+
+    /// 1a-4: `Shift+Enter` extends the prompt, plain `Enter` still submits, and
+    /// `Esc` closes an open picker before it closes the composer.
+    #[tokio::test]
+    async fn shift_enter_adds_a_prompt_line_and_escape_closes_the_picker_first() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        {
+            let home = app.state.home.as_mut().expect("home");
+            home.focus = Some(crate::app::home::HomeFocus::Prompt);
+            home.prompt = "first".into();
+        }
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::SHIFT))
+            .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.clone()),
+            Some("first\nx".to_string()),
+            "shift+enter must insert a newline rather than dispatch"
+        );
+
+        // Esc unwinds one layer at a time: picker, then composer, then home.
+        {
+            let home = app.state.home.as_mut().expect("home");
+            home.focus = Some(crate::app::home::HomeFocus::Workspace);
+            home.picker = Some(crate::app::home::HomePicker::Workspace);
+        }
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        let home = app.state.home.as_ref().expect("home stays open");
+        assert!(home.picker.is_none(), "esc closes the picker first");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Workspace));
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .expect("home stays open")
+            .focus
+            .is_none());
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        assert!(app.state.home.is_none(), "the third esc closes home");
     }
 
     #[tokio::test]
