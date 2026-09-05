@@ -100,18 +100,40 @@ pub(crate) enum HomeTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HomeWorkspace {
+    CurrentCheckout,
+    NewWorktree,
+    PreviousWorktree(PathBuf),
+}
+
+impl HomeWorkspace {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::CurrentCheckout => "⌂ Current checkout".into(),
+            Self::NewWorktree => "⎇ New worktree".into(),
+            Self::PreviousWorktree(path) => {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                format!("↺ Previous worktree ({name})")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeDispatchPlan {
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     pub(crate) directory: PathBuf,
+    pub(crate) workspace: HomeWorkspace,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
 }
 
-/// Placeholder option of the workspace picker until slice 1b fills it.
-pub(crate) const CURRENT_CHECKOUT_LABEL: &str = "Current checkout";
 /// Shown when no pane in the selected directory has reported a branch yet.
 pub(crate) const UNKNOWN_REF_LABEL: &str = "current branch";
 
@@ -159,10 +181,14 @@ pub(crate) struct HomeState {
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     pub(crate) directory: PathBuf,
+    pub(crate) workspace: HomeWorkspace,
     pub(crate) target: HomeTarget,
     pub(crate) picker: Option<HomePicker>,
     pub(crate) picker_selected: usize,
     pub(crate) directory_filter: DropdownFilterState,
+    workspace_options: Vec<HomeWorkspace>,
+    pub(crate) pending_dispatch: Option<HomeDispatchPlan>,
+    pub(crate) dispatch_error: Option<String>,
 }
 
 impl Default for HomeState {
@@ -178,15 +204,35 @@ impl Default for HomeState {
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
             directory: default_directory(),
+            workspace: HomeWorkspace::CurrentCheckout,
             target: HomeTarget::NewSpace,
             picker: None,
             picker_selected: 0,
             directory_filter: DropdownFilterState::default(),
+            workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
+            pending_dispatch: None,
+            dispatch_error: None,
         }
     }
 }
 
 impl HomeState {
+    #[cfg(test)]
+    pub(crate) fn test_with_prompt(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_focus(focus: HomeFocus) -> Self {
+        Self {
+            focus: Some(focus),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn with_catalog(catalog: HomeCatalog) -> Self {
         Self {
             catalog,
@@ -314,6 +360,9 @@ impl HomeState {
     }
 
     pub(crate) fn close_composer_or_home(&mut self) -> bool {
+        if self.pending_dispatch.is_some() {
+            return false;
+        }
         if self.picker.take().is_some() {
             return false;
         }
@@ -363,6 +412,7 @@ impl HomeState {
 
     pub(crate) fn append_prompt(&mut self, character: char) {
         self.prompt.push(character);
+        self.dispatch_error = None;
     }
 
     pub(crate) fn append_reply(&mut self, character: char) {
@@ -377,6 +427,7 @@ impl HomeState {
 
     pub(crate) fn backspace_prompt(&mut self) {
         self.prompt.pop();
+        self.dispatch_error = None;
     }
 
     pub(crate) fn dispatch_plan(&self) -> Result<HomeDispatchPlan, String> {
@@ -417,11 +468,16 @@ impl HomeState {
         }
         argv.push(prompt.into());
 
+        let directory = match &self.workspace {
+            HomeWorkspace::PreviousWorktree(path) => path.clone(),
+            HomeWorkspace::CurrentCheckout | HomeWorkspace::NewWorktree => self.directory.clone(),
+        };
         Ok(HomeDispatchPlan {
             agent: self.agent,
             model: self.model.clone(),
             effort: self.effort.clone(),
-            directory: self.directory.clone(),
+            directory,
+            workspace: self.workspace.clone(),
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -438,6 +494,19 @@ pub(crate) struct HomeCounts {
     pub blocked: usize,
     pub agents: usize,
     pub spaces: usize,
+}
+
+pub(crate) fn home_workspace_options_from_entries(
+    entries: &[crate::app::state::WorktreeOpenEntry],
+) -> Vec<HomeWorkspace> {
+    let mut options = vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree];
+    options.extend(
+        entries
+            .iter()
+            .filter(|entry| entry.is_linked_worktree)
+            .map(|entry| HomeWorkspace::PreviousWorktree(entry.path.clone())),
+    );
+    options
 }
 
 impl crate::app::state::AppState {
@@ -635,10 +704,27 @@ impl crate::app::state::AppState {
         vec![branch.unwrap_or_else(|| UNKNOWN_REF_LABEL.to_string())]
     }
 
-    /// The single workspace option the bottom-left picker shows. Slice 1b adds
-    /// the new and previous worktree options.
-    pub(crate) fn home_workspace_options(&self) -> Vec<String> {
-        vec![CURRENT_CHECKOUT_LABEL.to_string()]
+    pub(crate) fn home_workspace_options(&self) -> Vec<HomeWorkspace> {
+        self.home
+            .as_ref()
+            .map(|home| home.workspace_options.clone())
+            .unwrap_or_default()
+    }
+
+    fn refresh_home_workspace_options(&mut self) {
+        let directory = self.home_directory();
+        let entries = super::worktrees::worktree_repo_root(&directory)
+            .and_then(|repo_root| {
+                super::worktrees::worktree_entries_for_repo(&repo_root, |_| None).ok()
+            })
+            .unwrap_or_default();
+        let options = home_workspace_options_from_entries(&entries);
+        if let Some(home) = self.home.as_mut() {
+            home.workspace_options = options;
+            if !home.workspace_options.contains(&home.workspace) {
+                home.workspace = HomeWorkspace::CurrentCheckout;
+            }
+        }
     }
 
     pub(crate) fn home_target_options(&self) -> Vec<HomeTarget> {
@@ -690,6 +776,9 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn home_open_picker(&mut self, picker: HomePicker) {
+        if picker == HomePicker::Workspace {
+            self.refresh_home_workspace_options();
+        }
         if picker == HomePicker::Directory {
             if let Some(home) = self.home.as_mut() {
                 home.directory_filter.set_query("");
@@ -719,9 +808,12 @@ impl crate::app::state::AppState {
                     .home_directory_options()
                     .iter()
                     .position(|directory| directory == &home.directory),
-                // Both placeholders carry a single option, so the cursor has
-                // nowhere else to be until 1b and 1c give them real lists.
-                HomePicker::Workspace | HomePicker::Ref => Some(0),
+                HomePicker::Workspace => self
+                    .home_workspace_options()
+                    .iter()
+                    .position(|workspace| workspace == &home.workspace),
+                // Slice 1c replaces the single ref placeholder.
+                HomePicker::Ref => Some(0),
                 HomePicker::Target => self
                     .home_target_options()
                     .iter()
@@ -830,10 +922,19 @@ impl crate::app::state::AppState {
                     if let Some(home) = self.home.as_mut() {
                         home.directory = directory;
                     }
+                    self.refresh_home_workspace_options();
                 }
             }
-            // Selecting the only option cannot change anything.
-            HomePicker::Workspace | HomePicker::Ref => {}
+            HomePicker::Workspace => {
+                if let Some(workspace) = self.home_workspace_options().get(selected).cloned() {
+                    if let Some(home) = self.home.as_mut() {
+                        home.workspace = workspace;
+                        home.dispatch_error = None;
+                    }
+                }
+            }
+            // Selecting the only ref option cannot change anything.
+            HomePicker::Ref => {}
             HomePicker::Target => {
                 if let Some(target) = self.home_target_options().get(selected).cloned() {
                     if let Some(home) = self.home.as_mut() {
@@ -1134,6 +1235,7 @@ mod tests {
                 model: "gpt-5.6-sol".into(),
                 effort: Some("ultra".into()),
                 directory: PathBuf::from("/tmp/frozen-plan"),
+                workspace: HomeWorkspace::CurrentCheckout,
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![
@@ -1146,6 +1248,80 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn workspace_options_keep_fixed_choices_first_then_linked_worktrees() {
+        let entries = vec![
+            crate::app::state::WorktreeOpenEntry {
+                path: PathBuf::from("/repo/root"),
+                branch: Some("main".into()),
+                is_linked_worktree: false,
+                already_open_ws_idx: None,
+            },
+            crate::app::state::WorktreeOpenEntry {
+                path: PathBuf::from("/worktrees/alpha"),
+                branch: Some("alpha".into()),
+                is_linked_worktree: true,
+                already_open_ws_idx: Some(1),
+            },
+            crate::app::state::WorktreeOpenEntry {
+                path: PathBuf::from("/worktrees/beta"),
+                branch: Some("beta".into()),
+                is_linked_worktree: true,
+                already_open_ws_idx: None,
+            },
+        ];
+
+        assert_eq!(
+            home_workspace_options_from_entries(&entries),
+            vec![
+                HomeWorkspace::CurrentCheckout,
+                HomeWorkspace::NewWorktree,
+                HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/alpha")),
+                HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/beta")),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_plan_applies_each_workspace_variant() {
+        let mut home = HomeState {
+            prompt: "run the checks".into(),
+            directory: PathBuf::from("/repo/root"),
+            workspace: HomeWorkspace::CurrentCheckout,
+            ..Default::default()
+        };
+        let current = home.dispatch_plan().expect("current checkout plan");
+        assert_eq!(current.directory, PathBuf::from("/repo/root"));
+        assert_eq!(current.workspace, HomeWorkspace::CurrentCheckout);
+
+        home.workspace = HomeWorkspace::NewWorktree;
+        let new_worktree = home.dispatch_plan().expect("new worktree plan");
+        assert_eq!(new_worktree.directory, PathBuf::from("/repo/root"));
+        assert_eq!(new_worktree.workspace, HomeWorkspace::NewWorktree);
+
+        home.workspace = HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/old"));
+        let previous = home.dispatch_plan().expect("previous worktree plan");
+        assert_eq!(previous.directory, PathBuf::from("/worktrees/old"));
+        assert_eq!(
+            previous.workspace,
+            HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/old"))
+        );
+    }
+
+    #[test]
+    fn pending_worktree_creation_keeps_home_open() {
+        let mut home = HomeState {
+            prompt: "wait for the worktree".into(),
+            workspace: HomeWorkspace::NewWorktree,
+            ..Default::default()
+        };
+        home.pending_dispatch = Some(home.dispatch_plan().expect("pending plan"));
+
+        assert!(!home.close_composer_or_home());
+        assert_eq!(home.focus, Some(HomeFocus::Prompt));
+        assert!(home.pending_dispatch.is_some());
     }
 
     #[test]

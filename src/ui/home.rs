@@ -464,10 +464,7 @@ fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
 /// slice 1b folds the folder into the workspace choice.
 fn secondary_specs(app: &AppState, home: &HomeState) -> [(HomeFocus, String); 4] {
     [
-        (
-            HomeFocus::Workspace,
-            format!("⌂ {} ▾", workspace_label(app)),
-        ),
+        (HomeFocus::Workspace, workspace_label(home)),
         (
             HomeFocus::Directory,
             format!("{} ▾", directory_label(&home.directory)),
@@ -480,11 +477,12 @@ fn secondary_specs(app: &AppState, home: &HomeState) -> [(HomeFocus, String); 4]
     ]
 }
 
-fn workspace_label(app: &AppState) -> String {
-    app.home_workspace_options()
-        .first()
-        .cloned()
-        .unwrap_or_else(|| crate::app::home::CURRENT_CHECKOUT_LABEL.to_string())
+fn workspace_label(home: &HomeState) -> String {
+    if home.pending_dispatch.is_some() {
+        "creating worktree…".into()
+    } else {
+        format!("{} ▾", home.workspace.label())
+    }
 }
 
 fn ref_label(app: &AppState) -> String {
@@ -683,7 +681,11 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|directory| directory_label(directory))
             .collect(),
-        HomePicker::Workspace => app.home_workspace_options(),
+        HomePicker::Workspace => app
+            .home_workspace_options()
+            .iter()
+            .map(crate::app::home::HomeWorkspace::label)
+            .collect(),
         HomePicker::Ref => app.home_ref_options(),
         HomePicker::Target => app
             .home_target_options()
@@ -1374,6 +1376,26 @@ pub(super) fn render_home(
         )),
         hint,
     );
+    if let (Some(composer), Some(error)) = (
+        composer,
+        app.home
+            .as_ref()
+            .and_then(|home| home.dispatch_error.as_deref()),
+    ) {
+        let error_row = Rect::new(
+            composer.frame.x,
+            composer.frame.bottom(),
+            composer.frame.width,
+            1,
+        );
+        if error_row.bottom() <= area.bottom() {
+            frame.render_widget(
+                Paragraph::new(truncate_end(error, error_row.width as usize))
+                    .style(Style::default().fg(app.palette.red)),
+                error_row,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1682,6 +1704,60 @@ mod tests {
             "dropdown top must match field bottom"
         );
         assert!(popup.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn workspace_dropdown_opens_downward_and_renders_fixed_options_first() {
+        let mut app = AppState::test_new();
+        let home = HomeState::test_with_focus(HomeFocus::Workspace);
+        app.home = Some(home);
+        app.home_open_picker(HomePicker::Workspace);
+        let queue = [blocked(0)];
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = bands(area, queue.len());
+        let composer = layout.composer.expect("composer should fit");
+        let home = app.home.as_ref().expect("home");
+        let field = composer_field_rect(&app, home, composer, HomeFocus::Workspace)
+            .expect("workspace field");
+        let popup = picker_popup_rect(&app, home, composer, area).expect("workspace picker");
+        let buffer = draw_home(&app, &queue, area);
+
+        assert_eq!(popup.y, field.bottom());
+        assert!(popup.bottom() <= area.bottom());
+        assert!(row_text(&buffer, popup, popup.y).contains("⌂ Current checkout"));
+        assert!(row_text(&buffer, popup, popup.y + 1).contains("⎇ New worktree"));
+    }
+
+    #[test]
+    fn composer_renders_worktree_progress_and_inline_failure() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::test_with_prompt("keep this prompt");
+        home.pending_dispatch = Some(crate::app::home::HomeDispatchPlan {
+            agent: crate::detect::Agent::Codex,
+            model: "gpt-5.3-codex".into(),
+            effort: Some("high".into()),
+            directory: "/repo/herdr".into(),
+            workspace: crate::app::home::HomeWorkspace::NewWorktree,
+            target: HomeTarget::NewSpace,
+            prompt: home.prompt.clone(),
+            argv: vec!["codex".into(), "keep this prompt".into()],
+        });
+        app.home = Some(home);
+        let queue = [blocked(0)];
+        let area = Rect::new(0, 0, 100, 20);
+        let composer = bands(area, queue.len()).composer.expect("composer");
+
+        let creating = draw_home(&app, &queue, area);
+        assert!(
+            row_text(&creating, composer.frame, composer.bottom.y).contains("creating worktree…")
+        );
+
+        let home = app.home.as_mut().expect("home");
+        home.pending_dispatch = None;
+        home.dispatch_error = Some("branch already exists".into());
+        let failed = draw_home(&app, &queue, area);
+        assert!(row_text(&failed, composer.frame, composer.frame.bottom())
+            .contains("branch already exists"));
     }
 
     #[test]
@@ -2369,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn the_workspace_and_ref_pickers_offer_their_single_placeholder_option() {
+    fn the_workspace_picker_puts_current_then_new_first() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
 
@@ -2378,7 +2454,13 @@ mod tests {
             app.home.as_ref().and_then(|home| home.picker),
             Some(HomePicker::Workspace)
         );
-        assert_eq!(app.home_workspace_options(), vec!["Current checkout"]);
+        assert_eq!(
+            &app.home_workspace_options()[..2],
+            &[
+                crate::app::home::HomeWorkspace::CurrentCheckout,
+                crate::app::home::HomeWorkspace::NewWorktree,
+            ]
+        );
         assert_eq!(app.home_ref_options(), vec!["current branch"]);
         app.home_accept_picker();
         assert!(app.home.as_ref().and_then(|home| home.picker).is_none());
