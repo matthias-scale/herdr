@@ -1191,9 +1191,9 @@ impl DockSurface {
     pub fn placeholder(self) -> Option<String> {
         matches!(
             self,
-            Self::Terminal | Self::Files | Self::Diff | Self::Pr | Self::Linear | Self::Agents
+            Self::Terminal | Self::Files | Self::Linear | Self::Agents
         )
-        .then(|| format!("{}: coming in slice 3b/3c/5b", self.title()))
+        .then(|| format!("{}: coming in a later slice", self.title()))
     }
 }
 
@@ -2242,6 +2242,12 @@ pub struct AppState {
     /// Diff interaction state is attach-local TUI state. The whitespace choice
     /// survives surface switches for the lifetime of the client session.
     pub(crate) dock_diff_focused: bool,
+    /// Compact PR surface interaction state. TUI presentation state: the
+    /// pull request itself is a shared work-index fact, the open menu and the
+    /// staged confirmation are not.
+    pub(crate) dock_pr_focused: bool,
+    pub(crate) dock_pr_checkout_menu: Option<PrCheckoutChoice>,
+    pub(crate) dock_pr_pending_land: Option<PrLandConfirmation>,
     pub(crate) dock_diff_ignore_whitespace: bool,
     pub(crate) dock_diff_selected: usize,
     pub(crate) dock_diff_collapsed: std::collections::HashSet<String>,
@@ -3431,6 +3437,9 @@ impl AppState {
             dock_scroll: 0,
             dock_editor_focused: false,
             dock_diff_focused: false,
+            dock_pr_focused: false,
+            dock_pr_checkout_menu: None,
+            dock_pr_pending_land: None,
             dock_diff_ignore_whitespace: false,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),

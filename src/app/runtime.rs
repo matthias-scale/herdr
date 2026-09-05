@@ -415,17 +415,25 @@ impl App {
             .work_view
             .as_ref()
             .and_then(|view| view.selected.clone());
+        let dock_pr_visible =
+            !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
+        let dock_pr_selection = dock_pr_visible
+            .then(|| crate::ui::dock::pr::focused_pr_key(&self.state))
+            .flatten();
         let detail_visible = self.state.work_view.is_some()
+            || dock_pr_visible
             || !self.state.dock_collapsed
                 && self.state.dock_tab == Some(crate::app::DockSurface::Home);
         self.start_work_item_detail_refresh_if_due(
             now,
-            if self.state.work_view.is_some() {
+            if self.state.work_view.is_some() || dock_pr_visible {
                 crate::app::state::DockHomeSection::Prs
             } else {
                 self.state.dock_home_section
             },
-            work_view_selection.or_else(|| self.state.dock_home_active_selection()),
+            work_view_selection
+                .or(dock_pr_selection)
+                .or_else(|| self.state.dock_home_active_selection()),
             detail_visible,
         );
         self.start_foreground_process_refresh_if_due(now);

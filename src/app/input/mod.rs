@@ -191,6 +191,9 @@ impl App {
         if self.handle_dock_diff_key(&key) {
             return None;
         }
+        if self.handle_dock_pr_key(&key) {
+            return None;
+        }
         if self.handle_dock_chooser_key(&key) {
             return None;
         }
@@ -550,6 +553,10 @@ impl App {
 
     pub(crate) fn handle_dock_diff_key_headless(&mut self, key: &TerminalKey) -> bool {
         self.state.popup_pane.is_none() && self.handle_dock_diff_key(key)
+    }
+
+    pub(crate) fn handle_dock_pr_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_pr_key(key)
     }
 
     /// Same for the surface chooser: an empty dock owns its card shortcuts
@@ -1328,28 +1335,135 @@ impl App {
         let Some((key, _, _)) = self.selected_pr_parts() else {
             return;
         };
-        let Some(number) = key.pr_number else {
-            return;
-        };
-        let Some(detail) = self.state.work_item_detail_cache.get(&key) else {
-            return;
-        };
-        let crate::ui::work_list_detail::PrLandStatus::Enabled(approval_signal) =
-            crate::ui::work_list_detail::pr_land_status(detail, &self.state.land_approval_label)
-        else {
-            return;
-        };
-        let Some(head_sha) = detail.head_sha.clone() else {
+        let Some(confirmation) = self.pr_land_confirmation(&key) else {
             return;
         };
         if let Some(view) = self.state.work_view.as_mut() {
-            view.pending_land = Some(crate::app::state::PrLandConfirmation {
-                repo: key.repo,
-                number,
-                head_sha,
-                approval_signal: approval_signal.confirmation_label(),
-            });
+            view.pending_land = Some(confirmation);
         }
+    }
+
+    /// The Land confirmation for `key`, or `None` when landing is disabled.
+    /// Shared by the full-screen view and the compact dock surface so both
+    /// gate on exactly the same evidence.
+    pub(crate) fn pr_land_confirmation(
+        &self,
+        key: &crate::app::state::WorkItemKey,
+    ) -> Option<crate::app::state::PrLandConfirmation> {
+        let number = key.pr_number?;
+        let detail = self.state.work_item_detail_cache.get(key)?;
+        let crate::ui::work_list_detail::PrLandStatus::Enabled(approval_signal) =
+            crate::ui::work_list_detail::pr_land_status(detail, &self.state.land_approval_label)
+        else {
+            return None;
+        };
+        let head_sha = detail.head_sha.clone()?;
+        Some(crate::app::state::PrLandConfirmation {
+            repo: key.repo.clone(),
+            number,
+            head_sha,
+            approval_signal: approval_signal.confirmation_label(),
+        })
+    }
+
+    /// Branch to check out for `key`: the fetched head, else the branch the
+    /// work index recorded for the pull request.
+    fn pr_head_ref(&self, key: &crate::app::state::WorkItemKey) -> Option<String> {
+        self.state
+            .work_item_detail_cache
+            .get(key)
+            .and_then(|detail| detail.head_ref_name.clone())
+            .or_else(|| {
+                self.state
+                    .work_index_snapshot
+                    .as_ref()?
+                    .items
+                    .iter()
+                    .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)
+                    .and_then(|item| item.branch.clone())
+            })
+    }
+
+    /// Keys of the compact PR surface: the same Check out and Land actions as
+    /// the full-screen view, over the focused pane's primary pull request.
+    fn handle_dock_pr_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Pr)
+            || !self.state.dock_pr_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        if self.state.dock_pr_pending_land.is_some() {
+            match event.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.state.request_pr_land = self.state.dock_pr_pending_land.take();
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => self.state.dock_pr_pending_land = None,
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = self.state.dock_pr_checkout_menu {
+            match event.code {
+                KeyCode::Up | KeyCode::Down => {
+                    self.state.dock_pr_checkout_menu = Some(match choice {
+                        crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                            crate::app::state::PrCheckoutChoice::NewWorktree
+                        }
+                        crate::app::state::PrCheckoutChoice::NewWorktree => {
+                            crate::app::state::PrCheckoutChoice::CurrentCheckout
+                        }
+                    });
+                }
+                KeyCode::Enter => self.open_dock_pr_checkout(choice),
+                KeyCode::Esc => self.state.dock_pr_checkout_menu = None,
+                _ => {}
+            }
+            return true;
+        }
+        match event.code {
+            KeyCode::Char('c') => {
+                self.state.dock_pr_checkout_menu = Some(Default::default());
+            }
+            KeyCode::Char('l') => self.stage_dock_pr_land(),
+            KeyCode::Esc => self.state.dock_pr_focused = false,
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_dock_pr_checkout(&mut self, choice: crate::app::state::PrCheckoutChoice) {
+        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return;
+        };
+        let Some(head) = self.pr_head_ref(&key) else {
+            return;
+        };
+        let Some(number) = key.pr_number else {
+            return;
+        };
+        let Some(url) = key.pr_url.clone() else {
+            return;
+        };
+        let pr = crate::app::home::HomePrContext {
+            url,
+            number,
+            repo: key.repo,
+        };
+        self.state.dock_pr_checkout_menu = None;
+        self.open_pr_home(head, choice, String::new(), pr);
+    }
+
+    fn stage_dock_pr_land(&mut self) {
+        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return;
+        };
+        self.state.dock_pr_pending_land = self.pr_land_confirmation(&key);
     }
 
     fn open_selected_symphony_workflow(&mut self) {
@@ -2333,6 +2447,7 @@ fn app_for_mouse_test() -> App {
         crate::api::EventHub::default(),
     );
     app.state.mode = Mode::Terminal;
+    app.state.sidebar_collapsed = false;
     // Deliberately not the shipped default (`Hidden`): these tests click on a
     // tab row, so they need one.
     app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
@@ -2580,6 +2695,87 @@ mod tests {
         app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_tab = Some(crate::app::DockSurface::Diff);
         assert!(app.state.dock_diff_ignore_whitespace);
+    }
+
+    #[test]
+    fn compact_pr_surface_keys_drive_the_5a_checkout_and_land_actions() {
+        let mut app = test_app();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
+        app.state.dock_pr_focused = true;
+
+        assert!(
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.state.dock_pr_checkout_menu,
+            Some(crate::app::state::PrCheckoutChoice::CurrentCheckout)
+        );
+        assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Down, KeyModifiers::empty())));
+        assert_eq!(
+            app.state.dock_pr_checkout_menu,
+            Some(crate::app::state::PrCheckoutChoice::NewWorktree)
+        );
+        assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.dock_pr_checkout_menu.is_none());
+
+        // Land is staged as a confirmation and only lands on an explicit yes,
+        // exactly as the full-screen view does.
+        let confirmation = crate::app::state::PrLandConfirmation {
+            repo: "owner/repo".into(),
+            number: 42,
+            head_sha: "abc123".into(),
+            approval_signal: "approved review".into(),
+        };
+        app.state.dock_pr_pending_land = Some(confirmation.clone());
+        assert!(
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()))
+        );
+        assert!(app.state.dock_pr_pending_land.is_none());
+        assert!(app.state.request_pr_land.is_none());
+        app.state.dock_pr_pending_land = Some(confirmation.clone());
+        assert!(
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()))
+        );
+        assert_eq!(app.state.request_pr_land, Some(confirmation));
+
+        app.state.dock_pr_focused = false;
+        assert!(
+            !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn compact_pr_land_gate_matches_the_full_screen_matrix() {
+        let mut app = test_app();
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            ticket_id: None,
+        };
+        assert!(app.pr_land_confirmation(&key).is_none());
+        for (states, merge, expected) in [
+            (vec!["SUCCESS"], "CLEAN", true),
+            (vec!["FAILURE"], "CLEAN", false),
+            (vec!["SUCCESS"], "BEHIND", false),
+            (Vec::new(), "CLEAN", false),
+        ] {
+            let mut detail = crate::work_index::WorkItemDetail::empty();
+            detail.actions = states
+                .iter()
+                .map(|state| crate::work_index::WorkItemAction {
+                    name: "check".into(),
+                    state: (*state).into(),
+                })
+                .collect();
+            detail.merge_state_status = Some(merge.into());
+            detail.head_sha = Some("abc123".into());
+            detail.review_decision = Some("APPROVED".into());
+            app.state.work_item_detail_cache.insert(key.clone(), detail);
+            assert_eq!(app.pr_land_confirmation(&key).is_some(), expected);
+        }
     }
 
     #[test]
