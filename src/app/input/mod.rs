@@ -166,6 +166,9 @@ impl App {
         if self.handle_dock_home_key(&key) {
             return None;
         }
+        if self.handle_dock_chooser_key(&key) {
+            return None;
+        }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
@@ -207,10 +210,82 @@ impl App {
         None
     }
 
+    /// Keys of the surface chooser: the card-grid shortcuts of an empty dock,
+    /// the open `+` menu, and the one keypress that restores a maximised dock.
+    fn handle_dock_chooser_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal || self.state.dock_collapsed {
+            return false;
+        }
+        let event = key.as_key_event();
+
+        if self.state.dock_surface_menu.is_some() {
+            let count = crate::app::DockSurface::ALL.len();
+            match event.code {
+                KeyCode::Esc => {
+                    self.state.dock_surface_menu = None;
+                }
+                KeyCode::Down => {
+                    if let Some(menu) = self.state.dock_surface_menu.as_mut() {
+                        menu.selected = (menu.selected + 1) % count;
+                    }
+                }
+                KeyCode::Up => {
+                    if let Some(menu) = self.state.dock_surface_menu.as_mut() {
+                        menu.selected = (menu.selected + count - 1) % count;
+                    }
+                }
+                KeyCode::Enter => {
+                    let selected = self
+                        .state
+                        .dock_surface_menu
+                        .and_then(|menu| crate::app::DockSurface::ALL.get(menu.selected).copied());
+                    if let Some(surface) = selected {
+                        if self.state.activate_dock_surface(surface) {
+                            self.state.dock_surface_menu = None;
+                        }
+                    }
+                }
+                KeyCode::Char(character) if event.modifiers.is_empty() => {
+                    if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
+                        if self.state.activate_dock_surface(surface) {
+                            self.state.dock_surface_menu = None;
+                        }
+                    }
+                }
+                _ => return false,
+            }
+            return true;
+        }
+
+        if self.state.dock_tab.is_some() || !self.state.dock_chooser_focused {
+            return false;
+        }
+        match event.code {
+            KeyCode::Char(character) if event.modifiers.is_empty() => {
+                match crate::app::DockSurface::from_shortcut(character) {
+                    Some(surface) => {
+                        self.state.activate_dock_surface(surface);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            KeyCode::Esc if self.state.dock_maximized => {
+                self.state.dock_maximized = false;
+                true
+            }
+            KeyCode::Esc => {
+                self.state.dock_chooser_focused = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
         if self.state.mode != Mode::Terminal
             || self.state.dock_collapsed
-            || self.state.dock_tab != crate::app::DockTab::Home
+            || self.state.dock_tab != Some(crate::app::DockSurface::Home)
             || !self.state.dock_home_focused
         {
             return false;
@@ -1953,7 +2028,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
         for (ws_idx, number) in pr_numbers.iter().enumerate() {
             let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
@@ -2092,7 +2167,7 @@ mod tests {
             let mut app = dock_home_test_app(&[10, 20]);
             match guard {
                 "collapsed" => app.state.dock_collapsed = true,
-                "other tab" => app.state.dock_tab = crate::app::DockTab::Context,
+                "other tab" => app.state.dock_tab = Some(crate::app::DockSurface::Context),
                 "unfocused" => app.state.dock_home_focused = false,
                 _ => unreachable!(),
             }
@@ -2179,10 +2254,10 @@ navigate_workspace_down = "ctrl+j"
             "20"
         );
 
-        app.state.dock_tab = crate::app::DockTab::Editor;
+        app.state.dock_tab = Some(crate::app::DockSurface::Editor);
         app.state.dock_editor_focused = true;
         assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = false;
         assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
     }

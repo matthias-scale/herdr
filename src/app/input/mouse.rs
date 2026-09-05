@@ -552,14 +552,52 @@ impl AppState {
                 if self.on_dock_toggle(mouse.column, mouse.row) {
                     self.dock_collapsed = !self.dock_collapsed;
                     self.dock_home_focused =
-                        !self.dock_collapsed && self.dock_tab == crate::app::DockTab::Home;
+                        !self.dock_collapsed && self.dock_tab == Some(crate::app::DockSurface::Home);
                     self.mark_session_dirty();
                     return None;
                 }
+                // The open chooser owns every click while it is up: a row
+                // selects, anything else dismisses it before the click can
+                // reach the strip underneath.
+                if self.dock_surface_menu.is_some() {
+                    if let Some(surface) = self.dock_surface_menu_at(mouse.column, mouse.row) {
+                        if self.activate_dock_surface(surface) {
+                            self.dock_surface_menu = None;
+                        }
+                        return None;
+                    }
+                    self.dock_surface_menu = None;
+                    if self.on_dock_plus(mouse.column, mouse.row) {
+                        return None;
+                    }
+                }
+                if self.on_dock_maximize(mouse.column, mouse.row) {
+                    self.toggle_dock_maximized();
+                    self.mark_session_dirty();
+                    return None;
+                }
+                if self.on_dock_tab_close(mouse.column, mouse.row) {
+                    if let Some(surface) = self.dock_tab {
+                        self.close_dock_surface(surface);
+                        self.dock_editor_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Editor);
+                        self.dock_home_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Home);
+                    }
+                    return None;
+                }
+                if self.on_dock_plus(mouse.column, mouse.row) {
+                    self.toggle_dock_surface_menu();
+                    return None;
+                }
+                if let Some(surface) = self.dock_surface_card_at(mouse.column, mouse.row) {
+                    self.activate_dock_surface(surface);
+                    return None;
+                }
                 if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
-                    self.dock_tab = tab;
-                    self.dock_editor_focused = tab == crate::app::DockTab::Editor;
-                    self.dock_home_focused = tab == crate::app::DockTab::Home;
+                    self.open_dock_surface(tab);
+                    self.dock_editor_focused = tab == crate::app::DockSurface::Editor;
+                    self.dock_home_focused = tab == crate::app::DockSurface::Home;
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -615,7 +653,11 @@ impl AppState {
                     return None;
                 }
                 if in_dock {
-                    self.dock_editor_focused = self.dock_tab == crate::app::DockTab::Editor;
+                    self.dock_editor_focused =
+                        self.dock_tab == Some(crate::app::DockSurface::Editor);
+                    // Clicking an empty dock hands it the keyboard so the card
+                    // shortcuts work without a tab to focus first.
+                    self.dock_chooser_focused = self.dock_tab.is_none();
                     return None;
                 }
 
@@ -2344,7 +2386,7 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = true;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.view.dock_rect = Rect::new(79, 0, 1, 20);
         app.state.view.dock_handle_rect = app.state.view.dock_rect;
         let focused_before = app
@@ -2380,12 +2422,12 @@ mod tests {
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 94, 0));
 
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Shortcuts));
         assert!(!app.state.dock_home_focused);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 82, 0));
 
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(app.state.dock_home_focused);
     }
 
@@ -2411,7 +2453,7 @@ mod tests {
             })
             .expect("work context");
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Context;
+        app.state.dock_tab = Some(crate::app::DockSurface::Context);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let link = app
             .state
@@ -2452,7 +2494,7 @@ mod tests {
         ));
 
         assert!(!app.state.dock_collapsed);
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Shortcuts));
     }
 
     #[test]
@@ -2483,7 +2525,7 @@ mod tests {
             })
             .expect("work context");
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let tab = app.state.view.dock_home_tab_hit_areas[0];
         let expected_key = app.state.dock_home_projection().rows[0].key.clone();
@@ -2549,7 +2591,7 @@ mod tests {
             review_terminal_ids.push(terminal_id);
         }
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let stale_first_tab = app.state.view.dock_home_tab_hit_areas[0];
         let second_key = app.state.dock_home_projection().rows[1].key.clone();

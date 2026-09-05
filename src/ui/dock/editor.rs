@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, AppState, DockTab, Mode},
+    app::{App, AppState, DockSurface, Mode},
     layout::PaneId,
     pane::{AgentDetection, PaneLaunchEnv},
     terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry},
@@ -44,7 +44,7 @@ fn focused_editor_terminal_id(app: &AppState) -> Option<TerminalId> {
     if app.mode != Mode::Terminal
         || !app.dock_editor_focused
         || app.dock_collapsed
-        || app.dock_tab != DockTab::Editor
+        || app.dock_tab != Some(DockSurface::Editor)
     {
         return None;
     }
@@ -158,14 +158,14 @@ impl App {
             .dock_editor_requested_paths
             .insert(agent_pane_id, path);
         self.state.dock_collapsed = false;
-        self.state.dock_tab = DockTab::Editor;
+        self.state.dock_tab = Some(DockSurface::Editor);
         self.state.dock_editor_focused = true;
         self.ensure_dock_editor();
     }
 
     pub(crate) fn ensure_dock_editor(&mut self) {
         self.reap_orphaned_dock_editors();
-        if self.state.dock_collapsed || self.state.dock_tab != DockTab::Editor {
+        if self.state.dock_collapsed || self.state.dock_tab != Some(DockSurface::Editor) {
             return;
         }
         let Some((agent_pane_id, cwd)) = focused_agent_pane(&self.state, &self.terminal_runtimes)
@@ -238,7 +238,7 @@ impl App {
     }
 
     pub(crate) fn resize_dock_editor(&self) {
-        if self.state.dock_collapsed || self.state.dock_tab != DockTab::Editor {
+        if self.state.dock_collapsed || self.state.dock_tab != Some(DockSurface::Editor) {
             return;
         }
         let Some(terminal_id) = editor_terminal_id_for_focused_agent(&self.state) else {
@@ -512,12 +512,12 @@ mod tests {
         let runtime_count = app.terminal_runtimes.len();
 
         app.ensure_dock_editor();
-        app.state.dock_tab = DockTab::Shortcuts;
+        app.state.dock_tab = Some(DockSurface::Shortcuts);
         app.ensure_dock_editor();
         app.state.dock_collapsed = true;
         app.ensure_dock_editor();
         app.state.dock_collapsed = false;
-        app.state.dock_tab = DockTab::Editor;
+        app.state.dock_tab = Some(DockSurface::Editor);
         app.ensure_dock_editor();
 
         assert_eq!(
@@ -561,7 +561,7 @@ mod tests {
             .insert(editor_terminal_id.clone(), runtime);
         app.state.dock_collapsed = false;
         // Home is the default tab now; the editor only resizes on its own tab.
-        app.state.dock_tab = DockTab::Editor;
+        app.state.dock_tab = Some(DockSurface::Editor);
         app.state.view.dock_body_rect = Rect::new(0, 0, 18, 5);
         app.state.dock_editor_sessions.insert(
             agent_pane_id,

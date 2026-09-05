@@ -816,7 +816,12 @@ pub(crate) struct SidebarPresentationState {
 pub(crate) struct DockPresentationState {
     pub(crate) width: u16,
     pub(crate) collapsed: bool,
-    pub(crate) tab: DockTab,
+    /// Active surface. `None` while the dock is a chooser with nothing open.
+    pub(crate) tab: Option<DockSurface>,
+    pub(crate) open_surfaces: Vec<DockSurface>,
+    pub(crate) maximized: bool,
+    pub(crate) surface_menu: Option<DockSurfaceMenu>,
+    pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
     pub(crate) editor_focused: bool,
     /// Selection inside the home tab. Stored as a work-item key, never an
@@ -838,7 +843,11 @@ impl Default for DockPresentationState {
         Self {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
-            tab: DockTab::Home,
+            tab: Some(DockSurface::Home),
+            open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            maximized: false,
+            surface_menu: None,
+            chooser_focused: false,
             scroll: 0,
             editor_focused: false,
             home_selection: None,
@@ -1004,16 +1013,50 @@ pub enum ViewLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DockTab {
+pub enum DockSurface {
     Home,
+    Terminal,
+    Files,
+    Diff,
+    Pr,
+    Linear,
+    Agents,
     Editor,
     Shortcuts,
     Context,
     Scratchpad,
 }
 
-impl DockTab {
-    pub const ALL: [Self; 5] = [
+impl DockSurface {
+    /// Every surface the chooser can open, in menu order.
+    pub const ALL: [Self; 11] = [
+        Self::Terminal,
+        Self::Files,
+        Self::Diff,
+        Self::Pr,
+        Self::Linear,
+        Self::Agents,
+        Self::Home,
+        Self::Editor,
+        Self::Shortcuts,
+        Self::Context,
+        Self::Scratchpad,
+    ];
+
+    /// The card grid of the empty dock, each with its single-key shortcut.
+    pub const CARDS: [Self; 6] = [
+        Self::Terminal,
+        Self::Files,
+        Self::Diff,
+        Self::Pr,
+        Self::Linear,
+        Self::Agents,
+    ];
+
+    /// Surfaces a dock opens with. Keeping the pre-chooser tab strip as the
+    /// default set makes the rename behaviour-neutral: the same five tabs are
+    /// there, in the same order, until the user closes one.
+    pub const DEFAULT_OPEN: [Self; 5] = [
         Self::Home,
         Self::Editor,
         Self::Shortcuts,
@@ -1030,18 +1073,81 @@ impl DockTab {
             // Five labels plus one space each must fit the 32-column default
             // dock; longer names truncate their left neighbour instead.
             Self::Scratchpad => "note",
+            Self::Terminal => "term",
+            Self::Files => "files",
+            Self::Diff => "diff",
+            Self::Pr => "pr",
+            Self::Linear => "linear",
+            Self::Agents => "agents",
         }
     }
 
-    pub fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+    /// Title used by the chooser card grid and the `+` menu.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Editor => "Editor",
+            Self::Shortcuts => "Shortcuts",
+            Self::Context => "Context",
+            Self::Scratchpad => "Scratchpad",
+            Self::Terminal => "Terminal",
+            Self::Files => "Files",
+            Self::Diff => "Diff",
+            Self::Pr => "PR",
+            Self::Linear => "Linear",
+            Self::Agents => "Agents",
+        }
     }
 
-    pub fn previous(self) -> Self {
-        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
-        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Home => "work index",
+            Self::Editor => "edit files",
+            Self::Shortcuts => "keybinds",
+            Self::Context => "pane facts",
+            Self::Scratchpad => "notes",
+            Self::Terminal => "shell here",
+            Self::Files => "browse",
+            Self::Diff => "vs base",
+            Self::Pr => "this branch",
+            Self::Linear => "ticket",
+            Self::Agents => "subagents",
+        }
     }
+
+    /// Single-key shortcut of the empty-dock card grid.
+    pub fn shortcut(self) -> Option<char> {
+        match self {
+            Self::Terminal => Some('T'),
+            Self::Files => Some('F'),
+            Self::Diff => Some('D'),
+            Self::Pr => Some('P'),
+            Self::Linear => Some('L'),
+            Self::Agents => Some('A'),
+            _ => None,
+        }
+    }
+
+    pub fn from_shortcut(key: char) -> Option<Self> {
+        let key = key.to_ascii_uppercase();
+        Self::CARDS
+            .into_iter()
+            .find(|surface| surface.shortcut() == Some(key))
+    }
+
+    /// Placeholder body until the surface gets its implementation slice.
+    pub fn placeholder(self) -> Option<String> {
+        matches!(
+            self,
+            Self::Terminal | Self::Files | Self::Diff | Self::Pr | Self::Linear | Self::Agents
+        )
+        .then(|| format!("{}: coming in slice 3b/3c/5b", self.title()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DockSurfaceMenu {
+    pub(crate) selected: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1123,6 +1229,16 @@ pub struct ViewState {
     pub dock_divider_rect: Rect,
     pub dock_tab_bar_rect: Rect,
     pub dock_tab_hit_areas: Vec<Rect>,
+    /// Close glyph of the active tab; empty when no surface is open.
+    pub dock_tab_close_rect: Rect,
+    /// The `+` that opens the surface chooser.
+    pub dock_plus_rect: Rect,
+    /// The `⤢` that maximises the dock.
+    pub dock_maximize_rect: Rect,
+    /// One rect per `DockSurface::CARDS` entry of the empty-dock grid.
+    pub dock_surface_card_hit_areas: Vec<Rect>,
+    /// Geometry of the open `+` menu.
+    pub(crate) dock_surface_menu_layout: Option<crate::ui::dropdown::DropdownLayout>,
     pub dock_home_section_hit_areas: Vec<Rect>,
     pub dock_home_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
@@ -1942,7 +2058,17 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub dock_width: u16,
     pub dock_collapsed: bool,
-    pub dock_tab: DockTab,
+    /// Active dock surface, `None` when nothing is open and the dock shows the
+    /// surface chooser. TUI presentation state; never leaves the client.
+    pub dock_tab: Option<DockSurface>,
+    /// Surfaces open as tabs, in strip order. TUI presentation state.
+    pub dock_open_surfaces: Vec<DockSurface>,
+    /// Dock takes the whole main area. TUI presentation state.
+    pub dock_maximized: bool,
+    /// Open `+` chooser dropdown. TUI presentation state.
+    pub(crate) dock_surface_menu: Option<DockSurfaceMenu>,
+    /// Keyboard focus sits on the chooser card grid. TUI presentation state.
+    pub(crate) dock_chooser_focused: bool,
     pub dock_scroll: u16,
     pub(crate) dock_editor_focused: bool,
     /// Selection inside the dock home tab, swapped per client through
@@ -2326,7 +2452,7 @@ impl AppState {
     /// editing it is the deliberate one.
     pub(crate) fn show_scratchpad_tab(&mut self) {
         self.dock_collapsed = false;
-        self.dock_tab = DockTab::Scratchpad;
+        self.open_dock_surface(DockSurface::Scratchpad);
         self.dock_editor_focused = false;
     }
 
@@ -2414,10 +2540,74 @@ impl AppState {
         );
     }
 
+    /// Open `surface` as a tab and make it active. Already-open surfaces are
+    /// only reactivated, so the strip order never shuffles under the user.
+    pub(crate) fn open_dock_surface(&mut self, surface: DockSurface) {
+        if !self.dock_open_surfaces.contains(&surface) {
+            self.dock_open_surfaces.push(surface);
+        }
+        self.dock_tab = Some(surface);
+        self.dock_surface_menu = None;
+        self.dock_chooser_focused = false;
+    }
+
+    /// Close `surface`. The active surface moves to the neighbour that took its
+    /// place, or to `None` when the dock is left empty and becomes a chooser.
+    pub(crate) fn close_dock_surface(&mut self, surface: DockSurface) {
+        let Some(index) = self
+            .dock_open_surfaces
+            .iter()
+            .position(|open| *open == surface)
+        else {
+            return;
+        };
+        self.dock_open_surfaces.remove(index);
+        if self.dock_tab != Some(surface) {
+            return;
+        }
+        self.dock_tab = self
+            .dock_open_surfaces
+            .get(index)
+            .or_else(|| self.dock_open_surfaces.get(index.saturating_sub(1)))
+            .copied();
+        self.dock_scroll = 0;
+        if self.dock_tab.is_none() {
+            self.dock_editor_focused = false;
+            self.dock_home_focused = false;
+            self.dock_chooser_focused = true;
+        }
+    }
+
+    pub(crate) fn toggle_dock_maximized(&mut self) {
+        self.dock_maximized = !self.dock_maximized;
+    }
+
+    /// Adjacent open surface, wrapping. `None` when nothing is open.
+    pub(crate) fn adjacent_dock_surface(&self, forward: bool) -> Option<DockSurface> {
+        let open = &self.dock_open_surfaces;
+        if open.is_empty() {
+            return None;
+        }
+        let current = self
+            .dock_tab
+            .and_then(|tab| open.iter().position(|surface| *surface == tab))
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % open.len()
+        } else {
+            (current + open.len() - 1) % open.len()
+        };
+        open.get(next).copied()
+    }
+
     pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
         std::mem::swap(&mut self.dock_width, &mut other.width);
         std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
+        std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
+        std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
+        std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
+        std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
@@ -2868,6 +3058,11 @@ impl AppState {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_tab_close_rect: Rect::default(),
+                dock_plus_rect: Rect::default(),
+                dock_maximize_rect: Rect::default(),
+                dock_surface_card_hit_areas: Vec::new(),
+                dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
@@ -2899,7 +3094,11 @@ impl AppState {
             sidebar_max_width: 36,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: DockTab::Home,
+            dock_tab: Some(DockSurface::Home),
+            dock_open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_maximized: false,
+            dock_surface_menu: None,
+            dock_chooser_focused: false,
             dock_scroll: 0,
             dock_editor_focused: false,
             dock_home_selection: None,

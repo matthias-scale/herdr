@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::app::state::{AppState, DockTab};
+use crate::app::state::{AppState, DockSurface};
 
 impl AppState {
     pub(crate) fn on_dock_toggle(&self, col: u16, row: u16) -> bool {
@@ -11,7 +11,7 @@ impl AppState {
         !self.dock_collapsed && rect_contains(self.view.dock_divider_rect, col, row)
     }
 
-    pub(crate) fn dock_tab_at(&self, col: u16, row: u16) -> Option<DockTab> {
+    pub(crate) fn dock_tab_at(&self, col: u16, row: u16) -> Option<DockSurface> {
         if self.dock_collapsed {
             return None;
         }
@@ -19,11 +19,66 @@ impl AppState {
             .dock_tab_hit_areas
             .iter()
             .position(|area| rect_contains(*area, col, row))
-            .and_then(|index| DockTab::ALL.get(index).copied())
+            .and_then(|index| self.dock_open_surfaces.get(index).copied())
+    }
+
+    /// The close glyph of the active tab.
+    pub(crate) fn on_dock_tab_close(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_tab_close_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_plus(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_plus_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_maximize(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_maximize_rect, col, row)
+    }
+
+    /// Card of the empty-dock grid under the cursor, available or not. The
+    /// caller decides what an unavailable card does, so the geometry stays a
+    /// pure function of the rect.
+    pub(crate) fn dock_surface_card_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        if self.dock_collapsed || self.dock_tab.is_some() {
+            return None;
+        }
+        self.view
+            .dock_surface_card_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+            .and_then(|index| DockSurface::CARDS.get(index).copied())
+    }
+
+    /// Row of the open `+` menu under the cursor.
+    pub(crate) fn dock_surface_menu_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        let layout = self.view.dock_surface_menu_layout?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+            .and_then(|index| DockSurface::ALL.get(index).copied())
+    }
+
+    /// Open `surface` unless the focused pane makes it useless. A disabled card
+    /// or menu row is inert rather than opening an empty surface.
+    pub(crate) fn activate_dock_surface(&mut self, surface: DockSurface) -> bool {
+        let (context, in_git_repo) = crate::ui::dock::chooser::focused_availability(self);
+        if !crate::ui::dock::chooser::surface_available(surface, &context, in_git_repo) {
+            return false;
+        }
+        self.open_dock_surface(surface);
+        self.dock_scroll = 0;
+        self.dock_editor_focused = surface == DockSurface::Editor;
+        self.dock_home_focused = surface == DockSurface::Home;
+        true
+    }
+
+    pub(crate) fn toggle_dock_surface_menu(&mut self) {
+        self.dock_surface_menu = match self.dock_surface_menu {
+            Some(_) => None,
+            None => Some(crate::app::state::DockSurfaceMenu { selected: 0 }),
+        };
     }
 
     pub(crate) fn dock_home_tab_at(&self, col: u16, row: u16) -> Option<usize> {
-        if self.dock_collapsed || self.dock_tab != DockTab::Home {
+        if self.dock_collapsed || self.dock_tab != Some(DockSurface::Home) {
             return None;
         }
         self.view
@@ -37,7 +92,7 @@ impl AppState {
         col: u16,
         row: u16,
     ) -> Option<crate::app::state::DockHomeSection> {
-        if self.dock_collapsed || self.dock_tab != DockTab::Home {
+        if self.dock_collapsed || self.dock_tab != Some(DockSurface::Home) {
             return None;
         }
         self.view
@@ -92,7 +147,7 @@ mod tests {
     fn dock_home_tab_at_maps_each_horizontal_hit_area() {
         let mut app = AppState::test_new();
         app.dock_collapsed = false;
-        app.dock_tab = DockTab::Home;
+        app.dock_tab = Some(DockSurface::Home);
         app.view.dock_home_tab_hit_areas = vec![Rect::new(80, 2, 8, 1), Rect::new(88, 2, 9, 1)];
 
         assert_eq!(app.dock_home_tab_at(81, 2), Some(0));
