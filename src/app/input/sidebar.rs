@@ -20,6 +20,86 @@ impl AppState {
         self.sidebar_group_menu_open = true;
     }
 
+    pub(crate) fn sidebar_filter_anchor_rect(&self) -> Rect {
+        crate::ui::sidebar_filter_anchor_rect(self, self.view.sidebar_rect)
+    }
+
+    pub(crate) fn sidebar_filter_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_filter_menu_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn open_sidebar_filter_menu(&mut self) {
+        self.sidebar_filter_menu_selected = 0;
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = true;
+    }
+
+    /// Apply the option at `index` to the stored filter. A team option replaces
+    /// the team and leaves the assignee alone, and vice versa, so the two
+    /// narrowings compose instead of resetting each other.
+    pub(crate) fn select_sidebar_filter_option(&mut self, index: usize) {
+        let Some(option) = crate::ui::sidebar_filter_options(self)
+            .into_iter()
+            .nth(index)
+        else {
+            self.sidebar_filter_menu_open = false;
+            return;
+        };
+        let mut filter = self.sidebar_work_filter.clone();
+        match option {
+            crate::ui::SidebarFilterOption::AllTeams => filter.team = None,
+            crate::ui::SidebarFilterOption::Team(team) => filter.team = Some(team),
+            crate::ui::SidebarFilterOption::AllAssignees => filter.assignee = None,
+            crate::ui::SidebarFilterOption::Assignee(assignee) => filter.assignee = Some(assignee),
+        }
+        self.set_sidebar_work_filter(filter);
+    }
+
+    pub(crate) fn handle_sidebar_filter_menu_key(&mut self, key: KeyEvent) -> bool {
+        if !self.sidebar_filter_menu_open {
+            return false;
+        }
+        let count = crate::ui::sidebar_filter_options(self).len();
+        match key.code {
+            KeyCode::Esc => self.sidebar_filter_menu_open = false,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.sidebar_filter_menu_selected =
+                    self.sidebar_filter_menu_selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.sidebar_filter_menu_selected = self
+                    .sidebar_filter_menu_selected
+                    .saturating_add(1)
+                    .min(count.saturating_sub(1));
+            }
+            KeyCode::Enter => self.select_sidebar_filter_option(self.sidebar_filter_menu_selected),
+            _ => {}
+        }
+        true
+    }
+
+    /// `Enter` on a selected dim work-item header starts its thread. The
+    /// selection only exists while one is selected, so this never swallows a
+    /// keystroke meant for a pane.
+    pub(crate) fn handle_sidebar_work_group_key(&mut self, key: KeyEvent) -> bool {
+        let Some(selected) = self.sidebar_selected_work_group.clone() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                self.sidebar_selected_work_group = None;
+                self.open_home_composer_for_work_group(&selected);
+                true
+            }
+            KeyCode::Esc => {
+                self.sidebar_selected_work_group = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn handle_sidebar_group_menu_key(&mut self, key: KeyEvent) -> bool {
         if !self.sidebar_group_menu_open {
             return false;
@@ -380,8 +460,7 @@ impl AppState {
                     indented: false,
                 } => Some(ws_idx),
                 crate::ui::WorkspaceListEntry::Workspace { .. } => None,
-                crate::ui::WorkspaceListEntry::NestedHeader { .. }
-                | crate::ui::WorkspaceListEntry::UnavailableHeader => None,
+                crate::ui::WorkspaceListEntry::NestedHeader { .. } => None,
             })
             .collect::<Vec<_>>();
         let source_pos = roots.iter().position(|ws_idx| *ws_idx == source_ws_idx)?;
@@ -527,6 +606,34 @@ mod tests {
             crate::app::state::SidebarGroupMode::RepoPr
         );
         assert!(!app.state.sidebar_group_menu_open);
+    }
+
+    #[test]
+    fn clicking_the_filter_chip_opens_a_downward_dropdown() {
+        let mut app = app_for_mouse_test();
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::LinearTeam);
+        let area = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let anchor = app.state.sidebar_filter_anchor_rect();
+        assert!(anchor.width > 0, "the filter chip needs a hit area");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            anchor.x,
+            anchor.y,
+        ));
+        assert!(app.state.sidebar_filter_menu_open);
+        assert!(!app.state.sidebar_group_menu_open);
+
+        let layout =
+            crate::ui::sidebar_filter_menu_layout(&app.state, area).expect("filter dropdown");
+        assert_eq!(layout.rect.y, anchor.bottom(), "dropdowns open downward");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.list_rect.x,
+            layout.list_rect.y,
+        ));
+        assert!(!app.state.sidebar_filter_menu_open);
     }
 
     #[test]

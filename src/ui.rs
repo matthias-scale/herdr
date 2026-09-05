@@ -86,7 +86,9 @@ pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
-use self::sidebar::{render_sidebar, render_sidebar_collapsed, render_sidebar_group_menu};
+use self::sidebar::{
+    render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu, render_sidebar_group_menu,
+};
 #[cfg(test)]
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
@@ -119,13 +121,15 @@ pub(crate) use self::{
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, sidebar_group_menu_layout, sidebar_group_mode_anchor_rect,
-        sidebar_header_new_space_rect, sidebar_header_overflow_rect, sidebar_nested_header_at,
-        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
-        sidebar_separator_col, sidebar_thread_entries, workspace_agent_chevron_rect,
-        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
-        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, SidebarRow, WorkspaceListEntry,
+        relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
+        sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
+        sidebar_group_mode_anchor_rect, sidebar_header_new_space_rect,
+        sidebar_header_overflow_rect, sidebar_nested_header_at, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col, sidebar_thread_entries,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, SidebarFilterOption, SidebarRow, WorkspaceListEntry,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -1008,6 +1012,7 @@ fn render_with_runtime_registry_inner(
         Mode::Terminal => {}
     }
     render_sidebar_group_menu(app, frame);
+    render_sidebar_filter_menu(app, frame);
 }
 
 fn render_navigation_chrome(

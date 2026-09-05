@@ -13,6 +13,8 @@ struct ClientPresentationFile {
     dock_width: Option<u16>,
     #[serde(default)]
     sidebar_group_mode: Option<crate::app::state::SidebarGroupMode>,
+    #[serde(default)]
+    sidebar_work_filter: Option<crate::app::state::SidebarWorkFilter>,
 }
 
 fn presentation_path() -> PathBuf {
@@ -60,6 +62,24 @@ pub(crate) fn load_sidebar_group_mode() -> crate::app::state::SidebarGroupMode {
 pub(crate) fn save_sidebar_group_mode(mode: crate::app::state::SidebarGroupMode) {
     let path = presentation_path();
     if let Err(err) = update_path(&path, |state| state.sidebar_group_mode = Some(mode)) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+pub(crate) fn load_sidebar_work_filter() -> crate::app::state::SidebarWorkFilter {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.sidebar_work_filter.unwrap_or_default(),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            crate::app::state::SidebarWorkFilter::default()
+        }
+    }
+}
+
+pub(crate) fn save_sidebar_work_filter(filter: crate::app::state::SidebarWorkFilter) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| state.sidebar_work_filter = Some(filter)) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
 }
@@ -159,6 +179,44 @@ mod tests {
         );
         std::fs::write(&path, "not json").expect("write invalid state");
         assert!(load_from_path(&path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sidebar_work_filter_round_trips_with_the_group_mode() {
+        let path = temp_path();
+        update_path(&path, |state| {
+            state.sidebar_group_mode = Some(crate::app::state::SidebarGroupMode::LinearTeam);
+            state.sidebar_work_filter = Some(crate::app::state::SidebarWorkFilter {
+                team: Some("SCA".into()),
+                assignee: Some("matthias".into()),
+            });
+        })
+        .expect("save sidebar work filter");
+        let state = load_from_path(&path).expect("load client presentation state");
+        assert_eq!(
+            state.sidebar_group_mode,
+            Some(crate::app::state::SidebarGroupMode::LinearTeam)
+        );
+        assert_eq!(
+            state.sidebar_work_filter,
+            Some(crate::app::state::SidebarWorkFilter {
+                team: Some("SCA".into()),
+                assignee: Some("matthias".into()),
+            })
+        );
+        // A filter that narrows nothing round trips as the default, not as a
+        // missing key that would resurrect an older narrowing.
+        update_path(&path, |state| {
+            state.sidebar_work_filter = Some(crate::app::state::SidebarWorkFilter::default());
+        })
+        .expect("clear sidebar work filter");
+        assert_eq!(
+            load_from_path(&path)
+                .expect("load client presentation state")
+                .sidebar_work_filter,
+            Some(crate::app::state::SidebarWorkFilter::default())
+        );
         let _ = std::fs::remove_file(path);
     }
 

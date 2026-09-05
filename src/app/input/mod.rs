@@ -148,6 +148,12 @@ impl App {
         if self.state.handle_sidebar_group_menu_key(key_event) {
             return None;
         }
+        if self.state.handle_sidebar_filter_menu_key(key_event) {
+            return None;
+        }
+        if self.state.handle_sidebar_work_group_key(key_event) {
+            return None;
+        }
         if self.handle_symphony_key(key_event) {
             return None;
         }

@@ -1011,7 +1011,6 @@ pub(crate) enum WorkspaceListEntry {
         key: String,
         title: String,
     },
-    UnavailableHeader,
 }
 
 #[derive(Clone)]
@@ -1042,7 +1041,8 @@ pub(crate) enum SidebarRow {
         title: String,
         count: usize,
         collapsed: bool,
-        unavailable: bool,
+        /// A work item with no pane: rendered dim, never collapsible.
+        dim: bool,
     },
 }
 
@@ -1179,13 +1179,30 @@ fn compact_sidebar_rows_inner(
         app.sidebar_group_mode,
         SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
     ) {
-        rows.push(SidebarRow::NestedHeader {
-            key: "not-available".into(),
-            title: "not available yet".into(),
-            count: 0,
-            collapsed: false,
-            unavailable: true,
-        });
+        let all_entries = entries_by_workspace
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        for group in sidebar_work_groups(app, &all_entries, app.sidebar_group_mode) {
+            // A work item nobody has started is not a container, so it is never
+            // collapsible; it is a row you press Enter on.
+            let dim = group.entries.is_empty();
+            let collapsed = !dim && section_is_collapsed(app, &group.key);
+            rows.push(SidebarRow::NestedHeader {
+                key: group.key,
+                title: group.title,
+                count: group.entries.len(),
+                collapsed,
+                dim,
+            });
+            if !collapsed {
+                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
+                    entry: Box::new(entry),
+                    depth: 1,
+                }));
+            }
+        }
+        return rows;
     }
     for workspace in workspaces {
         let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace else {
@@ -1225,7 +1242,7 @@ fn compact_sidebar_rows_inner(
                 title: group.title,
                 count: group.entries.len(),
                 collapsed,
-                unavailable: false,
+                dim: false,
             });
             if !collapsed {
                 rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
@@ -1355,6 +1372,289 @@ fn sidebar_tab_groups(
     groups
 }
 
+/// A ticket or Missive conversation the sidebar groups panes under.
+///
+/// Unlike the repo-level groups, a work group can exist with no pane at all:
+/// the projection knows the ticket, nobody has started a thread on it yet, and
+/// that absence is exactly what the operator wants to see.
+pub(crate) struct SidebarWorkGroup {
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) entries: Vec<AgentPanelEntry>,
+    pub(crate) unlinked: bool,
+    /// What `Enter` on the dim header starts. `None` for the unlinked bucket,
+    /// which names no work item.
+    pub(crate) activation: Option<SidebarWorkGroupActivation>,
+}
+
+/// The prefilled composer a dim work-item header opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarWorkGroupActivation {
+    pub(crate) prompt: String,
+    /// The checkout the work item is linked to, when the projection knows one.
+    /// `None` leaves the composer on its last used directory.
+    pub(crate) directory: Option<std::path::PathBuf>,
+}
+
+const UNLINKED_GROUP_KEY: &str = "unlinked";
+
+/// Linear ships priority as a label; nothing in the projection carries a
+/// separate field, so the header reads the label vocabulary rather than
+/// inventing a fetch for it.
+fn ticket_priority(ticket: &crate::work_index::WorkTicket) -> Option<String> {
+    ticket
+        .labels
+        .iter()
+        .find(|label| {
+            let mut characters = label.chars();
+            matches!(characters.next(), Some('P' | 'p'))
+                && matches!(characters.next(), Some(digit) if digit.is_ascii_digit())
+                && characters.next().is_none()
+        })
+        .map(|label| label.to_uppercase())
+}
+
+/// `SCA-3165` -> `SCA`. The team is the identifier prefix; the projection
+/// carries no separate team field.
+pub(crate) fn ticket_team(identifier: &str) -> Option<String> {
+    identifier
+        .split_once('-')
+        .map(|(team, _)| team.to_string())
+        .filter(|team| !team.is_empty())
+}
+
+fn ticket_matches_filter(
+    ticket: &crate::work_index::WorkTicket,
+    filter: &crate::app::state::SidebarWorkFilter,
+) -> bool {
+    if let Some(team) = filter.team.as_deref() {
+        if ticket_team(&ticket.identifier).as_deref() != Some(team) {
+            return false;
+        }
+    }
+    if let Some(assignee) = filter.assignee.as_deref() {
+        if ticket.assignee.as_deref() != Some(assignee) {
+            return false;
+        }
+    }
+    true
+}
+
+fn ticket_group_title(ticket: &crate::work_index::WorkTicket) -> String {
+    let mut title = ticket.identifier.clone();
+    if let Some(ticket_title) = ticket.title.as_deref() {
+        title.push(' ');
+        title.push_str(ticket_title);
+    }
+    if let Some(priority) = ticket_priority(ticket) {
+        title.push_str("  ");
+        title.push_str(&priority);
+    }
+    title
+}
+
+fn ticket_prompt(ticket: &crate::work_index::WorkTicket) -> String {
+    match ticket.title.as_deref() {
+        Some(title) => format!("{}: {title}", ticket.identifier),
+        None => ticket.identifier.clone(),
+    }
+}
+
+/// Where a thread for this ticket should start: the checkout of a pane already
+/// working the repository the ticket's pull request lives in.
+fn ticket_directory(
+    app: &AppState,
+    row: &crate::work_projection::DockHomeTicketRow,
+) -> Option<std::path::PathBuf> {
+    let repo = row
+        .linked_pr_url
+        .as_deref()
+        .and_then(crate::work_context::repo_slug_from_pr_url)?;
+    app.workspaces
+        .iter()
+        .flat_map(|workspace| workspace.tabs.iter())
+        .flat_map(|tab| tab.panes.values())
+        .filter_map(|pane| app.terminals.get(&pane.attached_terminal_id))
+        .find(|terminal| terminal.effective_work_context().repo.as_deref() == Some(repo.as_str()))
+        .map(|terminal| terminal.cwd.clone())
+}
+
+/// The last segment of a Missive conversation URL.
+fn missive_url_tail(url: &str) -> String {
+    url.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(url)
+        .to_string()
+}
+
+/// The conversation subject the context dock already has: the declared work
+/// title of a pane bound to that conversation and to nothing else. This slice
+/// adds no Missive fetch, so every other conversation falls back to the tail.
+fn missive_subject(app: &AppState, url: &str) -> Option<String> {
+    app.workspaces
+        .iter()
+        .flat_map(|workspace| workspace.tabs.iter())
+        .flat_map(|tab| tab.panes.values())
+        .filter_map(|pane| app.terminals.get(&pane.attached_terminal_id))
+        .find_map(|terminal| {
+            let context = terminal.effective_work_context();
+            let bound = context.missive_urls.len() == 1
+                && context.missive_urls.first().map(String::as_str) == Some(url)
+                && context.ticket_ids.is_empty()
+                && context.pr_urls.is_empty();
+            bound.then(|| context.work_title.clone()).flatten()
+        })
+}
+
+fn work_group_index(groups: &[SidebarWorkGroup], key: &str) -> Option<usize> {
+    groups.iter().position(|group| group.key == key)
+}
+
+fn push_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
+    match work_group_index(groups, UNLINKED_GROUP_KEY) {
+        Some(index) => groups[index].entries.push(entry),
+        None => groups.push(SidebarWorkGroup {
+            key: UNLINKED_GROUP_KEY.into(),
+            title: "unlinked".into(),
+            entries: vec![entry],
+            unlinked: true,
+            activation: None,
+        }),
+    }
+}
+
+/// Group panes by the work item they are bound to, joined with the work items
+/// the projection knows about. Work items without a pane stay in the list; the
+/// caller renders them dim.
+pub(crate) fn sidebar_work_groups(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    mode: SidebarGroupMode,
+) -> Vec<SidebarWorkGroup> {
+    let mut groups: Vec<SidebarWorkGroup> = Vec::new();
+    if mode == SidebarGroupMode::LinearTeam {
+        for row in app.dock_home_projection().ticket_rows {
+            if !ticket_matches_filter(&row.ticket, &app.sidebar_work_filter) {
+                continue;
+            }
+            let key = format!("linear:{}", row.ticket.identifier);
+            if work_group_index(&groups, &key).is_some() {
+                continue;
+            }
+            groups.push(SidebarWorkGroup {
+                key,
+                title: ticket_group_title(&row.ticket),
+                entries: Vec::new(),
+                unlinked: false,
+                activation: Some(SidebarWorkGroupActivation {
+                    prompt: ticket_prompt(&row.ticket),
+                    directory: ticket_directory(app, &row),
+                }),
+            });
+        }
+    }
+    for entry in ordered_tab_entries(entries) {
+        let context = entry_work_context(app, &entry);
+        match mode {
+            SidebarGroupMode::LinearTeam => {
+                // A pane with several tickets belongs to its first one only, so
+                // the same thread never appears twice in the tree.
+                let Some(ticket_id) = context.and_then(|context| context.ticket_ids.first()) else {
+                    push_unlinked_entry(&mut groups, entry);
+                    continue;
+                };
+                // A ticket the filter excluded takes its panes with it.
+                if let Some(index) = work_group_index(&groups, &format!("linear:{ticket_id}")) {
+                    groups[index].entries.push(entry);
+                }
+            }
+            SidebarGroupMode::Missive => {
+                let urls = context
+                    .map(|context| context.missive_urls.as_slice())
+                    .unwrap_or_default();
+                let Some((first, rest)) = urls.split_first() else {
+                    push_unlinked_entry(&mut groups, entry);
+                    continue;
+                };
+                // The conversations this pane also touches are still worth
+                // seeing; they simply have no thread of their own yet.
+                for (position, url) in std::iter::once(first).chain(rest).enumerate() {
+                    let key = format!("missive:{url}");
+                    let index = match work_group_index(&groups, &key) {
+                        Some(index) => index,
+                        None => {
+                            groups.push(SidebarWorkGroup {
+                                key,
+                                title: missive_subject(app, url)
+                                    .unwrap_or_else(|| missive_url_tail(url)),
+                                entries: Vec::new(),
+                                unlinked: false,
+                                activation: Some(SidebarWorkGroupActivation {
+                                    prompt: url.clone(),
+                                    directory: None,
+                                }),
+                            });
+                            groups.len() - 1
+                        }
+                    };
+                    if position == 0 {
+                        groups[index].entries.push(entry.clone());
+                    }
+                }
+            }
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoPr | SidebarGroupMode::RepoWorktree => {}
+        }
+    }
+    groups.sort_by_key(|group| group.unlinked);
+    groups
+}
+
+/// Teams and assignees the filter dropdown can offer, taken from the tickets
+/// the projection already knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SidebarFilterOption {
+    AllTeams,
+    Team(String),
+    AllAssignees,
+    Assignee(String),
+}
+
+impl SidebarFilterOption {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::AllTeams => "all teams".into(),
+            Self::Team(team) => team.clone(),
+            Self::AllAssignees => "all assignees".into(),
+            Self::Assignee(assignee) => format!("assigned to {assignee}"),
+        }
+    }
+}
+
+pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption> {
+    let projection = app.dock_home_projection();
+    let mut teams = Vec::new();
+    let mut assignees = Vec::new();
+    for row in &projection.ticket_rows {
+        if let Some(team) = ticket_team(&row.ticket.identifier) {
+            if !teams.contains(&team) {
+                teams.push(team);
+            }
+        }
+        if let Some(assignee) = row.ticket.assignee.clone() {
+            if !assignees.contains(&assignee) {
+                assignees.push(assignee);
+            }
+        }
+    }
+    teams.sort();
+    assignees.sort();
+    let mut options = vec![SidebarFilterOption::AllTeams];
+    options.extend(teams.into_iter().map(SidebarFilterOption::Team));
+    options.push(SidebarFilterOption::AllAssignees);
+    options.extend(assignees.into_iter().map(SidebarFilterOption::Assignee));
+    options
+}
+
 fn append_recently_done_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
@@ -1445,10 +1745,16 @@ fn workspace_list_entries_inner(
     match mode {
         SidebarGroupMode::Repo => repo_entries,
         SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
-            let mut entries = Vec::with_capacity(repo_entries.len() + 1);
-            entries.push(WorkspaceListEntry::UnavailableHeader);
-            entries.extend(repo_entries);
-            entries
+            // Work items cut across repositories, so they are the top level in
+            // these modes and the repo tree does not appear at all.
+            sidebar_work_groups(app, &sidebar_thread_entries(app), mode)
+                .into_iter()
+                .map(|group| WorkspaceListEntry::NestedHeader {
+                    parent_ws_idx: group.entries.first().map(|entry| entry.ws_idx).unwrap_or(0),
+                    key: group.key,
+                    title: group.title,
+                })
+                .collect()
         }
         SidebarGroupMode::RepoPr | SidebarGroupMode::RepoWorktree => {
             let thread_entries = sidebar_thread_entries(app);
@@ -1927,7 +2233,7 @@ struct NestedHeaderArea {
     title: String,
     count: usize,
     collapsed: bool,
-    unavailable: bool,
+    dim: bool,
     rect: Rect,
 }
 
@@ -1952,7 +2258,7 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
             title,
             count,
             collapsed,
-            unavailable,
+            dim,
         } = row
         {
             out.push(NestedHeaderArea {
@@ -1960,7 +2266,7 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
                 title: title.clone(),
                 count: *count,
                 collapsed: *collapsed,
-                unavailable: *unavailable,
+                dim: *dim,
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
@@ -1975,8 +2281,29 @@ pub(crate) fn sidebar_nested_header_at(app: &AppState, row: u16) -> Option<Strin
     compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
         .into_iter()
         .find(|header| row >= header.rect.y && row < header.rect.bottom())
-        .filter(|header| !header.unavailable)
+        .filter(|header| !header.dim)
         .map(|header| header.key)
+}
+
+/// The dim work-item header at this row, if any. Dim headers do not collapse;
+/// they select, and `Enter` starts a thread for them.
+pub(crate) fn sidebar_dim_header_at(app: &AppState, row: u16) -> Option<String> {
+    compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|header| row >= header.rect.y && row < header.rect.bottom())
+        .filter(|header| header.dim)
+        .map(|header| header.key)
+}
+
+/// What a dim work-item header starts, resolved from the current projection.
+pub(crate) fn sidebar_work_group_activation(
+    app: &AppState,
+    key: &str,
+) -> Option<SidebarWorkGroupActivation> {
+    sidebar_work_groups(app, &sidebar_thread_entries(app), app.sidebar_group_mode)
+        .into_iter()
+        .find(|group| group.key == key)
+        .and_then(|group| group.activation)
 }
 
 pub(crate) fn compute_sidebar_section_header_areas(
@@ -2227,8 +2554,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
-            SidebarRow::NestedHeader { unavailable, .. } => {
-                let color = if *unavailable { p.overlay0 } else { p.accent };
+            SidebarRow::NestedHeader { dim, .. } => {
+                let color = if *dim { p.overlay0 } else { p.accent };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         "─".repeat(usize::from(ws_area.width)),
@@ -2274,9 +2601,7 @@ pub(crate) fn workspace_drop_slots(
                     indented: false,
                 } => Some(*ws_idx),
                 WorkspaceListEntry::Workspace { .. } => None,
-                WorkspaceListEntry::NestedHeader { .. } | WorkspaceListEntry::UnavailableHeader => {
-                    None
-                }
+                WorkspaceListEntry::NestedHeader { .. } => None,
             })
     };
 
@@ -2318,7 +2643,7 @@ pub(crate) fn workspace_drop_slots(
         Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
             crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
         }
-        Some(WorkspaceListEntry::NestedHeader { .. } | WorkspaceListEntry::UnavailableHeader) => {
+        Some(WorkspaceListEntry::NestedHeader { .. }) => {
             crate::app::state::WorkspaceDropTarget::End
         }
         None => crate::app::state::WorkspaceDropTarget::End,
@@ -2386,14 +2711,12 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     );
     let mode_anchor = sidebar_group_mode_anchor_rect(area);
     if mode_anchor.width > 0 {
-        let title = format!(
-            "{} {} ▾",
-            app.sidebar_group_mode.icon(),
-            app.sidebar_group_mode.label()
-        );
         frame.render_widget(
             Paragraph::new(Span::styled(
-                truncate_end(&title, usize::from(mode_anchor.width)),
+                truncate_end(
+                    &sidebar_header_mode_label(app),
+                    usize::from(mode_anchor.width),
+                ),
                 Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
             )),
             mode_anchor,
@@ -2713,25 +3036,22 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
         return;
     }
     let p = &app.palette;
-    let count_label = (!header.unavailable).then(|| format!(" ({})", header.count));
+    let count_label = (!header.dim).then(|| format!(" ({})", header.count));
     let count_width = count_label
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
-    let prefix = if header.unavailable { "   " } else { "  ▸ " };
+    let prefix = if header.dim { "   " } else { "  ▸ " };
     let title = truncate_end(
         &header.title,
         usize::from(header.rect.width)
             .saturating_sub(display_width(prefix))
             .saturating_sub(count_width),
     );
-    let color = if header.unavailable {
-        p.overlay0
-    } else {
-        p.subtext0
-    };
+    // A dim header carries no live state colour: nothing is running under it.
+    let color = if header.dim { p.overlay0 } else { p.subtext0 };
     let mut spans = vec![
-        Span::raw(if header.unavailable {
+        Span::raw(if header.dim {
             "   "
         } else if header.collapsed {
             "  ▸ "
@@ -2740,13 +3060,11 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
         }),
         Span::styled(
             title,
-            Style::default()
-                .fg(color)
-                .add_modifier(if header.unavailable {
-                    Modifier::DIM
-                } else {
-                    Modifier::BOLD
-                }),
+            Style::default().fg(color).add_modifier(if header.dim {
+                Modifier::DIM
+            } else {
+                Modifier::BOLD
+            }),
         ),
     ];
     if let Some(count_label) = count_label {
@@ -2755,8 +3073,14 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
         ));
     }
+    let selected = header.dim && app.sidebar_selected_work_group.as_deref() == Some(&header.key);
+    let paragraph = if selected {
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p.surface1))
+    } else {
+        Paragraph::new(Line::from(spans))
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(spans)),
+        paragraph,
         Rect::new(header.rect.x, header.rect.y, header.rect.width, 1),
     );
 }
@@ -3004,6 +3328,51 @@ pub(crate) fn sidebar_header_new_space_rect(area: Rect) -> Rect {
     Rect::new(area.x + area.width.saturating_sub(5), area.y, 2, 1)
 }
 
+/// The sidebar header line. In the work-item modes it names the team and the
+/// active filter rather than the mode, which is what the operator is actually
+/// steering there.
+pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
+    match app.sidebar_group_mode {
+        SidebarGroupMode::LinearTeam => format!(
+            "{} {} · {} ▾",
+            app.sidebar_group_mode.icon(),
+            app.sidebar_work_filter.team_label(),
+            app.sidebar_work_filter.label()
+        ),
+        _ => format!(
+            "{} {} ▾",
+            app.sidebar_group_mode.icon(),
+            app.sidebar_group_mode.label()
+        ),
+    }
+}
+
+/// The `· <filter> ▾` half of the header line, which opens the filter dropdown.
+/// Empty outside the work-item modes, where there is nothing to filter.
+pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
+    if app.sidebar_group_mode != SidebarGroupMode::LinearTeam {
+        return Rect::default();
+    }
+    let mode_anchor = sidebar_group_mode_anchor_rect(area);
+    if mode_anchor.width == 0 {
+        return Rect::default();
+    }
+    let label = sidebar_header_mode_label(app);
+    let Some(offset) = label.find('·').map(|byte| display_width(&label[..byte])) else {
+        return Rect::default();
+    };
+    let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+    if offset >= mode_anchor.width {
+        return Rect::default();
+    }
+    Rect::new(
+        mode_anchor.x.saturating_add(offset),
+        mode_anchor.y,
+        mode_anchor.width.saturating_sub(offset),
+        1,
+    )
+}
+
 pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
     if area.width < 8 || area.height == 0 {
         return Rect::default();
@@ -3029,6 +3398,61 @@ pub(crate) fn sidebar_group_menu_layout(
         },
         area,
     )
+}
+
+pub(crate) fn sidebar_filter_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let anchor = sidebar_filter_anchor_rect(app, app.view.sidebar_rect);
+    let options = sidebar_filter_options(app);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor,
+            item_count: options.len(),
+            selected: app.sidebar_filter_menu_selected,
+            has_filter: false,
+            max_rows: options.len().min(10),
+            min_width: 20,
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_filter_menu(app: &AppState, frame: &mut Frame) {
+    if !app.sidebar_filter_menu_open {
+        return;
+    }
+    let Some(layout) = sidebar_filter_menu_layout(app, frame.area()) else {
+        return;
+    };
+    let options = sidebar_filter_options(app);
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    let lines = options
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(index, option)| {
+            let selected = index == app.sidebar_filter_menu_selected;
+            let marker = if selected { "▸" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(format!("{marker} {}", option.label()), style))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
 }
 
 pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
@@ -7370,6 +7794,450 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ws
     }
 
+    fn work_ticket(
+        identifier: &str,
+        title: &str,
+        assignee: &str,
+        labels: &[&str],
+    ) -> crate::work_index::WorkTicket {
+        crate::work_index::WorkTicket {
+            identifier: identifier.into(),
+            title: Some(title.into()),
+            description: None,
+            state: Some("In Progress".into()),
+            assignee: Some(assignee.into()),
+            created_at: None,
+            updated_at: None,
+            branch: None,
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            url: None,
+            parent: None,
+            relations: Vec::new(),
+        }
+    }
+
+    fn work_item(
+        repo: &str,
+        pr_number: Option<u64>,
+        tickets: Vec<crate::work_index::WorkTicket>,
+    ) -> crate::work_index::WorkItem {
+        crate::work_index::WorkItem {
+            repo: repo.into(),
+            pr_number,
+            pr_url: pr_number.map(|number| format!("https://github.com/{repo}/pull/{number}")),
+            pr_title: None,
+            pr_state: pr_number.map(|_| "open".into()),
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            ticket_ids: tickets
+                .iter()
+                .map(|ticket| ticket.identifier.clone())
+                .collect(),
+            ticket_title: None,
+            ticket_state: None,
+            ticket_details: tickets,
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: crate::work_index::WorkItemSource::default(),
+        }
+    }
+
+    const CONVERSATION_A: &str = "https://mail.missiveapp.com/#inbox/conversations/aaa111";
+    const CONVERSATION_B: &str = "https://mail.missiveapp.com/#inbox/conversations/bbb222";
+
+    /// Three panes: one on a ticket and two conversations, one on two tickets,
+    /// one on nothing. The snapshot knows a fourth ticket nobody works on.
+    pub(crate) fn sidebar_work_item_fixture() -> AppState {
+        let mut workspace = Workspace::test_new("repo");
+        workspace.test_add_tab(Some("addendum"));
+        workspace.test_add_tab(Some("shell"));
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for (tab_idx, context) in [
+            crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-3102".into()],
+                missive_urls: vec![CONVERSATION_A.into(), CONVERSATION_B.into()],
+                repo: Some("scalable-so/herdr".into()),
+                work_title: Some("fix pricing".into()),
+                ..Default::default()
+            },
+            crate::work_context::PaneWorkContext {
+                ticket_ids: vec!["SCA-3165".into(), "SCA-3170".into()],
+                ..Default::default()
+            },
+            crate::work_context::PaneWorkContext::default(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let pane_id = app.workspaces[0].tabs[tab_idx].root_pane;
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("fixture terminal");
+            terminal.replace_prevalidated_manual_work_context(context);
+            if tab_idx == 0 {
+                terminal.cwd = std::path::PathBuf::from("/tmp/herdr-fixture/herdr");
+            }
+        }
+        app.work_index_enabled = true;
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: vec![
+                work_item(
+                    "scalable-so/herdr",
+                    Some(159),
+                    vec![work_ticket(
+                        "SCA-3102",
+                        "annual credits",
+                        "matthias",
+                        &["P1"],
+                    )],
+                ),
+                work_item(
+                    "scalable-so/herdr",
+                    None,
+                    vec![
+                        work_ticket("SCA-3165", "image-edit v3", "matthias", &["P2"]),
+                        work_ticket("SCA-3170", "ads skill map", "jacob", &["P3"]),
+                    ],
+                ),
+                work_item(
+                    "scalable-so/110x",
+                    None,
+                    vec![work_ticket("OPS-12", "pixel EMQ drop", "jacob", &[])],
+                ),
+            ],
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        });
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    /// `(title, pane count, dim)` for every work-item header, with the pane
+    /// rows that sit under it.
+    fn work_group_shape(app: &AppState) -> Vec<(String, usize, bool)> {
+        sidebar_rows(app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader {
+                    title, count, dim, ..
+                } => Some((title, count, dim)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn linear_mode_joins_panes_with_the_projection_ticket_rows() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        assert_eq!(
+            work_group_shape(&app),
+            vec![
+                ("OPS-12 pixel EMQ drop".to_string(), 0, true),
+                ("SCA-3102 annual credits  P1".to_string(), 1, false),
+                ("SCA-3165 image-edit v3  P2".to_string(), 1, false),
+                // The two-ticket pane sits under its first ticket only, so the
+                // second one is a ticket nobody has started.
+                ("SCA-3170 ads skill map  P3".to_string(), 0, true),
+                ("unlinked".to_string(), 1, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn missive_mode_groups_panes_by_conversation() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        assert_eq!(
+            work_group_shape(&app),
+            vec![
+                // The pane sits under its first conversation; the second one it
+                // touches has no thread of its own.
+                ("aaa111".to_string(), 1, false),
+                ("bbb222".to_string(), 0, true),
+                ("unlinked".to_string(), 2, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn missive_headers_use_the_subject_the_context_dock_has() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        // A pane bound to one conversation and nothing else: its declared work
+        // title is the subject the context dock shows for that conversation.
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("fixture terminal")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                missive_urls: vec![CONVERSATION_A.into()],
+                work_title: Some("refund for invoice 42".into()),
+                ..Default::default()
+            });
+        assert_eq!(
+            work_group_shape(&app),
+            vec![
+                ("refund for invoice 42".to_string(), 1, false),
+                ("unlinked".to_string(), 2, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn dim_work_item_rows_carry_no_state_colour() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let dim_rows = sidebar_rows(&app)
+            .into_iter()
+            .filter(|row| matches!(row, SidebarRow::NestedHeader { dim: true, .. }))
+            .count();
+        assert_eq!(dim_rows, 2);
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(106, 40)).expect("test terminal for dim rows");
+        let area = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app, area);
+        terminal
+            .draw(|frame| {
+                render_sidebar(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    app.view.sidebar_rect,
+                )
+            })
+            .expect("render sidebar");
+        let buffer = terminal.backend().buffer();
+        let headers = compute_sidebar_nested_header_areas(&app, app.view.sidebar_rect);
+        let dim = headers
+            .iter()
+            .find(|header| header.dim)
+            .expect("a dim header on screen");
+        let line = row_text(buffer, dim.rect.y, dim.rect.width.saturating_sub(1));
+        assert!(
+            !line.contains('●') && !line.contains('○') && !line.contains('·'),
+            "{line:?}"
+        );
+        let styled = buffer[(dim.rect.x + 3, dim.rect.y)].style();
+        assert_eq!(styled.fg, Some(app.palette.overlay0));
+        for state in [AgentState::Working, AgentState::Blocked, AgentState::Idle] {
+            assert_ne!(
+                styled.fg,
+                Some(state_label_color(state, true, &app.palette)),
+                "dim rows must not take a live state colour"
+            );
+        }
+    }
+
+    #[test]
+    fn the_work_filter_narrows_tickets_by_team_and_assignee() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
+            team: Some("SCA".into()),
+            assignee: None,
+        };
+        assert_eq!(
+            work_group_shape(&app)
+                .into_iter()
+                .map(|(title, ..)| title)
+                .collect::<Vec<_>>(),
+            vec![
+                "SCA-3102 annual credits  P1",
+                "SCA-3165 image-edit v3  P2",
+                "SCA-3170 ads skill map  P3",
+                "unlinked",
+            ]
+        );
+
+        app.sidebar_work_filter.assignee = Some("jacob".into());
+        // Filtering a ticket out takes its panes with it.
+        assert_eq!(
+            work_group_shape(&app),
+            vec![
+                ("SCA-3170 ads skill map  P3".to_string(), 0, true),
+                ("unlinked".to_string(), 1, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_filter_dropdown_lists_teams_and_assignees_from_the_projection() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        assert_eq!(
+            sidebar_filter_options(&app)
+                .into_iter()
+                .map(|option| option.label())
+                .collect::<Vec<_>>(),
+            vec![
+                "all teams",
+                "OPS",
+                "SCA",
+                "all assignees",
+                "assigned to jacob",
+                "assigned to matthias",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_linear_header_names_the_team_and_the_filter() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        assert_eq!(
+            sidebar_header_mode_label(&app),
+            "◎ all teams · all assignees ▾"
+        );
+        app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
+            team: Some("SCA".into()),
+            assignee: Some("matthias".into()),
+        };
+        assert_eq!(
+            sidebar_header_mode_label(&app),
+            "◎ SCA · assigned to matthias ▾"
+        );
+    }
+
+    #[test]
+    fn choosing_a_filter_option_narrows_and_asks_to_be_persisted() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let options = sidebar_filter_options(&app);
+        let team = options
+            .iter()
+            .position(|option| *option == SidebarFilterOption::Team("SCA".into()))
+            .expect("SCA in the options");
+        app.select_sidebar_filter_option(team);
+        assert_eq!(app.sidebar_work_filter.team.as_deref(), Some("SCA"));
+
+        let assignee = options
+            .iter()
+            .position(|option| *option == SidebarFilterOption::Assignee("jacob".into()))
+            .expect("jacob in the options");
+        app.select_sidebar_filter_option(assignee);
+        // The two narrowings compose instead of resetting each other.
+        assert_eq!(app.sidebar_work_filter.team.as_deref(), Some("SCA"));
+        assert_eq!(app.sidebar_work_filter.assignee.as_deref(), Some("jacob"));
+        assert_eq!(
+            app.take_sidebar_work_filter_persistence_request(),
+            Some(crate::app::state::SidebarWorkFilter {
+                team: Some("SCA".into()),
+                assignee: Some("jacob".into()),
+            })
+        );
+
+        let all_teams = options
+            .iter()
+            .position(|option| *option == SidebarFilterOption::AllTeams)
+            .expect("all teams in the options");
+        app.select_sidebar_filter_option(all_teams);
+        assert_eq!(app.sidebar_work_filter.team, None);
+        assert_eq!(app.sidebar_work_filter.assignee.as_deref(), Some("jacob"));
+    }
+
+    #[test]
+    fn the_filter_dropdown_opens_below_its_anchor() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let area = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app, area);
+        let anchor = sidebar_filter_anchor_rect(&app, app.view.sidebar_rect);
+        assert!(anchor.width > 0);
+        let layout = sidebar_filter_menu_layout(&app, area).expect("filter dropdown layout");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert!(layout.rect.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn enter_on_a_dim_ticket_prefills_the_home_composer() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        // Nothing selected: the sidebar must not swallow the keystroke.
+        assert!(!app.handle_sidebar_work_group_key(enter));
+
+        app.sidebar_selected_work_group = Some("linear:SCA-3170".into());
+        assert!(app.handle_sidebar_work_group_key(enter));
+        assert_eq!(app.sidebar_selected_work_group, None);
+        let home = app.home.as_ref().expect("home composer");
+        assert_eq!(home.prompt, "SCA-3170: ads skill map");
+        assert_eq!(
+            home.focus,
+            Some(crate::app::home::HomeFocus::Prompt),
+            "the prompt takes focus so the operator can keep typing"
+        );
+        // No linked repository, so the composer keeps its last used directory.
+        assert_eq!(
+            home.directory,
+            crate::app::home::HomeState::default().directory
+        );
+
+        app.sidebar_selected_work_group = Some("linear:SCA-3102".into());
+        assert!(app.handle_sidebar_work_group_key(enter));
+        let home = app.home.as_ref().expect("home composer");
+        assert_eq!(home.prompt, "SCA-3102: annual credits");
+        assert_eq!(
+            home.directory,
+            std::path::PathBuf::from("/tmp/herdr-fixture/herdr")
+        );
+    }
+
+    #[test]
+    fn enter_on_a_dim_conversation_prefills_the_composer_with_its_url() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.sidebar_selected_work_group = Some(format!("missive:{CONVERSATION_B}"));
+        assert!(
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.home.as_ref().expect("home composer").prompt,
+            CONVERSATION_B
+        );
+    }
+
+    #[test]
+    fn a_dim_ticket_header_activates_with_its_identifier_title_and_repo() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let activation =
+            sidebar_work_group_activation(&app, "linear:SCA-3102").expect("ticket activation");
+        assert_eq!(activation.prompt, "SCA-3102: annual credits");
+        assert_eq!(
+            activation.directory,
+            Some(std::path::PathBuf::from("/tmp/herdr-fixture/herdr"))
+        );
+
+        // A ticket with no linked pull request leaves the directory alone.
+        let unlinked =
+            sidebar_work_group_activation(&app, "linear:SCA-3170").expect("ticket activation");
+        assert_eq!(unlinked.prompt, "SCA-3170: ads skill map");
+        assert_eq!(unlinked.directory, None);
+
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let conversation =
+            sidebar_work_group_activation(&app, &format!("missive:{CONVERSATION_B}"))
+                .expect("conversation activation");
+        assert_eq!(conversation.prompt, CONVERSATION_B);
+    }
+
     fn sidebar_grouping_fixture() -> AppState {
         let mut workspace = Workspace::test_new("repo");
         workspace.test_add_tab(Some("review"));
@@ -7423,7 +8291,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     format!("repo:{ws_idx}:{indented}")
                 }
                 WorkspaceListEntry::NestedHeader { title, .. } => title,
-                WorkspaceListEntry::UnavailableHeader => "not available yet".into(),
             })
             .collect()
     }
@@ -7464,14 +8331,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "unlinked",
             ]
         );
-        assert_eq!(
-            tree(SidebarGroupMode::LinearTeam),
-            ["not available yet", "repo:0:false"]
-        );
-        assert_eq!(
-            tree(SidebarGroupMode::Missive),
-            ["not available yet", "repo:0:false"]
-        );
+        // Work items are the top level in these modes; this fixture binds none,
+        // so every pane lands in the unlinked bucket and no repo header shows.
+        assert_eq!(tree(SidebarGroupMode::LinearTeam), ["unlinked"]);
+        assert_eq!(tree(SidebarGroupMode::Missive), ["unlinked"]);
 
         let mut tab_sets = Vec::new();
         for mode in SidebarGroupMode::ALL {
@@ -7511,7 +8374,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     ]
                 ),
                 SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
-                    assert_eq!(nested, ["not available yet"])
+                    assert_eq!(nested, ["unlinked"])
                 }
             }
         }
