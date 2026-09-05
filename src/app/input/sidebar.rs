@@ -1511,7 +1511,9 @@ mod tests {
         app.state.selected = 0;
         app.state.tab_scroll = usize::MAX;
         app.state.tab_scroll_follow_active = false;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        // 71 columns leaves the same tab strip as 65 did before the tab row
+        // gained the two pane-toggle buttons at its right end.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 71, 20));
 
         let last_idx = app.state.workspaces[0].tabs.len() - 1;
         let target = app.state.view.tab_hit_areas[last_idx];

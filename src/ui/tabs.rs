@@ -18,6 +18,11 @@ pub(crate) const PIN_GLYPH_ON: char = '*';
 pub(crate) const PIN_GLYPH_OFF: char = ' ';
 
 const MIN_TAB_WIDTH: u16 = 8;
+/// One cell of padding on each side of the glyph, matching `+` and the scroll
+/// arrows so the whole trailing control group has the same click rhythm.
+pub(crate) const PANE_TOGGLE_BUTTON_WIDTH: u16 = 3;
+pub(crate) const PANE_TOGGLE_BELOW_GLYPH: char = '\u{25ad}';
+pub(crate) const PANE_TOGGLE_RIGHT_GLYPH: char = '\u{25af}';
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 
@@ -28,6 +33,10 @@ pub(crate) struct TabBarView {
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    /// Splits the focused pane below, or closes the pane already below it.
+    pub pane_toggle_below_hit_area: Rect,
+    /// Splits the focused pane to the right, or closes the pane already there.
+    pub pane_toggle_right_hit_area: Rect,
 }
 
 fn tab_width(
@@ -215,7 +224,78 @@ fn max_tab_scroll(
         .unwrap_or(0)
 }
 
+fn active_tab_cell_width(ws: &crate::workspace::Workspace, view: &TabBarView) -> u16 {
+    view.tab_hit_areas
+        .get(ws.active_tab)
+        .map(|rect| rect.width)
+        .unwrap_or(0)
+}
+
 pub(crate) fn compute_tab_bar_view(
+    ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    area: Rect,
+    current_scroll: usize,
+    follow_active: bool,
+    mouse_chrome: bool,
+) -> TabBarView {
+    if !mouse_chrome || area.width == 0 || area.height == 0 {
+        return compute_tab_bar_view_inner(
+            ws,
+            terminals,
+            area,
+            current_scroll,
+            follow_active,
+            mouse_chrome,
+        );
+    }
+
+    // The buttons are the rightmost content, so they are paid for out of the
+    // tab strip's width. When that would truncate the active tab title they are
+    // dropped entirely rather than shown over a clipped label.
+    let toggles_width = PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2);
+    if area.width > toggles_width {
+        let tabs_area = Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(toggles_width),
+            area.height,
+        );
+        let mut view = compute_tab_bar_view_inner(
+            ws,
+            terminals,
+            tabs_area,
+            current_scroll,
+            follow_active,
+            true,
+        );
+        // The active tab may already be clipped by a narrow row; the buttons
+        // only have to not make that worse.
+        let full_view =
+            compute_tab_bar_view_inner(ws, terminals, area, current_scroll, follow_active, true);
+        let budget =
+            active_tab_cell_width(ws, &full_view).min(tab_width(ws, terminals, ws.active_tab));
+        if budget > 0 && active_tab_cell_width(ws, &view) >= budget {
+            let below_x = area.x + area.width - toggles_width;
+            view.pane_toggle_below_hit_area =
+                Rect::new(below_x, area.y, PANE_TOGGLE_BUTTON_WIDTH, 1);
+            view.pane_toggle_right_hit_area = Rect::new(
+                below_x + PANE_TOGGLE_BUTTON_WIDTH,
+                area.y,
+                PANE_TOGGLE_BUTTON_WIDTH,
+                1,
+            );
+            return view;
+        }
+    }
+
+    compute_tab_bar_view_inner(ws, terminals, area, current_scroll, follow_active, true)
+}
+
+fn compute_tab_bar_view_inner(
     ws: &crate::workspace::Workspace,
     terminals: &std::collections::HashMap<
         crate::terminal::TerminalId,
@@ -243,6 +323,8 @@ pub(crate) fn compute_tab_bar_view(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area: Rect::default(),
+            pane_toggle_below_hit_area: Rect::default(),
+            pane_toggle_right_hit_area: Rect::default(),
         };
     }
 
@@ -269,6 +351,8 @@ pub(crate) fn compute_tab_bar_view(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area,
+            pane_toggle_below_hit_area: Rect::default(),
+            pane_toggle_right_hit_area: Rect::default(),
         };
     }
 
@@ -313,6 +397,8 @@ pub(crate) fn compute_tab_bar_view(
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
+        pane_toggle_below_hit_area: Rect::default(),
+        pane_toggle_right_hit_area: Rect::default(),
     }
 }
 
@@ -475,6 +561,30 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
                     .set_style(Style::default().fg(p.accent));
             }
         }
+    }
+
+    for (rect, glyph, direction) in [
+        (
+            app.view.pane_toggle_below_hit_area,
+            PANE_TOGGLE_BELOW_GLYPH,
+            crate::app::state::PaneToggleDirection::Below,
+        ),
+        (
+            app.view.pane_toggle_right_hit_area,
+            PANE_TOGGLE_RIGHT_GLYPH,
+            crate::app::state::PaneToggleDirection::Right,
+        ),
+    ] {
+        if !app.mouse_capture || rect.width == 0 {
+            continue;
+        }
+        // Accent means "a pane is already there", so the same click closes it.
+        let style = if app.pane_toggle_sibling(direction).is_some() {
+            Style::default().fg(p.accent)
+        } else {
+            Style::default().fg(p.overlay1)
+        };
+        frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), rect);
     }
 
     if app.mouse_capture && app.view.new_tab_hit_area.width > 0 {
@@ -838,5 +948,107 @@ mod tests {
 
         let row = buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0);
         assert!(row.contains('馈'), "tab row: {row:?}");
+    }
+
+    fn tab_bar_view_at(width: u16, tab_name: &str) -> (crate::workspace::Workspace, TabBarView) {
+        let app = AppState::test_new();
+        let ws = Workspace::test_new(tab_name);
+        let view = compute_tab_bar_view(
+            &ws,
+            &app.terminals,
+            Rect::new(0, 0, width, 1),
+            0,
+            true,
+            true,
+        );
+        (ws, view)
+    }
+
+    #[test]
+    fn pane_toggle_buttons_sit_at_the_right_end_of_the_tab_row() {
+        for width in [80u16, 120] {
+            let (_, view) = tab_bar_view_at(width, "test");
+            assert_eq!(
+                view.pane_toggle_below_hit_area,
+                Rect::new(width - 6, 0, 3, 1),
+                "width {width}"
+            );
+            assert_eq!(
+                view.pane_toggle_right_hit_area,
+                Rect::new(width - 3, 0, 3, 1),
+                "width {width}"
+            );
+            // The tab strip and the `+` button stay left of the toggles.
+            assert!(view.new_tab_hit_area.x + view.new_tab_hit_area.width <= width - 6);
+            assert!(view
+                .tab_hit_areas
+                .iter()
+                .all(|rect| rect.x + rect.width <= width - 6));
+        }
+    }
+
+    #[test]
+    fn pane_toggle_buttons_are_hidden_when_the_row_cannot_spare_the_width() {
+        let app = AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let long_tab = ws.test_add_tab(Some("a-very-long-tab-title-here"));
+        ws.active_tab = long_tab;
+        let narrow =
+            compute_tab_bar_view(&ws, &app.terminals, Rect::new(0, 0, 20, 1), 0, true, true);
+        assert_eq!(narrow.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(narrow.pane_toggle_right_hit_area, Rect::default());
+
+        // The same long title with room to spare keeps the buttons.
+        let wide =
+            compute_tab_bar_view(&ws, &app.terminals, Rect::new(0, 0, 120, 1), 0, true, true);
+        assert_eq!(wide.pane_toggle_below_hit_area, Rect::new(114, 0, 3, 1));
+
+        // Without mouse chrome there are no clickable controls at all.
+        let app = AppState::test_new();
+        let ws = Workspace::test_new("test");
+        let view =
+            compute_tab_bar_view(&ws, &app.terminals, Rect::new(0, 0, 120, 1), 0, true, false);
+        assert_eq!(view.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(view.pane_toggle_right_hit_area, Rect::default());
+    }
+
+    #[test]
+    fn pane_toggle_buttons_render_their_glyphs_and_accent_the_close_side() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        let root = ws.tabs[0].root_pane;
+        ws.tabs[0].layout.focus_pane(root);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.mouse_capture = true;
+        app.view.tab_bar_rect = Rect::new(0, 0, 40, 1);
+        let view = compute_tab_bar_view(
+            &app.workspaces[0],
+            &app.terminals,
+            app.view.tab_bar_rect,
+            0,
+            true,
+            true,
+        );
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+        app.view.pane_toggle_below_hit_area = view.pane_toggle_below_hit_area;
+        app.view.pane_toggle_right_hit_area = view.pane_toggle_right_hit_area;
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = buffer_row_text(buffer, app.view.tab_bar_rect, 0);
+        assert!(row.contains(PANE_TOGGLE_BELOW_GLYPH), "tab row: {row:?}");
+        assert!(row.contains(PANE_TOGGLE_RIGHT_GLYPH), "tab row: {row:?}");
+
+        let below_style = buffer[(app.view.pane_toggle_below_hit_area.x + 1, 0)].style();
+        let right_style = buffer[(app.view.pane_toggle_right_hit_area.x + 1, 0)].style();
+        assert_eq!(below_style.fg, Some(app.palette.accent));
+        assert_ne!(right_style.fg, Some(app.palette.accent));
     }
 }

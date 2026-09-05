@@ -893,6 +893,11 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_new_workspace");
         }
 
+        if self.app.apply_pane_toggle_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_pane_toggle");
+        }
+
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();

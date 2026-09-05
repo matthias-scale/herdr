@@ -936,6 +936,28 @@ impl App {
         );
     }
 
+    /// Drain a tab-row pane-toggle click. A sibling pane in that direction is
+    /// closed, otherwise the focused pane splits that way. Both branches go
+    /// through the same runtime calls as the split and close keybindings.
+    pub(crate) fn apply_pane_toggle_request(&mut self) -> bool {
+        let Some(direction) = self.state.request_pane_toggle.take() else {
+            return false;
+        };
+        match self.state.pane_toggle_sibling(direction) {
+            Some(pane_id) => {
+                if let Some(public_id) = self
+                    .state
+                    .active
+                    .and_then(|ws_idx| self.public_pane_id(ws_idx, pane_id))
+                {
+                    self.runtime_pane_close("tui.pane.close", public_id);
+                }
+            }
+            None => self.split_focused_pane_via_api(direction.split()),
+        }
+        true
+    }
+
     pub(crate) fn close_focused_pane_via_api_requires_confirmation(&mut self) -> bool {
         let Some((ws_idx, pane_id)) = self.focused_pane_target() else {
             return false;
