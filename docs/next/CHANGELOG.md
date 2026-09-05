@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- A theme whose palette contradicts the appearance the terminal reports is now named in the `herdr server reload-config` diagnostics and the log, instead of being left to be noticed by eye.
 - `theme.custom.sidebar_bg` can now give the desktop sidebar its own background without changing built-in theme defaults.
 - Settings and `ui.status_indicators = "symbols"` can now use distinct static shapes for blocked, working, done, idle, and unknown agent states. (#2260)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
@@ -29,6 +30,10 @@
 - `prefix+b` now jumps to the next blocked tab across all Spaces and wraps at the end. Toggle the sidebar with `prefix+shift+b`.
 
 ### Fixed
+- The desktop sidebar now paints the theme's own background instead of inheriting the terminal's, so a palette that disagrees with the terminal appearance looks wrong instead of turning the sidebar unreadable. `theme.custom.sidebar_bg` still overrides it, and the `terminal` theme still follows the terminal.
+- `theme.auto_switch` no longer assumes a dark terminal before the host answers the OSC 11 appearance query; it holds the configured theme until a real answer arrives, then switches.
+- The selected tab now picks its label color by measured contrast against the accent, so no palette can render it near-invisibly.
+- Nord's muted UI text moved off Nord's comment color, which rendered sidebar secondary text at 1.69:1 against the panel background.
 - Session topology and optional pane history now persist as one crash-safe generation; failed background saves retry without losing dirty state, and unverifiable history is dropped instead of being attached to a reused pane identity. (#20)
 - Git metadata refresh is bounded so slow repository probes cannot stall the interface. (#21)
 - Agent state no longer sticks after closing-block flushes, blocker retirement, declared-wait expiry, or torn transcripts, and nested child work keeps active panes in `working`. (#42, #54, #55, #57, #59-#62, #64-#66)

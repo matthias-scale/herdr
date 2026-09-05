@@ -444,11 +444,17 @@ fn resolve_effective_theme(
     appearance: Option<crate::terminal_theme::HostAppearance>,
 ) -> (state::Palette, String) {
     let (name, fallback) = if runtime.auto_switch {
-        match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
-            crate::terminal_theme::HostAppearance::Dark => (&runtime.dark_name, "catppuccin"),
-            crate::terminal_theme::HostAppearance::Light => {
+        match appearance {
+            Some(crate::terminal_theme::HostAppearance::Dark) => (&runtime.dark_name, "catppuccin"),
+            Some(crate::terminal_theme::HostAppearance::Light) => {
                 (&runtime.light_name, "catppuccin-latte")
             }
+            // No OSC 11 answer has arrived yet. Guessing an appearance is how
+            // auto_switch earned its reputation: a wrong guess paints one
+            // appearance's foregrounds over the other's background, and the
+            // result is unreadable rather than merely off-brand. Hold the
+            // configured palette until the attached client reports for real.
+            None => (&runtime.manual_name, "catppuccin"),
         }
     } else {
         (&runtime.manual_name, "catppuccin")
@@ -881,6 +887,7 @@ impl App {
             theme_runtime,
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
+            theme_appearance_mismatch: None,
             settings: state::SettingsState {
                 section: state::SettingsSection::Theme,
                 list: state::SelectionListState::new(0),
@@ -1952,6 +1959,9 @@ impl App {
         if !invalid_section("theme") {
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
             self.refresh_effective_app_theme();
+        }
+        if let Some(mismatch) = &self.state.theme_appearance_mismatch {
+            diagnostics.push(mismatch.clone());
         }
 
         let status = if diagnostics.is_empty() {
@@ -3435,6 +3445,59 @@ mod tests {
         assert!(!app.state.theme_runtime.auto_switch);
         assert_eq!(app.state.theme_name, "tokyo-night");
         assert_eq!(app.state.palette, state::Palette::tokyo_night());
+    }
+
+    /// The regression this pins: with auto_switch on and no OSC 11 answer yet,
+    /// herdr assumed a dark terminal. Guessing wrong paints one appearance's
+    /// foregrounds onto the other's background — the unreadable case — and it
+    /// is what pushed every host onto a hand-pinned palette. Hold the
+    /// configured theme until the client actually reports.
+    #[test]
+    fn theme_auto_switch_holds_the_configured_theme_until_the_host_reports() {
+        let mut config = Config::default();
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        config.theme.auto_switch = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.host_terminal_appearance, None);
+        assert_eq!(app.state.theme_name, "github-light-high-contrast");
+        assert_eq!(
+            app.state.palette,
+            state::Palette::github_light_high_contrast()
+        );
+
+        assert!(app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true));
+        assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+    }
+
+    /// A pinned palette that contradicts the terminal is legal but nearly
+    /// always a mistake, and it is invisible precisely because it hides the UI.
+    /// Name it where the operator already looks: the config-reload report.
+    #[test]
+    fn a_palette_that_contradicts_the_terminal_is_reported() {
+        let mut config = Config::default();
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.theme_appearance_mismatch, None);
+
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true);
+        let mismatch = app
+            .state
+            .theme_appearance_mismatch
+            .clone()
+            .expect("light palette in front of a dark terminal is a mismatch");
+        assert!(
+            mismatch.contains("github-light-high-contrast"),
+            "{mismatch}"
+        );
+        assert!(mismatch.contains("dark background"), "{mismatch}");
+
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true);
+        assert_eq!(app.state.theme_appearance_mismatch, None);
     }
 
     #[test]

@@ -290,8 +290,11 @@ impl Palette {
             surface0: Color::Rgb(59, 66, 82),
             surface1: Color::Rgb(67, 76, 94),
             surface_dim: Color::Rgb(46, 52, 64),
-            overlay0: Color::Rgb(76, 86, 106),
-            overlay1: Color::Rgb(100, 110, 130),
+            // Nord's own nord3 (#4c566a) is a comment color: on nord0 it lands
+            // at 1.69:1, dim enough to lose the sidebar's secondary text. Use
+            // the brighter muted tone the Nord UI ports settle on instead.
+            overlay0: Color::Rgb(123, 136, 161),
+            overlay1: Color::Rgb(143, 156, 178),
             text: Color::Rgb(236, 239, 244),
             subtext0: Color::Rgb(216, 222, 233),
             mauve: Color::Rgb(180, 142, 173),
@@ -600,6 +603,33 @@ impl Palette {
             blue: Color::Rgb(176, 176, 176),
             teal: Color::Rgb(102, 221, 204),
             peach: Color::Rgb(255, 199, 153),
+        }
+    }
+
+    /// Background the desktop sidebar paints under its rows.
+    ///
+    /// A palette that leaves `sidebar_bg` at `Reset` follows its own panel
+    /// background rather than the terminal's. Borrowing the terminal
+    /// background is what makes a mismatched palette unreadable: theme
+    /// foregrounds land on a background chosen by something else. The
+    /// `terminal` palette keeps `panel_bg` at `Reset`, so it still inherits.
+    pub fn sidebar_background(&self) -> Color {
+        match self.sidebar_bg {
+            Color::Reset => self.panel_bg,
+            color => color,
+        }
+    }
+
+    /// Appearance this palette was built for, inferred from `panel_bg`.
+    ///
+    /// `None` when the palette leaves its panel background to the terminal
+    /// (the `terminal` theme), where no appearance can be claimed.
+    pub fn appearance(&self) -> Option<crate::terminal_theme::HostAppearance> {
+        match self.panel_bg {
+            Color::Rgb(r, g, b) => {
+                Some(crate::terminal_theme::RgbColor { r, g, b }.inferred_appearance())
+            }
+            _ => None,
         }
     }
 
@@ -1938,6 +1968,10 @@ pub struct AppState {
     pub host_terminal_appearance: Option<HostAppearance>,
     /// True when the foreground host explicitly reported appearance via Mode 2031.
     pub host_terminal_appearance_explicit: bool,
+    /// Set when the active palette contradicts the appearance the host terminal
+    /// reports, e.g. a light theme pinned in front of a dark terminal. Surfaced
+    /// as a config-reload diagnostic so the mismatch is named, not guessed at.
+    pub theme_appearance_mismatch: Option<String>,
     /// Settings panel state.
     pub settings: SettingsState,
     /// Cached integration recommendations for onboarding/settings UI.
@@ -2820,6 +2854,7 @@ impl AppState {
             },
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
+            theme_appearance_mismatch: None,
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),
