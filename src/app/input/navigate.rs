@@ -293,7 +293,6 @@ impl App {
             NavigateAction::NextReviewAgent => {
                 if let Some((ws_idx, pane_id)) = next_review_agent_target(&self.state) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
-                    self.state.dock_editor_focused = false;
                     self.state.dock_home_focused = false;
                 }
                 leave_navigate_mode(&mut self.state);
@@ -467,7 +466,6 @@ impl App {
                 // row never expands, with nothing on screen saying why.
                 if self.state.dock_collapsed {
                     self.state.dock_home_focused = false;
-                    self.state.dock_editor_focused = false;
                 } else {
                     sync_dock_tab_focus(&mut self.state);
                 }
@@ -499,7 +497,6 @@ impl App {
             }
             NavigateAction::EditScratchpad => {
                 self.open_scratchpad_in_editor();
-                sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::ShowScratchpad => {
@@ -1277,6 +1274,53 @@ impl App {
         }
     }
 
+    /// Open the repository scratchpad beside the focused pane using its normal
+    /// managed terminal lifecycle. The persistent scratchpad is never a temp file.
+    pub(crate) fn open_scratchpad_in_editor(&mut self) {
+        let Some(root) = crate::scratchpad::focused_repo_root(&self.state) else {
+            self.show_work_link_notice("no repository for this pane");
+            return;
+        };
+        let path = crate::scratchpad::scratchpad_path(&root);
+        if let Err(error) = crate::scratchpad::ensure_scratchpad_file(&path) {
+            tracing::warn!(path = %path.display(), %error, "could not create scratchpad");
+            self.show_work_link_notice("could not create the scratchpad");
+            return;
+        }
+        let (env, cwd) = self.custom_command_env();
+        let cwd = cwd.or(Some(root));
+        let mut last_error = None;
+        for argv in crate::scratchpad::editor_argv_candidates(Some(&path)) {
+            match self.spawn_overlay_argv_command(
+                &argv,
+                cwd.clone(),
+                env.clone(),
+                Vec::new(),
+                false,
+            ) {
+                Ok((_, new_pane)) => {
+                    let terminal_id = new_pane.terminal.id.clone();
+                    self.terminal_runtimes
+                        .insert(terminal_id.clone(), new_pane.runtime);
+                    self.state
+                        .remove_alias_shadowed_by_new_pane(new_pane.pane_id);
+                    self.state.terminals.insert(terminal_id, new_pane.terminal);
+                    self.state.dock_home_focused = false;
+                    self.render_dirty.request_generic();
+                    self.render_notify.notify_one();
+                    return;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if let Some(error) = last_error {
+            tracing::warn!(%error, "could not spawn scratchpad editor");
+            self.show_work_link_notice("could not open the scratchpad editor");
+        } else {
+            self.show_work_link_notice("no editor command found");
+        }
+    }
+
     fn open_focused_scrollback_in_editor(&mut self) -> std::io::Result<()> {
         let ws_idx = self
             .state
@@ -1306,13 +1350,14 @@ impl App {
             }
         };
         let (env, _) = self.custom_command_env();
-        let new_pane = match self.spawn_overlay_argv_command(&argv, None, env, vec![path.clone()]) {
-            Ok((_, new_pane)) => new_pane,
-            Err(err) => {
-                let _ = fs::remove_file(&path);
-                return Err(err);
-            }
-        };
+        let new_pane =
+            match self.spawn_overlay_argv_command(&argv, None, env, vec![path.clone()], true) {
+                Ok((_, new_pane)) => new_pane,
+                Err(err) => {
+                    let _ = fs::remove_file(&path);
+                    return Err(err);
+                }
+            };
         let terminal_id = new_pane.terminal.id.clone();
         self.terminal_runtimes
             .insert(terminal_id.clone(), new_pane.runtime);
@@ -1415,6 +1460,7 @@ impl App {
         cwd: Option<std::path::PathBuf>,
         extra_env: Vec<(String, String)>,
         temp_files: Vec<std::path::PathBuf>,
+        zoom: bool,
     ) -> std::io::Result<(usize, crate::workspace::NewPane)> {
         let Some(ws_idx) = self.state.active else {
             return Err(std::io::Error::other("no active workspace"));
@@ -1469,8 +1515,8 @@ impl App {
             };
             ws.tabs
                 .get_mut(tab_idx)
-                .ok_or_else(|| std::io::Error::other("plugin overlay tab disappeared"))?
-                .zoomed = true;
+                .ok_or_else(|| std::io::Error::other("overlay tab disappeared"))?
+                .zoomed = zoom;
             self.overlay_panes.insert(
                 new_pane.pane_id,
                 super::super::OverlayPaneState {
@@ -1857,10 +1903,6 @@ fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::P
 
 fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_home_focused = state.dock_tab == crate::app::DockTab::Home;
-    state.dock_editor_focused = state.dock_tab == crate::app::DockTab::Editor;
-    if state.dock_editor_focused {
-        state.retry_dock_editor();
-    }
 }
 
 fn indexed_navigation_action(
@@ -2164,7 +2206,6 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::NextReviewAgent => {
             if let Some((ws_idx, pane_id)) = next_review_agent_target(state) {
                 state.focus_pane_in_workspace(ws_idx, pane_id);
-                state.dock_editor_focused = false;
                 state.dock_home_focused = false;
             }
             leave_navigate_mode(state);
@@ -2327,7 +2368,6 @@ pub(super) fn execute_navigate_action_in_context(
             // Headless mirror of the interactive arm above.
             if state.dock_collapsed {
                 state.dock_home_focused = false;
-                state.dock_editor_focused = false;
             } else {
                 sync_dock_tab_focus(state);
             }
@@ -2636,6 +2676,110 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[cfg(unix)]
+    fn assert_scratchpad_opens_as_real_pane(initially_zoomed: bool) {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let root = unique_temp_path("scratchpad-real-pane");
+        fs::create_dir_all(&root).expect("create repository directory");
+        let editor = root.join("editor.sh");
+        fs::write(
+            &editor,
+            "printf '%s' \"$HERDR_PANE_ID\" > \"$1.identity\"\nread -r line\nprintf '%s' \"$line\" > \"$1.input\"\nread -r line\n",
+        )
+        .expect("write editor fixture");
+        env.set("EDITOR", format!("/bin/sh '{}'", editor.display()));
+        let mut app = app_with_test_workspaces(&["scratchpad"]);
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_home_focused = true;
+        let workspace = &mut app.state.workspaces[0];
+        workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "scratchpad-test".into(),
+            label: "scratchpad".into(),
+            repo_root: root.clone(),
+            checkout_path: root.clone(),
+            is_linked_worktree: false,
+        });
+        let previous_focus = workspace.focused_pane_id().expect("focused pane");
+        workspace.active_tab_mut().expect("active tab").zoomed = initially_zoomed;
+        let path = crate::scratchpad::scratchpad_path(&root);
+        crate::scratchpad::ensure_scratchpad_file(&path).expect("create scratchpad");
+        fs::write(&path, "keep my notes\n").expect("seed scratchpad");
+
+        app.execute_tui_navigate_action(NavigateAction::EditScratchpad, ActionContext::Prefix);
+
+        let workspace = &app.state.workspaces[0];
+        let editor_pane = workspace.focused_pane_id().expect("editor focus");
+        assert_ne!(editor_pane, previous_focus);
+        assert_eq!(app.find_pane(editor_pane).map(|(index, _)| index), Some(0));
+        let tab = workspace.active_tab().expect("active tab");
+        assert!(tab.layout.pane_ids().contains(&previous_focus));
+        assert!(tab.layout.pane_ids().contains(&editor_pane));
+        assert!(!tab.zoomed, "both panes must stay visible");
+        let terminal_id = workspace
+            .terminal_id(editor_pane)
+            .expect("editor terminal")
+            .clone();
+        assert!(app.state.terminals.contains_key(&terminal_id));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_some());
+        let public_id = app
+            .public_pane_id(0, editor_pane)
+            .expect("public pane number");
+        assert_eq!(
+            wait_for_file(&path.with_extension("md.identity")),
+            public_id
+        );
+        assert!(app.overlay_panes[&editor_pane].temp_files.is_empty());
+        assert_eq!(
+            fs::read_to_string(&path).expect("scratchpad"),
+            "keep my notes\n"
+        );
+        assert!(
+            !app.state.dock_home_focused,
+            "editor pane owns keyboard focus"
+        );
+        for code in [KeyCode::Char('j'), KeyCode::Enter] {
+            let key = TerminalKey::new(code, KeyModifiers::empty());
+            assert!(!app.handle_dock_home_key_headless(&key));
+            let target = app
+                .handle_terminal_key_headless(key)
+                .expect("key reaches pane");
+            assert_eq!(target.terminal_id, terminal_id);
+        }
+        assert_eq!(wait_for_file(&path.with_extension("md.input")), "j");
+        app.terminal_runtimes
+            .remove(&terminal_id)
+            .expect("runtime")
+            .shutdown();
+        fs::remove_dir_all(root).expect("clean fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_scratchpad_registers_a_managed_layout_pane_beside_the_focused_pane() {
+        assert_scratchpad_opens_as_real_pane(false);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_scratchpad_unzooms_to_keep_the_previously_focused_pane_visible() {
+        assert_scratchpad_opens_as_real_pane(true);
+    }
+
+    #[test]
+    fn edit_scratchpad_without_a_repository_preserves_dock_home_focus() {
+        let mut app = app_with_test_workspaces(&["outside-repository"]);
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_home_focused = true;
+
+        app.execute_tui_navigate_action(NavigateAction::EditScratchpad, ActionContext::Prefix);
+
+        assert!(app.state.dock_home_focused);
+        assert_eq!(app.state.dock_tab, crate::app::DockTab::Home);
+        assert!(app.overlay_panes.is_empty());
     }
 
     fn app_with_global_window_fixture() -> App {
@@ -3095,46 +3239,6 @@ mod tests {
     }
 
     #[test]
-    fn selecting_the_editor_tab_retries_after_the_editor_exited() {
-        let mut state = app_with_test_workspaces(&["one"]).state;
-        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
-        state.mode = Mode::Prefix;
-        let agent_pane_id = state.workspaces[0].focused_pane_id().expect("focused pane");
-        let terminal_id = state.workspaces[0]
-            .terminal_id(agent_pane_id)
-            .expect("agent terminal")
-            .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal state")
-            .detected_agent = Some(crate::detect::Agent::Codex);
-        // What `handle_dock_editor_exit` leaves behind when the editor quits.
-        state
-            .dock_editor_errors
-            .insert(agent_pane_id, "editor exited".to_string());
-
-        for _ in 0..8 {
-            if state.dock_tab == crate::app::DockTab::Editor {
-                break;
-            }
-            execute_navigate_action_in_context(
-                &mut state,
-                &mut terminal_runtimes,
-                NavigateAction::NextDockTab,
-                ActionContext::Prefix,
-            );
-        }
-
-        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
-        assert!(state.dock_editor_focused);
-        assert!(
-            !state.dock_editor_errors.contains_key(&agent_pane_id),
-            "selecting the editor tab must clear the exit error so an editor can spawn again"
-        );
-    }
-
-    #[test]
     fn dock_key_actions_cycle_tabs_and_toggle_the_dock() {
         let mut state = app_with_test_workspaces(&["one"]).state;
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
@@ -3171,8 +3275,7 @@ mod tests {
             NavigateAction::NextDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
-        assert!(state.dock_editor_focused);
+        assert_eq!(state.dock_tab, crate::app::DockTab::Shortcuts);
         assert!(!state.dock_home_focused);
 
         execute_navigate_action_in_context(
@@ -3186,7 +3289,6 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::XPolls
         );
-        assert!(!state.dock_editor_focused);
         assert!(state.dock_home_focused);
 
         execute_navigate_action_in_context(

@@ -557,10 +557,6 @@ impl TerminalRuntime {
         crate::pane::PaneRuntime::test_cwd_query_count()
     }
 
-    pub(crate) fn test_resize_count(&self) -> usize {
-        self.0.test_resize_count()
-    }
-
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) = crate::pane::PaneRuntime::test_with_channel(cols, rows);
         (Self(runtime), rx)

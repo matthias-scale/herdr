@@ -144,16 +144,6 @@ impl App {
             return None;
         }
 
-        if let Some(terminal_id) = self.dock_editor_terminal_id() {
-            let rt = self.terminal_runtimes.get(&terminal_id)?;
-            rt.scroll_reset();
-            let bytes = rt.encode_terminal_key(key);
-            return Some(PreparedPaneInput {
-                target: TerminalInputTarget { terminal_id },
-                bytes: Bytes::from(bytes),
-            });
-        }
-
         let ws_idx = self.state.active?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
@@ -291,11 +281,9 @@ impl App {
         let runtime = if self.state.popup_pane.is_some() {
             self.popup_runtime()
         } else if self.state.mode == Mode::Terminal {
-            self.dock_editor_runtime().or_else(|| {
-                self.state.active.and_then(|ws_idx| {
-                    self.state
-                        .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-                })
+            self.state.active.and_then(|ws_idx| {
+                self.state
+                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
             })
         } else {
             None
@@ -538,6 +526,48 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
         (app, info)
+    }
+
+    #[tokio::test]
+    async fn host_report_all_ignores_unfocused_editor_pane() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("editor");
+        let shell = workspace.focused_pane_id().expect("shell pane");
+        let editor = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let shell_terminal = workspace
+            .terminal_id(shell)
+            .expect("shell terminal")
+            .clone();
+        let editor_terminal = workspace
+            .terminal_id(editor)
+            .expect("editor terminal")
+            .clone();
+        app.terminal_runtimes.insert(
+            shell_terminal,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"shell"),
+        );
+        // A typical editor negotiates kitty report-all while the shell does not.
+        app.terminal_runtimes.insert(
+            editor_terminal.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"\x1b[>15u"),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+
+        assert!(app.state.focus_pane_in_workspace(0, shell));
+        assert!(!app.host_keyboard_report_all_requested());
+        assert!(app.state.focus_pane_in_workspace(0, editor));
+        assert!(app.host_keyboard_report_all_requested());
+        assert!(app.state.focus_pane_in_workspace(0, shell));
+        assert!(!app.host_keyboard_report_all_requested());
+        assert!(app
+            .terminal_runtimes
+            .get(&editor_terminal)
+            .expect("editor runtime")
+            .keyboard_protocol()
+            .reports_all_keys());
     }
 
     fn double_click(app: &mut App, col: u16, row: u16) {
