@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    home::{directory_label, HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
+    home::{HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
     inbox::BlockedAgent,
     state::{HomeHitArea, HomeHitTarget},
     AppState,
@@ -358,6 +358,21 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
     }
 }
 
+/// Composer bands for a chip-row test: the bottom row is wide enough that the
+/// start-in target keeps its place there and the chips stay the three pickers.
+#[cfg(test)]
+fn chip_row_bands(chips: Rect) -> ComposerBands {
+    ComposerBands {
+        headline: Rect::new(chips.x, chips.y, chips.width, 1),
+        frame: chips,
+        prompt: chips,
+        chips,
+        submit: Rect::new(chips.right(), chips.y, 0, 1),
+        divider: chips,
+        bottom: Rect::new(chips.x, chips.y, u16::MAX / 2, 1),
+    }
+}
+
 #[cfg(test)]
 fn bands(area: Rect, queue_rows: usize) -> HomeBands {
     bands_for(area, false, queue_rows)
@@ -375,7 +390,11 @@ fn home_bands(app: &AppState, queue: &[BlockedAgent], area: Rect) -> HomeBands {
     bands_for(area, lens_requested(app, queue), queue.len())
 }
 
-fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
+fn chip_specs(
+    app: &AppState,
+    home: &HomeState,
+    composer: ComposerBands,
+) -> Vec<(HomeFocus, String)> {
     let mut specs = vec![
         (
             HomeFocus::Agent,
@@ -388,6 +407,9 @@ fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
     }
     if let Some(context) = &home.context_window {
         specs.push((HomeFocus::Context, format!("{context} ▾")));
+    }
+    if target_in_chip_row(app, home, composer) {
+        specs.push((HomeFocus::Target, target_chip_label(app, home)));
     }
     specs
 }
@@ -431,8 +453,9 @@ fn picker_row_label(label: &str, width: usize) -> String {
     }
 }
 
-fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
-    let specs = chip_specs(home);
+fn chip_rects(app: &AppState, home: &HomeState, composer: ComposerBands) -> Vec<(HomeFocus, Rect)> {
+    let area = composer.chips;
+    let specs = chip_specs(app, home, composer);
     let preferred_widths = specs
         .iter()
         .map(|(_, label)| display_width(label))
@@ -440,7 +463,11 @@ fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
     let minimum_widths = specs
         .iter()
         .map(|(focus, _)| match focus {
-            HomeFocus::Agent | HomeFocus::Model | HomeFocus::Effort | HomeFocus::Context => 4usize,
+            HomeFocus::Agent
+            | HomeFocus::Model
+            | HomeFocus::Effort
+            | HomeFocus::Context
+            | HomeFocus::Target => MINIMUM_CHIP_WIDTH,
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -499,24 +526,50 @@ fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
         .collect()
 }
 
-/// The four bottom-row fields, outermost first on each side.
+/// The bottom-row fields, outermost first on each side.
 ///
-/// Workspace and ref are the two the design names and are the last to be
-/// dropped when the row is short; folder and start-in sit between them because
-/// slice 1b folds the folder into the workspace choice.
-fn secondary_specs(app: &AppState, home: &HomeState) -> [(HomeFocus, String); 4] {
-    [
-        (HomeFocus::Workspace, workspace_label(home)),
-        (
-            HomeFocus::Directory,
-            format!("{} ▾", directory_label(&home.directory)),
-        ),
-        (
-            HomeFocus::Target,
-            format!("{} ▾", target_label(app, &home.target)),
-        ),
-        (HomeFocus::Ref, format!("⎇ {} ▾", ref_label(app))),
-    ]
+/// Workspace and ref are the two the design names and keep the row's ends; the
+/// start-in target sits between them while it fits and moves up to the picker
+/// row when it does not, so neither named field is squeezed for it.
+fn secondary_specs(
+    app: &AppState,
+    home: &HomeState,
+    composer: ComposerBands,
+) -> Vec<(HomeFocus, String)> {
+    let mut specs = vec![(HomeFocus::Workspace, workspace_label(home))];
+    if !target_in_chip_row(app, home, composer) {
+        specs.push((HomeFocus::Target, target_chip_label(app, home)));
+    }
+    specs.push((HomeFocus::Ref, format!("⎇ {} ▾", ref_label(app))));
+    specs
+}
+
+fn target_chip_label(app: &AppState, home: &HomeState) -> String {
+    format!("{} ▾", target_label(app, &home.target))
+}
+
+/// Gap between the bottom-row fields.
+const BOTTOM_ROW_GAP: usize = 2;
+
+/// `… ▾`: the narrowest a picker chip can be and still read as one.
+const MINIMUM_CHIP_WIDTH: usize = 4;
+
+/// Whether the target has to give up its place between workspace and ref.
+///
+/// It only moves when the picker row can actually hold it: a row too narrow for
+/// a fourth chip would leave the field with a single cell, which is worse than
+/// an elided label between the two fields the design names.
+fn target_in_chip_row(app: &AppState, home: &HomeState, composer: ComposerBands) -> bool {
+    let wanted = display_width(&workspace_label(home))
+        + display_width(&target_chip_label(app, home))
+        + display_width(&format!("⎇ {} ▾", ref_label(app)))
+        + BOTTOM_ROW_GAP * 2;
+    if wanted <= composer.bottom.width as usize {
+        return false;
+    }
+    let chips = 2 + usize::from(home.effort.is_some()) + usize::from(home.context_window.is_some());
+    let minimum = (chips + 1) * MINIMUM_CHIP_WIDTH + chips;
+    minimum <= composer.chips.width as usize
 }
 
 fn workspace_label(home: &HomeState) -> String {
@@ -531,97 +584,137 @@ fn ref_label(app: &AppState) -> String {
     app.home_ref_label()
 }
 
-fn secondary_rects(app: &AppState, home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
+fn secondary_rects(
+    app: &AppState,
+    home: &HomeState,
+    composer: ComposerBands,
+) -> Vec<(HomeFocus, Rect)> {
+    let area = composer.bottom;
     if area.width == 0 {
         return Vec::new();
     }
-    let specs = secondary_specs(app, home);
-    let preferred = specs
+    let specs = secondary_specs(app, home, composer);
+    let mut widths = specs
         .iter()
         .map(|(_, label)| display_width(label))
         .collect::<Vec<_>>();
-    let gaps = specs.len() - 1;
-    let preferred_total = preferred.iter().sum::<usize>();
-    let gap = if preferred_total + gaps * 2 <= area.width as usize {
-        2usize
+    let gaps = specs.len().saturating_sub(1) * BOTTOM_ROW_GAP;
+    let mut total = widths.iter().sum::<usize>() + gaps;
+    // Shrink from the middle outwards: the two fields the design names lose
+    // their labels last.
+    let shrink_order = if specs.len() == 3 {
+        vec![1usize, 2, 0]
     } else {
-        1
+        vec![1usize, 0]
     };
-    // Every field here opens a picker, so none of them is dropped when the row
-    // is short: they shrink to a stub and the renderer elides the label.
-    let available = (area.width as usize).saturating_sub(gaps * gap);
-    let mut widths = preferred.clone();
-    if preferred_total > available {
-        widths = preferred
-            .iter()
-            .scan(available, |remaining, _| {
-                let width = 4usize.min(*remaining);
-                *remaining = remaining.saturating_sub(width);
-                Some(width)
-            })
-            .collect();
-        let mut remaining = available.saturating_sub(widths.iter().sum::<usize>());
-        // Workspace and ref reach their full label first: they are the two the
-        // design names, and eliding them costs more than eliding a path.
-        for index in [0, 3, 1, 2] {
-            let wanted = preferred[index]
-                .saturating_sub(widths[index])
-                .min(remaining);
-            widths[index] += wanted;
-            remaining -= wanted;
+    for index in shrink_order {
+        if total <= area.width as usize {
+            break;
         }
+        let Some(width) = widths.get_mut(index) else {
+            continue;
+        };
+        let taken = (total - area.width as usize).min(*width);
+        *width -= taken;
+        total -= taken;
     }
     let widths = widths
         .into_iter()
         .map(|width| u16::try_from(width).unwrap_or(u16::MAX))
         .collect::<Vec<_>>();
-    // The two outer fields anchor the row; whatever slack is left lands in the
-    // middle rather than at either edge.
+    let last = specs.len() - 1;
     let mut rects = Vec::with_capacity(specs.len());
-    let mut left = area.x;
-    for index in [0, 1] {
-        if widths[index] == 0 {
-            continue;
-        }
+    if widths[0] > 0 {
         rects.push((
-            specs[index].0,
-            Rect::new(left, area.y, widths[index], area.height),
+            specs[0].0,
+            Rect::new(area.x, area.y, widths[0], area.height),
         ));
-        left = left
-            .saturating_add(widths[index])
-            .saturating_add(gap as u16);
     }
-    let mut right = area.right();
-    for index in [3, 2] {
-        if widths[index] == 0 {
-            continue;
-        }
-        right = right.saturating_sub(widths[index]);
+    if widths[last] > 0 {
         rects.push((
-            specs[index].0,
-            Rect::new(right, area.y, widths[index], area.height),
+            specs[last].0,
+            Rect::new(
+                area.right().saturating_sub(widths[last]),
+                area.y,
+                widths[last],
+                area.height,
+            ),
         ));
-        right = right.saturating_sub(gap as u16);
+    }
+    // Whatever slack is left lands around the middle field rather than at
+    // either edge.
+    if specs.len() == 3 && widths[1] > 0 {
+        let left = area
+            .x
+            .saturating_add(widths[0])
+            .saturating_add(BOTTOM_ROW_GAP as u16);
+        let right = area
+            .right()
+            .saturating_sub(widths[last])
+            .saturating_sub(BOTTOM_ROW_GAP as u16);
+        let span = right.saturating_sub(left);
+        let x = left.saturating_add(span.saturating_sub(widths[1]) / 2);
+        rects.push((specs[1].0, Rect::new(x, area.y, widths[1], area.height)));
     }
     rects
 }
 
 /// `What should we build in <name>?`, with the name underlined.
-fn headline_line(app: &AppState, width: u16) -> Line<'static> {
-    let name = app.home_headline_name();
-    let prefix = "What should we build in ";
-    let name = truncate_end(
-        &name,
-        (width as usize).saturating_sub(display_width(prefix) + 1),
-    );
+///
+/// The name is the directory field: it is what the thread is about, so it
+/// carries the picker instead of a second folder chip in the bottom row.
+const HEADLINE_PREFIX: &str = "What should we build in ";
+
+fn headline_name(app: &AppState, width: u16) -> String {
+    truncate_end(
+        &app.home_headline_name(),
+        (width as usize).saturating_sub(display_width(HEADLINE_PREFIX) + 1),
+    )
+}
+
+/// The cells the underlined name occupies, given the centred headline.
+fn headline_name_rect(app: &AppState, headline: Rect) -> Option<Rect> {
+    if headline.width == 0 || headline.height == 0 {
+        return None;
+    }
+    let name = headline_name(app, headline.width);
+    let name_width = display_width_u16(&name);
+    if name_width == 0 {
+        return None;
+    }
+    let line_width = display_width_u16(HEADLINE_PREFIX)
+        .saturating_add(name_width)
+        .saturating_add(1);
+    let left = headline
+        .x
+        .saturating_add(headline.width.saturating_sub(line_width) / 2)
+        .saturating_add(display_width_u16(HEADLINE_PREFIX));
+    if left >= headline.right() {
+        return None;
+    }
+    Some(Rect::new(
+        left,
+        headline.y,
+        name_width.min(headline.right() - left),
+        1,
+    ))
+}
+
+fn headline_line(app: &AppState, width: u16, focused: bool) -> Line<'static> {
+    let name = headline_name(app, width);
+    let name_style = Style::default()
+        .fg(app.palette.text)
+        .add_modifier(Modifier::UNDERLINED);
+    let name_style = if focused {
+        name_style
+            .bg(app.palette.surface1)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        name_style
+    };
     Line::from(vec![
-        Span::styled(prefix, Style::default().fg(app.palette.subtext0)),
-        Span::styled(
-            name,
-            Style::default()
-                .fg(app.palette.text)
-                .add_modifier(Modifier::UNDERLINED),
-        ),
+        Span::styled(HEADLINE_PREFIX, Style::default().fg(app.palette.subtext0)),
+        Span::styled(name, name_style),
         Span::styled("?", Style::default().fg(app.palette.subtext0)),
     ])
 }
@@ -720,11 +813,15 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(|context| (*context).to_string())
             .collect(),
-        HomePicker::Directory => app
-            .home_directory_options()
-            .iter()
-            .map(|directory| directory_label(directory))
-            .collect(),
+        HomePicker::Directory => match home.browse.as_ref() {
+            // Browsing replaces the options with what is under the typed path.
+            Some(browse) => browse.children.clone(),
+            None => app
+                .home_directory_picker_options()
+                .iter()
+                .map(crate::app::home::HomeDirectoryOption::label)
+                .collect(),
+        },
         HomePicker::Workspace => app
             .home_workspace_options()
             .iter()
@@ -750,6 +847,11 @@ fn picker_matches<'a>(
     labels: &'a [String],
 ) -> Vec<(usize, &'a str)> {
     match picker {
+        HomePicker::Directory if home.browse.is_some() => labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (index, label.as_str()))
+            .collect(),
         HomePicker::Directory => home.directory_filter.matches(labels),
         HomePicker::Ref => {
             let names = app
@@ -780,17 +882,14 @@ fn composer_field_rect(
     if focus == HomeFocus::Prompt {
         return (composer.prompt.width > 0).then_some(composer.prompt);
     }
-    if matches!(
-        focus,
-        HomeFocus::Directory | HomeFocus::Workspace | HomeFocus::Ref | HomeFocus::Target
-    ) {
-        return secondary_rects(app, home, composer.bottom)
-            .into_iter()
-            .find_map(|(field_focus, rect)| (field_focus == focus).then_some(rect));
+    // The directory is the headline, not a field in the card.
+    if focus == HomeFocus::Directory {
+        return headline_name_rect(app, composer.headline);
     }
-    chip_rects(home, composer.chips)
+    secondary_rects(app, home, composer)
         .into_iter()
-        .find_map(|(chip_focus, rect)| (chip_focus == focus).then_some(rect))
+        .chain(chip_rects(app, home, composer))
+        .find_map(|(field_focus, rect)| (field_focus == focus).then_some(rect))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -969,6 +1068,15 @@ fn render_lens(
     );
 }
 
+/// The dropdown's own input line: a fuzzy filter, or the browsed path.
+fn picker_filter_text(home: &HomeState, picker: HomePicker) -> String {
+    match (picker, home.browse.as_ref()) {
+        (HomePicker::Directory, Some(browse)) => format!(" › {}_", browse.input),
+        (HomePicker::Directory, None) => format!(" / {}_", home.directory_filter.query),
+        _ => format!(" / {}_", home.ref_filter.query),
+    }
+}
+
 fn picker_layout(
     app: &AppState,
     home: &HomeState,
@@ -978,18 +1086,15 @@ fn picker_layout(
     let picker = home.picker?;
     let field = composer_field_rect(app, home, composer, home.focus?)?;
     let labels = picker_labels(app, home, picker);
-    if labels.is_empty() || area.width == 0 || area.height == 0 {
+    let browsing = picker == HomePicker::Directory && home.browse.is_some();
+    // A path with no matching children still has to show its input line.
+    if (labels.is_empty() && !browsing) || area.width == 0 || area.height == 0 {
         return None;
     }
     let has_filter = matches!(picker, HomePicker::Directory | HomePicker::Ref);
     let matches = picker_matches(app, home, picker, &labels);
     let filter_width = if has_filter {
-        let query = if picker == HomePicker::Directory {
-            &home.directory_filter.query
-        } else {
-            &home.ref_filter.query
-        };
-        display_width(query).saturating_add(4)
+        display_width(&picker_filter_text(home, picker)).saturating_add(1)
     } else {
         0
     };
@@ -1113,9 +1218,16 @@ pub(super) fn home_hit_areas(
                 rect: composer.prompt,
             });
         }
-        for (focus, rect) in chip_rects(home, composer.chips)
+        // The underlined name in the headline is the directory field.
+        if let Some(rect) = headline_name_rect(app, composer.headline) {
+            hits.push(HomeHitArea {
+                target: HomeHitTarget::Directory,
+                rect,
+            });
+        }
+        for (focus, rect) in chip_rects(app, home, composer)
             .into_iter()
-            .chain(secondary_rects(app, home, composer.bottom))
+            .chain(secondary_rects(app, home, composer))
         {
             hits.push(HomeHitArea {
                 target: match focus {
@@ -1236,8 +1348,12 @@ pub(super) fn render_home(
             composer.frame,
         );
         frame.render_widget(
-            Paragraph::new(headline_line(app, composer.headline.width))
-                .alignment(Alignment::Center),
+            Paragraph::new(headline_line(
+                app,
+                composer.headline.width,
+                home.focus == Some(HomeFocus::Directory),
+            ))
+            .alignment(Alignment::Center),
             composer.headline,
         );
 
@@ -1289,7 +1405,7 @@ pub(super) fn render_home(
             }
         }
 
-        let chip_rects = chip_rects(home, composer.chips);
+        let chip_rects = chip_rects(app, home, composer);
         // The separator lives in the gap, so it never eats a chip's own width
         // or its click target.
         for pair in chip_rects.windows(2) {
@@ -1326,7 +1442,7 @@ pub(super) fn render_home(
         );
 
         for (focus, rect) in chip_rects {
-            let label = chip_specs(home)
+            let label = chip_specs(app, home, composer)
                 .into_iter()
                 .find_map(|(candidate, label)| (candidate == focus).then_some(label))
                 .unwrap_or_default();
@@ -1344,8 +1460,8 @@ pub(super) fn render_home(
             );
         }
 
-        for (focus, rect) in secondary_rects(app, home, composer.bottom) {
-            let label = secondary_specs(app, home)
+        for (focus, rect) in secondary_rects(app, home, composer) {
+            let label = secondary_specs(app, home, composer)
                 .into_iter()
                 .find_map(|(candidate, label)| (candidate == focus).then_some(label))
                 .unwrap_or_default();
@@ -1373,12 +1489,7 @@ pub(super) fn render_home(
                     _ => home.picker_selected,
                 };
                 if let Some(filter_rect) = dropdown.filter_rect {
-                    let filter = if picker == HomePicker::Directory {
-                        &home.directory_filter
-                    } else {
-                        &home.ref_filter
-                    };
-                    let query = format!(" / {}_", filter.query);
+                    let query = picker_filter_text(home, picker);
                     frame.render_widget(
                         Paragraph::new(truncate_end(&query, filter_rect.width as usize)).style(
                             Style::default()
@@ -1449,9 +1560,12 @@ pub(super) fn render_home(
     );
     if let (Some(composer), Some(error)) = (
         composer,
-        app.home
-            .as_ref()
-            .and_then(|home| home.dispatch_error.as_deref()),
+        app.home.as_ref().and_then(|home| {
+            home.browse
+                .as_ref()
+                .and_then(|browse| browse.error.as_deref())
+                .or(home.dispatch_error.as_deref())
+        }),
     ) {
         let error_row = Rect::new(
             composer.frame.x,
@@ -1849,7 +1963,7 @@ mod tests {
         assert_eq!(composer.prompt.x, composer.frame.x + 1);
         assert_eq!(composer.chips.x, composer.frame.x + 1);
         assert_eq!(composer.bottom.x, composer.frame.x + 1);
-        let wide_chip_rects = chip_rects(home, composer.chips);
+        let wide_chip_rects = chip_rects(&app, home, composer);
         assert!(wide_chip_rects
             .windows(2)
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
@@ -1872,13 +1986,13 @@ mod tests {
             hits.iter()
                 .find(|hit| hit.target == HomeHitTarget::Target)
                 .map(|hit| hit.rect),
-            secondary_rects(&app, home, composer.bottom)
+            secondary_rects(&app, home, composer)
                 .into_iter()
                 .find_map(|(focus, rect)| (focus == HomeFocus::Target).then_some(rect))
         );
-        for (focus, rect) in chip_rects(home, composer.chips)
+        for (focus, rect) in chip_rects(&app, home, composer)
             .into_iter()
-            .chain(secondary_rects(&app, home, composer.bottom))
+            .chain(secondary_rects(&app, home, composer))
         {
             let target = match focus {
                 HomeFocus::Agent => HomeHitTarget::Agent,
@@ -2050,7 +2164,7 @@ mod tests {
             .composer
             .expect("composer should fit");
         let home = app.home.as_ref().expect("home");
-        let rects = chip_rects(home, composer.chips);
+        let rects = chip_rects(&app, home, composer);
         let buffer = draw_home(&app, &queue, area);
         let chip_row = row_text(&buffer, area, composer.chips.y);
 
@@ -2171,7 +2285,7 @@ mod tests {
         let mut home = HomeState::default();
         home.model = "模型六点一".into();
         let area = Rect::new(0, 0, 24, 1);
-        let rects = chip_rects(&home, area);
+        let rects = chip_rects(&AppState::test_new(), &home, chip_row_bands(area));
 
         assert_eq!(rects.len(), 3);
         assert_eq!(
@@ -2472,11 +2586,11 @@ mod tests {
         let bottom = card_row(composer.bottom.y);
         assert!(bottom.contains("⌂ Current checkout ▾"), "{bottom:?}");
         assert!(bottom.contains("⎇ current branch ▾"), "{bottom:?}");
-        let workspace = secondary_rects(&app, app.home.as_ref().expect("home"), composer.bottom)
+        let workspace = secondary_rects(&app, app.home.as_ref().expect("home"), composer)
             .into_iter()
             .find_map(|(focus, rect)| (focus == HomeFocus::Workspace).then_some(rect))
             .expect("workspace field");
-        let git_ref = secondary_rects(&app, app.home.as_ref().expect("home"), composer.bottom)
+        let git_ref = secondary_rects(&app, app.home.as_ref().expect("home"), composer)
             .into_iter()
             .find_map(|(focus, rect)| (focus == HomeFocus::Ref).then_some(rect))
             .expect("ref field");
@@ -2626,5 +2740,143 @@ mod tests {
         let composer_again = home_bands(&app, &queue, area);
         assert!(composer_again.composer.is_some());
         assert!(composer_again.lens.is_none());
+    }
+
+    #[test]
+    fn the_headline_name_is_the_directory_field_and_opens_its_picker_below_the_headline() {
+        let mut app = AppState::test_new();
+        app.home = Some(HomeState::test_with_focus(HomeFocus::Directory));
+        app.home_open_picker(HomePicker::Directory);
+        let queue = [blocked(0)];
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = bands(area, queue.len());
+        let composer = layout.composer.expect("composer should fit");
+        let home = app.home.as_ref().expect("home");
+        let field =
+            composer_field_rect(&app, home, composer, HomeFocus::Directory).expect("name field");
+        let popup = picker_popup_rect(&app, home, composer, area).expect("directory picker");
+        let buffer = draw_home(&app, &queue, area);
+        let hits = home_hit_areas(&app, &queue, area);
+
+        // The field is the underlined name inside the headline, not a chip.
+        assert_eq!(field.y, composer.headline.y);
+        assert!(field.y < composer.frame.y);
+        let headline = row_text(&buffer, area, composer.headline.y);
+        let name = app.home_headline_name();
+        assert!(headline.contains(&format!("What should we build in {name}?")));
+        assert_eq!(
+            row_text(&buffer, field, field.y).trim(),
+            name,
+            "the field covers exactly the name"
+        );
+        assert_eq!(
+            hits.iter()
+                .find(|hit| hit.target == HomeHitTarget::Directory)
+                .map(|hit| hit.rect),
+            Some(field),
+            "clicking the name is what opens the picker"
+        );
+
+        // And the picker opens below the headline, never above it.
+        assert_eq!(popup.y, field.bottom());
+        assert!(popup.bottom() <= area.bottom());
+        assert!(
+            row_text(&buffer, popup, popup.y).contains('/'),
+            "filter line"
+        );
+        assert!(
+            (popup.y..popup.bottom()).any(
+                |y| row_text(&buffer, popup, y).contains(crate::app::home::BROWSE_OPTION_LABEL)
+            ),
+            "the last option is browse"
+        );
+    }
+
+    #[test]
+    fn the_bottom_row_drops_the_folder_field_and_keeps_workspace_target_and_ref() {
+        let mut app = AppState::test_new();
+        app.home = Some(HomeState::default());
+        let queue = [blocked(0)];
+        for width in [80u16, 120] {
+            let area = Rect::new(0, 0, width, 40);
+            let composer = bands(area, queue.len()).composer.expect("composer");
+            let home = app.home.as_ref().expect("home");
+            let focuses = secondary_specs(&app, home, composer)
+                .into_iter()
+                .map(|(focus, _)| focus)
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                focuses,
+                vec![HomeFocus::Workspace, HomeFocus::Target, HomeFocus::Ref],
+                "at {width} columns"
+            );
+            let bottom = row_text(&draw_home(&app, &queue, area), area, composer.bottom.y);
+            assert!(bottom.contains("⌂ Current checkout ▾"), "{bottom:?}");
+            assert!(bottom.contains("⎇ "), "{bottom:?}");
+            assert!(
+                !bottom.contains('~') && !bottom.contains("Folder"),
+                "the folder field is gone: {bottom:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_bottom_row_moves_the_target_to_the_picker_row() {
+        let mut app = AppState::test_new();
+        app.home = Some(HomeState::default());
+        let queue = [blocked(0)];
+        let area = Rect::new(0, 0, 46, 40);
+        let composer = bands(area, queue.len()).composer.expect("composer");
+        let home = app.home.as_ref().expect("home");
+
+        let bottom = secondary_specs(&app, home, composer)
+            .into_iter()
+            .map(|(focus, _)| focus)
+            .collect::<Vec<_>>();
+        let chips = chip_specs(&app, home, composer)
+            .into_iter()
+            .map(|(focus, _)| focus)
+            .collect::<Vec<_>>();
+
+        assert_eq!(bottom, vec![HomeFocus::Workspace, HomeFocus::Ref]);
+        assert!(chips.contains(&HomeFocus::Target), "{chips:?}");
+        assert_eq!(
+            composer_field_rect(&app, home, composer, HomeFocus::Target).map(|rect| rect.y),
+            Some(composer.chips.y),
+            "the field follows the label it moved with"
+        );
+    }
+
+    #[test]
+    fn browse_replaces_the_filter_line_with_the_typed_path_and_lists_its_children() {
+        let root =
+            std::env::temp_dir().join(format!("herdr-home-browse-ui-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("alpha")).expect("fixture");
+        std::fs::create_dir_all(root.join("beta")).expect("fixture");
+        let mut app = AppState::test_new();
+        let mut home = HomeState::test_with_focus(HomeFocus::Directory);
+        home.directory = root.clone();
+        app.home = Some(home);
+        app.home_open_picker(HomePicker::Directory);
+        if let Some(home) = app.home.as_mut() {
+            home.browse = Some(crate::app::home::HomeBrowse::starting_at(&root));
+        }
+        let queue = [blocked(0)];
+        let area = Rect::new(0, 0, 120, 40);
+        let composer = bands(area, queue.len()).composer.expect("composer");
+        let home = app.home.as_ref().expect("home");
+        let popup = picker_popup_rect(&app, home, composer, area).expect("browse popup");
+        let buffer = draw_home(&app, &queue, area);
+
+        assert!(
+            row_text(&buffer, popup, popup.y).contains('›'),
+            "the filter line became a path input: {:?}",
+            row_text(&buffer, popup, popup.y)
+        );
+        assert!(row_text(&buffer, popup, popup.y + 1).contains("alpha"));
+        assert!(row_text(&buffer, popup, popup.y + 2).contains("beta"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

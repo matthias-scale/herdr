@@ -2104,17 +2104,20 @@ mod tests {
 
     fn app_with_home(directory: &Path) -> crate::app::state::AppState {
         let mut app = crate::app::state::AppState::test_new();
-        let mut home = HomeState::default();
-        home.directory = directory.to_path_buf();
-        app.home = Some(home);
+        app.home = Some(HomeState {
+            directory: directory.to_path_buf(),
+            ..HomeState::default()
+        });
         app
     }
 
     #[test]
     fn the_focus_cycle_visits_the_headline_directory_between_the_chips_and_the_workspace() {
-        let mut home = HomeState::default();
-        home.context_window = Some(DEFAULT_CONTEXT_WINDOW.into());
-        home.focus = Some(HomeFocus::Prompt);
+        let mut home = HomeState {
+            context_window: Some(DEFAULT_CONTEXT_WINDOW.into()),
+            focus: Some(HomeFocus::Prompt),
+            ..HomeState::default()
+        };
 
         let mut order = Vec::new();
         for _ in 0..8 {
@@ -2187,7 +2190,10 @@ mod tests {
             .iter()
             .rposition(|option| matches!(option, HomeDirectoryOption::Recent(_)))
             .expect("a recent directory");
-        assert!(last_recent < first_worktree, "recents come first: {options:?}");
+        assert!(
+            last_recent < first_worktree,
+            "recents come first: {options:?}"
+        );
         assert_eq!(
             options.last().map(HomeDirectoryOption::label),
             Some(BROWSE_OPTION_LABEL.to_string())
@@ -2357,5 +2363,4 @@ mod tests {
         );
         assert_eq!(name, "~");
     }
-
 }
