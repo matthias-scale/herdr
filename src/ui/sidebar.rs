@@ -1487,23 +1487,69 @@ fn missive_url_tail(url: &str) -> String {
         .to_string()
 }
 
-/// The conversation subject the context dock already has: the declared work
-/// title of a pane bound to that conversation and to nothing else. This slice
-/// adds no Missive fetch, so every other conversation falls back to the tail.
-fn missive_subject(app: &AppState, url: &str) -> Option<String> {
+/// The link-row label the context dock shows for this conversation, when it
+/// carries more than the URL itself. `work_link_candidates` derives the label
+/// from the URL today, so this is the seam a cached subject arrives through.
+fn cached_missive_link_label(app: &AppState, url: &str) -> Option<String> {
+    context_panes(app).find_map(|context| {
+        crate::work_context::work_link_candidates(context)
+            .into_iter()
+            .find(|candidate| {
+                candidate.kind == crate::work_context::WorkLinkKind::Missive && candidate.url == url
+            })
+            .map(|candidate| candidate.label)
+    })
+}
+
+/// A label that is only the URL restated tells the reader nothing the header
+/// would not already show.
+fn missive_label_is_url(label: &str, url: &str) -> bool {
+    let tail = missive_url_tail(url);
+    label == url || label == tail || label == format!("missive/{tail}")
+}
+
+/// The declared work title of a pane carrying this conversation. A pane bound
+/// to that conversation alone describes it best, so it wins over a pane that
+/// spreads across several.
+fn missive_work_title(app: &AppState, url: &str) -> Option<String> {
+    let carries = |context: &&crate::work_context::PaneWorkContext| {
+        context.missive_urls.iter().any(|other| other == url)
+    };
+    let exclusive = context_panes(app)
+        .filter(carries)
+        .find(|context| context.missive_urls.len() == 1);
+    exclusive
+        .or_else(|| context_panes(app).find(carries))
+        .and_then(|context| context.work_title.clone())
+}
+
+/// The header for a Missive conversation, resolved from state Herdr already
+/// holds: the cached link label, then the declared work title of a pane on that
+/// conversation, then the URL tail. This slice adds no Missive fetch.
+fn missive_subject(app: &AppState, url: &str) -> String {
+    missive_subject_from(
+        cached_missive_link_label(app, url).as_deref(),
+        missive_work_title(app, url).as_deref(),
+        url,
+    )
+}
+
+fn missive_subject_from(link_label: Option<&str>, work_title: Option<&str>, url: &str) -> String {
+    link_label
+        .filter(|label| !missive_label_is_url(label, url))
+        .or(work_title)
+        .map(str::to_string)
+        .unwrap_or_else(|| missive_url_tail(url))
+}
+
+/// Every pane's effective work context, in workspace order.
+fn context_panes(app: &AppState) -> impl Iterator<Item = &crate::work_context::PaneWorkContext> {
     app.workspaces
         .iter()
         .flat_map(|workspace| workspace.tabs.iter())
         .flat_map(|tab| tab.panes.values())
         .filter_map(|pane| app.terminals.get(&pane.attached_terminal_id))
-        .find_map(|terminal| {
-            let context = terminal.effective_work_context();
-            let bound = context.missive_urls.len() == 1
-                && context.missive_urls.first().map(String::as_str) == Some(url)
-                && context.ticket_ids.is_empty()
-                && context.pr_urls.is_empty();
-            bound.then(|| context.work_title.clone()).flatten()
-        })
+        .map(|terminal| terminal.effective_work_context())
 }
 
 fn work_group_index(groups: &[SidebarWorkGroup], key: &str) -> Option<usize> {
@@ -1557,36 +1603,40 @@ pub(crate) fn sidebar_work_groups(
         let context = entry_work_context(app, &entry);
         match mode {
             SidebarGroupMode::LinearTeam => {
-                // A pane with several tickets belongs to its first one only, so
-                // the same thread never appears twice in the tree.
-                let Some(ticket_id) = context.and_then(|context| context.ticket_ids.first()) else {
+                // A pane on several tickets is work on each of them, so it is
+                // listed under every ticket header it belongs to.
+                let ticket_ids = context
+                    .map(|context| context.ticket_ids.as_slice())
+                    .unwrap_or_default();
+                if ticket_ids.is_empty() {
                     push_unlinked_entry(&mut groups, entry);
                     continue;
-                };
-                // A ticket the filter excluded takes its panes with it.
-                if let Some(index) = work_group_index(&groups, &format!("linear:{ticket_id}")) {
-                    groups[index].entries.push(entry);
+                }
+                for ticket_id in ticket_ids {
+                    // A ticket the filter excluded takes its panes with it.
+                    if let Some(index) = work_group_index(&groups, &format!("linear:{ticket_id}")) {
+                        groups[index].entries.push(entry.clone());
+                    }
                 }
             }
             SidebarGroupMode::Missive => {
                 let urls = context
                     .map(|context| context.missive_urls.as_slice())
                     .unwrap_or_default();
-                let Some((first, rest)) = urls.split_first() else {
+                if urls.is_empty() {
                     push_unlinked_entry(&mut groups, entry);
                     continue;
-                };
-                // The conversations this pane also touches are still worth
-                // seeing; they simply have no thread of their own yet.
-                for (position, url) in std::iter::once(first).chain(rest).enumerate() {
+                }
+                // A pane replying in several conversations belongs under each
+                // of them.
+                for url in urls {
                     let key = format!("missive:{url}");
                     let index = match work_group_index(&groups, &key) {
                         Some(index) => index,
                         None => {
                             groups.push(SidebarWorkGroup {
                                 key,
-                                title: missive_subject(app, url)
-                                    .unwrap_or_else(|| missive_url_tail(url)),
+                                title: missive_subject(app, url),
                                 entries: Vec::new(),
                                 unlinked: false,
                                 activation: Some(SidebarWorkGroupActivation {
@@ -1597,9 +1647,7 @@ pub(crate) fn sidebar_work_groups(
                             groups.len() - 1
                         }
                     };
-                    if position == 0 {
-                        groups[index].entries.push(entry.clone());
-                    }
+                    groups[index].entries.push(entry.clone());
                 }
             }
             SidebarGroupMode::Repo | SidebarGroupMode::RepoPr | SidebarGroupMode::RepoWorktree => {}
@@ -7944,9 +7992,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("OPS-12 pixel EMQ drop".to_string(), 0, true),
                 ("SCA-3102 annual credits  P1".to_string(), 1, false),
                 ("SCA-3165 image-edit v3  P2".to_string(), 1, false),
-                // The two-ticket pane sits under its first ticket only, so the
-                // second one is a ticket nobody has started.
-                ("SCA-3170 ads skill map  P3".to_string(), 0, true),
+                // The two-ticket pane is listed under both of its tickets.
+                ("SCA-3170 ads skill map  P3".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
         );
@@ -7959,10 +8006,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             work_group_shape(&app),
             vec![
-                // The pane sits under its first conversation; the second one it
-                // touches has no thread of its own.
-                ("aaa111".to_string(), 1, false),
-                ("bbb222".to_string(), 0, true),
+                // The pane replies in both conversations, so it is listed under
+                // both; its declared work title is each header's subject.
+                ("fix pricing".to_string(), 1, false),
+                ("fix pricing".to_string(), 1, false),
                 ("unlinked".to_string(), 2, false),
             ]
         );
@@ -7996,6 +8043,69 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn multi_ticket_pane_appears_under_every_ticket() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        let panes_under = |app: &AppState, title: &str| {
+            work_group_shape(app)
+                .into_iter()
+                .find(|(header, _, _)| header.starts_with(title))
+                .map(|(_, count, _)| count)
+        };
+        // The fixture pane declares SCA-3165 and SCA-3170.
+        assert_eq!(panes_under(&app, "SCA-3165"), Some(1));
+        assert_eq!(panes_under(&app, "SCA-3170"), Some(1));
+    }
+
+    #[test]
+    fn multi_link_pane_appears_under_every_missive_conversation() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let groups =
+            sidebar_work_groups(&app, &agent_panel_entries(&app), SidebarGroupMode::Missive);
+        let entries_for = |key: &str| {
+            groups
+                .iter()
+                .find(|group| group.key == key)
+                .map(|group| group.entries.len())
+        };
+        assert_eq!(entries_for(&format!("missive:{CONVERSATION_A}")), Some(1));
+        assert_eq!(entries_for(&format!("missive:{CONVERSATION_B}")), Some(1));
+    }
+
+    #[test]
+    fn missive_subject_prefers_cached_link_label_then_work_title_then_url_tail() {
+        // A cached subject wins over everything else.
+        assert_eq!(
+            missive_subject_from(
+                Some("refund for invoice 42"),
+                Some("fix pricing"),
+                CONVERSATION_A
+            ),
+            "refund for invoice 42"
+        );
+        // A label that only restates the URL is no subject at all.
+        assert_eq!(
+            missive_subject_from(Some("missive/aaa111"), Some("fix pricing"), CONVERSATION_A),
+            "fix pricing"
+        );
+        assert_eq!(missive_subject_from(None, None, CONVERSATION_A), "aaa111");
+
+        // The same order against real state: the dock has no cached subject
+        // yet, so the pane's declared title titles the header.
+        let app = sidebar_work_item_fixture();
+        assert_eq!(missive_subject(&app, CONVERSATION_A), "fix pricing");
+        // A conversation no pane carries falls back to the URL tail.
+        assert_eq!(
+            missive_subject(
+                &app,
+                "https://mail.missiveapp.com/#inbox/conversations/ccc333"
+            ),
+            "ccc333"
+        );
+    }
+
+    #[test]
     fn dim_work_item_rows_carry_no_state_colour() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
@@ -8003,7 +8113,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .filter(|row| matches!(row, SidebarRow::NestedHeader { dim: true, .. }))
             .count();
-        assert_eq!(dim_rows, 2);
+        assert_eq!(dim_rows, 1);
 
         let mut terminal =
             Terminal::new(TestBackend::new(106, 40)).expect("test terminal for dim rows");
@@ -8063,11 +8173,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.sidebar_work_filter.assignee = Some("jacob".into());
-        // Filtering a ticket out takes its panes with it.
+        // Filtering a ticket out takes the panes only that ticket had; the
+        // two-ticket pane survives under the ticket that remains.
         assert_eq!(
             work_group_shape(&app),
             vec![
-                ("SCA-3170 ads skill map  P3".to_string(), 0, true),
+                ("SCA-3170 ads skill map  P3".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
         );
