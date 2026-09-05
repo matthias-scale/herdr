@@ -836,6 +836,9 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
     pub(crate) selected_work_group: Option<String>,
+    pub(crate) selected_settled: Option<PaneFocusTarget>,
+    pub(crate) settled_menu_target: Option<PaneFocusTarget>,
+    pub(crate) settled_menu_selected: usize,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -2019,6 +2022,13 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneSettlementChange {
+    pub(crate) workspace_id: String,
+    pub(crate) pane_id: PaneId,
+    pub(crate) settled_at: Option<u64>,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -2082,6 +2092,7 @@ pub struct AppState {
     pub(crate) hide_done_after: std::time::Duration,
     pub(crate) reap_done_after: std::time::Duration,
     pub(crate) reap_done_panes: bool,
+    pub(crate) settle_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -2150,6 +2161,10 @@ pub struct AppState {
     /// Dim work-item header the operator selected with the mouse. Enter on it
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
+    pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
+    pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
+    pub(crate) sidebar_settled_menu_selected: usize,
+    pub(crate) pending_pane_settlement_changes: Vec<PaneSettlementChange>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -2662,6 +2677,8 @@ impl AppState {
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
         self.sidebar_selected_work_group = None;
+        self.sidebar_selected_settled = None;
+        self.sidebar_settled_menu_target = None;
         self.sidebar_filter_menu_open = false;
         self.workspace_scroll = 0;
         self.mark_sidebar_projection_changed();
@@ -2738,6 +2755,18 @@ impl AppState {
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
             &mut other.selected_work_group,
+        );
+        std::mem::swap(
+            &mut self.sidebar_selected_settled,
+            &mut other.selected_settled,
+        );
+        std::mem::swap(
+            &mut self.sidebar_settled_menu_target,
+            &mut other.settled_menu_target,
+        );
+        std::mem::swap(
+            &mut self.sidebar_settled_menu_selected,
+            &mut other.settled_menu_selected,
         );
     }
 
@@ -3189,6 +3218,7 @@ impl AppState {
             hide_done_after: std::time::Duration::from_secs(30 * 60),
             reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
             reap_done_panes: true,
+            settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -3236,6 +3266,10 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_selected_settled: None,
+            sidebar_settled_menu_target: None,
+            sidebar_settled_menu_selected: 0,
+            pending_pane_settlement_changes: Vec::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,

@@ -735,6 +735,7 @@ impl App {
         pane_id: crate::layout::PaneId,
         observed_at: Instant,
     ) {
+        self.state.note_pane_activity_at(pane_id, observed_at);
         self.record_contract_false_positive_for_pane(pane_id, observed_at);
         self.handle_internal_event(AppEvent::HookAuthorityRetired {
             pane_id,

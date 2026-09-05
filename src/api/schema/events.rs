@@ -56,6 +56,10 @@ pub enum Subscription {
     PaneClosed {},
     #[serde(rename = "pane.updated")]
     PaneUpdated {},
+    #[serde(rename = "pane.settled")]
+    PaneSettled {},
+    #[serde(rename = "pane.unsettled")]
+    PaneUnsettled {},
     #[serde(rename = "pane.focused")]
     PaneFocused {},
     #[serde(rename = "pane.moved")]
@@ -214,6 +218,8 @@ pub enum EventKind {
     PaneCreated,
     PaneClosed,
     PaneUpdated,
+    PaneSettled,
+    PaneUnsettled,
     PaneFocused,
     PaneMoved,
     PaneOutputChanged,
@@ -246,6 +252,8 @@ impl EventKind {
             EventKind::PaneCreated => "pane.created",
             EventKind::PaneClosed => "pane.closed",
             EventKind::PaneUpdated => "pane.updated",
+            EventKind::PaneSettled => "pane.settled",
+            EventKind::PaneUnsettled => "pane.unsettled",
             EventKind::PaneFocused => "pane.focused",
             EventKind::PaneMoved => "pane.moved",
             EventKind::PaneOutputChanged => "pane.output_changed",
@@ -279,6 +287,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneCreated,
     EventKind::PaneClosed,
     EventKind::PaneUpdated,
+    EventKind::PaneSettled,
+    EventKind::PaneUnsettled,
     EventKind::PaneFocused,
     EventKind::PaneMoved,
     EventKind::PaneOutputChanged,
@@ -306,6 +316,8 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::TabFocused,
     EventKind::PaneCreated,
     EventKind::PaneClosed,
+    EventKind::PaneSettled,
+    EventKind::PaneUnsettled,
     EventKind::PaneFocused,
     EventKind::PaneMoved,
     EventKind::PaneExited,
@@ -516,6 +528,15 @@ pub enum EventData {
     },
     PaneUpdated {
         pane: PaneInfo,
+    },
+    PaneSettled {
+        pane_id: String,
+        workspace_id: String,
+        settled_at: u64,
+    },
+    PaneUnsettled {
+        pane_id: String,
+        workspace_id: String,
     },
     PaneFocused {
         pane_id: String,

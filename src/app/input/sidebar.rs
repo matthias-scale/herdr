@@ -5,7 +5,69 @@ use crate::app::state::{AppState, ViewLayout};
 
 use super::ScrollbarClickTarget;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SettledMenuAction {
+    Resume(crate::app::state::PaneFocusTarget),
+    NewThread {
+        directory: std::path::PathBuf,
+        workspace: crate::app::home::HomeWorkspace,
+    },
+    Delete(crate::app::state::PaneFocusTarget),
+}
+
 impl AppState {
+    pub(crate) fn sidebar_settled_target_at(
+        &self,
+        row: u16,
+    ) -> Option<crate::app::state::PaneFocusTarget> {
+        let target = self
+            .tab_target_at(row)
+            .and_then(|(ws_idx, tab_idx)| {
+                crate::ui::compute_tab_card_areas(self, self.view.sidebar_rect)
+                    .into_iter()
+                    .find(|card| card.ws_idx == ws_idx && card.tab_idx == tab_idx)
+                    .map(|card| (ws_idx, card.pane_id))
+            })
+            .or_else(|| {
+                self.agent_detail_target_at(row)
+                    .map(|(ws_idx, _, pane_id)| (ws_idx, pane_id))
+            })?;
+        self.pane_is_settled(target.0, target.1)
+            .then(|| crate::app::state::PaneFocusTarget {
+                workspace_id: self.workspaces[target.0].id.clone(),
+                pane_id: target.1,
+            })
+    }
+
+    pub(crate) fn sidebar_settled_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_settled_menu_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn select_settled_menu_action(&mut self, index: usize) -> Option<SettledMenuAction> {
+        let target = self.sidebar_settled_menu_target.take()?;
+        self.sidebar_selected_settled = None;
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)?;
+        let pane = self.workspaces[ws_idx].pane_state(target.pane_id)?;
+        let terminal = self.terminals.get(&pane.attached_terminal_id)?;
+        match index {
+            0 => Some(SettledMenuAction::Resume(target)),
+            1 => Some(SettledMenuAction::NewThread {
+                directory: terminal.cwd.clone(),
+                workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
+            }),
+            2 => Some(SettledMenuAction::NewThread {
+                directory: terminal.cwd.clone(),
+                workspace: crate::app::home::HomeWorkspace::NewWorktree,
+            }),
+            3 => Some(SettledMenuAction::Delete(target)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn sidebar_group_mode_anchor_rect(&self) -> Rect {
         crate::ui::sidebar_group_mode_anchor_rect(self.view.sidebar_rect)
     }
@@ -554,6 +616,91 @@ impl AppState {
     }
 }
 
+impl super::super::App {
+    pub(crate) fn handle_sidebar_settled_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.sidebar_settled_menu_target.is_some() {
+            match key.code {
+                KeyCode::Esc => self.state.sidebar_settled_menu_target = None,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.sidebar_settled_menu_selected =
+                        self.state.sidebar_settled_menu_selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.sidebar_settled_menu_selected = self
+                        .state
+                        .sidebar_settled_menu_selected
+                        .saturating_add(1)
+                        .min(crate::ui::SETTLED_MENU_LABELS.len() - 1);
+                }
+                KeyCode::Enter => {
+                    let index = self.state.sidebar_settled_menu_selected;
+                    self.apply_sidebar_settled_menu_action(index);
+                }
+                _ => {}
+            }
+            return true;
+        }
+        let Some(target) = self.state.sidebar_selected_settled.clone() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                self.state.sidebar_settled_menu_target = Some(target);
+                self.state.sidebar_settled_menu_selected = 0;
+                true
+            }
+            KeyCode::Esc => {
+                self.state.sidebar_selected_settled = None;
+                true
+            }
+            _ => {
+                self.state.sidebar_selected_settled = None;
+                false
+            }
+        }
+    }
+
+    pub(crate) fn apply_sidebar_settled_menu_action(&mut self, index: usize) {
+        let Some(action) = self.state.select_settled_menu_action(index) else {
+            return;
+        };
+        match action {
+            SettledMenuAction::Resume(target) => {
+                let Some(ws_idx) = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == target.workspace_id)
+                else {
+                    return;
+                };
+                self.state
+                    .note_pane_activity_at(target.pane_id, std::time::Instant::now());
+                self.focus_pane_internal_via_api(ws_idx, target.pane_id);
+            }
+            SettledMenuAction::NewThread {
+                directory,
+                workspace,
+            } => self
+                .state
+                .open_home_composer_in_directory(directory, workspace),
+            SettledMenuAction::Delete(target) => {
+                let Some(ws_idx) = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == target.workspace_id)
+                else {
+                    return;
+                };
+                self.focus_pane_internal_via_api(ws_idx, target.pane_id);
+                self.close_focused_pane_via_api_requires_confirmation();
+            }
+        }
+        self.flush_pane_settlement_events();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -568,6 +715,81 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    fn settled_target(app: &mut crate::app::App) -> crate::app::state::PaneFocusTarget {
+        if app.state.workspaces.is_empty() {
+            app.state.workspaces.push(Workspace::test_new("settled"));
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.ensure_test_terminals();
+        }
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .settled_at = Some(1_725_000_000);
+        crate::app::state::PaneFocusTarget {
+            workspace_id: app.state.workspaces[0].id.clone(),
+            pane_id,
+        }
+    }
+
+    #[test]
+    fn settled_menu_items_yield_resume_delete_and_home_dispatch_plans() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+        assert_eq!(
+            app.state.select_settled_menu_action(0),
+            Some(super::SettledMenuAction::Resume(target.clone()))
+        );
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+        assert_eq!(
+            app.state.select_settled_menu_action(3),
+            Some(super::SettledMenuAction::Delete(target.clone()))
+        );
+
+        for (index, expected_workspace) in [
+            (1, crate::app::home::HomeWorkspace::CurrentCheckout),
+            (2, crate::app::home::HomeWorkspace::NewWorktree),
+        ] {
+            app.state.sidebar_settled_menu_target = Some(target.clone());
+            let Some(super::SettledMenuAction::NewThread {
+                directory,
+                workspace,
+            }) = app.state.select_settled_menu_action(index)
+            else {
+                panic!("menu item {index} should start a new thread");
+            };
+            assert_eq!(workspace, expected_workspace);
+            app.state
+                .open_home_composer_in_directory(directory.clone(), workspace);
+            let home = app.state.home.as_mut().expect("home composer");
+            home.prompt = "continue this work".into();
+            let plan = home.dispatch_plan().expect("dispatch plan");
+            assert_eq!(plan.directory, directory);
+            assert_eq!(plan.workspace, expected_workspace);
+        }
+    }
+
+    #[test]
+    fn settled_menu_opens_below_its_sidebar_row() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+        let anchor = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.pane_id == target.pane_id)
+            .expect("settled row")
+            .rect;
+        let layout =
+            crate::ui::sidebar_settled_menu_layout(&app.state, area).expect("settled dropdown");
+        assert_eq!(layout.rect.y, anchor.bottom());
+    }
 
     #[test]
     fn clicking_launcher_opens_global_menu() {

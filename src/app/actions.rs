@@ -3673,6 +3673,9 @@ impl AppState {
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
+        pane.activity.note(now);
+        let unsettled = pane.settled_at.take().is_some();
+
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,
             pane.seen,
@@ -3695,6 +3698,18 @@ impl AppState {
         } else {
             None
         };
+
+        if unsettled {
+            let workspace_id = self.workspaces[ws_idx].id.clone();
+            self.pending_pane_settlement_changes
+                .push(crate::app::state::PaneSettlementChange {
+                    workspace_id,
+                    pane_id,
+                    settled_at: None,
+                });
+            self.mark_session_dirty();
+            self.mark_sidebar_projection_changed();
+        }
 
         if let Some(delivery) = self.record_or_deliver_agent_notification(ws_idx, pane_id, change) {
             self.apply_agent_notification_delivery(&delivery);

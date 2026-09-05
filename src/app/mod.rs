@@ -30,6 +30,7 @@ mod repo_routing;
 mod runtime;
 mod runtime_mutations;
 mod session;
+mod settled;
 pub mod state;
 mod terminal_targets;
 mod terminal_titles;
@@ -672,6 +673,10 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_selected_settled: None,
+            sidebar_settled_menu_target: None,
+            sidebar_settled_menu_selected: 0,
+            pending_pane_settlement_changes: Vec::new(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
@@ -708,6 +713,12 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             ),
             reap_done_panes: config.session.reap_done_panes,
+            settle_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .settle_after_days
+                    .saturating_mul(24 * 60 * 60),
+            ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -1848,6 +1859,12 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
+            self.state.settle_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .settle_after_days
+                    .saturating_mul(24 * 60 * 60),
+            );
             if hide_threshold_changed {
                 self.state.mark_sidebar_projection_changed();
             }

@@ -204,6 +204,14 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::PaneUpdated,
                 last_sequence: 0,
             })),
+            Subscription::PaneSettled {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneSettled,
+                last_sequence: 0,
+            })),
+            Subscription::PaneUnsettled {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneUnsettled,
+                last_sequence: 0,
+            })),
             Subscription::PaneFocused {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::PaneFocused,
                 last_sequence: 0,
@@ -696,6 +704,7 @@ mod tests {
             workspace_id: "workspace_1".into(),
             tab_id: "tab_1".into(),
             focused: true,
+            settled_at: None,
             work_context: Default::default(),
             cwd: None,
             foreground_cwd: None,
