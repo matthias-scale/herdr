@@ -413,6 +413,12 @@ impl App {
         let Some(home) = self.state.home.as_mut() else {
             return false;
         };
+        if home.picker == Some(crate::app::home::HomePicker::Directory) {
+            for character in text.chars() {
+                home.directory_filter.push(character);
+            }
+            return true;
+        }
         match home.focus {
             Some(crate::app::home::HomeFocus::Prompt) => home.prompt.push_str(text),
             Some(crate::app::home::HomeFocus::Reply) => {
@@ -430,12 +436,7 @@ impl App {
             return false;
         }
 
-        if self
-            .state
-            .home
-            .as_ref()
-            .is_some_and(|home| home.picker.is_some())
-        {
+        if let Some(picker) = self.state.home.as_ref().and_then(|home| home.picker) {
             match event.code {
                 KeyCode::Tab if event.modifiers.is_empty() => {
                     let queue_empty = self.state.blocked_agents().is_empty();
@@ -445,11 +446,35 @@ impl App {
                     let queue_empty = self.state.blocked_agents().is_empty();
                     self.state.home_move_composer_focus(true, queue_empty);
                 }
-                KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() => {
+                KeyCode::Up if event.modifiers.is_empty() => {
                     self.state.home_move_picker(-1);
                 }
-                KeyCode::Down | KeyCode::Char('j') if event.modifiers.is_empty() => {
+                KeyCode::Down if event.modifiers.is_empty() => {
                     self.state.home_move_picker(1);
+                }
+                KeyCode::Char('k')
+                    if event.modifiers.is_empty()
+                        && picker != crate::app::home::HomePicker::Directory =>
+                {
+                    self.state.home_move_picker(-1);
+                }
+                KeyCode::Char('j')
+                    if event.modifiers.is_empty()
+                        && picker != crate::app::home::HomePicker::Directory =>
+                {
+                    self.state.home_move_picker(1);
+                }
+                KeyCode::Backspace
+                    if event.modifiers.is_empty()
+                        && picker == crate::app::home::HomePicker::Directory =>
+                {
+                    self.state.home_pop_directory_filter();
+                }
+                KeyCode::Char(character)
+                    if event.modifiers.is_empty()
+                        && picker == crate::app::home::HomePicker::Directory =>
+                {
+                    self.state.home_push_directory_filter(character);
                 }
                 KeyCode::Enter if event.modifiers.is_empty() => {
                     self.state.home_accept_picker();

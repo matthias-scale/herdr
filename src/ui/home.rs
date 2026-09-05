@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    home::{HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
+    home::{directory_label, HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
     inbox::BlockedAgent,
     state::{HomeHitArea, HomeHitTarget},
     AppState,
@@ -416,7 +416,7 @@ fn secondary_specs(app: &AppState, home: &HomeState) -> [(HomeFocus, String); 2]
     [
         (
             HomeFocus::Directory,
-            format!("Folder {} ▾", display_path(&home.directory)),
+            format!("Folder {} ▾", directory_label(&home.directory)),
         ),
         (
             HomeFocus::Target,
@@ -464,21 +464,6 @@ fn secondary_rects(app: &AppState, home: &HomeState, area: Rect) -> Vec<(HomeFoc
     rects
 }
 
-fn display_path(path: &std::path::Path) -> String {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
-        return path.display().to_string();
-    };
-    path.strip_prefix(&home)
-        .map(|relative| {
-            if relative.as_os_str().is_empty() {
-                "~".to_string()
-            } else {
-                format!("~/{}", relative.display())
-            }
-        })
-        .unwrap_or_else(|_| path.display().to_string())
-}
-
 fn target_label(app: &AppState, target: &HomeTarget) -> String {
     match target {
         HomeTarget::NewSpace => "new space".into(),
@@ -506,13 +491,29 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
         HomePicker::Directory => app
             .home_directory_options()
             .iter()
-            .map(|directory| display_path(directory))
+            .map(|directory| directory_label(directory))
             .collect(),
         HomePicker::Target => app
             .home_target_options()
             .iter()
             .map(|target| target_label(app, target))
             .collect(),
+    }
+}
+
+fn picker_matches<'a>(
+    home: &HomeState,
+    picker: HomePicker,
+    labels: &'a [String],
+) -> Vec<(usize, &'a str)> {
+    if picker == HomePicker::Directory {
+        home.directory_filter.matches(labels)
+    } else {
+        labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (index, label.as_str()))
+            .collect()
     }
 }
 
@@ -723,22 +724,34 @@ fn picker_layout(
     if labels.is_empty() || area.width == 0 || area.height == 0 {
         return None;
     }
+    let has_filter = picker == HomePicker::Directory;
+    let matches = picker_matches(home, picker, &labels);
+    let filter_width = if has_filter {
+        display_width(&home.directory_filter.query).saturating_add(4)
+    } else {
+        0
+    };
     let min_width = labels
         .iter()
         .map(|label| display_width(label))
         .max()
         .unwrap_or(0)
         .saturating_add(2)
+        .max(filter_width)
         .try_into()
         .unwrap_or(u16::MAX)
         .min(area.width);
     layout_dropdown(
         &DropdownSpec {
             anchor: field,
-            item_count: labels.len(),
-            selected: home.picker_selected,
-            has_filter: false,
-            max_rows: labels.len(),
+            item_count: matches.len(),
+            selected: if has_filter {
+                home.directory_filter.selected
+            } else {
+                home.picker_selected
+            },
+            has_filter,
+            max_rows: labels.len().max(1),
             min_width,
         },
         area,
@@ -1028,13 +1041,31 @@ pub(super) fn render_home(
         if let Some(dropdown) = picker_viewport(app, home, composer, area) {
             if let Some(picker) = home.picker {
                 let labels = picker_labels(app, home, picker);
-                let lines = labels
+                let matches = picker_matches(home, picker, &labels);
+                let selected = if picker == HomePicker::Directory {
+                    home.directory_filter.selected
+                } else {
+                    home.picker_selected
+                };
+                if let Some(filter_rect) = dropdown.filter_rect {
+                    let query = format!(" / {}_", home.directory_filter.query);
+                    frame.render_widget(
+                        Paragraph::new(truncate_end(&query, filter_rect.width as usize)).style(
+                            Style::default()
+                                .fg(app.palette.text)
+                                .bg(app.palette.surface1)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        filter_rect,
+                    );
+                }
+                let lines = matches
                     .into_iter()
                     .enumerate()
                     .skip(dropdown.first_visible)
                     .take(dropdown.visible_rows)
-                    .map(|(index, label)| {
-                        let style = if index == home.picker_selected {
+                    .map(|(match_index, (_, label))| {
+                        let style = if match_index == selected {
                             Style::default()
                                 .fg(app.palette.text)
                                 .bg(app.palette.surface1)
@@ -1628,8 +1659,8 @@ mod tests {
         let mut home = HomeState::default();
         home.focus = Some(HomeFocus::Directory);
         home.picker = Some(HomePicker::Directory);
-        home.picker_selected = app.home_directory_options().len().saturating_sub(1);
-        let selected = home.picker_selected;
+        home.directory_filter.selected = app.home_directory_options().len().saturating_sub(1);
+        let selected = home.directory_filter.selected;
         app.home = Some(home);
         let queue = vec![blocked(0)];
         let area = Rect::new(0, 0, 50, 12);
@@ -1655,6 +1686,47 @@ mod tests {
             .expect("directory field");
         assert_eq!(popup.y, field.bottom());
         assert!(popup.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn directory_picker_filter_narrows_and_accepts_absolute_index() {
+        let mut app = AppState::test_new();
+        app.workspaces.clear();
+        for (id, directory) in [
+            ("first", "/tmp/absolute-first-match"),
+            ("second", "/tmp/absolute-second-match"),
+        ] {
+            let mut workspace = Workspace::test_new(id);
+            workspace.identity_cwd = directory.into();
+            app.workspaces.push(workspace);
+        }
+        app.home = Some(HomeState::default());
+        app.home_open_picker(HomePicker::Directory);
+        for character in "absolutematch".chars() {
+            app.home_push_directory_filter(character);
+        }
+
+        let home = app.home.as_ref().expect("home");
+        let labels = picker_labels(&app, home, HomePicker::Directory);
+        let matches = picker_matches(home, HomePicker::Directory, &labels);
+        assert_eq!(
+            matches
+                .iter()
+                .map(|(absolute_index, _)| *absolute_index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(home.directory_filter.selected, 0);
+
+        app.home_move_picker(1);
+        app.home_accept_picker();
+
+        let home = app.home.as_ref().expect("home");
+        assert_eq!(
+            home.directory,
+            std::path::PathBuf::from("/tmp/absolute-second-match")
+        );
+        assert!(home.picker.is_none());
     }
 
     #[test]

@@ -10,11 +10,11 @@
 //! here is the cursor plus the draft dispatch settings, which cannot be
 //! re-derived.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
-use crate::{app::inbox::BlockedAgent, detect::Agent};
+use crate::{app::inbox::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilterState};
 
 use super::home_catalog::{HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_MODEL};
 
@@ -104,6 +104,21 @@ fn default_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+pub(crate) fn directory_label(path: &Path) -> String {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return path.display().to_string();
+    };
+    path.strip_prefix(&home)
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", relative.display())
+            }
+        })
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
 pub(crate) fn dispatchable_agents() -> &'static [Agent] {
     &[Agent::Claude, Agent::Codex]
 }
@@ -124,6 +139,7 @@ pub(crate) struct HomeState {
     pub(crate) target: HomeTarget,
     pub(crate) picker: Option<HomePicker>,
     pub(crate) picker_selected: usize,
+    pub(crate) directory_filter: DropdownFilterState,
 }
 
 impl Default for HomeState {
@@ -142,6 +158,7 @@ impl Default for HomeState {
             target: HomeTarget::NewSpace,
             picker: None,
             picker_selected: 0,
+            directory_filter: DropdownFilterState::default(),
         }
     }
 }
@@ -563,12 +580,35 @@ impl crate::app::state::AppState {
                 .as_ref()
                 .map(|home| home.effort_options().len())
                 .unwrap_or(0),
-            HomePicker::Directory => self.home_directory_options().len(),
+            HomePicker::Directory => self.home_directory_match_indices().len(),
             HomePicker::Target => self.home_target_options().len(),
         }
     }
 
+    fn home_directory_match_indices(&self) -> Vec<usize> {
+        let labels = self
+            .home_directory_options()
+            .iter()
+            .map(|directory| directory_label(directory))
+            .collect::<Vec<_>>();
+        self.home
+            .as_ref()
+            .map(|home| {
+                home.directory_filter
+                    .matches(&labels)
+                    .into_iter()
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn home_open_picker(&mut self, picker: HomePicker) {
+        if picker == HomePicker::Directory {
+            if let Some(home) = self.home.as_mut() {
+                home.directory_filter.set_query("");
+            }
+        }
         let length = self.home_picker_len(picker);
         if length == 0 {
             return;
@@ -601,35 +641,70 @@ impl crate::app::state::AppState {
             .unwrap_or(0);
         if let Some(home) = self.home.as_mut() {
             home.picker = Some(picker);
-            home.picker_selected = current.min(length - 1);
+            if picker == HomePicker::Directory {
+                home.directory_filter.selected = current.min(length - 1);
+            } else {
+                home.picker_selected = current.min(length - 1);
+            }
         }
     }
 
     pub(crate) fn home_move_picker(&mut self, delta: i32) {
-        let Some((picker, selected)) = self
-            .home
-            .as_ref()
-            .and_then(|home| home.picker.map(|picker| (picker, home.picker_selected)))
-        else {
+        let Some(picker) = self.home.as_ref().and_then(|home| home.picker) else {
             return;
         };
         let length = self.home_picker_len(picker);
-        if length == 0 {
-            return;
-        }
-        let selected = (selected as i32 + delta).clamp(0, length as i32 - 1) as usize;
         if let Some(home) = self.home.as_mut() {
-            home.picker_selected = selected;
+            if picker == HomePicker::Directory {
+                home.directory_filter.move_selection(delta, length);
+            } else if length > 0 {
+                let selected =
+                    (home.picker_selected as i32 + delta).clamp(0, length as i32 - 1) as usize;
+                home.picker_selected = selected;
+            }
+        }
+    }
+
+    pub(crate) fn home_push_directory_filter(&mut self, character: char) {
+        if let Some(home) = self
+            .home
+            .as_mut()
+            .filter(|home| home.picker == Some(HomePicker::Directory))
+        {
+            home.directory_filter.push(character);
+        }
+    }
+
+    pub(crate) fn home_pop_directory_filter(&mut self) {
+        if let Some(home) = self
+            .home
+            .as_mut()
+            .filter(|home| home.picker == Some(HomePicker::Directory))
+        {
+            home.directory_filter.pop();
         }
     }
 
     pub(crate) fn home_accept_picker(&mut self) {
-        let Some((picker, selected)) = self
-            .home
-            .as_ref()
-            .and_then(|home| home.picker.map(|picker| (picker, home.picker_selected)))
-        else {
+        let Some((picker, selected)) = self.home.as_ref().and_then(|home| {
+            home.picker.map(|picker| {
+                let selected = if picker == HomePicker::Directory {
+                    home.directory_filter.selected
+                } else {
+                    home.picker_selected
+                };
+                (picker, selected)
+            })
+        }) else {
             return;
+        };
+        let selected = if picker == HomePicker::Directory {
+            let Some(selected) = self.home_directory_match_indices().get(selected).copied() else {
+                return;
+            };
+            selected
+        } else {
+            selected
         };
         match picker {
             HomePicker::Agent => {

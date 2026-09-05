@@ -145,7 +145,11 @@ impl AppState {
                         }
                         HomeHitTarget::PickerOption(index) => {
                             if let Some(home) = self.home.as_mut() {
-                                home.picker_selected = index;
+                                if home.picker == Some(crate::app::home::HomePicker::Directory) {
+                                    home.directory_filter.selected = index;
+                                } else {
+                                    home.picker_selected = index;
+                                }
                             }
                             self.home_accept_picker();
                         }
