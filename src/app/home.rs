@@ -1039,38 +1039,43 @@ impl crate::app::state::AppState {
     /// What the headline calls the place this thread will start in.
     ///
     /// The declared repo outranks the path because a worktree directory is
-    /// named after the task, not the project.
+    /// named after the task, not the project. A linked worktree is named after
+    /// the task twice over: its own root is the task directory, so the
+    /// repository is the one the git common directory belongs to.
     pub(crate) fn home_headline_name(&self) -> String {
         let directory = self.home_directory();
-        // The repository root the pane cache already resolved for this cwd, or
-        // the one the ref picker resolved for this very directory. Both name a
-        // project; a home directory's own basename names the account.
-        let repo_root = self
-            .git_root_for_cwd
-            .get(&directory)
-            .cloned()
-            .flatten()
-            .or_else(|| {
-                let directory = crate::worktree::canonical_or_original(&directory);
-                self.home
-                    .as_ref()
-                    .filter(|home| home.ref_directory == directory)
-                    .and_then(|home| home.ref_repo_root.clone())
-            });
-        if let Some(repo_root) = repo_root {
-            return directory_basename(&repo_root);
-        }
-        let repo = self
+        // The strongest name a pane already declared for this directory.
+        if let Some(repo) = self
             .work_contexts_for_directory(&directory)
             .find_map(|context| context.repo.as_deref())
-            .map(|repo| {
-                repo.rsplit('/')
-                    .next()
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(repo)
-                    .to_string()
-            });
-        repo.unwrap_or_else(|| directory_display_name(&directory))
+        {
+            let name = repo
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(repo);
+            return name.to_string();
+        }
+        // The repository the ref picker resolved for this very directory. It
+        // comes from the git common directory, so a linked worktree resolves to
+        // the main checkout rather than to its own task-named root. Resolved
+        // off the render path when the directory was set; never re-run here.
+        let common_root = {
+            let canonical = crate::worktree::canonical_or_original(&directory);
+            self.home
+                .as_ref()
+                .filter(|home| home.ref_directory == canonical)
+                .and_then(|home| home.ref_repo_root.clone())
+        };
+        // The checkout root the pane cache resolved, which for a linked
+        // worktree is the worktree itself. Weakest of the three, but still a
+        // project name where a home directory's own basename names the account.
+        let repo_root =
+            common_root.or_else(|| self.git_root_for_cwd.get(&directory).cloned().flatten());
+        match repo_root {
+            Some(repo_root) => directory_basename(&repo_root),
+            None => directory_display_name(&directory),
+        }
     }
 
     pub(crate) fn home_ref_options(&self) -> Vec<HomeRef> {
@@ -2345,6 +2350,81 @@ mod tests {
         );
 
         assert_eq!(app.home_headline_name(), "herdr");
+    }
+
+    /// A `git worktree add` checkout whose root is the task directory, next to
+    /// the main checkout it belongs to.
+    fn linked_worktree_fixture() -> Option<(PathBuf, PathBuf, PathBuf)> {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-home-linked-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or_default()
+        ));
+        let checkout = root.join("herdr");
+        let linked = root.join("t3-f2");
+        std::fs::create_dir_all(&checkout).expect("fixture directory");
+        let git = |cwd: &Path, args: &[&str]| -> bool {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        };
+        let prepared = git(&checkout, &["init", "--initial-branch", "main"])
+            && git(&checkout, &["config", "user.email", "fixture@example.com"])
+            && git(&checkout, &["config", "user.name", "fixture"])
+            && git(&checkout, &["commit", "--allow-empty", "-m", "root"])
+            && git(
+                &checkout,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "task",
+                    linked.to_str().unwrap_or_default(),
+                ],
+            );
+        if !prepared {
+            let _ = std::fs::remove_dir_all(&root);
+            return None;
+        }
+        Some((root, checkout, linked))
+    }
+
+    #[test]
+    fn the_headline_names_the_repository_for_a_linked_worktree() {
+        let Some((root, checkout, linked)) = linked_worktree_fixture() else {
+            return;
+        };
+
+        let mut app = app_with_home(&checkout);
+        app.home_set_directory(crate::worktree::canonical_or_original(&checkout));
+        assert_eq!(app.home_headline_name(), "herdr", "the main checkout");
+
+        // What a pane working in the linked worktree caches: its own checkout
+        // root, which is named after the task and not after the repository.
+        let linked = crate::worktree::canonical_or_original(&linked);
+        app.git_root_for_cwd
+            .insert(linked.clone(), Some(linked.clone()));
+        app.home_set_directory(linked.clone());
+        assert_eq!(
+            directory_basename(&linked),
+            "t3-f2",
+            "the fixture worktree is task-named"
+        );
+        assert_eq!(
+            app.home_headline_name(),
+            "herdr",
+            "a linked worktree is named after its repository, not its task"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
