@@ -145,6 +145,11 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        if self.state.sidebar_settled_menu_target.is_some()
+            && self.handle_sidebar_settled_key(key_event)
+        {
+            return None;
+        }
         if self.state.handle_sidebar_group_menu_key(key_event) {
             return None;
         }
@@ -152,6 +157,9 @@ impl App {
             return None;
         }
         if self.state.handle_sidebar_work_group_key(key_event) {
+            return None;
+        }
+        if self.handle_sidebar_settled_key(key_event) {
             return None;
         }
         if self.handle_symphony_key(key_event) {
@@ -1567,6 +1575,9 @@ impl App {
             }
             if let Some(action) = action {
                 match action {
+                    MouseAction::SettledMenu { index } => {
+                        self.apply_sidebar_settled_menu_action(index)
+                    }
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")
                     }

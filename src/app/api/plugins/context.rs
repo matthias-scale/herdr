@@ -164,6 +164,15 @@ impl App {
                 workspace_id,
                 ..
             }
+            | EventData::PaneSettled {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneUnsettled {
+                pane_id,
+                workspace_id,
+            }
             | EventData::PaneExited {
                 pane_id,
                 workspace_id,

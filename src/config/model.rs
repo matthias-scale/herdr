@@ -292,6 +292,8 @@ pub struct SessionConfig {
     /// Automatically close eligible Done panes. Set false to disable reaping.
     /// Default: true.
     pub reap_done_panes: bool,
+    /// Settle panes with no activity after this many days. Default: 3.
+    pub settle_after_days: u64,
 }
 
 impl Default for SessionConfig {
@@ -301,6 +303,7 @@ impl Default for SessionConfig {
             hide_done_after_minutes: 30,
             reap_done_after_minutes: 4 * 60,
             reap_done_panes: true,
+            settle_after_days: 3,
         }
     }
 }
@@ -1634,6 +1637,7 @@ new_cwd = "~/Projects"
         assert_eq!(default_config.session.hide_done_after_minutes, 30);
         assert_eq!(default_config.session.reap_done_after_minutes, 240);
         assert!(default_config.session.reap_done_panes);
+        assert_eq!(default_config.session.settle_after_days, 3);
 
         let toml = r#"
 [session]
@@ -1641,12 +1645,14 @@ resume_agents_on_restore = false
 hide_done_after_minutes = 15
 reap_done_after_minutes = 90
 reap_done_panes = false
+settle_after_days = 7
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
         assert_eq!(config.session.hide_done_after_minutes, 15);
         assert_eq!(config.session.reap_done_after_minutes, 90);
         assert!(!config.session.reap_done_panes);
+        assert_eq!(config.session.settle_after_days, 7);
     }
 
     #[test]

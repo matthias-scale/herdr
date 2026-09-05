@@ -451,6 +451,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # reap_done_after_minutes = 240
 # Set false to disable automatic pane reaping entirely.
 # reap_done_panes = true
+# Move inactive or completed work into the Settled sidebar section after this many days.
+# settle_after_days = 3
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
@@ -1026,6 +1028,7 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# full_lifecycle_hook_authority_timeout_seconds = 600"));
         assert!(DEFAULT_CONFIG.contains("# hide_done_after_minutes = 30"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
+        assert!(DEFAULT_CONFIG.contains("# settle_after_days = 3"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
     }
 

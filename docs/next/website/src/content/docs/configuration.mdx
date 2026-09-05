@@ -105,9 +105,12 @@ Done panes stay in the main sidebar for 30 minutes, then move into the collapsed
 hide_done_after_minutes = 30
 reap_done_after_minutes = 240
 reap_done_panes = true
+settle_after_days = 3
 ```
 
 Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose status is not Done. When the pane owns a linked Git worktree, Herdr removes that checkout only when it is clean and its commits are present on the configured upstream branch. Set `reap_done_panes = false` to keep automatic reaping disabled while retaining the Recently done section.
+
+Herdr moves panes into the collapsible Settled section when their primary pull request closes or merges, a linked ticket reaches Done, or they have no activity for `settle_after_days`. New pane input, output, or agent-state activity returns a settled pane to the active sidebar without stopping its terminal.
 
 ## Remote attach
 

@@ -1293,6 +1293,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Automatically close eligible Done panes. Set false to disable reaping entirely."
+        },
+        {
+          "key": "session.settle_after_days",
+          "type": "integer",
+          "default": "3",
+          "description": "Move completed or inactive panes into the Settled sidebar section after this many days without activity."
         }
       ]
     },

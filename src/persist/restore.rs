@@ -597,7 +597,10 @@ fn restore_tab(
             if initial_restore_agent.is_some() && !startup.duplicate_agent_session {
                 reseed_blocked_hook_authority(&mut terminal, saved_agent_session);
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane = PaneState::new(terminal_id);
+            pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
+            pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
+            panes.insert(*id, pane);
             terminals.push(terminal);
             continue;
         }
@@ -721,7 +724,9 @@ fn restore_tab(
                         );
                     }
                 }
-                let pane = PaneState::new(terminal_id.clone());
+                let mut pane = PaneState::new(terminal_id.clone());
+                pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
+                pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
                 #[cfg(unix)]
                 let pane = {
                     let mut pane = pane;
@@ -1493,6 +1498,8 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            settled_at: None,
+                            settled_work_key: None,
                             work_context: crate::work_context::PaneWorkContext {
                                 repo: None,
                                 ticket_ids: vec!["MAT-12".into()],
@@ -1617,6 +1624,8 @@ mod tests {
                             10,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                settled_at: None,
+                                settled_work_key: None,
                                 work_context: Default::default(),
                                 work_context_tiers: None,
                                 label: None,
@@ -1630,6 +1639,8 @@ mod tests {
                             20,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                settled_at: None,
+                                settled_work_key: None,
                                 work_context: Default::default(),
                                 work_context_tiers: None,
                                 label: None,
@@ -1688,6 +1699,8 @@ mod tests {
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
+                    settled_at: None,
+                    settled_work_key: None,
                     work_context: Default::default(),
                     work_context_tiers: None,
                     label: None,
@@ -1700,6 +1713,8 @@ mod tests {
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
+            settled_at: None,
+            settled_work_key: None,
             work_context: Default::default(),
             work_context_tiers: None,
             label: Some("planner".into()),
@@ -1879,6 +1894,8 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            settled_at: None,
+                            settled_work_key: None,
                             work_context: Default::default(),
                             work_context_tiers: None,
                             label: None,
@@ -2123,6 +2140,8 @@ mod tests {
             0,
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
+                settled_at: None,
+                settled_work_key: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,

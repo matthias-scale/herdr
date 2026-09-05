@@ -1052,6 +1052,7 @@ pub(crate) enum SidebarRow {
 pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
 pub(crate) const AGENTS_SECTION_TITLE: &str = "Agents";
 pub(crate) const RECENTLY_DONE_SECTION_TITLE: &str = "Recently done";
+pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
 #[cfg(test)]
 pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
@@ -1115,14 +1116,17 @@ fn compact_sidebar_rows_inner(
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
         None => sidebar_thread_entries(app),
     };
+    let (settled_entries, active_entries): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|entry| app.pane_is_settled(entry.ws_idx, entry.pane_id));
     let visible_entries = if app.blocked_filter {
-        entries
+        active_entries
             .iter()
             .filter(|entry| entry_has_red_dot(entry))
             .cloned()
             .collect::<Vec<_>>()
     } else {
-        entries.clone()
+        active_entries
     };
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
@@ -1143,6 +1147,7 @@ fn compact_sidebar_rows_inner(
             }
         }
         append_recently_done_rows(app, &mut rows, recently_done);
+        append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
 
@@ -1173,6 +1178,7 @@ fn compact_sidebar_rows_inner(
         collapsed: section_is_collapsed(app, SPACES_SECTION_TITLE),
     });
     if section_is_collapsed(app, SPACES_SECTION_TITLE) {
+        append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
     if matches!(
@@ -1202,6 +1208,7 @@ fn compact_sidebar_rows_inner(
                 }));
             }
         }
+        append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
     }
     for workspace in workspaces {
@@ -1252,7 +1259,102 @@ fn compact_sidebar_rows_inner(
             }
         }
     }
+    append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
     rows
+}
+
+fn append_settled_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: Vec<AgentPanelEntry>,
+    expand_worktrees: bool,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    rows.push(SidebarRow::SectionHeader {
+        title: SETTLED_SECTION_TITLE,
+        count: entries.len(),
+        collapsed: section_is_collapsed(app, SETTLED_SECTION_TITLE),
+    });
+    if section_is_collapsed(app, SETTLED_SECTION_TITLE) {
+        return;
+    }
+
+    if matches!(
+        app.sidebar_group_mode,
+        SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
+    ) {
+        for group in sidebar_work_groups(app, &entries, app.sidebar_group_mode) {
+            let collapsed = section_is_collapsed(app, &group.key);
+            rows.push(SidebarRow::NestedHeader {
+                key: group.key,
+                title: group.title,
+                count: group.entries.len(),
+                collapsed,
+                dim: false,
+            });
+            if !collapsed {
+                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
+                    entry: Box::new(entry),
+                    depth: 1,
+                }));
+            }
+        }
+        return;
+    }
+
+    let mut by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
+    for entry in entries {
+        by_workspace.entry(entry.ws_idx).or_default().push(entry);
+    }
+    for workspace in workspace_list_entries_for_mode(app, expand_worktrees, app.sidebar_group_mode)
+    {
+        let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace else {
+            continue;
+        };
+        if indented {
+            continue;
+        }
+        let mut member_entries = Vec::new();
+        for member_idx in sidebar_space_member_indices(app, ws_idx) {
+            if let Some(workspace_entries) = by_workspace.remove(&member_idx) {
+                member_entries.extend(workspace_entries);
+            }
+        }
+        if member_entries.is_empty() {
+            continue;
+        }
+        rows.push(SidebarRow::Workspace { ws_idx, indented });
+        if app.sidebar_group_mode == SidebarGroupMode::Repo {
+            rows.extend(
+                ordered_tab_entries(&member_entries)
+                    .into_iter()
+                    .map(|entry| SidebarRow::Tab {
+                        entry: Box::new(entry),
+                        depth: 1,
+                    }),
+            );
+            continue;
+        }
+        for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
+            let collapse_key = format!("settled:{ws_idx}:{}", group.key);
+            let collapsed = section_is_collapsed(app, &collapse_key);
+            rows.push(SidebarRow::NestedHeader {
+                key: collapse_key,
+                title: group.title,
+                count: group.entries.len(),
+                collapsed,
+                dim: false,
+            });
+            if !collapsed {
+                rows.extend(group.entries.into_iter().map(|entry| SidebarRow::Tab {
+                    entry: Box::new(entry),
+                    depth: 2,
+                }));
+            }
+        }
+    }
 }
 
 struct SidebarTabGroup {
@@ -2579,6 +2681,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     .style(row_style),
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
+                if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                    dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
+                }
             }
             SidebarRow::Tab { entry, .. } => {
                 let icon = compact_row_dot(entry);
@@ -2590,6 +2695,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     ])),
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
+                if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                    dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
+                }
             }
             SidebarRow::SectionHeader { title, .. } => {
                 // Collapsed leaves no room for a word, so the header degrades to
@@ -3312,6 +3420,18 @@ fn render_tab_card(app: &AppState, frame: &mut Frame, card: &crate::app::state::
     });
     let Some((entry, depth)) = entry else { return };
     render_compact_agent_row(app, frame, &entry, card.rect, depth, true, None);
+    if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+        dim_settled_row(frame, card.rect, app.palette.overlay0);
+        let target = crate::app::state::PaneFocusTarget {
+            workspace_id: app.workspaces[entry.ws_idx].id.clone(),
+            pane_id: entry.pane_id,
+        };
+        if app.sidebar_selected_settled.as_ref() == Some(&target) {
+            frame
+                .buffer_mut()
+                .set_style(card.rect, Style::default().bg(app.palette.surface1));
+        }
+    }
 }
 
 fn render_agent_card(
@@ -3322,6 +3442,19 @@ fn render_agent_card(
     depth: u16,
 ) {
     render_compact_agent_row(app, frame, detail, rect, depth, false, None);
+    if app.pane_is_settled(detail.ws_idx, detail.pane_id) {
+        dim_settled_row(frame, rect, app.palette.overlay0);
+    }
+}
+
+/// Preserve the frozen row layout, then replace only its foreground styling.
+fn dim_settled_row(frame: &mut Frame, rect: Rect, color: ratatui::style::Color) {
+    let buffer = frame.buffer_mut();
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            buffer[(x, y)].set_style(Style::default().fg(color).add_modifier(Modifier::DIM));
+        }
+    }
 }
 
 pub(crate) fn visible_tab_activity_instants_from(
@@ -3465,6 +3598,106 @@ pub(crate) fn sidebar_filter_menu_layout(
         },
         area,
     )
+}
+
+pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
+    "↺ Resume thread",
+    "✎ New thread in same repo",
+    "⎇ New thread, new worktree",
+    "🗑 Delete",
+];
+
+pub(crate) fn sidebar_settled_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let target = app.sidebar_settled_menu_target.as_ref()?;
+    let ws_idx = app
+        .workspaces
+        .iter()
+        .position(|workspace| workspace.id == target.workspace_id)?;
+    let anchor = compute_tab_card_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|card| card.ws_idx == ws_idx && card.pane_id == target.pane_id)
+        .map(|card| card.rect)
+        .or_else(|| {
+            compute_agent_card_areas(app, app.view.sidebar_rect)
+                .into_iter()
+                .find(|card| card.ws_idx == ws_idx && card.pane_id == target.pane_id)
+                .map(|card| card.rect)
+        })?;
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor,
+            item_count: SETTLED_MENU_LABELS.len(),
+            selected: app.sidebar_settled_menu_selected,
+            has_filter: false,
+            max_rows: SETTLED_MENU_LABELS.len(),
+            min_width: 31,
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_settled_menu(app: &AppState, frame: &mut Frame) {
+    if app.sidebar_settled_menu_target.is_none() {
+        return;
+    }
+    let Some(layout) = sidebar_settled_menu_layout(app, frame.area()) else {
+        let Some(target) = app.sidebar_settled_menu_target.as_ref() else {
+            return;
+        };
+        let Some(ws_idx) = app
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)
+        else {
+            return;
+        };
+        if let Some(anchor) = compute_tab_card_areas(app, app.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.ws_idx == ws_idx && card.pane_id == target.pane_id)
+            .map(|card| card.rect)
+        {
+            frame.render_widget(
+                Paragraph::new(" no space below").style(
+                    Style::default()
+                        .fg(app.palette.red)
+                        .bg(app.palette.panel_bg),
+                ),
+                anchor,
+            );
+        }
+        return;
+    };
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    let lines = SETTLED_MENU_LABELS
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(index, label)| {
+            let selected = index == app.sidebar_settled_menu_selected;
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                format!("{} {label}", if selected { "▸" } else { " " }),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
 }
 
 pub(super) fn render_sidebar_filter_menu(app: &AppState, frame: &mut Frame) {
@@ -3884,6 +4117,84 @@ mod tests {
         assert_eq!(tab_entries.len(), 1);
         assert_eq!(tab_entries[0].ws_idx, 1);
         assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
+    }
+
+    #[test]
+    fn settled_section_is_last_and_keeps_active_group_mode() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("active"),
+            Workspace::test_new("settled"),
+        ];
+        app.ensure_test_terminals();
+        app.reconcile_sidebar_presentation();
+        let pane_id = app.workspaces[1].tabs[0].root_pane;
+        app.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("settled pane")
+            .settled_at = Some(1_725_000_000);
+        let terminal_id = app.workspaces[1].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/owner/repo/pull/42".into()]),
+                ..Default::default()
+            })
+            .expect("work context");
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+
+        let rows = sidebar_rows(&app);
+        let settled = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SETTLED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )
+            })
+            .expect("Settled section");
+        assert!(rows[settled + 1..].iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { title, .. } if title.starts_with("#42")
+        )));
+        assert!(rows[settled + 1..].iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } if entry.pane_id == pane_id
+        )));
+        assert!(!rows[..settled].iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } if entry.pane_id == pane_id
+        )));
+
+        let area = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app, area);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_sidebar(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    app.view.sidebar_rect,
+                )
+            })
+            .expect("render sidebar");
+        let card = compute_tab_card_areas(&app, app.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.pane_id == pane_id)
+            .expect("settled card");
+        let style = terminal.backend().buffer()[(card.rect.x + 2, card.rect.y)].style();
+        assert_eq!(style.fg, Some(app.palette.overlay0));
+        assert!(style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

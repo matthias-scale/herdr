@@ -5,6 +5,49 @@ const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 const MAX_DISPLAY_DAYS: u64 = 999;
 
+/// Server-owned activity clock for one pane.
+///
+/// The timestamp covers output, input, and agent-state changes. The content
+/// revision lets the periodic refresh turn PTY output into the same activity
+/// signal without coupling the terminal runtime to sidebar state.
+pub(crate) struct PaneActivity {
+    last_at: Instant,
+    content_revision: Option<u64>,
+}
+
+impl PaneActivity {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            last_at: now,
+            content_revision: None,
+        }
+    }
+
+    pub(crate) fn note(&mut self, now: Instant) {
+        self.last_at = now;
+    }
+
+    pub(crate) fn observe_content_revision(&mut self, revision: u64, now: Instant) -> bool {
+        let changed = match self.content_revision.replace(revision) {
+            Some(previous) => previous != revision,
+            None => revision > 0,
+        };
+        if changed {
+            self.note(now);
+        }
+        changed
+    }
+
+    pub(crate) fn inactive_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_at)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_last_at(&mut self, at: Instant) {
+        self.last_at = at;
+    }
+}
+
 pub(crate) fn compact_label(observed_at: Option<Instant>, now: Instant) -> String {
     let Some(observed_at) = observed_at else {
         return "--".into();

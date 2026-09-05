@@ -872,6 +872,7 @@ mod tests {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             focused: true,
+            settled_at: None,
             work_context: Default::default(),
             cwd: None,
             foreground_cwd: None,
@@ -894,6 +895,14 @@ mod tests {
             scroll: None,
             revision: 0,
         }
+    }
+
+    #[test]
+    fn pane_json_exposes_settled_at_as_unix_seconds() {
+        let mut pane = pane_info("pane_1", crate::api::schema::AgentStatus::Idle);
+        pane.settled_at = Some(1_725_000_000);
+        let json = serde_json::to_value(pane).expect("pane JSON");
+        assert_eq!(json["settled_at"], 1_725_000_000_u64);
     }
 
     fn spawn_pane_get_responder(

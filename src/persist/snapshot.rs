@@ -117,6 +117,10 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_work_key: Option<String>,
     /// Flat effective projection, kept for readers of older formats.
     #[serde(default)]
     pub work_context: crate::work_context::PaneWorkContext,
@@ -386,10 +390,8 @@ fn capture_tab(
         let cwd = tab
             .cwd_for_pane(*id, terminals, terminal_runtimes)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let terminal = tab
-            .panes
-            .get(id)
-            .and_then(|pane| terminals.get(&pane.attached_terminal_id));
+        let pane = tab.panes.get(id);
+        let terminal = pane.and_then(|pane| terminals.get(&pane.attached_terminal_id));
         let label = terminal.and_then(|terminal| terminal.manual_label.clone());
         let (agent_name, managed_agent_kind) = terminal
             .filter(|terminal| !terminal.managed_agent_launch_pending())
@@ -442,6 +444,8 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                settled_at: pane.and_then(|pane| pane.settled_at),
+                settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
                 work_context,
                 work_context_tiers,
                 label,
@@ -1164,6 +1168,8 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
+                settled_at: Some(1_725_000_000),
+                settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,
@@ -1177,6 +1183,8 @@ mod tests {
             1,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
+                settled_at: None,
+                settled_work_key: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: Some("website".into()),
@@ -1238,6 +1246,16 @@ mod tests {
         );
         assert_eq!(restored.workspaces[0].tabs.len(), 1);
         assert_eq!(restored.workspaces[0].tabs[0].panes.len(), 2);
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&0].settled_at,
+            Some(1_725_000_000)
+        );
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&0]
+                .settled_work_key
+                .as_deref(),
+            Some("pr:https://github.com/owner/repo/pull/7:merged")
+        );
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&0].cwd,
             PathBuf::from("/home/can/Projects/herdr")
@@ -1857,6 +1875,8 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+                settled_at: None,
+                settled_work_key: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,
@@ -1872,6 +1892,8 @@ mod tests {
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
+                settled_at: None,
+                settled_work_key: None,
                 work_context: Default::default(),
                 work_context_tiers: None,
                 label: None,

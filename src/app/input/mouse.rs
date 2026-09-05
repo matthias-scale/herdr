@@ -34,6 +34,9 @@ fn dock_body_contains(app: &AppState, column: u16, row: u16) -> bool {
 }
 
 pub(super) enum MouseAction {
+    SettledMenu {
+        index: usize,
+    },
     NewWorkspace,
     Settings(SettingsAction),
     FocusWorkspace {
@@ -221,6 +224,22 @@ impl AppState {
         let group_anchor_hit = group_menu_enabled
             && !filter_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
+        {
+            if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                self.sidebar_settled_menu_selected = index;
+            }
+            return None;
+        }
+        if self.sidebar_settled_menu_target.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                    return Some(MouseAction::SettledMenu { index });
+                }
+                self.sidebar_settled_menu_target = None;
+            }
+            return None;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_filter_menu_open {
             if let Some(index) = self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
                 self.sidebar_filter_menu_selected = index;
@@ -852,6 +871,7 @@ impl AppState {
                 }
 
                 if in_sidebar {
+                    self.sidebar_selected_settled = None;
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
                         self.sidebar_collapsed = !self.sidebar_collapsed;
                         return None;
@@ -933,6 +953,13 @@ impl AppState {
                             start_col: mouse.column,
                             start_row: mouse.row,
                         });
+                        return None;
+                    }
+
+                    if let Some(target) = self.sidebar_settled_target_at(mouse.row) {
+                        self.sidebar_selected_work_group = None;
+                        self.sidebar_selected_settled = Some(target);
+                        self.mode = Mode::Navigate;
                         return None;
                     }
 

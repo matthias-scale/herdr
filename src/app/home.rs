@@ -637,6 +637,24 @@ impl crate::app::state::AppState {
         true
     }
 
+    pub(crate) fn open_home_composer_in_directory(
+        &mut self,
+        directory: PathBuf,
+        workspace: HomeWorkspace,
+    ) {
+        let mut home = self
+            .home
+            .take()
+            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+        home.prompt.clear();
+        home.directory = directory;
+        home.workspace = workspace;
+        home.focus = Some(HomeFocus::Prompt);
+        home.picker = None;
+        self.inbox = None;
+        self.home = Some(home);
+    }
+
     pub(crate) fn clear_home(&mut self) {
         self.home = None;
     }

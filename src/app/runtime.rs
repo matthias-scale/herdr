@@ -406,6 +406,8 @@ impl App {
         changed |= self.clear_due_selection_highlight(now);
         changed |= self.process_git_action_panes(now);
 
+        changed |= self.refresh_pane_settlement_at(now);
+
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
         let detail_visible = !self.state.dock_collapsed

@@ -1437,6 +1437,7 @@ impl crate::app::App {
         }
         self.state.work_index_snapshot = Some(snapshot.clone());
         self.work_index_snapshot = Some(snapshot);
+        self.refresh_pane_settlement_at(Instant::now());
         self.invalidate_work_item_details();
         true
     }
