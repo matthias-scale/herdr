@@ -3,11 +3,53 @@ use ratatui::layout::Rect;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DropdownSpec {
     pub anchor: Rect,
+    /// Number of matching items when `has_filter` is true, otherwise all items.
     pub item_count: usize,
     pub selected: usize,
     pub has_filter: bool,
     pub max_rows: usize,
     pub min_width: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DropdownFilterState {
+    pub query: String,
+    pub selected: usize,
+}
+
+impl DropdownFilterState {
+    pub(crate) fn set_query(&mut self, query: &str) {
+        self.query.clear();
+        self.query.push_str(query);
+        self.selected = 0;
+    }
+
+    pub(crate) fn push(&mut self, character: char) {
+        self.query.push(character);
+        self.selected = 0;
+    }
+
+    pub(crate) fn pop(&mut self) {
+        self.query.pop();
+        self.selected = 0;
+    }
+
+    pub(crate) fn matches<'a>(&self, items: &'a [String]) -> Vec<(usize, &'a str)> {
+        filter_items(items, &self.query)
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: i32, match_count: usize) {
+        if match_count == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = if delta.is_negative() {
+            self.selected.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            self.selected.saturating_add(delta as usize)
+        }
+        .min(match_count - 1);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +63,7 @@ pub(crate) struct DropdownLayout {
 
 /// Lay out a popup below its anchor without consulting or changing UI state.
 pub(crate) fn layout_dropdown(spec: &DropdownSpec, area: Rect) -> Option<DropdownLayout> {
-    if spec.item_count == 0 || spec.max_rows == 0 || area.width == 0 || area.height == 0 {
+    if spec.max_rows == 0 || area.width == 0 || area.height == 0 {
         return None;
     }
 
@@ -36,7 +78,7 @@ pub(crate) fn layout_dropdown(spec: &DropdownSpec, area: Rect) -> Option<Dropdow
         .item_count
         .min(spec.max_rows)
         .min(available_rows.saturating_sub(filter_rows));
-    if visible_rows == 0 {
+    if visible_rows == 0 && (!spec.has_filter || spec.item_count > 0 || available_rows == 0) {
         return None;
     }
 
@@ -74,8 +116,6 @@ pub(crate) fn layout_dropdown(spec: &DropdownSpec, area: Rect) -> Option<Dropdow
     })
 }
 
-// The Phase 0 widget publishes filtering before a filtered picker consumes it.
-#[allow(dead_code)]
 pub(crate) fn filter_items<'a>(items: &'a [String], query: &str) -> Vec<(usize, &'a str)> {
     let query: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
     items
@@ -173,19 +213,65 @@ mod tests {
     }
 
     #[test]
-    fn filter_narrows_and_is_case_insensitive() {
+    fn set_query_resets_selection() {
+        let mut filter = DropdownFilterState {
+            query: "old".into(),
+            selected: 4,
+        };
+
+        filter.set_query("new");
+
+        assert_eq!(filter.query, "new");
+        assert_eq!(filter.selected, 0);
+    }
+
+    #[test]
+    fn push_and_pop_reset_selection() {
+        let mut filter = DropdownFilterState {
+            query: "ab".into(),
+            selected: 3,
+        };
+
+        filter.push('c');
+        assert_eq!(filter.query, "abc");
+        assert_eq!(filter.selected, 0);
+
+        filter.selected = 2;
+        filter.pop();
+        assert_eq!(filter.query, "ab");
+        assert_eq!(filter.selected, 0);
+    }
+
+    #[test]
+    fn move_selection_clamps_to_match_count() {
+        let mut filter = DropdownFilterState::default();
+
+        filter.move_selection(8, 3);
+        assert_eq!(filter.selected, 2);
+        filter.move_selection(-8, 3);
+        assert_eq!(filter.selected, 0);
+        filter.selected = 2;
+        filter.move_selection(1, 0);
+        assert_eq!(filter.selected, 0);
+    }
+
+    #[test]
+    fn matches_returns_absolute_indices() {
         let items = vec![
             "Claude Code".to_string(),
             "Codex".to_string(),
             "Gemini CLI".to_string(),
             "code runner".to_string(),
         ];
+        let mut filter = DropdownFilterState::default();
 
+        filter.set_query("CdE");
         assert_eq!(
-            filter_items(&items, "CdE"),
+            filter.matches(&items),
             vec![(0, "Claude Code"), (1, "Codex"), (3, "code runner")]
         );
-        assert_eq!(filter_items(&items, "MIC"), vec![(2, "Gemini CLI")]);
+        filter.set_query("MIC");
+        assert_eq!(filter.matches(&items), vec![(2, "Gemini CLI")]);
     }
 
     #[test]
