@@ -39,6 +39,19 @@ pub(crate) struct HandoffManifest {
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
+    /// Dock editors follow an agent pane but never live in a workspace tab, so
+    /// they need their own manifest entries to survive a handoff.
+    #[serde(default)]
+    pub dock_editors: Vec<DockEditorHandoff>,
+}
+
+/// A dock editor named by the pane it follows and the pane id its runtime was
+/// exported under, so the import can find its entry in `panes`.
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DockEditorHandoff {
+    pub agent_pane_id: u32,
+    pub editor_pane_id: u32,
 }
 
 #[cfg(unix)]
@@ -302,6 +315,7 @@ pub(crate) fn report_owned(stream: &mut UnixStream) -> io::Result<()> {
 pub(crate) fn manifest_for(
     snapshot: crate::persist::SessionSnapshot,
     panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
+    dock_editors: Vec<DockEditorHandoff>,
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
 ) -> HandoffManifest {
@@ -313,6 +327,7 @@ pub(crate) fn manifest_for(
         expected_protocol,
         snapshot,
         panes,
+        dock_editors,
     }
 }
 

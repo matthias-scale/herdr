@@ -144,6 +144,26 @@ impl App {
         }
     }
 
+    /// The dock editors a live handoff has to carry: agent pane, editor pane,
+    /// and the terminal whose pty must be duplicated into the new server.
+    ///
+    /// Dock editors are keyed by the agent pane they follow and never live in a
+    /// workspace tab, so a handoff that walks workspaces alone drops their
+    /// runtimes and the editor child dies of a hangup.
+    #[cfg(unix)]
+    pub(crate) fn dock_editor_handoff_terminals(
+        &self,
+    ) -> Vec<(crate::terminal::TerminalId, PaneId, PaneId)> {
+        self.state
+            .dock_editor_sessions
+            .iter()
+            .filter(|(_, session)| self.terminal_runtimes.get(&session.terminal_id).is_some())
+            .map(|(agent_pane_id, session)| {
+                (session.terminal_id.clone(), *agent_pane_id, session.pane_id)
+            })
+            .collect()
+    }
+
     /// Opens the focused repository's scratchpad in the dock's `$EDITOR`. The
     /// existing session is torn down first: it was started on a directory and
     /// cannot be redirected at a file after the fact.
@@ -402,6 +422,72 @@ mod tests {
 
         assert!(app.state.dock_editor_sessions.is_empty());
         assert!(app.terminal_runtimes.get(&editor_terminal_id).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn dock_editors_are_listed_for_handoff_even_though_no_tab_holds_them() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("editor")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let agent_pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let editor_pane_id = PaneId::alloc();
+        let editor_terminal_id = TerminalId::alloc();
+        app.state.dock_editor_sessions.insert(
+            agent_pane_id,
+            DockEditorSession {
+                pane_id: editor_pane_id,
+                terminal_id: editor_terminal_id.clone(),
+            },
+        );
+        app.terminal_runtimes.insert(
+            editor_terminal_id.clone(),
+            TerminalRuntime::test_with_screen_bytes(10, 2, b"EDITOR"),
+        );
+
+        // No tab holds the editor pane, which is exactly why the handoff needs
+        // this list: walking workspaces cannot find it.
+        assert!(app.find_pane(editor_pane_id).is_none());
+        assert_eq!(
+            app.dock_editor_handoff_terminals(),
+            vec![(editor_terminal_id, agent_pane_id, editor_pane_id)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dock_editor_without_a_runtime_is_left_out_of_the_handoff() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("editor")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let agent_pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.state.dock_editor_sessions.insert(
+            agent_pane_id,
+            DockEditorSession {
+                pane_id: PaneId::alloc(),
+                terminal_id: TerminalId::alloc(),
+            },
+        );
+
+        assert!(app.dock_editor_handoff_terminals().is_empty());
     }
 
     #[test]
