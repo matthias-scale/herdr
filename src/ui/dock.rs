@@ -80,3 +80,104 @@ pub(super) fn render_dock(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// Body renderings frozen before the `DockTab` → `DockSurface` rename so the
+    /// rename stays behaviour-neutral for the surfaces that already existed.
+    fn body_text(app: &AppState, tab: DockTab) -> String {
+        let area = app.view.dock_body_rect;
+        let runtimes = TerminalRuntimeRegistry::new();
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| match tab {
+                DockTab::Editor => editor::render_editor_body(app, &runtimes, frame),
+                DockTab::Shortcuts => {
+                    super::super::dock_shortcuts::render_shortcuts(app, frame, area)
+                }
+                DockTab::Context => super::super::dock_context::render_context(app, frame, area),
+                DockTab::Scratchpad => {
+                    super::super::dock_scratchpad::render_scratchpad(app, frame, area)
+                }
+                DockTab::Home => home::render_home(app, frame, area),
+            })
+            .expect("render dock body");
+        let buffer = terminal.backend().buffer().clone();
+        (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn characterization_app() -> AppState {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.view.dock_body_rect = Rect::new(0, 0, 30, 12);
+        app
+    }
+
+    #[test]
+    fn existing_dock_surfaces_render_unchanged() {
+        let app = characterization_app();
+
+        assert_eq!(
+            body_text(&app, DockTab::Editor),
+            [
+                "focus an agent first          ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+                "                              ",
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            body_text(&app, DockTab::Shortcuts),
+            [
+                " global                      \u{2590}",
+                " ctrl+b                      \u{2595}",
+                " prefix mode                 \u{2595}",
+                " prefix+?                    \u{2595}",
+                " keybinds                    \u{2595}",
+                " prefix+s                    \u{2595}",
+                " settings                    \u{2595}",
+                " prefix+q                    \u{2595}",
+                " detach                      \u{2595}",
+                " prefix+shift+r              \u{2595}",
+                " reload config               \u{2595}",
+                " prefix+o                    \u{2595}",
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            body_text(&app, DockTab::Context)
+                .lines()
+                .next()
+                .unwrap_or_default(),
+            " no focused pane              "
+        );
+        assert_eq!(
+            body_text(&app, DockTab::Scratchpad)
+                .lines()
+                .next()
+                .unwrap_or_default(),
+            " no repository for this pane  "
+        );
+    }
+}
