@@ -1345,6 +1345,18 @@
       ]
     },
     {
+      "id": "land",
+      "title": "Pull request landing",
+      "keys": [
+        {
+          "key": "land.approval_label",
+          "type": "string",
+          "default": "\"approved\"",
+          "description": "Exact pull request label accepted as an approval signal for the Land action."
+        }
+      ]
+    },
+    {
       "id": "remote",
       "title": "Remote",
       "keys": [

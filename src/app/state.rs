@@ -2299,6 +2299,8 @@ pub struct AppState {
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
     pub(crate) work_index_enabled: bool,
+    /// Client-local approval label used by the PR landing gate.
+    pub(crate) land_approval_label: String,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
@@ -2598,6 +2600,7 @@ pub(crate) struct PrLandConfirmation {
     pub(crate) repo: String,
     pub(crate) number: u64,
     pub(crate) head_sha: String,
+    pub(crate) approval_signal: String,
 }
 
 impl WorkViewState {
@@ -3459,6 +3462,7 @@ impl AppState {
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
+            land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),

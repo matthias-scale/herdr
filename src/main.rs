@@ -183,6 +183,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # GitHub repositories to include, for example ["owner/repo"].
 # repos = []
 
+[land]
+# PRs can land after an approved review or this exact label.
+# approval_label = "approved"
+
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
@@ -1030,6 +1034,8 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
         assert!(DEFAULT_CONFIG.contains("# settle_after_days = 3"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
+        assert!(DEFAULT_CONFIG.contains("[land]\n# PRs can land after"));
+        assert!(DEFAULT_CONFIG.contains("# approval_label = \"approved\""));
     }
 
     #[test]

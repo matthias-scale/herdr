@@ -114,6 +114,36 @@ fn notification_show_response_shown(response: &str) -> bool {
     )
 }
 
+fn work_item_detail_request(
+    client: &ClientConnection,
+) -> Option<(
+    crate::app::state::DockHomeSection,
+    Option<crate::app::state::WorkItemKey>,
+    bool,
+)> {
+    if !client.is_full_app_client() {
+        return None;
+    }
+    if let Some(view) = client.work_view.as_ref() {
+        return Some((
+            crate::app::state::DockHomeSection::Prs,
+            view.selected.clone(),
+            true,
+        ));
+    }
+    let presentation = &client.dock_presentation;
+    let selection = match presentation.home_section {
+        crate::app::state::DockHomeSection::Prs => presentation.home_selection.clone(),
+        crate::app::state::DockHomeSection::Tickets => presentation.home_ticket_selection.clone(),
+        crate::app::state::DockHomeSection::XPolls => presentation.home_poll_selection.clone(),
+    };
+    Some((
+        presentation.home_section,
+        selection,
+        !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Home),
+    ))
+}
+
 fn alt_screen_restore_error_response(id: String) -> String {
     serde_json::to_string(&api::schema::ErrorResponse {
         id,
@@ -4905,26 +4935,7 @@ impl HeadlessServer {
         let detail_request = self
             .foreground_client_id
             .and_then(|client_id| self.clients.get(&client_id))
-            .filter(|client| client.is_full_app_client())
-            .map(|client| {
-                let presentation = &client.dock_presentation;
-                (
-                    presentation.home_section,
-                    match presentation.home_section {
-                        crate::app::state::DockHomeSection::Prs => {
-                            presentation.home_selection.clone()
-                        }
-                        crate::app::state::DockHomeSection::Tickets => {
-                            presentation.home_ticket_selection.clone()
-                        }
-                        crate::app::state::DockHomeSection::XPolls => {
-                            presentation.home_poll_selection.clone()
-                        }
-                    },
-                    !presentation.collapsed
-                        && presentation.tab == Some(crate::app::DockSurface::Home),
-                )
-            });
+            .and_then(work_item_detail_request);
         let (section, selection, detail_visible) =
             detail_request.unwrap_or((crate::app::state::DockHomeSection::Prs, None, false));
         self.app
@@ -5570,6 +5581,33 @@ mod tests {
             server_event_rx,
             server_event_tx,
         }
+    }
+
+    #[test]
+    fn full_screen_work_view_requests_pr_details_without_open_dock() {
+        let mut client = ClientConnection::new(
+            (120, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            ticket_id: None,
+        };
+        let mut view = crate::app::state::WorkViewState::new(true, None);
+        view.selected = Some(key.clone());
+        client.work_view = Some(view);
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
+        );
     }
 
     #[tokio::test]

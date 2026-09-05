@@ -2089,6 +2089,7 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         assert_eq!(detail.head_sha.as_deref(), Some("abcdef012345"));
         assert_eq!(detail.merge_state_status.as_deref(), Some("CLEAN"));
         assert_eq!(detail.labels, vec!["high-risk"]);
+        assert_eq!(detail.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
         assert_eq!(
             detail.checks,
             Some(WorkItemCheckSummary {
