@@ -3116,7 +3116,9 @@ impl AppState {
             AppEvent::StatusMetricsRefreshed { .. }
             | AppEvent::ProviderUsageRefreshed { .. }
             | AppEvent::ConnectivityProbed { .. }
-            | AppEvent::HomeCatalogRefreshed { .. } => Vec::new(),
+            | AppEvent::HomeCatalogRefreshed { .. }
+            | AppEvent::HomeRefsRefreshed { .. }
+            | AppEvent::HomeCheckoutFinished { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()

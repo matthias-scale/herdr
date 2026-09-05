@@ -594,9 +594,18 @@ impl App {
         let Some(home) = self.state.home.as_mut() else {
             return false;
         };
-        if home.picker == Some(crate::app::home::HomePicker::Directory) {
+        if matches!(
+            home.picker,
+            Some(crate::app::home::HomePicker::Directory | crate::app::home::HomePicker::Ref)
+        ) {
             for character in text.chars() {
-                home.directory_filter.push(character);
+                match home.picker {
+                    Some(crate::app::home::HomePicker::Directory) => {
+                        home.directory_filter.push(character)
+                    }
+                    Some(crate::app::home::HomePicker::Ref) => home.ref_filter.push(character),
+                    _ => {}
+                }
             }
             return true;
         }
@@ -608,6 +617,7 @@ impl App {
             }
             _ => {}
         }
+        self.start_home_ref_refresh_if_requested();
         true
     }
 
@@ -635,27 +645,43 @@ impl App {
                 }
                 KeyCode::Char('k')
                     if event.modifiers.is_empty()
-                        && picker != crate::app::home::HomePicker::Directory =>
+                        && !matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
                 {
                     self.state.home_move_picker(-1);
                 }
                 KeyCode::Char('j')
                     if event.modifiers.is_empty()
-                        && picker != crate::app::home::HomePicker::Directory =>
+                        && !matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
                 {
                     self.state.home_move_picker(1);
                 }
                 KeyCode::Backspace
                     if event.modifiers.is_empty()
-                        && picker == crate::app::home::HomePicker::Directory =>
+                        && matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
                 {
-                    self.state.home_pop_directory_filter();
+                    self.state.home_pop_picker_filter();
                 }
                 KeyCode::Char(character)
                     if event.modifiers.is_empty()
-                        && picker == crate::app::home::HomePicker::Directory =>
+                        && matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
                 {
-                    self.state.home_push_directory_filter(character);
+                    self.state.home_push_picker_filter(character);
                 }
                 KeyCode::Enter if event.modifiers.is_empty() => {
                     self.state.home_accept_picker();
@@ -767,6 +793,7 @@ impl App {
             }
             _ => {}
         }
+        self.start_home_ref_refresh_if_requested();
         true
     }
 
@@ -803,11 +830,20 @@ impl App {
             return;
         };
 
-        let dispatch = if plan.workspace == crate::app::home::HomeWorkspace::NewWorktree {
-            self.start_home_worktree_add(plan)
-        } else {
-            self.dispatch_home_composer(plan)
-                .map_err(|error| error.to_string())
+        let dispatch = match plan.workspace {
+            crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),
+            crate::app::home::HomeWorkspace::CurrentCheckout
+                if plan
+                    .git_ref
+                    .as_ref()
+                    .is_some_and(|git_ref| !git_ref.is_current()) =>
+            {
+                self.start_home_checkout(plan)
+            }
+            crate::app::home::HomeWorkspace::CurrentCheckout
+            | crate::app::home::HomeWorkspace::PreviousWorktree(_) => self
+                .dispatch_home_composer(plan)
+                .map_err(|error| error.to_string()),
         };
         match dispatch {
             Ok(()) => {
@@ -1525,6 +1561,7 @@ impl App {
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
             let action = self.state.handle_mouse(&mut self.terminal_runtimes, mouse);
+            self.start_home_ref_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }

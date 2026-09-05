@@ -856,6 +856,7 @@ mod tests {
             effort: Some("high".into()),
             directory: std::env::temp_dir(),
             workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
+            git_ref: None,
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],

@@ -2044,6 +2044,11 @@ pub struct AppState {
     pub(crate) home: Option<crate::app::home::HomeState>,
     /// Provider choices resolved outside `HomeState`, ready for the next Home open.
     pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
+    /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
+    pub(crate) home_ref_cache:
+        std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
+    /// Opening the ref picker asks the runtime layer to refresh this repository.
+    pub(crate) request_home_ref_refresh: Option<std::path::PathBuf>,
     /// Unsent text typed by a human in each pane. Home replies must not touch a
     /// pane while this draft exists because the terminal owns that edit buffer.
     pub(crate) pending_human_drafts: std::collections::HashMap<PaneId, String>,
@@ -3163,6 +3168,8 @@ impl AppState {
             inbox: None,
             home: None,
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
+            home_ref_cache: std::collections::HashMap::new(),
+            request_home_ref_refresh: None,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),

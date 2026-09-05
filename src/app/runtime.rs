@@ -421,6 +421,7 @@ impl App {
         self.start_git_status_refresh_if_due(now);
         self.start_dock_diff_refresh_if_needed();
         self.start_dock_files_refresh_if_needed();
+        self.start_home_ref_refresh_if_requested();
 
         if self
             .next_auto_update_check

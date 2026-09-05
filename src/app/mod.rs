@@ -21,6 +21,7 @@ mod git_actions;
 mod git_refresh;
 pub(crate) mod home;
 pub(crate) mod home_catalog;
+pub(crate) mod home_refs;
 mod ids;
 pub(crate) mod inbox;
 mod input;
@@ -167,6 +168,7 @@ pub struct App {
     pub(crate) files_refresh_in_flight: Option<FilesRefreshInFlight>,
     pub(crate) last_files_refresh_generation: u64,
     pub(crate) dock_files_refresh_demand: bool,
+    pub(crate) home_ref_refreshes_in_flight: HashSet<std::path::PathBuf>,
     pub(crate) git_work_context_refresh_in_flight:
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) git_work_context_refresh_due_after_in_flight: bool,
@@ -686,6 +688,8 @@ impl App {
             } else {
                 crate::app::home_catalog::cached_home_catalog_for_current_profile()
             },
+            home_ref_cache: std::collections::HashMap::new(),
+            request_home_ref_refresh: None,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,
@@ -1063,6 +1067,7 @@ impl App {
             files_refresh_in_flight: None,
             last_files_refresh_generation: 0,
             dock_files_refresh_demand: false,
+            home_ref_refreshes_in_flight: HashSet::new(),
             git_work_context_refresh_in_flight: None,
             git_work_context_refresh_due_after_in_flight: false,
             git_work_context_rotation: 0,

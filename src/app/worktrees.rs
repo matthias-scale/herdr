@@ -70,6 +70,13 @@ fn generated_home_worktree_name(agent: crate::detect::Agent, seed_micros: u64) -
     )
 }
 
+fn pending_home_worktree_base(home: Option<&crate::app::home::HomeState>) -> String {
+    home.and_then(|home| home.pending_dispatch.as_ref())
+        .and_then(|plan| plan.git_ref.as_ref())
+        .map(|git_ref| git_ref.name.clone())
+        .unwrap_or_else(|| "HEAD".into())
+}
+
 impl App {
     fn worktree_source_metadata(
         &self,
@@ -583,6 +590,7 @@ impl App {
 
     pub(crate) fn start_worktree_add(&mut self) {
         self.sync_worktree_branch_from_input();
+        let base = pending_home_worktree_base(self.state.home.as_ref());
         let Some(create) = &mut self.state.worktree_create else {
             return;
         };
@@ -618,6 +626,7 @@ impl App {
         let path = create.checkout_path.clone();
         let source_checkout_path = create.source_checkout_path.clone();
         let branch = create.branch.clone();
+        let base = base.clone();
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = if let Some(parent_dir) = parent_dir {
@@ -630,7 +639,7 @@ impl App {
                     &source_checkout_path,
                     &path,
                     &branch,
-                    "HEAD",
+                    &base,
                 )
             });
             let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
@@ -1268,6 +1277,20 @@ mod tests {
         )
     }
 
+    #[test]
+    fn new_worktree_uses_selected_ref_as_its_base() {
+        let mut home = crate::app::home::HomeState::test_with_prompt("start from release");
+        home.workspace = crate::app::home::HomeWorkspace::NewWorktree;
+        home.selected_ref = Some(crate::app::home_refs::HomeRef {
+            name: "origin/release".into(),
+            oid: "1234567".into(),
+            tag: Some(crate::app::home_refs::HomeRefTag::Remote),
+        });
+        home.pending_dispatch = Some(home.dispatch_plan().expect("fixed prompt dispatches"));
+
+        assert_eq!(pending_home_worktree_base(Some(&home)), "origin/release");
+    }
+
     fn event_kinds(event_hub: &crate::api::EventHub) -> Vec<crate::api::schema::EventKind> {
         event_hub
             .events_after(0)
@@ -1300,6 +1323,7 @@ mod tests {
             effort: Some("high".into()),
             directory: "/repo/herdr".into(),
             workspace: crate::app::home::HomeWorkspace::NewWorktree,
+            git_ref: None,
             target,
             prompt: home.prompt.clone(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
@@ -1397,6 +1421,7 @@ mod tests {
             effort: Some("high".into()),
             directory: repo.clone(),
             workspace: crate::app::home::HomeWorkspace::NewWorktree,
+            git_ref: None,
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "dispatch after worktree add".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
