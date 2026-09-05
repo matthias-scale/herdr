@@ -605,9 +605,7 @@ impl App {
             match event.code {
                 // The path input owns tab, enter and escape: they complete,
                 // accept and leave the input rather than moving the composer.
-                KeyCode::Tab
-                    if event.modifiers.is_empty() && self.state.home_browse_active() =>
-                {
+                KeyCode::Tab if event.modifiers.is_empty() && self.state.home_browse_active() => {
                     self.state.home_browse_complete();
                 }
                 KeyCode::Enter if event.modifiers.is_empty() && self.state.home_browse_active() => {
