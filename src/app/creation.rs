@@ -756,6 +756,83 @@ fn aggregate_tab_agent_status(
 mod tests {
     use super::*;
 
+    fn fixed_home_dispatch_plan(
+        target: crate::app::home::HomeTarget,
+    ) -> crate::app::home::HomeDispatchPlan {
+        let mut home = crate::app::home::HomeState::default();
+        home.directory = std::env::temp_dir();
+        home.target = target;
+        home.prompt = "characterize home dispatch".into();
+        home.dispatch_plan().expect("fixed inputs should dispatch")
+    }
+
+    #[tokio::test]
+    async fn dispatch_home_composer_creates_requested_workspace_or_tab() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut new_space_app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let new_space_plan = fixed_home_dispatch_plan(crate::app::home::HomeTarget::NewSpace);
+        new_space_app
+            .dispatch_home_composer(new_space_plan.clone())
+            .expect("new-space dispatch should succeed");
+
+        assert_eq!(new_space_app.state.workspaces.len(), 1);
+        assert_eq!(new_space_app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(
+            new_space_app.state.workspaces[0].identity_cwd,
+            new_space_plan.directory
+        );
+        let new_pane = new_space_app.state.workspaces[0].tabs[0].root_pane;
+        let new_terminal = new_space_app.state.workspaces[0]
+            .terminal_id(new_pane)
+            .and_then(|terminal_id| new_space_app.state.terminals.get(terminal_id))
+            .expect("new space should have a terminal");
+        assert_eq!(new_terminal.cwd, new_space_plan.directory);
+        assert_eq!(
+            new_terminal.launch_argv.as_ref(),
+            Some(&new_space_plan.argv)
+        );
+        assert_eq!(new_space_app.state.mode, Mode::Terminal);
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut existing_app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        existing_app.state.workspaces = vec![Workspace::test_new("existing-space")];
+        existing_app.state.ensure_test_terminals();
+        let workspace_id = existing_app.state.workspaces[0].id.clone();
+        let existing_plan =
+            fixed_home_dispatch_plan(crate::app::home::HomeTarget::Existing(workspace_id));
+        existing_app
+            .dispatch_home_composer(existing_plan.clone())
+            .expect("existing-space dispatch should succeed");
+
+        assert_eq!(existing_app.state.workspaces.len(), 1);
+        assert_eq!(existing_app.state.workspaces[0].tabs.len(), 2);
+        let added_tab = &existing_app.state.workspaces[0].tabs[1];
+        let added_terminal = added_tab
+            .terminal_id(added_tab.root_pane)
+            .and_then(|terminal_id| existing_app.state.terminals.get(terminal_id))
+            .expect("added tab should have a terminal");
+        assert_eq!(added_terminal.cwd, existing_plan.directory);
+        assert_eq!(
+            added_terminal.launch_argv.as_ref(),
+            Some(&existing_plan.argv)
+        );
+        assert_eq!(existing_app.state.active, Some(0));
+        assert_eq!(existing_app.state.workspaces[0].active_tab, 1);
+        assert_eq!(existing_app.state.mode, Mode::Terminal);
+    }
+
     fn title_test_app() -> (App, crate::terminal::TerminalId) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
