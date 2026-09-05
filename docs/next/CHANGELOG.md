@@ -4,7 +4,7 @@
 
 ### Added
 - A theme whose palette contradicts the appearance the terminal reports is now named in the `herdr server reload-config` diagnostics and the log, instead of being left to be noticed by eye.
-- `theme.custom.sidebar_bg` can now give the desktop sidebar its own background without changing built-in theme defaults.
+- `theme.custom.sidebar_bg` can now give the desktop sidebar its own background without changing built-in theme defaults. Leaving it unset follows the theme's `panel_bg`; setting it to `reset` still hands the sidebar back to the terminal.
 - Settings and `ui.status_indicators = "symbols"` can now use distinct static shapes for blocked, working, done, idle, and unknown agent states. (#2260)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 - Desktop sessions now have a theme-derived native status row for Git branch, device name, CPU, and memory. Disable it with `ui.status_bar.enabled = false`. (#2, #13)
@@ -32,7 +32,7 @@
 ### Fixed
 - The desktop sidebar now paints the theme's own background instead of inheriting the terminal's, so a palette that disagrees with the terminal appearance looks wrong instead of turning the sidebar unreadable. `theme.custom.sidebar_bg` still overrides it, and the `terminal` theme still follows the terminal.
 - `theme.auto_switch` no longer assumes a dark terminal before the host answers the OSC 11 appearance query; it holds the configured theme until a real answer arrives, then switches.
-- The selected tab now picks its label color by measured contrast against the accent, so no palette can render it near-invisibly.
+- The selected tab now picks its label color by measured contrast against the accent, so no palette can render it near-invisibly. Named and indexed colors are measured through the xterm defaults instead of being treated as unknowable, so the `terminal` theme is covered too.
 - Nord's muted UI text moved off Nord's comment color, which rendered sidebar secondary text at 1.69:1 against the panel background.
 - Session topology and optional pane history now persist as one crash-safe generation; failed background saves retry without losing dirty state, and unverifiable history is dropped instead of being attached to a reused pane identity. (#20)
 - Git metadata refresh is bounded so slow repository probes cannot stall the interface. (#21)

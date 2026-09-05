@@ -39,9 +39,7 @@ pub(super) fn panel_contrast_fg(p: &Palette) -> Color {
 /// WCAG 2.1 relative luminance. `None` for colors herdr cannot measure —
 /// `Reset` and the 16 named colors, whose value belongs to the terminal.
 pub(super) fn relative_luminance(color: Color) -> Option<f64> {
-    let Color::Rgb(r, g, b) = color else {
-        return None;
-    };
+    let crate::terminal_theme::RgbColor { r, g, b } = crate::app::state::color_rgb(color)?;
     let channel = |value: u8| {
         let value = f64::from(value) / 255.0;
         if value <= 0.03928 {
@@ -339,4 +337,42 @@ pub(super) fn centered_button_row(
             rect
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::Palette;
+
+    /// The failure this guards: a palette whose accent is a named or indexed
+    /// color used to skip contrast selection entirely and take the first
+    /// candidate, which is how the `terminal` theme drew its selected tab in
+    /// dark gray on blue.
+    #[test]
+    fn readable_fg_measures_named_and_indexed_backgrounds() {
+        let terminal = Palette::terminal();
+        let chosen = readable_fg_on(
+            terminal.accent,
+            &[panel_contrast_fg(&terminal), terminal.text],
+        );
+        let ratio = contrast_ratio(chosen, terminal.accent).expect("named colors are measurable");
+        assert!(
+            ratio >= 4.5,
+            "{chosen:?} on {:?} is {ratio:.2}:1",
+            terminal.accent
+        );
+
+        let indexed = readable_fg_on(Color::Indexed(226), &[Color::White, Color::Black]);
+        assert_eq!(indexed, Color::Black, "dark text belongs on bright yellow");
+    }
+
+    /// With nothing measurable to sit on, the first candidate is all herdr can
+    /// honestly offer — it must not invent a color the theme never chose.
+    #[test]
+    fn readable_fg_keeps_the_first_candidate_when_the_background_is_unknowable() {
+        assert_eq!(
+            readable_fg_on(Color::Reset, &[Color::Rgb(1, 2, 3), Color::White]),
+            Color::Rgb(1, 2, 3)
+        );
+    }
 }

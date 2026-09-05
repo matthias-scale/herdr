@@ -1960,9 +1960,6 @@ impl App {
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
             self.refresh_effective_app_theme();
         }
-        if let Some(mismatch) = &self.state.theme_appearance_mismatch {
-            diagnostics.push(mismatch.clone());
-        }
 
         let status = if diagnostics.is_empty() {
             crate::config::ConfigReloadStatus::Applied
@@ -1994,6 +1991,13 @@ impl App {
                     target: None,
                 });
             }
+        }
+
+        // The mismatch is a warning about the terminal in front of the config,
+        // not a defect in the config itself: report it without demoting a valid
+        // reload to `Partial` or claiming the config diagnostic banner.
+        if let Some(mismatch) = &self.state.theme_appearance_mismatch {
+            diagnostics.push(mismatch.clone());
         }
 
         crate::config::ConfigReloadReport {
@@ -3498,6 +3502,29 @@ mod tests {
 
         app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true);
         assert_eq!(app.state.theme_appearance_mismatch, None);
+    }
+
+    /// The mismatch describes the terminal in front of the config, not a fault
+    /// in the config: it must reach the reload report without demoting a valid
+    /// reload to `Partial` or taking over the config diagnostic banner.
+    #[test]
+    fn a_reported_mismatch_does_not_demote_a_valid_config_reload() {
+        let mut config = Config::default();
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true);
+
+        let report = app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(
+            report.diagnostics[0].contains("github-light-high-contrast"),
+            "{:?}",
+            report.diagnostics
+        );
+        assert_eq!(app.state.config_diagnostic, None);
     }
 
     #[test]
