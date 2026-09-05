@@ -4,7 +4,7 @@ use crate::layout::PaneId;
 
 use super::{state::PaneSettlementChange, App, AppState};
 
-fn unix_seconds(now: SystemTime) -> u64 {
+pub(crate) fn unix_seconds(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
@@ -75,6 +75,36 @@ impl AppState {
             .get(ws_idx)
             .and_then(|workspace| workspace.pane_state(pane_id))
             .is_some_and(|pane| pane.settled_at.is_some())
+    }
+
+    pub(crate) fn settle_pane_at(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        settled_at: u64,
+    ) -> bool {
+        let Some(pane) = self.workspaces.get_mut(ws_idx).and_then(|workspace| {
+            workspace
+                .tabs
+                .iter_mut()
+                .find_map(|tab| tab.panes.get_mut(&pane_id))
+        }) else {
+            return false;
+        };
+        if pane.settled_at.is_some() {
+            return false;
+        }
+        pane.settled_at = Some(settled_at);
+        let workspace_id = self.workspaces[ws_idx].id.clone();
+        self.pending_pane_settlement_changes
+            .push(PaneSettlementChange {
+                workspace_id,
+                pane_id,
+                settled_at: Some(settled_at),
+            });
+        self.mark_session_dirty();
+        self.mark_sidebar_projection_changed();
+        true
     }
 
     pub(crate) fn note_pane_activity_at(&mut self, pane_id: PaneId, now: Instant) -> bool {
@@ -166,24 +196,7 @@ impl AppState {
             }
         }
         for (ws_idx, pane_id, _) in &candidates {
-            if let Some(pane) = self.workspaces[*ws_idx]
-                .tabs
-                .iter_mut()
-                .find_map(|tab| tab.panes.get_mut(pane_id))
-            {
-                pane.settled_at = Some(now_unix);
-                let workspace_id = self.workspaces[*ws_idx].id.clone();
-                self.pending_pane_settlement_changes
-                    .push(PaneSettlementChange {
-                        workspace_id,
-                        pane_id: *pane_id,
-                        settled_at: Some(now_unix),
-                    });
-            }
-        }
-        if !candidates.is_empty() {
-            self.mark_session_dirty();
-            self.mark_sidebar_projection_changed();
+            self.settle_pane_at(*ws_idx, *pane_id, now_unix);
         }
         candidates.len()
     }

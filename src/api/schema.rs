@@ -175,6 +175,10 @@ pub enum Method {
     PaneCurrent(PaneCurrentParams),
     #[serde(rename = "pane.get")]
     PaneGet(PaneTarget),
+    #[serde(rename = "pane.settle")]
+    PaneSettle(PaneTarget),
+    #[serde(rename = "pane.unsettle")]
+    PaneUnsettle(PaneTarget),
     #[serde(rename = "pane.focus")]
     PaneFocus(PaneTarget),
     #[serde(rename = "pane.rename")]

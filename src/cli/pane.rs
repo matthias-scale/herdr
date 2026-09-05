@@ -19,6 +19,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "list" => pane_list(&args[1..]),
         "current" => pane_current(&args[1..]),
         "get" => pane_get(&args[1..]),
+        "settle" => pane_settlement(&args[1..], true),
+        "unsettle" => pane_settlement(&args[1..], false),
         "layout" => pane_layout(&args[1..]),
         "process-info" => pane_process_info(&args[1..]),
         "neighbor" => pane_neighbor(&args[1..]),
@@ -95,6 +97,35 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
             pane_id: super::normalize_pane_id(raw_pane_id),
         }),
     })?)
+}
+
+fn pane_settlement(args: &[String], settle: bool) -> std::io::Result<i32> {
+    let command = if settle { "settle" } else { "unsettle" };
+    let target = match parse_pane_settlement_args(args, command) {
+        Ok(target) => target,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    let method = if settle {
+        Method::PaneSettle(target)
+    } else {
+        Method::PaneUnsettle(target)
+    };
+    super::print_response(&super::send_request(&Request {
+        id: format!("cli:pane:{command}"),
+        method,
+    })?)
+}
+
+fn parse_pane_settlement_args(args: &[String], command: &str) -> Result<PaneTarget, String> {
+    let [raw_pane_id] = args else {
+        return Err(format!("usage: herdr pane {command} <pane_id>"));
+    };
+    Ok(PaneTarget {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+    })
 }
 
 fn pane_work_context(args: &[String]) -> std::io::Result<i32> {
@@ -1721,6 +1752,8 @@ fn print_pane_help() {
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane current [--pane ID|--current]");
     eprintln!("  herdr pane get <pane_id>");
+    eprintln!("  herdr pane settle <pane_id>");
+    eprintln!("  herdr pane unsettle <pane_id>");
     eprintln!("  herdr pane layout [--pane ID|--current]");
     eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
@@ -1821,6 +1854,16 @@ mod tests {
             params.patch.clear_fields,
             vec![crate::work_context::PaneWorkContextField::Branch]
         );
+    }
+
+    #[test]
+    fn parse_pane_settle_and_unsettle_require_one_pane_id() {
+        for command in ["settle", "unsettle"] {
+            let target = parse_pane_settlement_args(&args(&["1-9"]), command).expect("parse");
+            assert_eq!(target.pane_id, "1-9");
+            assert!(parse_pane_settlement_args(&[], command).is_err());
+            assert!(parse_pane_settlement_args(&args(&["1-9", "extra"]), command).is_err());
+        }
     }
 
     #[test]

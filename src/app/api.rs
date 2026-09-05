@@ -1497,6 +1497,12 @@ impl App {
             Method::PaneList(params) => return self.handle_pane_list(request.id, params),
             Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
+            Method::PaneSettle(target) => {
+                return self.handle_pane_settlement(request.id, target, true)
+            }
+            Method::PaneUnsettle(target) => {
+                return self.handle_pane_settlement(request.id, target, false)
+            }
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneWorkContextSet(params) => {

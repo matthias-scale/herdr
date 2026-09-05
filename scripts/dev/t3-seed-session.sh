@@ -71,6 +71,23 @@ print_panes() {
     done
 }
 
+settle_and_assert() {
+    local pane_id=$1
+    local pane_json
+    local attempt
+    for attempt in {1..20}; do
+        run_herdr pane settle "$pane_id" >/dev/null
+        pane_json=$(run_herdr pane get "$pane_id")
+        if jq -e '.result.pane.settled_at != null' <<<"$pane_json" >/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    printf 'sample-settled pane %s has null settled_at after 20 pane settle attempts\n' \
+        "$pane_id" >&2
+    return 1
+}
+
 workspaces_json=$(run_herdr workspace list)
 mapfile -t sample_workspace_ids < <(
     jq -r '.result.workspaces[] | select(.label == "t3-sample") | .workspace_id' \
@@ -94,8 +111,10 @@ elif [[ ${#sample_workspace_ids[@]} -gt 0 ]]; then
         printf 't3-sample exists with different panes; rerun with --reset\n' >&2
         exit 1
     fi
+    sample_settled=$(jq -er '.result.panes[] | select(.label == "sample-settled") | .pane_id' \
+        <<<"$panes_json")
+    settle_and_assert "$sample_settled"
     print_panes "$panes_json"
-    printf 'sample-settled will settle after the configured inactivity period; no settle mutation API exists\n'
     exit 0
 fi
 
@@ -137,10 +156,10 @@ run_herdr pane work-context set "$sample_missive" \
 
 sample_shell=$(create_tab sample-shell /tmp)
 sample_settled=$(create_tab sample-settled "$sample_cwd")
+settle_and_assert "$sample_settled"
 
 printf 'sample-linear: %s\n' "$sample_linear"
 printf 'sample-pr: %s\n' "$sample_pr"
 printf 'sample-missive: %s\n' "$sample_missive"
 printf 'sample-shell: %s\n' "$sample_shell"
 printf 'sample-settled: %s\n' "$sample_settled"
-printf 'sample-settled will settle after the configured inactivity period; no settle mutation API exists\n'
