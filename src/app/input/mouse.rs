@@ -2508,11 +2508,15 @@ mod tests {
         app.state.selected = 0;
         app.state.reconcile_sidebar_presentation();
         let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = cards
+            .iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("linked workspace tab row");
         // The overview shows no work-link marker, so the compact row focuses the tab directly.
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            cards[1].rect.x + 5,
-            cards[1].rect.y,
+            target.rect.x + 5,
+            target.rect.y,
         ));
 
         assert_eq!(app.state.active, Some(1));
