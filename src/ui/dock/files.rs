@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, DockFileRowHitArea};
-use crate::files::{FileTreeRow, FileTreeRowKind, FileTreeSnapshot};
+use crate::files::{FileTreeRow, FileTreeRowKind, FileTreeSnapshot, FileTreeSource};
 
 pub(crate) fn active_snapshot(app: &AppState) -> Option<&FileTreeSnapshot> {
     let root = app.dock_files_root.as_ref()?;
@@ -42,21 +42,33 @@ fn matched_files(snapshot: &FileTreeSnapshot, query: &str) -> Option<HashSet<Pat
     )
 }
 
+/// Rows the tree gives up to the header: the search line, plus the fallback
+/// banner when the listing did not come from git.
+pub(crate) fn header_rows(app: &AppState) -> u16 {
+    1 + u16::from(
+        active_snapshot(app).is_some_and(|snapshot| snapshot.source == FileTreeSource::Directory),
+    )
+}
+
 pub(crate) fn row_hit_areas(app: &AppState, area: Rect) -> Vec<DockFileRowHitArea> {
-    if area.height <= 1 || area.width == 0 {
+    let header = header_rows(app);
+    if area.height <= header || area.width == 0 {
+        return Vec::new();
+    }
+    if active_snapshot(app).is_some_and(|snapshot| snapshot.error.is_some()) {
         return Vec::new();
     }
     let rows = visible_rows(app);
-    let height = usize::from(area.height - 1);
+    let height = usize::from(area.height - header);
     let scroll = usize::from(app.dock_scroll).min(rows.len().saturating_sub(height));
     rows.into_iter()
         .skip(scroll)
-        .take(usize::from(area.height - 1))
+        .take(height)
         .enumerate()
         .map(|(index, row)| DockFileRowHitArea {
             path: row.path,
             kind: row.kind,
-            rect: Rect::new(area.x, area.y + 1 + index as u16, area.width, 1),
+            rect: Rect::new(area.x, area.y + header + index as u16, area.width, 1),
         })
         .collect()
 }
@@ -69,36 +81,92 @@ pub(super) fn render_files(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.height <= 1 {
         return;
     }
-    let rows = visible_rows(app);
-    if active_snapshot(app).is_none() {
-        render_message(app, frame, area, "loading files…");
+    let Some(snapshot) = active_snapshot(app) else {
+        render_message(app, frame, area, 1, "loading files…");
+        return;
+    };
+    if snapshot.source == FileTreeSource::Directory {
+        render_message(
+            app,
+            frame,
+            area,
+            1,
+            &fallback_notice(&snapshot.root, area.width),
+        );
+    }
+    let header = header_rows(app);
+    if let Some(error) = snapshot.error.as_deref() {
+        render_message(app, frame, area, header, error);
         return;
     }
+    if area.height <= header {
+        return;
+    }
+    let rows = visible_rows(app);
     if rows.is_empty() {
         let message = if app.dock_files_filter.is_empty() {
             "no files"
         } else {
             "no matching files"
         };
-        render_message(app, frame, area, message);
+        render_message(app, frame, area, header, message);
         return;
     }
 
-    let height = usize::from(area.height - 1);
+    let height = usize::from(area.height - header);
     let scroll = usize::from(app.dock_scroll).min(rows.len().saturating_sub(height));
-    for (index, row) in rows
-        .iter()
-        .skip(scroll)
-        .take(usize::from(area.height - 1))
-        .enumerate()
-    {
+    for (index, row) in rows.iter().skip(scroll).take(height).enumerate() {
         render_row(
             app,
             frame,
-            Rect::new(area.x, area.y + 1 + index as u16, area.width, 1),
+            Rect::new(area.x, area.y + header + index as u16, area.width, 1),
             row,
         );
     }
+}
+
+/// What the surface says when the pane cwd is not a git repository. The dock is
+/// narrow, so the notice gives up the head of the path, then the path itself,
+/// before it gives up the sentence.
+pub(crate) fn fallback_notice(root: &Path, width: u16) -> String {
+    const LEAD: &str = "not a git repository";
+    // The row is drawn with one leading space.
+    let width = usize::from(width).saturating_sub(1);
+    let directory = root.to_string_lossy().into_owned();
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| directory.clone());
+
+    let full = format!("{LEAD} · showing {directory}");
+    if full.chars().count() <= width {
+        return full;
+    }
+    if let Some(notice) = with_tail(&format!("{LEAD} · showing …"), &directory, width) {
+        return notice;
+    }
+    let named = format!("{LEAD} · {name}");
+    if named.chars().count() <= width {
+        return named;
+    }
+    if let Some(notice) = with_tail(&format!("{LEAD} · …"), &name, width) {
+        return notice;
+    }
+    LEAD.chars().take(width).collect()
+}
+
+/// `prefix` followed by as much of `value`'s tail as `width` allows, or `None`
+/// when that would leave less than three characters of it.
+fn with_tail(prefix: &str, value: &str, width: usize) -> Option<String> {
+    let room = width.saturating_sub(prefix.chars().count());
+    if room < 3 {
+        return None;
+    }
+    let skip = value.chars().count().saturating_sub(room);
+    Some(format!(
+        "{prefix}{}",
+        value.chars().skip(skip).collect::<String>()
+    ))
 }
 
 fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -117,10 +185,13 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_message(app: &AppState, frame: &mut Frame, area: Rect, message: &str) {
+fn render_message(app: &AppState, frame: &mut Frame, area: Rect, row: u16, message: &str) {
+    if row >= area.height {
+        return;
+    }
     frame.render_widget(
         Paragraph::new(format!(" {message}")).style(Style::default().fg(app.palette.overlay0)),
-        Rect::new(area.x, area.y + 1, area.width, 1),
+        Rect::new(area.x, area.y + row, area.width, 1),
     );
 }
 
@@ -247,6 +318,98 @@ mod tests {
         );
     }
 
+    fn app_with(snapshot: FileTreeSnapshot) -> AppState {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_tab = Some(crate::app::DockSurface::Files);
+        app.dock_files_root = Some(snapshot.root.clone());
+        app.dock_file_cache.insert(snapshot.root.clone(), snapshot);
+        app
+    }
+
+    fn walk_snapshot(error: Option<&str>) -> FileTreeSnapshot {
+        FileTreeSnapshot {
+            root: PathBuf::from("/home/agent"),
+            files: vec![crate::files::FileRecord {
+                path: PathBuf::from("notes.md"),
+                status: None,
+            }],
+            fingerprint: 1,
+            source: FileTreeSource::Directory,
+            error: error.map(str::to_string),
+        }
+    }
+
+    fn rendered(app: &AppState, area: Rect) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_files(app, frame, area))
+            .expect("render files");
+        let buffer = terminal.backend().buffer().clone();
+        (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_cwd_outside_a_repository_says_so_above_the_walked_tree() {
+        let app = app_with(walk_snapshot(None));
+        let area = Rect::new(0, 0, 60, 6);
+
+        let screen = rendered(&app, area);
+
+        assert_eq!(
+            screen[1].trim_end(),
+            " not a git repository · showing /home/agent"
+        );
+        assert!(
+            screen[2].contains("notes.md"),
+            "the walked tree follows the notice: {screen:?}"
+        );
+        assert_eq!(
+            row_hit_areas(&app, area).first().map(|hit| hit.rect.y),
+            Some(2),
+            "the tree rows move down with the notice"
+        );
+    }
+
+    #[test]
+    fn a_walk_that_failed_shows_the_error_instead_of_the_spinner() {
+        let app = app_with(walk_snapshot(Some("listing timed out after 5s")));
+        let area = Rect::new(0, 0, 40, 6);
+
+        let screen = rendered(&app, area);
+
+        assert_eq!(screen[2].trim_end(), " listing timed out after 5s");
+        assert!(
+            !screen.iter().any(|line| line.contains("loading files…")),
+            "the spinner is gone: {screen:?}"
+        );
+        assert!(row_hit_areas(&app, area).is_empty());
+    }
+
+    #[test]
+    fn the_fallback_notice_keeps_the_tail_of_a_long_path() {
+        let notice = fallback_notice(Path::new("/home/agent/deeply/nested/place"), 44);
+
+        assert!(notice.chars().count() <= 43, "{notice:?}");
+        assert!(notice.starts_with("not a git repository · showing …"));
+        assert!(notice.ends_with("place"), "{notice:?}");
+
+        // Too narrow for the sentence and the path: the directory name stays.
+        let narrow = fallback_notice(Path::new("/home/agent/deeply/nested/place"), 30);
+        assert_eq!(narrow, "not a git repository · place");
+        let narrower = fallback_notice(Path::new("/home/agent/deeply/nested/place"), 28);
+        assert_eq!(narrower, "not a git repository · …ace");
+        let tiny = fallback_notice(Path::new("/home/agent/deeply/nested/place"), 12);
+        assert_eq!(tiny, "not a git r");
+    }
+
     #[test]
     fn search_uses_subsequence_filter_and_expands_matching_parents() {
         let mut app = AppState::test_new();
@@ -267,6 +430,8 @@ mod tests {
                     },
                 ],
                 fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
             },
         );
         app.dock_files_collapsed.insert(PathBuf::from("src"));
