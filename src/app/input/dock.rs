@@ -122,6 +122,9 @@ impl AppState {
         self.dock_home_focused = surface == DockSurface::Home;
         self.dock_diff_focused = surface == DockSurface::Diff;
         self.dock_files_focused = surface == DockSurface::Files;
+        self.dock_pr_focused = surface == DockSurface::Pr;
+        self.dock_pr_checkout_menu = None;
+        self.dock_pr_pending_land = None;
         true
     }
 

@@ -14,6 +14,7 @@ pub(crate) mod diff;
 pub(crate) mod editor;
 pub(crate) mod files;
 mod home;
+pub(crate) mod pr;
 
 pub(crate) use chooser::{
     card_hit_areas as chooser_card_hit_areas, menu_layout as chooser_menu_layout,
@@ -180,6 +181,7 @@ pub(super) fn render_dock(
         Some(DockSurface::Editor) => editor::render_editor_body(app, terminal_runtimes, frame),
         Some(DockSurface::Diff) => diff::render_diff(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Files) => files::render_files(app, frame, app.view.dock_body_rect),
+        Some(DockSurface::Pr) => pr::render_pr(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Shortcuts) => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)
         }

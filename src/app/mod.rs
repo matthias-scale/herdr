@@ -659,8 +659,14 @@ impl App {
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        #[cfg(not(test))]
         let sidebar_group_mode = crate::client::presentation::load_sidebar_group_mode();
+        #[cfg(test)]
+        let sidebar_group_mode = state::SidebarGroupMode::default();
+        #[cfg(not(test))]
         let sidebar_work_filter = crate::client::presentation::load_sidebar_work_filter();
+        #[cfg(test)]
+        let sidebar_work_filter = state::SidebarWorkFilter::default();
 
         let mut state = AppState {
             collapsed_sidebar_groups: std::iter::once(format!(
@@ -870,6 +876,9 @@ impl App {
             dock_scroll: 0,
             dock_editor_focused: false,
             dock_diff_focused: false,
+            dock_pr_focused: false,
+            dock_pr_checkout_menu: None,
+            dock_pr_pending_land: None,
             dock_diff_ignore_whitespace: false,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
@@ -2291,6 +2300,13 @@ impl App {
                                 continue;
                             }
                             if self.handle_dock_files_key(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_pr_key_headless(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
