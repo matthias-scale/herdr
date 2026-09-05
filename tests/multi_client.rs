@@ -938,10 +938,10 @@ fn non_foreground_render_preserves_interactive_tab_scroll() {
         initial_frames.join("\n--- frame ---\n")
     );
 
-    // The collapsed dock owns the final column and the two pane-toggle buttons
-    // own the six before it, so the tab bar's right scroll button is x=67..69,
-    // y=1 (zero-based) at an 80-column client.
-    send_client_input(&mut interactive, b"\x1b[<0;69;2M");
+    // The collapsed dock owns the final column, the git button and pane toggles
+    // own the sixteen before it, so the tab bar's right scroll button is
+    // x=57..59, y=1 (zero-based) at an 80-column client.
+    send_client_input(&mut interactive, b"\x1b[<0;59;2M");
     let (scrolled, interactive_frames) =
         wait_for_frame_matching_with_snapshots(&mut interactive, Duration::from_secs(3), |frame| {
             tab_bar_starts_after(frame, "tab-02", "tab-01")

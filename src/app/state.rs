@@ -1210,6 +1210,10 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub git_menu_button_hit_area: Rect,
+    pub git_menu_popup_rect: Rect,
+    pub git_menu_first_visible: usize,
+    pub git_menu_row_hit_areas: Vec<Rect>,
     pub pane_toggle_below_hit_area: Rect,
     pub pane_toggle_right_hit_area: Rect,
     pub terminal_area: Rect,
@@ -1314,6 +1318,7 @@ pub enum Mode {
     Resize,
     ConfirmClose,
     ContextMenu,
+    GitMenu,
     Settings,
     GlobalMenu,
     KeybindHelp,
@@ -1323,7 +1328,10 @@ pub enum Mode {
 
 impl Mode {
     pub(crate) fn mouse_motion_changes_view(self) -> bool {
-        matches!(self, Self::GlobalMenu | Self::ContextMenu | Self::Navigator)
+        matches!(
+            self,
+            Self::GlobalMenu | Self::ContextMenu | Self::GitMenu | Self::Navigator
+        )
     }
 
     /// Whether keys in this mode are commands/navigation (an ASCII input source is wanted) rather
@@ -1347,10 +1355,41 @@ impl Mode {
                 | Mode::ConfirmClose
                 | Mode::ConfirmRemoveWorktree
                 | Mode::ContextMenu
+                | Mode::GitMenu
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
                 | Mode::WorkLinkPicker
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitAction {
+    Pull,
+    Commit,
+    Push,
+    CreatePr,
+}
+
+impl GitAction {
+    pub(crate) const ALL: [Self; 4] = [Self::Pull, Self::Commit, Self::Push, Self::CreatePr];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Pull => "⇣ Pull",
+            Self::Commit => "⊙ Commit",
+            Self::Push => "⇡ Push",
+            Self::CreatePr => "⑂ Create PR",
+        }
+    }
+
+    pub(crate) fn argv(self) -> &'static [&'static str] {
+        match self {
+            Self::Pull => &["git", "pull", "--rebase"],
+            Self::Commit => &["git", "commit"],
+            Self::Push => &["git", "push"],
+            Self::CreatePr => &["gh", "pr", "create", "--fill"],
+        }
     }
 }
 
@@ -1925,6 +1964,7 @@ pub struct AppState {
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
     pub(crate) status_git_branch: Option<String>,
+    pub(crate) status_git_ahead_behind: Option<(usize, usize)>,
     /// Runtime-resolved cwd of the focused pane, projected from the same
     /// source the Git refresh uses so rendering never re-derives a weaker one.
     pub(crate) status_focused_cwd: Option<std::path::PathBuf>,
@@ -1977,6 +2017,8 @@ pub struct AppState {
     /// Set by a click on a tab-row pane toggle, drained by the runtime loop
     /// into the same split/close calls the keybindings use.
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
+    /// Git action chosen from the tab-row menu, drained by the runtime loop.
+    pub(crate) request_git_action: Option<GitAction>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
     pub request_pin_toggle: Option<(usize, usize)>,
@@ -2043,6 +2085,7 @@ pub struct AppState {
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
+    pub(crate) git_menu: MenuListState,
     // Notifications
     pub update_available: Option<String>,
     pub update_install_command: String,
@@ -2960,6 +3003,7 @@ impl AppState {
             }),
             status_git_cwd: None,
             status_git_branch: None,
+            status_git_ahead_behind: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             git_root_for_cwd: std::collections::HashMap::new(),
@@ -2993,6 +3037,7 @@ impl AppState {
             request_new_workspace: false,
             request_new_tab: false,
             request_pane_toggle: None,
+            request_git_action: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -3048,6 +3093,10 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                git_menu_button_hit_area: Rect::default(),
+                git_menu_popup_rect: Rect::default(),
+                git_menu_first_visible: 0,
+                git_menu_row_hit_areas: Vec::new(),
                 pane_toggle_below_hit_area: Rect::default(),
                 pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
@@ -3084,6 +3133,7 @@ impl AppState {
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
+            git_menu: MenuListState::new(0),
             update_available: None,
             update_install_command: "herdr update".into(),
             latest_release_notes_available: false,

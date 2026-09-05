@@ -1939,6 +1939,10 @@ impl AppState {
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
+            self.view.git_menu_button_hit_area = ratatui::layout::Rect::default();
+            self.view.git_menu_popup_rect = ratatui::layout::Rect::default();
+            self.view.git_menu_first_visible = 0;
+            self.view.git_menu_row_hit_areas.clear();
             self.view.pane_toggle_below_hit_area = ratatui::layout::Rect::default();
             self.view.pane_toggle_right_hit_area = ratatui::layout::Rect::default();
             return;
@@ -1957,16 +1961,19 @@ impl AppState {
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
+        self.view.git_menu_button_hit_area = layout.git_menu_button_hit_area;
         // Mirrors `compute_view`: a hidden or too-narrow tab row hands the
         // toggles to the status row instead of dropping them.
-        let (below, right) = if layout.pane_toggle_below_hit_area.width > 0 {
+        let (menu, below, right) = if layout.pane_toggle_below_hit_area.width > 0 {
             (
+                layout.git_menu_button_hit_area,
                 layout.pane_toggle_below_hit_area,
                 layout.pane_toggle_right_hit_area,
             )
         } else {
-            crate::ui::pane_toggle_fallback_hit_areas(self.view.status_bar_rect, self.mouse_capture)
+            crate::ui::tab_action_fallback_hit_areas(self.view.status_bar_rect, self.mouse_capture)
         };
+        self.view.git_menu_button_hit_area = menu;
         self.view.pane_toggle_below_hit_area = below;
         self.view.pane_toggle_right_hit_area = right;
     }
@@ -2941,6 +2948,7 @@ impl AppState {
         if self.status_git_cwd.as_ref() != self.status_focused_cwd.as_ref() {
             changed |= self.status_git_cwd.take().is_some();
             changed |= self.status_git_branch.take().is_some();
+            changed |= self.status_git_ahead_behind.take().is_some();
         }
         changed
     }
@@ -2950,8 +2958,9 @@ impl AppState {
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
-        let mut changed =
-            self.status_bar_enabled && self.sync_status_focused_cwd(terminal_runtimes);
+        let focused_git_projection =
+            self.status_bar_enabled || self.view.git_menu_button_hit_area.width > 0;
+        let mut changed = focused_git_projection && self.sync_status_focused_cwd(terminal_runtimes);
         for result in results {
             let Some(ws_idx) = self
                 .workspaces
@@ -2961,7 +2970,7 @@ impl AppState {
                 continue;
             };
 
-            let focused_cwd = if self.status_bar_enabled {
+            let focused_cwd = if focused_git_projection {
                 self.active
                     .filter(|active| *active == ws_idx)
                     .and_then(|_| self.status_focused_cwd.clone())
@@ -2977,6 +2986,13 @@ impl AppState {
                     self.status_git_branch = result.branch.clone();
                     changed = true;
                 }
+            }
+            if result.demand.ahead_behind
+                && focused_cwd.as_ref() == Some(&result.resolved_identity_cwd)
+                && self.status_git_ahead_behind != result.ahead_behind
+            {
+                self.status_git_ahead_behind = result.ahead_behind;
+                changed = true;
             }
 
             if !result.updates_workspace_identity
@@ -4854,6 +4870,36 @@ mod tests {
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("last-good"));
         assert_eq!(state.workspaces[0].cached_auto_label, previous_label);
         assert_eq!(state.workspaces[0].cached_git_status_key, cwd);
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_projects_menu_ahead_behind_for_focused_cwd() {
+        let mut state = app_with_workspaces(&["one"]);
+        state.status_bar_enabled = false;
+        state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 10, 1);
+        let workspace_id = state.workspaces[0].id.clone();
+        let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.sync_status_focused_cwd(&terminal_runtimes);
+
+        assert!(state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand {
+                    branch: false,
+                    ahead_behind: true,
+                },
+                updates_workspace_identity: false,
+                auto_label: "one".into(),
+                branch: None,
+                ahead_behind: Some((2, 3)),
+                space: None,
+            }],
+        ));
+        assert_eq!(state.status_git_ahead_behind, Some((2, 3)));
     }
 
     #[test]

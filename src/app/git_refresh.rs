@@ -82,7 +82,10 @@ impl App {
             return;
         }
 
-        if self.state.status_bar_enabled && self.sync_status_focused_runtime_cwd() {
+        let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
+        if (self.state.status_bar_enabled || git_menu_visible)
+            && self.sync_status_focused_runtime_cwd()
+        {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -169,6 +172,7 @@ impl App {
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
         let mut demand = self.sidebar_git_refresh_demand();
         demand.branch |= self.state.status_bar_enabled;
+        demand.ahead_behind |= self.state.view.git_menu_button_hit_area.width > 0;
         demand
     }
 
@@ -190,6 +194,8 @@ impl App {
     ) -> Vec<WorkspaceGitRefreshItem> {
         let mut workspace_demand = self.sidebar_git_refresh_demand();
         workspace_demand.branch |= self.git_identity_refresh_requested;
+        let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
+        workspace_demand.ahead_behind |= git_menu_visible;
         let mut items = if workspace_demand.is_empty() {
             Vec::new()
         } else {
@@ -214,7 +220,7 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
-        if self.state.status_bar_enabled {
+        if self.state.status_bar_enabled || git_menu_visible {
             // The status bar projects whichever pane becomes focused next, so every
             // live pane cwd across all workspaces and tabs needs an observation.
             // Job-level deduplication by checkout/cache key happens downstream in
@@ -229,7 +235,14 @@ impl App {
                         ) else {
                             continue;
                         };
-                        push_branch_refresh_item(&mut items, ws, cwd, refresh_repo_discovery);
+                        push_focused_git_refresh_item(
+                            &mut items,
+                            ws,
+                            cwd,
+                            refresh_repo_discovery,
+                            self.state.status_bar_enabled,
+                            git_menu_visible,
+                        );
                     }
                 }
             }
@@ -242,7 +255,14 @@ impl App {
                 .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
             {
                 if let Some(cwd) = self.state.status_focused_cwd.clone() {
-                    push_branch_refresh_item(&mut items, ws, cwd, refresh_repo_discovery);
+                    push_focused_git_refresh_item(
+                        &mut items,
+                        ws,
+                        cwd,
+                        refresh_repo_discovery,
+                        self.state.status_bar_enabled,
+                        git_menu_visible,
+                    );
                 }
             }
         }
@@ -251,17 +271,20 @@ impl App {
     }
 }
 
-fn push_branch_refresh_item(
+fn push_focused_git_refresh_item(
     items: &mut Vec<WorkspaceGitRefreshItem>,
     ws: &crate::workspace::Workspace,
     cwd: PathBuf,
     refresh_repo_discovery: bool,
+    branch: bool,
+    ahead_behind: bool,
 ) {
     if let Some(existing) = items
         .iter_mut()
         .find(|item| item.workspace_id == ws.id && item.resolved_identity_cwd == cwd)
     {
-        existing.demand.branch = true;
+        existing.demand.branch |= branch;
+        existing.demand.ahead_behind |= ahead_behind;
         return;
     }
     let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
@@ -271,8 +294,8 @@ fn push_branch_refresh_item(
         resolved_identity_cwd: cwd,
         cache_key_hint,
         demand: GitStatusRefreshDemand {
-            branch: true,
-            ahead_behind: false,
+            branch,
+            ahead_behind,
         },
         updates_workspace_identity: false,
     });
@@ -732,6 +755,29 @@ mod tests {
 
         assert!(app.git_refresh_demand().is_empty());
         assert!(app.git_refresh_deadline().is_none());
+    }
+
+    #[test]
+    fn visible_git_menu_button_demands_ahead_behind_from_existing_refresh() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+        app.state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 10, 1);
+
+        assert_eq!(
+            app.git_refresh_demand(),
+            GitStatusRefreshDemand {
+                branch: false,
+                ahead_behind: true,
+            }
+        );
+        assert!(app.git_refresh_deadline().is_some());
+        assert!(app
+            .workspace_git_refresh_items(false)
+            .iter()
+            .all(|item| item.demand.ahead_behind));
     }
 
     #[test]

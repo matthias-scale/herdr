@@ -287,6 +287,42 @@ impl AppState {
             return None;
         }
 
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.on_git_menu_button(mouse.column, mouse.row)
+        {
+            if self.mode == Mode::GitMenu {
+                self.mode = Mode::Terminal;
+            } else if matches!(self.mode, Mode::Terminal | Mode::Navigate) {
+                self.git_menu = MenuListState::new(0);
+                self.mode = Mode::GitMenu;
+            }
+            return None;
+        }
+
+        if self.mode == Mode::GitMenu {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    let hovered = self
+                        .git_menu_row_at(mouse.column, mouse.row)
+                        .filter(|index| *index < crate::app::state::GitAction::ALL.len());
+                    self.git_menu.hover(hovered);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(index) = self.git_menu_row_at(mouse.column, mouse.row) {
+                        if let Some(action) = crate::app::state::GitAction::ALL.get(index).copied()
+                        {
+                            self.request_git_action = Some(action);
+                            self.mode = Mode::Terminal;
+                        }
+                    } else {
+                        self.mode = Mode::Terminal;
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         if self.mode == Mode::KeybindHelp {
             return None;
         }
@@ -1590,6 +1626,29 @@ impl AppState {
             && row < area.y + area.height
             && col >= area.x
             && col < area.x + area.width
+    }
+
+    pub(super) fn on_git_menu_button(&self, col: u16, row: u16) -> bool {
+        let area = self.view.git_menu_button_hit_area;
+        area.width > 0
+            && row >= area.y
+            && row < area.bottom()
+            && col >= area.x
+            && col < area.right()
+    }
+
+    pub(super) fn git_menu_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.view
+            .git_menu_row_hit_areas
+            .iter()
+            .position(|area| {
+                area.width > 0
+                    && row >= area.y
+                    && row < area.bottom()
+                    && col >= area.x
+                    && col < area.right()
+            })
+            .map(|offset| self.view.git_menu_first_visible + offset)
     }
 
     pub(super) fn on_tab_scroll_left_button(&self, col: u16, row: u16) -> bool {
@@ -5092,6 +5151,53 @@ mod tests {
             // No sibling on that side, so the toggle resolves to a split.
             assert_eq!(app.state.pane_toggle_sibling(direction), None);
         }
+    }
+
+    #[test]
+    fn git_menu_button_and_selectable_rows_queue_actions_but_status_does_not() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let button = app.state.view.git_menu_button_hit_area;
+        assert_eq!(button.width, 10);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert_eq!(app.state.mode, Mode::GitMenu);
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let commit = app.state.view.git_menu_row_hit_areas[1];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            commit.x + 1,
+            commit.y,
+        ));
+        assert_eq!(
+            app.state.request_git_action,
+            Some(crate::app::state::GitAction::Commit)
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        app.state.request_git_action = None;
+        app.state.status_git_cwd = app.state.status_focused_cwd.clone();
+        app.state.status_git_ahead_behind = Some((0, 1));
+        app.state.mode = Mode::GitMenu;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let status = app.state.view.git_menu_row_hit_areas[4];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            status.x + 1,
+            status.y,
+        ));
+        assert_eq!(app.state.request_git_action, None);
+        assert_eq!(app.state.mode, Mode::GitMenu);
     }
 
     #[test]

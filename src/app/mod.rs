@@ -15,6 +15,7 @@ pub(crate) mod claude_subagents;
 mod config_io;
 mod creation;
 pub(crate) mod foreground_process;
+mod git_actions;
 mod git_refresh;
 pub(crate) mod home;
 pub(crate) mod home_catalog;
@@ -122,6 +123,8 @@ pub struct App {
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    /// Runtime-only markers for shell panes launched from the git menu.
+    pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -669,6 +672,7 @@ impl App {
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,
+            status_git_ahead_behind: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             git_root_for_cwd: std::collections::HashMap::new(),
@@ -701,6 +705,7 @@ impl App {
             request_new_workspace: false,
             request_new_tab: false,
             request_pane_toggle: None,
+            request_git_action: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -761,6 +766,10 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                git_menu_button_hit_area: Rect::default(),
+                git_menu_popup_rect: Rect::default(),
+                git_menu_first_visible: 0,
+                git_menu_row_hit_areas: Vec::new(),
                 pane_toggle_below_hit_area: Rect::default(),
                 pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
@@ -797,6 +806,7 @@ impl App {
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
+            git_menu: state::MenuListState::new(0),
             update_available,
             update_install_command,
             latest_release_notes_available,
@@ -994,6 +1004,7 @@ impl App {
             connectivity_probed_at: cfg!(test).then(Instant::now),
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
+            git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
             loop_history_reader,
@@ -1328,6 +1339,10 @@ impl App {
             }
 
             if self.apply_pane_toggle_request() {
+                needs_render = true;
+            }
+
+            if self.apply_git_action_request() {
                 needs_render = true;
             }
 
@@ -2348,6 +2363,9 @@ impl App {
             }
             Mode::ContextMenu => {
                 self.handle_context_menu_key_via_api(key_event);
+            }
+            Mode::GitMenu => {
+                input::handle_git_menu_key(&mut self.state, key_event);
             }
             Mode::KeybindHelp => {
                 input::handle_keybind_help_key(&mut self.state, key);
