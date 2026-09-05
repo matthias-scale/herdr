@@ -528,6 +528,10 @@ impl AppState {
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
                     self.set_dock_home_section(section);
                     self.dock_home_focused = true;
+                    // Clicking a section is as deliberate as moving the cursor:
+                    // it overrides the focused pane having nothing bound, so the
+                    // section opens on a real row instead of an inert list.
+                    self.dock_home_focus_unbound = false;
                     return None;
                 }
                 if let Some(index) = self.dock_home_tab_at(mouse.column, mouse.row) {
@@ -551,8 +555,12 @@ impl AppState {
                             .map(|row| row.key.clone()),
                     };
                     if let Some(key) = key {
-                        let already_selected =
-                            self.dock_home_active_selection().as_ref() == Some(&key);
+                        // While the focused pane is unbound nothing is selected
+                        // on screen, so a click has to select rather than treat
+                        // the stale stored key as the current selection.
+                        let already_selected = !self.dock_home_focus_unbound
+                            && self.dock_home_active_selection().as_ref() == Some(&key);
+                        self.dock_home_focus_unbound = false;
                         match self.dock_home_section {
                             crate::app::state::DockHomeSection::Prs => {
                                 self.dock_home_selection = Some(key)
@@ -2438,6 +2446,66 @@ mod tests {
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(pane_id));
         assert!(!app.state.dock_home_focused);
+    }
+
+    #[test]
+    fn dock_home_tab_click_selects_while_the_focused_pane_is_unbound() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("current"),
+            Workspace::test_new("review"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[1].focused_pane_id().expect("pane");
+        let terminal_id = app.state.workspaces[1]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                pr_urls: Some(vec!["https://github.com/herdrdev/herdr/pull/125".into()]),
+                work_title: Some("review dock home".into()),
+                role: Some(crate::work_context::PaneWorkRole::Review),
+                active_owner: Some(true),
+                ..Default::default()
+            })
+            .expect("work context");
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = crate::app::DockTab::Home;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let tab = app.state.view.dock_home_tab_hit_areas[0];
+        let expected_key = app.state.dock_home_projection().rows[0].key.clone();
+        // The focused pane carries no work item, so nothing is selected on
+        // screen even though a key is still stored from an earlier pane.
+        app.state.dock_home_selection = Some(expected_key.clone());
+        app.state.dock_home_focus_unbound = true;
+        assert_eq!(
+            app.state
+                .dock_home_selected_index(&app.state.dock_home_projection()),
+            None
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            tab.x + 1,
+            tab.y,
+        ));
+
+        // The click selects rather than jumping: the row is now visible.
+        assert!(!app.state.dock_home_focus_unbound);
+        assert_eq!(
+            app.state
+                .dock_home_selected_index(&app.state.dock_home_projection()),
+            Some(0)
+        );
+        assert_eq!(app.state.dock_home_selection.as_ref(), Some(&expected_key));
+        assert_eq!(app.state.active, Some(0));
+        assert!(app.state.dock_home_focused);
     }
 
     #[test]
