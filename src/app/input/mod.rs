@@ -263,6 +263,18 @@ impl App {
             return true;
         }
 
+        // A maximised dock leaves no pane to type into, so one Esc gives the
+        // main area back. The editor is the exception: its keys belong to the
+        // PTY, and the ⤢ click restores it instead.
+        if self.state.dock_maximized
+            && !self.state.dock_editor_focused
+            && event.code == KeyCode::Esc
+            && event.modifiers.is_empty()
+        {
+            self.state.dock_maximized = false;
+            return true;
+        }
+
         if self.state.dock_tab.is_some() || !self.state.dock_chooser_focused {
             return false;
         }
@@ -275,10 +287,6 @@ impl App {
                     }
                     None => false,
                 }
-            }
-            KeyCode::Esc if self.state.dock_maximized => {
-                self.state.dock_maximized = false;
-                true
             }
             KeyCode::Esc => {
                 self.state.dock_chooser_focused = false;
@@ -2067,6 +2075,35 @@ mod tests {
         // An unrelated key is not swallowed by the chooser.
         assert!(!app
             .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty())));
+    }
+
+    #[test]
+    fn one_escape_restores_a_maximised_dock() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Scratchpad);
+        app.state.dock_maximized = true;
+
+        assert!(app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(!app.state.dock_maximized);
+        assert_eq!(
+            app.state.dock_tab,
+            Some(crate::app::DockSurface::Scratchpad),
+            "restoring the dock does not close the surface"
+        );
+
+        // The editor keeps its keys; only the ⤢ click restores it.
+        app.state.dock_maximized = true;
+        app.state.dock_tab = Some(crate::app::DockSurface::Editor);
+        app.state.dock_editor_focused = true;
+        assert!(
+            !app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+        );
+        assert!(app.state.dock_maximized);
     }
 
     #[test]
