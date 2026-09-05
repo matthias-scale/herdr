@@ -144,7 +144,7 @@ fn mobile_switcher_target_for_row(
             ws_idx: entry.ws_idx,
             tab_idx: entry.tab_idx,
         },
-        SidebarRow::SectionHeader { .. } => return None,
+        SidebarRow::SectionHeader { .. } | SidebarRow::NestedHeader { .. } => return None,
     })
 }
 
@@ -163,7 +163,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
     match row {
         SidebarRow::Workspace { .. }
         | SidebarRow::Tab { .. }
-        | SidebarRow::SectionHeader { .. } => 1,
+        | SidebarRow::SectionHeader { .. }
+        | SidebarRow::NestedHeader { .. } => 1,
         SidebarRow::Agent { .. } => 1,
     }
 }
@@ -750,6 +751,30 @@ fn render_mobile_switcher_content(
                     Line::from(Span::styled(
                         label,
                         Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                    )),
+                );
+            }
+            SidebarRow::NestedHeader {
+                title,
+                collapsed,
+                unavailable,
+                ..
+            } => {
+                let label = if *unavailable {
+                    format!("   {title}")
+                } else {
+                    format!("   {} {title}", if *collapsed { "▸" } else { "▾" })
+                };
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        label,
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                     )),
                 );
             }

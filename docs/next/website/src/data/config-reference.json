@@ -626,6 +626,12 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.sidebar_cycle_group_mode",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Cycle the sidebar grouping mode."
+        },
+        {
           "key": "keys.toggle_blocked_filter",
           "type": "keybinding",
           "default": "\"prefix+f\"",

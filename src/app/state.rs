@@ -726,6 +726,68 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SidebarGroupMode {
+    #[default]
+    Repo,
+    RepoPr,
+    RepoWorktree,
+    LinearTeam,
+    Missive,
+}
+
+impl SidebarGroupMode {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Repo,
+        Self::RepoPr,
+        Self::RepoWorktree,
+        Self::LinearTeam,
+        Self::Missive,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Repo => "Repo",
+            Self::RepoPr => "Repo / PR",
+            Self::RepoWorktree => "Repo / worktree",
+            Self::LinearTeam => "Linear team",
+            Self::Missive => "Missive threads",
+        }
+    }
+
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Self::Repo => "⊞",
+            Self::RepoPr => "⑂",
+            Self::RepoWorktree => "⎇",
+            Self::LinearTeam => "◎",
+            Self::Missive => "✉",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0)
+    }
+
+    pub(crate) fn collapse_namespace(self) -> &'static str {
+        match self {
+            Self::Repo => "repo",
+            Self::RepoPr => "repo_pr",
+            Self::RepoWorktree => "repo_worktree",
+            Self::LinearTeam => "linear_team",
+            Self::Missive => "missive",
+        }
+    }
+}
+
 /// Attach-local sidebar state. The headless server swaps one instance into
 /// `AppState` while routing input or rendering for that client; the monolithic
 /// app keeps its own instance directly.
@@ -742,6 +804,9 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) mobile_switcher_scroll: usize,
     /// Global projection revision last reconciled into this attach.
     pub(crate) projection_revision: u64,
+    pub(crate) group_mode: SidebarGroupMode,
+    pub(crate) group_menu_open: bool,
+    pub(crate) group_menu_selected: usize,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -1806,6 +1871,7 @@ pub struct AppState {
     pub request_client_config_reload: bool,
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
+    pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -1823,6 +1889,9 @@ pub struct AppState {
     /// `collapsed_space_keys`, which folds one space inside the tree; this folds
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
+    pub(crate) sidebar_group_mode: SidebarGroupMode,
+    pub(crate) sidebar_group_menu_open: bool,
+    pub(crate) sidebar_group_menu_selected: usize,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -2289,6 +2358,29 @@ impl AppState {
         self.dock_width_persistence_request.take()
     }
 
+    pub(crate) fn set_sidebar_group_mode(&mut self, mode: SidebarGroupMode) {
+        if self.sidebar_group_mode == mode {
+            self.sidebar_group_menu_open = false;
+            return;
+        }
+        self.sidebar_group_mode = mode;
+        self.sidebar_group_menu_selected = mode.index();
+        self.sidebar_group_menu_open = false;
+        self.sidebar_group_mode_persistence_request = Some(mode);
+        self.workspace_scroll = 0;
+        self.mark_sidebar_projection_changed();
+    }
+
+    pub(crate) fn cycle_sidebar_group_mode(&mut self) {
+        self.set_sidebar_group_mode(self.sidebar_group_mode.next());
+    }
+
+    pub(crate) fn take_sidebar_group_mode_persistence_request(
+        &mut self,
+    ) -> Option<SidebarGroupMode> {
+        self.sidebar_group_mode_persistence_request.take()
+    }
+
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
@@ -2310,6 +2402,15 @@ impl AppState {
         std::mem::swap(
             &mut self.sidebar_presentation.projection_revision,
             &mut other.projection_revision,
+        );
+        std::mem::swap(&mut self.sidebar_group_mode, &mut other.group_mode);
+        std::mem::swap(
+            &mut self.sidebar_group_menu_open,
+            &mut other.group_menu_open,
+        );
+        std::mem::swap(
+            &mut self.sidebar_group_menu_selected,
+            &mut other.group_menu_selected,
         );
     }
 
@@ -2706,6 +2807,7 @@ impl AppState {
             request_reload_config: false,
             request_client_config_reload: false,
             dock_width_persistence_request: None,
+            sidebar_group_mode_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -2716,10 +2818,10 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_sidebar_groups: std::iter::once(
-                crate::ui::RECENTLY_DONE_SECTION_TITLE.to_string(),
-            )
-            .collect(),
+            collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            sidebar_group_mode: SidebarGroupMode::Repo,
+            sidebar_group_menu_open: false,
+            sidebar_group_menu_selected: 0,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,

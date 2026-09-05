@@ -207,6 +207,40 @@ impl AppState {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
         }
 
+        let group_menu_enabled = self.view.layout != ViewLayout::Mobile
+            && !self.sidebar_collapsed
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
+        let group_anchor = self.sidebar_group_mode_anchor_rect();
+        let group_anchor_hit =
+            group_menu_enabled && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_group_menu_open {
+            if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                self.sidebar_group_menu_selected = index;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && group_anchor_hit {
+            if self.sidebar_group_menu_open {
+                self.sidebar_group_menu_open = false;
+            } else {
+                self.open_sidebar_group_menu();
+            }
+            return None;
+        }
+        if self.sidebar_group_menu_open {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                    if let Some(mode) = crate::app::state::SidebarGroupMode::ALL.get(index).copied()
+                    {
+                        self.set_sidebar_group_mode(mode);
+                    }
+                } else {
+                    self.sidebar_group_menu_open = false;
+                }
+            }
+            return None;
+        }
+
         let launcher_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
             && matches!(
@@ -748,6 +782,10 @@ impl AppState {
                     // whole width, so anywhere on it folds the group.
                     if let Some(title) = self.sidebar_section_header_at(mouse.row) {
                         self.toggle_sidebar_group(title);
+                        return None;
+                    }
+                    if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
+                        self.toggle_sidebar_group(&key);
                         return None;
                     }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
