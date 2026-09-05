@@ -137,7 +137,7 @@ pub(crate) use self::{
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
-    tabs::compute_tab_bar_view,
+    tabs::{compute_tab_bar_view, pane_toggle_fallback_hit_areas},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -374,6 +374,18 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
+    // A hidden tab row leaves the toggles homeless; the status row takes them.
+    let (pane_toggle_below_hit_area, pane_toggle_right_hit_area) =
+        if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
+            (
+                tab_bar_view.pane_toggle_below_hit_area,
+                tab_bar_view.pane_toggle_right_hit_area,
+            )
+        } else if app.active.is_some() {
+            tabs::pane_toggle_fallback_hit_areas(status_bar_rect, app.mouse_capture)
+        } else {
+            (Rect::default(), Rect::default())
+        };
 
     let TabSurfaceLayout {
         pane_infos,
@@ -496,8 +508,8 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
-        pane_toggle_below_hit_area: tab_bar_view.pane_toggle_below_hit_area,
-        pane_toggle_right_hit_area: tab_bar_view.pane_toggle_right_hit_area,
+        pane_toggle_below_hit_area,
+        pane_toggle_right_hit_area,
         terminal_area,
         info_panel_rect,
         // Both surfaces feed one list because one click handler serves it: the panel
@@ -776,6 +788,9 @@ fn render_with_runtime_registry_inner(
     render_navigation_chrome(app, terminal_runtimes, frame);
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
+    }
+    if app.view.layout != ViewLayout::Mobile {
+        tabs::render_pane_toggle_buttons(app, frame);
     }
     if let Some(detail) = app.symphony_detail.as_ref() {
         render_symphony(
@@ -1478,6 +1493,79 @@ mod tests {
         assert_eq!(app.view.tab_bar_rect, Rect::default());
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
+    }
+
+    /// The buttons were only ever computed for the tab row, which the shipped
+    /// default config does not draw: `tab_bar_position` defaults to `hidden`.
+    /// Every unit test used `AppState::test_new()`, whose tab row is `Top`, so
+    /// the whole feature was invisible at runtime while the tests were green.
+    #[test]
+    fn pane_toggles_fall_back_to_the_status_row_under_the_default_config() {
+        assert_eq!(
+            crate::config::Config::default().ui.tab_bar_position,
+            crate::config::TabBarPositionConfig::Hidden,
+            "the default config hides the tab row; the toggles must survive that"
+        );
+
+        for (width, height) in [(120u16, 40u16), (80, 24)] {
+            let mut app = crate::app::state::AppState::test_new();
+            let defaults = crate::config::Config::default();
+            app.tab_bar_position = defaults.ui.tab_bar_position;
+            app.hide_tab_bar_when_single_tab = defaults.ui.hide_tab_bar_when_single_tab;
+            app.mouse_capture = defaults.ui.mouse_capture;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.selected = 0;
+            app.mode = Mode::Terminal;
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+
+            assert_eq!(app.view.tab_bar_rect, Rect::default(), "{width}x{height}");
+            let status = app.view.status_bar_rect;
+            let below = app.view.pane_toggle_below_hit_area;
+            let right = app.view.pane_toggle_right_hit_area;
+            assert_eq!(
+                below,
+                Rect::new(status.x + status.width - 6, status.y, 3, 1)
+            );
+            assert_eq!(right, Rect::new(below.x + 3, status.y, 3, 1));
+
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
+            assert!(
+                row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH),
+                "{width}x{height} status row: {row:?}"
+            );
+            assert!(
+                row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH),
+                "{width}x{height} status row: {row:?}"
+            );
+        }
+    }
+
+    /// Keyboard-only sessions keep a clean row: no hit areas and no glyphs.
+    #[test]
+    fn pane_toggles_stay_absent_without_mouse_capture() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Hidden;
+        app.mouse_capture = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        assert_eq!(app.view.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(app.view.pane_toggle_right_hit_area, Rect::default());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let status = app.view.status_bar_rect;
+        let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
+        assert!(!row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH), "{row:?}");
+        assert!(!row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH), "{row:?}");
     }
 
     #[test]
