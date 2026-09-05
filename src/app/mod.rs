@@ -2249,6 +2249,13 @@ impl App {
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
+                            if self.handle_dock_surface_menu_key(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             // Home is a launch overlay, and `terminal_input_context`
                             // reports no pane context while it is open. Settle home
                             // first: a key it has no use for closes it and then
