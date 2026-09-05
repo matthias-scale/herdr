@@ -75,6 +75,7 @@ impl AppState {
     pub(super) fn home_dismiss_picker(&mut self) {
         if let Some(home) = self.home.as_mut() {
             home.picker = None;
+            home.browse = None;
         }
     }
 
@@ -602,6 +603,19 @@ impl App {
 
         if let Some(picker) = self.state.home.as_ref().and_then(|home| home.picker) {
             match event.code {
+                // The path input owns tab, enter and escape: they complete,
+                // accept and leave the input rather than moving the composer.
+                KeyCode::Tab
+                    if event.modifiers.is_empty() && self.state.home_browse_active() =>
+                {
+                    self.state.home_browse_complete();
+                }
+                KeyCode::Enter if event.modifiers.is_empty() && self.state.home_browse_active() => {
+                    self.state.home_browse_accept();
+                }
+                KeyCode::Esc if self.state.home_browse_active() => {
+                    self.state.home_browse_cancel();
+                }
                 KeyCode::Tab if event.modifiers.is_empty() => {
                     let queue_empty = self.state.blocked_agents().is_empty();
                     self.state.home_move_composer_focus(false, queue_empty);
