@@ -690,15 +690,13 @@ fn dock_geometry(
     let [tab_bar, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
 
-    // Widths the strip wants: every open tab, the trailing `+`, and the `⤢`
+    // Width the strip wants: every open tab, the trailing `+`, and the `⤢`
     // pinned to the right edge. The maximise glyph only claims its two columns
     // when the tabs do not need them.
-    let mut widths: Vec<u16> = open
+    let wanted: u16 = open
         .iter()
         .map(|surface| dock::tab_width(*surface, active == Some(*surface)))
-        .collect();
-    widths.push(2);
-    let wanted: u16 = widths.iter().copied().fold(0u16, u16::saturating_add);
+        .fold(dock::PLUS_WIDTH, u16::saturating_add);
     let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
         (
             Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 2, 1),
@@ -708,22 +706,15 @@ fn dock_geometry(
         (tab_bar, Rect::default())
     };
 
-    let mut areas = horizontal_tab_hit_areas(strip, &widths);
-    let plus = areas.pop().unwrap_or_default();
-    let close = active
-        .and_then(|surface| {
-            open.iter()
-                .position(|open| *open == surface)
-                .and_then(|index| areas.get(index).copied())
-                .map(|tab| dock::close_rect(tab, surface))
-        })
-        .unwrap_or_default();
+    // The hit areas come from the same layout the strip is drawn from, so the
+    // `+` cell a click lands in is the cell the glyph occupies.
+    let dock::StripLayout { tabs, close, plus } = dock::strip_layout(strip, open, active);
 
     DockGeometry {
         handle,
         divider,
         tab_bar,
-        tabs: areas,
+        tabs,
         close,
         plus,
         maximize,
@@ -1327,6 +1318,82 @@ mod tests {
         assert!(app.dock_collapsed);
         assert_eq!(app.view.dock_rect.width, DOCK_COLLAPSED_WIDTH);
         assert!(app.view.terminal_area.width >= 1);
+    }
+
+    /// Screen size, open surfaces and the strip row the dock draws for them.
+    fn strip_row(width: u16, height: u16, open: &[crate::app::DockSurface]) -> (String, AppState) {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = open.to_vec();
+        app.dock_tab = open.first().copied();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, width, height);
+
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal
+            .draw(|frame| render(&app, frame))
+            .expect("render dock");
+        let buffer = terminal.backend().buffer().clone();
+        let strip = app.view.dock_tab_bar_rect;
+        let row = (strip.x..strip.right())
+            .map(|col| buffer[(col, strip.y)].symbol())
+            .collect::<String>();
+        (row, app)
+    }
+
+    fn three_and_seven_tabs() -> [Vec<crate::app::DockSurface>; 2] {
+        use crate::app::DockSurface;
+        [
+            vec![DockSurface::Home, DockSurface::Editor, DockSurface::Files],
+            vec![
+                DockSurface::Home,
+                DockSurface::Editor,
+                DockSurface::Shortcuts,
+                DockSurface::Context,
+                DockSurface::Scratchpad,
+                DockSurface::Files,
+                DockSurface::Diff,
+            ],
+        ]
+    }
+
+    #[test]
+    fn the_dock_strip_keeps_one_space_between_tab_labels() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            for open in three_and_seven_tabs() {
+                let (row, app) = strip_row(width, height, &open);
+                let rendered = app
+                    .dock_open_surfaces
+                    .iter()
+                    .copied()
+                    .zip(app.view.dock_tab_hit_areas.iter())
+                    .filter(|(_, area)| area.width > 0)
+                    .map(|(surface, area)| (surface, *area))
+                    .collect::<Vec<_>>();
+                assert!(!rendered.is_empty(), "{width}x{height}: no tab drawn");
+                for (surface, area) in rendered {
+                    let start = usize::from(area.x - app.view.dock_tab_bar_rect.x);
+                    let cells = row.chars().skip(start).take(usize::from(area.width));
+                    let drawn = cells.collect::<String>();
+                    let label = surface
+                        .label()
+                        .chars()
+                        .take(usize::from(area.width.saturating_sub(1)))
+                        .collect::<String>();
+                    assert!(
+                        drawn.starts_with(&label),
+                        "{width}x{height}: {drawn:?} does not start with {label:?}"
+                    );
+                    assert!(
+                        drawn.ends_with(' '),
+                        "{width}x{height}: {drawn:?} has no separating space in {row:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
