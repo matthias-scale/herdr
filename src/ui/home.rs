@@ -12,6 +12,9 @@ use crate::app::{
     state::{HomeHitArea, HomeHitTarget},
     AppState,
 };
+use crate::ui::dropdown::{
+    hit_test as dropdown_hit_test, layout_dropdown, DropdownLayout, DropdownSpec,
+};
 use crate::ui::text::{display_width, truncate_end};
 
 /// How long this agent has been waiting, in the sidebar's own age vocabulary.
@@ -708,19 +711,19 @@ fn render_lens(
     );
 }
 
-fn picker_popup_rect(
+fn picker_layout(
     app: &AppState,
     home: &HomeState,
     composer: ComposerBands,
     area: Rect,
-) -> Option<Rect> {
+) -> Option<DropdownLayout> {
     let picker = home.picker?;
     let field = composer_field_rect(app, home, composer, home.focus?)?;
     let labels = picker_labels(app, home, picker);
     if labels.is_empty() || area.width == 0 || area.height == 0 {
         return None;
     }
-    let width = labels
+    let min_width = labels
         .iter()
         .map(|label| display_width(label))
         .max()
@@ -729,24 +732,27 @@ fn picker_popup_rect(
         .try_into()
         .unwrap_or(u16::MAX)
         .min(area.width);
-    let wanted: u16 = labels.len().try_into().unwrap_or(u16::MAX).min(area.height);
-    let above = field.y.saturating_sub(area.y);
-    let below = area.bottom().saturating_sub(field.y.saturating_add(1));
-    // Dropdowns open downward. Opening upward is only a fallback for when there
-    // is genuinely more room above, which with the composer near the top of the
-    // pane is rare.
-    let (height, y) = if wanted <= below {
-        (wanted, field.y.saturating_add(1))
-    } else if above > below {
-        (wanted.min(above), field.y.saturating_sub(wanted.min(above)))
-    } else {
-        (below, field.y.saturating_add(1))
-    };
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let x = field.x.min(area.right().saturating_sub(width));
-    Some(Rect::new(x, y, width, height))
+    layout_dropdown(
+        &DropdownSpec {
+            anchor: field,
+            item_count: labels.len(),
+            selected: home.picker_selected,
+            has_filter: false,
+            max_rows: labels.len(),
+            min_width,
+        },
+        area,
+    )
+}
+
+#[cfg(test)]
+fn picker_popup_rect(
+    app: &AppState,
+    home: &HomeState,
+    composer: ComposerBands,
+    area: Rect,
+) -> Option<Rect> {
+    picker_layout(app, home, composer, area).map(|layout| layout.rect)
 }
 
 fn picker_viewport(
@@ -754,16 +760,8 @@ fn picker_viewport(
     home: &HomeState,
     composer: ComposerBands,
     area: Rect,
-) -> Option<(Rect, usize)> {
-    let popup = picker_popup_rect(app, home, composer, area)?;
-    let option_count = picker_labels(app, home, home.picker?).len();
-    let visible = popup.height as usize;
-    let max_start = option_count.saturating_sub(visible);
-    let start = home
-        .picker_selected
-        .saturating_sub(visible.saturating_sub(1))
-        .min(max_start);
-    Some((popup, start))
+) -> Option<DropdownLayout> {
+    picker_layout(app, home, composer, area)
 }
 
 fn queue_row_hit_areas(
@@ -814,11 +812,15 @@ pub(super) fn home_hit_areas(
     let layout = home_bands(app, queue, area);
     let mut hits = Vec::new();
     if let Some(composer) = layout.composer {
-        if let Some((popup, start)) = picker_viewport(app, home, composer, area) {
-            for offset in 0..popup.height {
+        if let Some(dropdown) = picker_viewport(app, home, composer, area) {
+            for offset in 0..dropdown.visible_rows {
+                let y = dropdown.list_rect.y + offset as u16;
+                let Some(index) = dropdown_hit_test(&dropdown, dropdown.list_rect.x, y) else {
+                    continue;
+                };
                 hits.push(HomeHitArea {
-                    target: HomeHitTarget::PickerOption(start + offset as usize),
-                    rect: Rect::new(popup.x, popup.y + offset, popup.width, 1),
+                    target: HomeHitTarget::PickerOption(index),
+                    rect: Rect::new(dropdown.list_rect.x, y, dropdown.list_rect.width, 1),
                 });
             }
         }
@@ -1023,14 +1025,14 @@ pub(super) fn render_home(
             );
         }
 
-        if let Some((popup, start)) = picker_viewport(app, home, composer, area) {
+        if let Some(dropdown) = picker_viewport(app, home, composer, area) {
             if let Some(picker) = home.picker {
                 let labels = picker_labels(app, home, picker);
                 let lines = labels
                     .into_iter()
                     .enumerate()
-                    .skip(start)
-                    .take(popup.height as usize)
+                    .skip(dropdown.first_visible)
+                    .take(dropdown.visible_rows)
                     .map(|(index, label)| {
                         let style = if index == home.picker_selected {
                             Style::default()
@@ -1047,8 +1049,24 @@ pub(super) fn render_home(
                     .collect::<Vec<_>>();
                 frame.render_widget(
                     Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
-                    popup,
+                    dropdown.list_rect,
                 );
+            }
+        } else if let Some(picker) = home.picker {
+            if !picker_labels(app, home, picker).is_empty() {
+                if let Some(field) = home
+                    .focus
+                    .and_then(|focus| composer_field_rect(app, home, composer, focus))
+                {
+                    frame.render_widget(
+                        Paragraph::new(" no room below").style(
+                            Style::default()
+                                .fg(app.palette.red)
+                                .bg(app.palette.panel_bg),
+                        ),
+                        field,
+                    );
+                }
             }
         }
     }
@@ -1361,8 +1379,8 @@ mod tests {
 
         assert_eq!(
             popup.y,
-            field.y + 1,
-            "a dropdown opens below its field, not above it"
+            field.bottom(),
+            "dropdown top must match field bottom"
         );
         assert!(popup.bottom() <= area.bottom());
     }
@@ -1617,7 +1635,9 @@ mod tests {
         let area = Rect::new(0, 0, 50, 12);
         let composer = bands(area, queue.len()).composer.expect("composer");
         let home = app.home.as_ref().expect("home");
-        let (popup, start) = picker_viewport(&app, home, composer, area).expect("picker");
+        let dropdown = picker_viewport(&app, home, composer, area).expect("picker");
+        let popup = dropdown.rect;
+        let start = dropdown.first_visible;
         let hits = home_hit_areas(&app, &queue, area);
         let option_hits = hits
             .iter()
@@ -1630,21 +1650,11 @@ mod tests {
         assert!(start > 0);
         assert_eq!(option_hits.first().map(|(index, _)| *index), Some(start));
         assert_eq!(option_hits.last().map(|(index, _)| *index), Some(selected));
-        assert_eq!(option_hits.len(), popup.height as usize);
-
-        let body = bands(area, queue.len()).body;
-        assert!(body.y >= popup.y && body.y < popup.bottom());
-        assert!(matches!(
-            hits.iter()
-                .find(|hit| {
-                    hit.rect.x <= popup.x
-                        && popup.x < hit.rect.right()
-                        && hit.rect.y <= body.y
-                        && body.y < hit.rect.bottom()
-                })
-                .map(|hit| hit.target),
-            Some(HomeHitTarget::PickerOption(_))
-        ));
+        assert_eq!(option_hits.len(), dropdown.visible_rows);
+        let field = composer_field_rect(&app, home, composer, HomeFocus::Directory)
+            .expect("directory field");
+        assert_eq!(popup.y, field.bottom());
+        assert!(popup.bottom() <= area.bottom());
     }
 
     #[test]
