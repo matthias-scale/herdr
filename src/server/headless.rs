@@ -4891,7 +4891,8 @@ impl HeadlessServer {
                             presentation.home_poll_selection.clone()
                         }
                     },
-                    !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Home),
+                    !presentation.collapsed
+                        && presentation.tab == Some(crate::app::DockSurface::Home),
                 )
             });
         let (section, selection, detail_visible) =

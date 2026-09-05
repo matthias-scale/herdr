@@ -551,8 +551,8 @@ impl AppState {
                 }
                 if self.on_dock_toggle(mouse.column, mouse.row) {
                     self.dock_collapsed = !self.dock_collapsed;
-                    self.dock_home_focused =
-                        !self.dock_collapsed && self.dock_tab == Some(crate::app::DockSurface::Home);
+                    self.dock_home_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Home);
                     self.mark_session_dirty();
                     return None;
                 }

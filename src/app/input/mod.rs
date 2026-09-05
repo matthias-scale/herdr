@@ -210,6 +210,12 @@ impl App {
         None
     }
 
+    /// Card shortcuts are written uppercase, so the shift that produces them is
+    /// part of the binding rather than a different chord.
+    fn dock_shortcut_modifiers(modifiers: KeyModifiers) -> bool {
+        modifiers.is_empty() || modifiers == KeyModifiers::SHIFT
+    }
+
     /// Keys of the surface chooser: the card-grid shortcuts of an empty dock,
     /// the open `+` menu, and the one keypress that restores a maximised dock.
     fn handle_dock_chooser_key(&mut self, key: &TerminalKey) -> bool {
@@ -245,7 +251,7 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Char(character) if event.modifiers.is_empty() => {
+                KeyCode::Char(character) if Self::dock_shortcut_modifiers(event.modifiers) => {
                     if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
                         if self.state.activate_dock_surface(surface) {
                             self.state.dock_surface_menu = None;
@@ -261,7 +267,7 @@ impl App {
             return false;
         }
         match event.code {
-            KeyCode::Char(character) if event.modifiers.is_empty() => {
+            KeyCode::Char(character) if Self::dock_shortcut_modifiers(event.modifiers) => {
                 match crate::app::DockSurface::from_shortcut(character) {
                     Some(surface) => {
                         self.state.activate_dock_surface(surface);
@@ -481,6 +487,12 @@ impl App {
     /// the headless input path must offer it keys before choosing a pane target.
     pub(crate) fn handle_dock_home_key_headless(&mut self, key: &TerminalKey) -> bool {
         self.state.popup_pane.is_none() && self.handle_dock_home_key(key)
+    }
+
+    /// Same for the surface chooser: an empty dock owns its card shortcuts
+    /// before a pane sees them.
+    pub(crate) fn handle_dock_chooser_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_chooser_key(key)
     }
 
     /// Home owns the full key stream so navigation never leaks into a pane.
@@ -2015,6 +2027,70 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn chooser_shortcuts_open_available_surfaces_and_ignore_the_rest() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces.clear();
+        app.state.dock_tab = None;
+        app.state.dock_chooser_focused = true;
+
+        // Uppercase arrives with shift; the card label is uppercase, so both
+        // spellings of the same shortcut have to work.
+        assert!(
+            app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('T'), KeyModifiers::SHIFT))
+        );
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Terminal));
+
+        app.state.dock_open_surfaces.clear();
+        app.state.dock_tab = None;
+        app.state.dock_chooser_focused = true;
+        assert!(app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty())));
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+
+        // No pull request on the focused pane: the card is inert, and the key
+        // travels on to whatever would have had it.
+        app.state.dock_open_surfaces.clear();
+        app.state.dock_tab = None;
+        app.state.dock_chooser_focused = true;
+        assert!(app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('p'), KeyModifiers::empty())));
+        assert_eq!(app.state.dock_tab, None);
+
+        // An unrelated key is not swallowed by the chooser.
+        assert!(!app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty())));
+    }
+
+    #[test]
+    fn the_surface_menu_takes_the_keyboard_while_it_is_open() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
+
+        assert!(
+            app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Down, KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.state.dock_surface_menu.map(|menu| menu.selected),
+            Some(1)
+        );
+        assert!(
+            app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+        );
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(app.state.dock_surface_menu.is_none());
     }
 
     fn dock_home_test_app(pr_numbers: &[u64]) -> App {

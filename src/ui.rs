@@ -1270,6 +1270,89 @@ mod tests {
     }
 
     #[test]
+    fn the_dock_strip_ends_with_a_plus_and_a_maximise_glyph() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let tabs = app.view.dock_tab_hit_areas.clone();
+        assert_eq!(tabs.len(), app.dock_open_surfaces.len());
+        assert!(app.view.dock_plus_rect.x >= tabs.last().expect("a tab").right());
+        assert!(app.view.dock_maximize_rect.x >= app.view.dock_plus_rect.right());
+        assert!(app.view.dock_maximize_rect.right() <= app.view.dock_rect.right());
+        // The close glyph sits inside the active tab, after its label.
+        let active = tabs.first().copied().expect("home is active");
+        assert_eq!(app.view.dock_tab_close_rect.y, active.y);
+        assert!(app.view.dock_tab_close_rect.x > active.x);
+        assert!(app.view.dock_tab_close_rect.right() <= active.right());
+    }
+
+    #[test]
+    fn an_empty_dock_lays_out_the_card_grid_instead_of_tabs() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces.clear();
+        app.dock_tab = None;
+        app.dock_chooser_focused = true;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 120, 40);
+
+        compute_view(&mut app, area);
+        assert!(app.view.dock_tab_hit_areas.is_empty());
+        assert_eq!(
+            app.view.dock_surface_card_hit_areas.len(),
+            crate::app::DockSurface::CARDS.len()
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Open a surface"));
+        for surface in crate::app::DockSurface::CARDS {
+            assert!(screen.contains(surface.title()), "missing {surface:?}");
+        }
+    }
+
+    #[test]
+    fn a_maximised_dock_takes_the_main_area_and_a_restore_gives_it_back() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 120, 40);
+
+        compute_view(&mut app, area);
+        let normal = app.view.dock_rect.width;
+
+        app.dock_maximized = true;
+        compute_view(&mut app, area);
+        let maximised = app.view.dock_rect.width;
+        assert!(maximised > normal);
+        assert_eq!(
+            app.view.dock_rect.right(),
+            area.right(),
+            "the dock still ends at the screen edge"
+        );
+
+        app.dock_maximized = false;
+        compute_view(&mut app, area);
+        assert_eq!(app.view.dock_rect.width, normal);
+    }
+
+    #[test]
     fn an_open_dock_exposes_every_named_tab_and_a_body_area() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;

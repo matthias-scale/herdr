@@ -61,7 +61,7 @@ pub(crate) fn card_hit_areas(area: Rect) -> Vec<Rect> {
         return Vec::new();
     }
     let columns: u16 = if area.width >= 24 { 2 } else { 1 };
-    let card_rows = usize::from(DockSurface::CARDS.len()).div_ceil(usize::from(columns));
+    let card_rows = DockSurface::CARDS.len().div_ceil(usize::from(columns));
     let available = area.height.saturating_sub(HEADER_ROWS);
     let card_height = if usize::from(available) >= card_rows * 4 {
         4
@@ -124,13 +124,7 @@ pub(crate) fn render_chooser(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn render_card(
-    app: &AppState,
-    frame: &mut Frame,
-    card: Rect,
-    surface: DockSurface,
-    enabled: bool,
-) {
+fn render_card(app: &AppState, frame: &mut Frame, card: Rect, surface: DockSurface, enabled: bool) {
     if card.width < 4 || card.height < 3 {
         return;
     }
@@ -157,10 +151,7 @@ fn render_card(
     let gap = inner.saturating_sub(title.chars().count() + 1);
 
     let mut lines = vec![
-        Line::from(Span::styled(
-            format!("┌{}┐", "─".repeat(inner)),
-            border,
-        )),
+        Line::from(Span::styled(format!("┌{}┐", "─".repeat(inner)), border)),
         Line::from(vec![
             Span::styled("│", border),
             Span::styled(format!("{title}{}", " ".repeat(gap)), label),
@@ -174,7 +165,10 @@ fn render_card(
         lines.push(Line::from(vec![
             Span::styled("│", border),
             Span::styled(
-                format!("{padded}{}", " ".repeat(inner.saturating_sub(padded.chars().count()))),
+                format!(
+                    "{padded}{}",
+                    " ".repeat(inner.saturating_sub(padded.chars().count()))
+                ),
                 hint,
             ),
             Span::styled("│", border),
@@ -265,6 +259,130 @@ pub(crate) fn render_menu(app: &AppState, frame: &mut Frame) {
             Paragraph::new(Line::from(Span::styled(text, style)))
                 .style(Style::default().bg(app.palette.surface_dim)),
             area,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::DockSurfaceMenu;
+
+    fn context(prs: &[&str], tickets: &[&str]) -> PaneWorkContext {
+        PaneWorkContext {
+            pr_urls: prs.iter().map(|url| (*url).to_string()).collect(),
+            ticket_ids: tickets.iter().map(|id| (*id).to_string()).collect(),
+            ..PaneWorkContext::default()
+        }
+    }
+
+    #[test]
+    fn availability_matrix_follows_the_focused_pane() {
+        let empty = context(&[], &[]);
+        let linked = context(&["https://github.com/o/r/pull/1"], &["MAT-1"]);
+
+        for (surface, in_repo, ctx, expected) in [
+            (DockSurface::Diff, true, &empty, true),
+            (DockSurface::Diff, false, &empty, false),
+            (DockSurface::Diff, false, &linked, false),
+            (DockSurface::Pr, true, &empty, false),
+            (DockSurface::Pr, false, &linked, true),
+            (DockSurface::Linear, true, &empty, false),
+            (DockSurface::Linear, false, &linked, true),
+            (DockSurface::Terminal, false, &empty, true),
+            (DockSurface::Files, false, &empty, true),
+            (DockSurface::Agents, false, &empty, true),
+            (DockSurface::Home, false, &empty, true),
+            (DockSurface::Editor, false, &empty, true),
+            (DockSurface::Shortcuts, false, &empty, true),
+            (DockSurface::Context, false, &empty, true),
+            (DockSurface::Scratchpad, false, &empty, true),
+        ] {
+            assert_eq!(
+                surface_available(surface, ctx, in_repo),
+                expected,
+                "{surface:?} in_git_repo={in_repo}"
+            );
+        }
+    }
+
+    #[test]
+    fn card_hit_areas_tile_two_columns_without_overlapping() {
+        let area = Rect::new(4, 2, 30, 20);
+        let cards = card_hit_areas(area);
+
+        assert_eq!(cards.len(), DockSurface::CARDS.len());
+        assert_eq!(cards[0].y, area.y + HEADER_ROWS);
+        assert_eq!(cards[0].height, 4);
+        assert_eq!(cards[1].y, cards[0].y);
+        assert!(cards[1].x >= cards[0].right());
+        assert_eq!(cards[2].y, cards[0].y + 4);
+        for card in &cards {
+            assert!(card.x >= area.x);
+            assert!(card.right() <= area.right());
+            assert!(card.bottom() <= area.bottom());
+        }
+    }
+
+    #[test]
+    fn a_short_dock_drops_the_cards_that_do_not_fit() {
+        let cards = card_hit_areas(Rect::new(0, 0, 30, 10));
+        assert_eq!(cards.len(), 4);
+        assert!(cards.iter().all(|card| card.bottom() <= 10));
+        assert!(card_hit_areas(Rect::new(0, 0, 30, 5)).is_empty());
+    }
+
+    #[test]
+    fn a_narrow_dock_falls_back_to_one_column() {
+        let cards = card_hit_areas(Rect::new(0, 0, 20, 30));
+        assert_eq!(cards.len(), DockSurface::CARDS.len());
+        assert!(cards.iter().all(|card| card.x == cards[0].x));
+    }
+
+    #[test]
+    fn the_surface_menu_opens_below_the_plus_and_never_above_it() {
+        let mut app = AppState::test_new();
+        let dock = Rect::new(80, 1, 32, 24);
+        app.view.dock_plus_rect = Rect::new(94, 1, 2, 1);
+        assert_eq!(menu_layout(&app, dock), None, "closed menu has no geometry");
+
+        app.dock_surface_menu = Some(DockSurfaceMenu { selected: 0 });
+        let layout = menu_layout(&app, dock).expect("the menu fits below the plus");
+        assert_eq!(layout.rect.y, app.view.dock_plus_rect.bottom());
+        assert!(layout.rect.y > app.view.dock_plus_rect.y);
+        assert_eq!(layout.visible_rows, DockSurface::ALL.len());
+        assert!(layout.rect.right() <= dock.right());
+
+        // Anchored on the last row there is no space below, and the menu
+        // renders nothing rather than flipping upwards.
+        app.view.dock_plus_rect = Rect::new(94, dock.bottom() - 1, 2, 1);
+        assert_eq!(menu_layout(&app, dock), None);
+    }
+
+    #[test]
+    fn the_menu_hit_test_maps_rows_to_surfaces() {
+        let mut app = AppState::test_new();
+        let dock = Rect::new(80, 1, 32, 24);
+        app.view.dock_plus_rect = Rect::new(94, 1, 2, 1);
+        app.dock_surface_menu = Some(DockSurfaceMenu { selected: 0 });
+        let layout = menu_layout(&app, dock).expect("menu geometry");
+        app.view.dock_surface_menu_layout = Some(layout);
+
+        assert_eq!(
+            app.dock_surface_menu_at(layout.list_rect.x, layout.list_rect.y),
+            Some(DockSurface::Terminal)
+        );
+        assert_eq!(
+            app.dock_surface_menu_at(layout.list_rect.x, layout.list_rect.y + 2),
+            Some(DockSurface::Diff)
+        );
+        assert_eq!(
+            app.dock_surface_menu_at(layout.list_rect.x, layout.list_rect.y - 1),
+            None
+        );
+        assert_eq!(
+            app.dock_surface_menu_at(layout.list_rect.right(), layout.list_rect.y),
+            None
         );
     }
 }

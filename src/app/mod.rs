@@ -2158,6 +2158,13 @@ impl App {
                                 );
                                 continue;
                             }
+                            if self.handle_dock_chooser_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             let initial_context = self.terminal_input_context();
                             let target = if initial_context.is_some() {
                                 self.handle_terminal_key_headless_from(source_id, key.clone())
