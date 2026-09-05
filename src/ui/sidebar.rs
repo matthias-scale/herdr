@@ -9730,9 +9730,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
         app.mode = Mode::Terminal;
-        // Skip Blocked, Prio, Spaces, and the collapsed repo-key row to land
-        // on "notes".
-        app.workspace_scroll = 4;
+        // Land on "notes" without coupling the fixture to the set of section
+        // headers that precede the Spaces tree.
+        app.workspace_scroll = sidebar_rows(&app)
+            .iter()
+            .position(|row| matches!(row, SidebarRow::Workspace { ws_idx: 2, .. }))
+            .expect("notes workspace row");
 
         let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 3));
 

@@ -1065,6 +1065,14 @@ mod tests {
             session_processes(self_pid).contains(&child_pid),
             "uncached scan must see the freshly spawned child"
         );
+        // Spawning and scanning /proc can exceed the production TTL on a busy
+        // test host. Reset only the captured timestamp so this assertion
+        // measures cache reuse instead of scheduler latency.
+        let mut snapshot = session_snapshot_cell()
+            .lock()
+            .expect("session snapshot lock");
+        snapshot.as_mut().expect("primed session snapshot").0 = Instant::now();
+        drop(snapshot);
         // ...while the snapshot taken microseconds ago does not.
         assert!(
             !session_processes_cached(self_pid).contains(&child_pid),
