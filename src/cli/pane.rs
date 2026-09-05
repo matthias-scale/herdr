@@ -155,6 +155,16 @@ fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSe
                     .push(value.clone());
                 index += 2;
             }
+            "--missive-url" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --missive-url".into());
+                };
+                patch
+                    .missive_urls
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
+                index += 2;
+            }
             "--branch" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --branch".into());
@@ -225,6 +235,9 @@ fn parse_work_context_field(
             Ok(crate::work_context::PaneWorkContextField::TicketIds)
         }
         "pr_urls" | "pr-urls" | "prs" => Ok(crate::work_context::PaneWorkContextField::PrUrls),
+        "missive_urls" | "missive-urls" | "missive" => {
+            Ok(crate::work_context::PaneWorkContextField::MissiveUrls)
+        }
         "branch" => Ok(crate::work_context::PaneWorkContextField::Branch),
         "repo" | "repository" => Ok(crate::work_context::PaneWorkContextField::Repo),
         "work_title" | "work-title" | "title" => {
@@ -239,7 +252,7 @@ fn parse_work_context_field(
 }
 
 fn work_context_set_usage() -> String {
-    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...".into()
+    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--missive-url URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...".into()
 }
 
 fn pane_current(args: &[String]) -> std::io::Result<i32> {
@@ -1771,6 +1784,10 @@ mod tests {
             "SCA-2",
             "--pr",
             "https://github.com/o/r/pull/9",
+            "--missive-url",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-1",
+            "--missive-url",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-2",
             "--title",
             "Manual title",
             "--role",
@@ -1786,6 +1803,13 @@ mod tests {
         assert_eq!(
             params.patch.pr_urls.unwrap(),
             vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(
+            params.patch.missive_urls.unwrap(),
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/sample-1",
+                "https://mail.missiveapp.com/#inbox/conversations/sample-2",
+            ]
         );
         assert_eq!(params.patch.work_title.as_deref(), Some("Manual title"));
         assert_eq!(

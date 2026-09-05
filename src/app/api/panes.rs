@@ -2300,6 +2300,9 @@ mod tests {
                     repo: None,
                     ticket_ids: Some(vec!["mat-7".into(), "SCA-2".into()]),
                     pr_urls: Some(vec!["https://github.com/o/r/pull/09".into()]),
+                    missive_urls: Some(vec![
+                        "https://MAIL.missiveapp.com/#inbox/conversations/sample-1".into(),
+                    ]),
                     branch: Some("feat/context".into()),
                     work_title: Some("Context model".into()),
                     role: Some(crate::work_context::PaneWorkRole::Ship),
@@ -2316,6 +2319,10 @@ mod tests {
         assert_eq!(
             pane.work_context.pr_urls,
             vec!["https://github.com/o/r/pull/9"]
+        );
+        assert_eq!(
+            pane.work_context.missive_urls,
+            vec!["https://mail.missiveapp.com/#inbox/conversations/sample-1"]
         );
         assert_eq!(pane.work_context.branch.as_deref(), Some("feat/context"));
         assert_eq!(
@@ -2356,6 +2363,9 @@ mod tests {
                     repo: None,
                     ticket_ids: Some(vec!["MAT-7".into(), "SCA-2".into()]),
                     pr_urls: Some(vec!["https://github.com/o/r/pull/9".into()]),
+                    missive_urls: Some(vec![
+                        "https://mail.missiveapp.com/#inbox/conversations/sample-1".into(),
+                    ]),
                     branch: Some("feat/context".into()),
                     work_title: Some("Context model".into()),
                     role: Some(crate::work_context::PaneWorkRole::Ship),

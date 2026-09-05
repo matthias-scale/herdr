@@ -3887,6 +3887,7 @@
           "enum": [
             "ticket_ids",
             "pr_urls",
+            "missive_urls",
             "branch",
             "repo",
             "work_title",
@@ -3914,6 +3915,15 @@
                 "$ref": "#/schemas/request/$defs/PaneWorkContextField"
               },
               "type": "array"
+            },
+            "missive_urls": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "pane_id": {
               "type": "string"

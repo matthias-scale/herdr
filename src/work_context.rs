@@ -295,6 +295,7 @@ pub struct PaneWorkContextTiers {
 pub enum PaneWorkContextField {
     TicketIds,
     PrUrls,
+    MissiveUrls,
     Branch,
     Repo,
     WorkTitle,
@@ -308,6 +309,8 @@ pub struct PaneWorkContextPatch {
     pub ticket_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_urls: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missive_urls: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -326,6 +329,7 @@ impl PaneWorkContextPatch {
     pub fn is_empty(&self) -> bool {
         self.ticket_ids.is_none()
             && self.pr_urls.is_none()
+            && self.missive_urls.is_none()
             && self.branch.is_none()
             && self.repo.is_none()
             && self.work_title.is_none()
@@ -339,6 +343,10 @@ impl PaneWorkContextPatch {
         for (field, supplied) in [
             (PaneWorkContextField::TicketIds, self.ticket_ids.is_some()),
             (PaneWorkContextField::PrUrls, self.pr_urls.is_some()),
+            (
+                PaneWorkContextField::MissiveUrls,
+                self.missive_urls.is_some(),
+            ),
             (PaneWorkContextField::Branch, self.branch.is_some()),
             (PaneWorkContextField::Repo, self.repo.is_some()),
             (PaneWorkContextField::WorkTitle, self.work_title.is_some()),
@@ -364,6 +372,7 @@ impl PaneWorkContextField {
         match self {
             Self::TicketIds => "ticket_ids",
             Self::PrUrls => "pr_urls",
+            Self::MissiveUrls => "missive_urls",
             Self::Branch => "branch",
             Self::Repo => "repo",
             Self::WorkTitle => "work_title",
@@ -407,7 +416,6 @@ impl PaneWorkContextState {
         };
         let mut manual = tiers.manual.normalized()?;
         manual.preview_urls.clear();
-        manual.missive_urls.clear();
         let hook_turn = tiers.hook_turn.normalized()?;
         let git_observation = tiers.git_observation.normalized()?;
         let restored_fallback = tiers.restored_fallback.normalized()?;
@@ -459,6 +467,9 @@ impl PaneWorkContextState {
         if let Some(pr_urls) = patch.pr_urls {
             candidate.pr_urls = pr_urls;
         }
+        if let Some(missive_urls) = patch.missive_urls {
+            candidate.missive_urls = missive_urls;
+        }
         if let Some(branch) = patch.branch {
             candidate.branch = Some(branch);
         }
@@ -472,6 +483,7 @@ impl PaneWorkContextState {
             match field {
                 PaneWorkContextField::TicketIds => candidate.ticket_ids.clear(),
                 PaneWorkContextField::PrUrls => candidate.pr_urls.clear(),
+                PaneWorkContextField::MissiveUrls => candidate.missive_urls.clear(),
                 PaneWorkContextField::Branch => candidate.branch = None,
                 PaneWorkContextField::Repo => candidate.repo = None,
                 PaneWorkContextField::WorkTitle => candidate.work_title = None,
@@ -1511,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn missive_urls_merge_across_tiers_and_never_persist_as_manual() {
+    fn missive_urls_merge_across_tiers_and_manual_values_survive_restore() {
         let mut state = PaneWorkContextState::default();
         state
             .replace_hook_turn(PaneWorkContext {
@@ -1548,7 +1560,35 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(restored.effective().missive_urls.is_empty());
+        assert_eq!(
+            restored.effective().missive_urls,
+            vec!["https://mail.missiveapp.com/#inbox/conversations/manual"]
+        );
+    }
+
+    #[test]
+    fn manual_missive_patch_normalizes_and_clears() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                missive_urls: Some(vec![
+                    "https://MAIL.missiveapp.com/#inbox/conversations/sample-1".into(),
+                ]),
+                ..Default::default()
+            })
+            .expect("valid Missive URL");
+        assert_eq!(
+            state.effective().missive_urls,
+            vec!["https://mail.missiveapp.com/#inbox/conversations/sample-1"]
+        );
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::MissiveUrls],
+                ..Default::default()
+            })
+            .expect("clear Missive URLs");
+        assert!(state.effective().missive_urls.is_empty());
     }
 
     #[test]
