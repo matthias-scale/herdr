@@ -147,6 +147,12 @@ impl AppState {
                             self.jump_to_selected_home_agent(&queue);
                         }
                         HomeHitTarget::PickerOption(index) => {
+                            if self.home_browse_active() {
+                                // A row under the path input is a child to
+                                // descend into, not a directory to dispatch in.
+                                self.home_browse_select(index);
+                                return None;
+                            }
                             if let Some(home) = self.home.as_mut() {
                                 if home.picker == Some(crate::app::home::HomePicker::Directory) {
                                     home.directory_filter.selected = index;
