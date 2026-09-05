@@ -200,6 +200,32 @@ impl App {
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
 
+    pub(super) fn handle_pane_settlement(
+        &mut self,
+        id: String,
+        target: PaneTarget,
+        settle: bool,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        if settle {
+            self.state.settle_pane_at(
+                ws_idx,
+                pane_id,
+                crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+            );
+        } else {
+            self.state
+                .note_pane_activity_at(pane_id, std::time::Instant::now());
+        }
+        self.flush_pane_settlement_events();
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
     pub(super) fn handle_pane_focus(&mut self, id: String, target: PaneTarget) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return pane_not_found(id, &target.pane_id);
@@ -2277,6 +2303,67 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    #[test]
+    fn pane_settle_api_round_trip_updates_json_and_emits_transition_events() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let settle_response = app.handle_api_request(crate::api::schema::Request {
+            id: "settle".into(),
+            method: crate::api::schema::Method::PaneSettle(PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        });
+        let settle: SuccessResponse = serde_json::from_str(&settle_response).expect("settle JSON");
+        let ResponseResult::PaneInfo { pane: settled } = settle.result else {
+            panic!("expected pane info");
+        };
+        let settled_at = settled.settled_at.expect("settled_at");
+        let settle_events = app.event_hub.events_after(0);
+        assert!(settle_events.iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                EventData::PaneSettled {
+                    pane_id: event_pane_id,
+                    settled_at: event_settled_at,
+                    ..
+                } if event.event == EventKind::PaneSettled
+                    && event_pane_id == &pane_id
+                    && *event_settled_at == settled_at
+            )
+        }));
+        let settle_seq = settle_events.last().map_or(0, |(seq, _)| *seq);
+
+        let unsettle_response = app.handle_api_request(crate::api::schema::Request {
+            id: "unsettle".into(),
+            method: crate::api::schema::Method::PaneUnsettle(PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        });
+        let unsettle: SuccessResponse =
+            serde_json::from_str(&unsettle_response).expect("unsettle JSON");
+        let ResponseResult::PaneInfo { pane: unsettled } = unsettle.result else {
+            panic!("expected pane info");
+        };
+        assert_eq!(
+            serde_json::to_value(unsettled).expect("pane JSON")["settled_at"],
+            serde_json::Value::Null
+        );
+        assert!(app
+            .event_hub
+            .events_after(settle_seq)
+            .iter()
+            .any(|(_, event)| {
+                matches!(
+                    &event.data,
+                    EventData::PaneUnsettled {
+                        pane_id: event_pane_id,
+                        ..
+                    } if event.event == EventKind::PaneUnsettled
+                        && event_pane_id == &pane_id
+                )
+            }));
+        assert_eq!(pane_updated_events(&app), 2);
     }
 
     #[test]

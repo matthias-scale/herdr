@@ -407,6 +407,8 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneList(_) => "pane.list",
         Method::PaneCurrent(_) => "pane.current",
         Method::PaneGet(_) => "pane.get",
+        Method::PaneSettle(_) => "pane.settle",
+        Method::PaneUnsettle(_) => "pane.unsettle",
         Method::PaneFocus(_) => "pane.focus",
         Method::PaneRename(_) => "pane.rename",
         Method::PaneWorkContextSet(_) => "pane.work_context.set",
