@@ -1292,6 +1292,8 @@ pub struct ViewState {
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
     pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
+    /// Sidebar-footer entry for the full-screen pull-request view.
+    pub(crate) sidebar_footer_work_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -3350,6 +3352,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_work_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),

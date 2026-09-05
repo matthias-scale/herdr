@@ -631,7 +631,25 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
 }
 
 fn expanded_sidebar_content(area: Rect) -> Rect {
-    Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+    Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1),
+        area.height.saturating_sub(1),
+    )
+}
+
+pub(crate) fn sidebar_footer_work_hit_area(area: Rect) -> Rect {
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 3 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(1),
+        area.bottom().saturating_sub(1),
+        3,
+        1,
+    )
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -2850,6 +2868,15 @@ pub(super) fn render_sidebar(
     let ws_area = workspace_list_rect_for_app(app, area);
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_sidebar_header(app, frame, area, p);
+    let work = sidebar_footer_work_hit_area(area);
+    if work.width > 0 {
+        let style = if app.work_view.is_some() {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(" ⑂ ", style)), work);
+    }
 }
 
 fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Palette) {
@@ -9707,7 +9734,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // on "notes".
         app.workspace_scroll = 4;
 
-        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 2));
+        let (cards, headers) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 3));
 
         assert!(headers.is_empty());
         assert_eq!(cards.len(), 1);

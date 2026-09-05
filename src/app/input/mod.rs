@@ -1704,6 +1704,16 @@ impl App {
         if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
+            let work = self.state.view.sidebar_footer_work_hit_area;
+            if mouse.column >= work.x
+                && mouse.column < work.x.saturating_add(work.width)
+                && mouse.row >= work.y
+                && mouse.row < work.y.saturating_add(work.height)
+            {
+                self.toggle_work_view();
+                return;
+            }
+
             if let Some(copy_value) = self
                 .state
                 .view

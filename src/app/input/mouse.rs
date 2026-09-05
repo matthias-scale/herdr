@@ -4991,6 +4991,31 @@ mod tests {
         assert_eq!(app.state.workspaces.len(), 1);
     }
 
+    #[test]
+    fn sidebar_footer_work_entry_opens_pull_requests_at_supported_widths() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let hit = app.state.view.sidebar_footer_work_hit_area;
+            assert_eq!(hit.height, 1, "footer must render at {width} columns");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+
+            assert!(
+                app.state.work_view.is_some(),
+                "footer click at {width} columns"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn desktop_new_workspace_creates_immediately_by_default() {
         let mut app = app_for_mouse_test();

@@ -794,6 +794,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_work_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),

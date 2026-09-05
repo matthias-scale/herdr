@@ -472,6 +472,11 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
+    let sidebar_footer_work_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_work_hit_area(sidebar_area)
+    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let DockGeometry {
@@ -566,6 +571,7 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
+        sidebar_footer_work_hit_area,
         workspace_card_areas,
         agent_card_areas,
         visible_agent_activity_instants,
@@ -813,6 +819,7 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
+        sidebar_footer_work_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
