@@ -1194,7 +1194,14 @@ impl HeadlessServer {
                 }
             }
         }
-        if pane_by_terminal.len() > crate::server::handoff::MAX_FDS_PER_HANDOFF {
+        // Dock editors are keyed by the agent pane they follow and never appear
+        // in a tab, so the workspace walk above cannot see them. Left out, their
+        // runtimes are dropped instead of preserved and the editor child dies of
+        // a hangup the moment this server exits.
+        let editor_terminals = self.app.dock_editor_handoff_terminals();
+        if pane_by_terminal.len() + editor_terminals.len()
+            > crate::server::handoff::MAX_FDS_PER_HANDOFF
+        {
             let _ = std::fs::remove_file(&socket_path);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1210,7 +1217,11 @@ impl HeadlessServer {
         let _ = reject_pending_client_connections(&self.client_listener);
 
         let mut paused_terminal_ids = Vec::new();
-        for terminal_id in pane_by_terminal.keys() {
+        for terminal_id in pane_by_terminal.keys().chain(
+            editor_terminals
+                .iter()
+                .map(|(terminal_id, _, _)| terminal_id),
+        ) {
             if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
                 if let Err(err) = runtime.pause_handoff_reader(Duration::from_secs(2)) {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
@@ -1261,6 +1272,21 @@ impl HeadlessServer {
             handoff_entries.push((terminal_id.clone(), handoff_runtime));
         }
 
+        let mut dock_editors = Vec::new();
+        for (terminal_id, agent_pane_id, editor_pane_id) in &editor_terminals {
+            let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) else {
+                continue;
+            };
+            handoff_entries.push((
+                terminal_id.clone(),
+                runtime.handoff_runtime_state(editor_pane_id.raw()),
+            ));
+            dock_editors.push(crate::server::handoff::DockEditorHandoff {
+                agent_pane_id: agent_pane_id.raw(),
+                editor_pane_id: editor_pane_id.raw(),
+            });
+        }
+
         let panes = handoff_entries
             .iter()
             .map(|(_, runtime)| runtime.clone())
@@ -1268,6 +1294,7 @@ impl HeadlessServer {
         let manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
+            dock_editors,
             params.expected_protocol,
             params.expected_version,
         );
@@ -1370,8 +1397,12 @@ impl HeadlessServer {
             return Err(err);
         }
 
+        let transferred: std::collections::HashSet<_> = handoff_entries
+            .iter()
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect();
         for (terminal_id, runtime) in self.app.terminal_runtimes.drain_for_handoff() {
-            if !pane_by_terminal.contains_key(&terminal_id) {
+            if !transferred.contains(&terminal_id) {
                 continue;
             }
             debug!(terminal = %terminal_id, "preserving pane runtime for handoff");
@@ -5284,8 +5315,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
 
+    let dock_editors = std::mem::take(&mut received.manifest.dock_editors);
     let mut imports = HashMap::new();
-    for (pane, fd) in received.manifest.panes.into_iter().zip(received.fds) {
+    for (pane, fd) in received.manifest.panes.drain(..).zip(received.fds) {
         let pane_id = pane.pane_id;
         imports.insert(
             pane_id,
@@ -5309,6 +5341,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             event_hub.clone(),
             &received.manifest.snapshot,
             &mut imports,
+            &dock_editors,
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
