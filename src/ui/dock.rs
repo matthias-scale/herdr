@@ -31,7 +31,9 @@ pub(crate) const PLUS_GLYPH: &str = "+";
 /// active tab — the close glyph with its own space.
 pub(crate) fn tab_width(surface: DockSurface, active: bool) -> u16 {
     let label = u16::try_from(surface.label().chars().count()).unwrap_or(u16::MAX);
-    label.saturating_add(1).saturating_add(if active { 2 } else { 0 })
+    label
+        .saturating_add(1)
+        .saturating_add(if active { 2 } else { 0 })
 }
 
 /// Column of the close glyph inside an active tab's rect.
@@ -195,7 +197,9 @@ mod tests {
                 DockSurface::Shortcuts => {
                     super::super::dock_shortcuts::render_shortcuts(app, frame, area)
                 }
-                DockSurface::Context => super::super::dock_context::render_context(app, frame, area),
+                DockSurface::Context => {
+                    super::super::dock_context::render_context(app, frame, area)
+                }
                 DockSurface::Scratchpad => {
                     super::super::dock_scratchpad::render_scratchpad(app, frame, area)
                 }

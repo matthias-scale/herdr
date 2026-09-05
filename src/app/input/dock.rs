@@ -172,4 +172,126 @@ mod tests {
         );
         assert_eq!(app.dock_home_detail_tab_at(81, 5), None);
     }
+
+    #[test]
+    fn opening_a_surface_appends_a_tab_and_activates_it() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+
+        app.open_dock_surface(DockSurface::Files);
+
+        assert_eq!(app.dock_tab, Some(DockSurface::Files));
+        assert_eq!(
+            app.dock_open_surfaces.last().copied(),
+            Some(DockSurface::Files)
+        );
+
+        // Reopening an already-open surface must not move it in the strip.
+        let before = app.dock_open_surfaces.clone();
+        app.open_dock_surface(DockSurface::Home);
+        assert_eq!(app.dock_open_surfaces, before);
+        assert_eq!(app.dock_tab, Some(DockSurface::Home));
+    }
+
+    #[test]
+    fn closing_the_active_surface_moves_to_its_neighbour() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![
+            DockSurface::Home,
+            DockSurface::Editor,
+            DockSurface::Scratchpad,
+        ];
+        app.dock_tab = Some(DockSurface::Editor);
+
+        app.close_dock_surface(DockSurface::Editor);
+        assert_eq!(
+            app.dock_open_surfaces,
+            vec![DockSurface::Home, DockSurface::Scratchpad]
+        );
+        assert_eq!(app.dock_tab, Some(DockSurface::Scratchpad));
+
+        // Closing the last tab falls back to the one before it.
+        app.close_dock_surface(DockSurface::Scratchpad);
+        assert_eq!(app.dock_tab, Some(DockSurface::Home));
+    }
+
+    #[test]
+    fn closing_every_surface_leaves_the_chooser() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        for surface in DockSurface::DEFAULT_OPEN {
+            app.close_dock_surface(surface);
+        }
+
+        assert!(app.dock_open_surfaces.is_empty());
+        assert_eq!(app.dock_tab, None);
+        assert!(app.dock_chooser_focused);
+        assert!(!app.dock_home_focused);
+        assert!(!app.dock_editor_focused);
+    }
+
+    #[test]
+    fn an_unavailable_surface_refuses_to_open() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces.clear();
+        app.dock_tab = None;
+
+        // No focused pane: no pull request and no ticket.
+        assert!(!app.activate_dock_surface(DockSurface::Pr));
+        assert!(!app.activate_dock_surface(DockSurface::Linear));
+        assert!(app.dock_open_surfaces.is_empty());
+        assert_eq!(app.dock_tab, None);
+
+        assert!(app.activate_dock_surface(DockSurface::Terminal));
+        assert_eq!(app.dock_tab, Some(DockSurface::Terminal));
+    }
+
+    #[test]
+    fn the_maximise_toggle_is_reversible() {
+        let mut app = AppState::test_new();
+        assert!(!app.dock_maximized);
+        app.toggle_dock_maximized();
+        assert!(app.dock_maximized);
+        app.toggle_dock_maximized();
+        assert!(!app.dock_maximized);
+    }
+
+    #[test]
+    fn the_plus_menu_toggles_and_the_tab_hit_areas_track_open_surfaces() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![DockSurface::Files, DockSurface::Diff];
+        app.dock_tab = Some(DockSurface::Files);
+        app.view.dock_tab_hit_areas = vec![Rect::new(80, 1, 8, 1), Rect::new(88, 1, 5, 1)];
+        app.view.dock_plus_rect = Rect::new(93, 1, 2, 1);
+
+        assert_eq!(app.dock_tab_at(81, 1), Some(DockSurface::Files));
+        assert_eq!(app.dock_tab_at(89, 1), Some(DockSurface::Diff));
+        assert_eq!(app.dock_tab_at(94, 1), None);
+        assert!(app.on_dock_plus(93, 1));
+
+        app.toggle_dock_surface_menu();
+        assert!(app.dock_surface_menu.is_some());
+        app.toggle_dock_surface_menu();
+        assert!(app.dock_surface_menu.is_none());
+    }
+
+    #[test]
+    fn card_hits_only_land_while_the_dock_is_a_chooser() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces.clear();
+        app.dock_tab = None;
+        app.view.dock_surface_card_hit_areas =
+            vec![Rect::new(80, 4, 12, 4), Rect::new(93, 4, 12, 4)];
+
+        assert_eq!(app.dock_surface_card_at(81, 5), Some(DockSurface::Terminal));
+        assert_eq!(app.dock_surface_card_at(94, 5), Some(DockSurface::Files));
+        assert_eq!(app.dock_surface_card_at(81, 9), None);
+
+        app.dock_tab = Some(DockSurface::Home);
+        assert_eq!(app.dock_surface_card_at(81, 5), None);
+    }
 }
