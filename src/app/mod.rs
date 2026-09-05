@@ -740,6 +740,7 @@ impl App {
             request_new_tab: false,
             request_pane_toggle: None,
             request_git_action: None,
+            request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -1422,6 +1423,9 @@ impl App {
             }
 
             if self.apply_git_action_request() {
+                needs_render = true;
+            }
+            if self.apply_pr_land_request() {
                 needs_render = true;
             }
 

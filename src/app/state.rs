@@ -1348,6 +1348,7 @@ pub struct ViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
     Home,
+    Work,
     BlockedFilter,
     Dock,
     /// Expand or collapse the usage detail in the status row.
@@ -2123,6 +2124,7 @@ pub struct AppState {
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
     /// Git action chosen from the tab-row menu, drained by the runtime loop.
     pub(crate) request_git_action: Option<GitAction>,
+    pub(crate) request_pr_land: Option<PrLandConfirmation>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
     pub request_pin_toggle: Option<(usize, usize)>,
@@ -2554,6 +2556,46 @@ pub(crate) struct WorkViewState {
     /// `None` means the enabled index has not been collected yet.
     pub(crate) snapshot: Option<crate::work_index::Snapshot>,
     pub(crate) hint: Option<String>,
+    pub(crate) search: String,
+    pub(crate) search_focused: bool,
+    pub(crate) sort: crate::ui::work_list_detail::PrSort,
+    pub(crate) open_only: bool,
+    pub(crate) detail_tab: PrDetailTab,
+    pub(crate) checkout_menu: Option<PrCheckoutChoice>,
+    pub(crate) pending_land: Option<PrLandConfirmation>,
+    pub(crate) refreshing: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PrDetailTab {
+    #[default]
+    Summary,
+    Timeline,
+    Code,
+}
+
+impl PrDetailTab {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Summary => Self::Timeline,
+            Self::Timeline => Self::Code,
+            Self::Code => Self::Summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PrCheckoutChoice {
+    #[default]
+    CurrentCheckout,
+    NewWorktree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrLandConfirmation {
+    pub(crate) repo: String,
+    pub(crate) number: u64,
+    pub(crate) head_sha: String,
 }
 
 impl WorkViewState {
@@ -2565,6 +2607,14 @@ impl WorkViewState {
             enabled,
             snapshot,
             hint: None,
+            search: String::new(),
+            search_focused: false,
+            sort: crate::ui::work_list_detail::PrSort::Updated,
+            open_only: true,
+            detail_tab: PrDetailTab::Summary,
+            checkout_menu: None,
+            pending_land: None,
+            refreshing: false,
         }
     }
 }
@@ -3243,6 +3293,7 @@ impl AppState {
             request_new_tab: false,
             request_pane_toggle: None,
             request_git_action: None,
+            request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
