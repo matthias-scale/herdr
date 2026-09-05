@@ -295,7 +295,7 @@ impl App {
 
 /// `path` is the file the editor should open. Without one the editor starts in the
 /// pane's directory, which is the dock editor's original behaviour.
-fn editor_argv_candidates(path: Option<&std::path::Path>) -> Vec<Vec<String>> {
+pub(crate) fn editor_argv_candidates(path: Option<&std::path::Path>) -> Vec<Vec<String>> {
     let mut candidates = Vec::new();
     if let Ok(editor) = std::env::var("EDITOR") {
         if let Some(argv) = parse_editor_command(&editor) {

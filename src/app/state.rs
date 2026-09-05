@@ -830,6 +830,10 @@ pub(crate) struct DockPresentationState {
     pub(crate) diff_collapsed: std::collections::HashSet<String>,
     pub(crate) diff_request: Option<super::diff::DiffRefreshRequest>,
     pub(crate) diff_active_key: Option<DiffCacheKey>,
+    pub(crate) files_focused: bool,
+    pub(crate) files_selection: Option<std::path::PathBuf>,
+    pub(crate) files_filter: String,
+    pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -862,6 +866,10 @@ impl Default for DockPresentationState {
             diff_collapsed: std::collections::HashSet::new(),
             diff_request: None,
             diff_active_key: None,
+            files_focused: false,
+            files_selection: None,
+            files_filter: String::new(),
+            files_collapsed: std::collections::HashSet::new(),
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -1192,6 +1200,13 @@ pub(crate) struct DiffCacheEntry {
     pub(crate) error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockFileRowHitArea {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) kind: crate::files::FileTreeRowKind,
+    pub(crate) rect: Rect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeHitTarget {
     QueueRow(usize),
@@ -1289,6 +1304,7 @@ pub struct ViewState {
     pub dock_home_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_home_detail_tab_hit_areas: Vec<Rect>,
+    pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -2173,6 +2189,18 @@ pub struct AppState {
     pub(crate) dock_diff_cache: std::collections::HashMap<DiffCacheKey, DiffCacheEntry>,
     pub(crate) dock_diff_resolved_requests:
         std::collections::HashMap<super::diff::DiffRefreshRequest, DiffCacheKey>,
+    pub(crate) dock_files_focused: bool,
+    pub(crate) dock_files_selection: Option<std::path::PathBuf>,
+    pub(crate) dock_files_filter: String,
+    pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    /// Cached client-side file snapshots, keyed by repository root.
+    pub(crate) dock_file_cache:
+        std::collections::HashMap<std::path::PathBuf, crate::files::FileTreeSnapshot>,
+    pub(crate) dock_files_root: Option<std::path::PathBuf>,
+    pub(crate) dock_files_cwd: Option<std::path::PathBuf>,
+    pub(crate) dock_files_roots_by_cwd:
+        std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    pub(crate) files_icons: crate::config::FilesIconConfig,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
@@ -2557,6 +2585,7 @@ impl AppState {
         self.open_dock_surface(DockSurface::Scratchpad);
         self.dock_editor_focused = false;
         self.dock_diff_focused = false;
+        self.dock_files_focused = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
@@ -2678,6 +2707,7 @@ impl AppState {
             self.dock_editor_focused = false;
             self.dock_home_focused = false;
             self.dock_diff_focused = false;
+            self.dock_files_focused = false;
             self.dock_chooser_focused = true;
         }
     }
@@ -2723,6 +2753,10 @@ impl AppState {
         std::mem::swap(&mut self.dock_diff_collapsed, &mut other.diff_collapsed);
         std::mem::swap(&mut self.dock_diff_request, &mut other.diff_request);
         std::mem::swap(&mut self.dock_diff_active_key, &mut other.diff_active_key);
+        std::mem::swap(&mut self.dock_files_focused, &mut other.files_focused);
+        std::mem::swap(&mut self.dock_files_selection, &mut other.files_selection);
+        std::mem::swap(&mut self.dock_files_filter, &mut other.files_filter);
+        std::mem::swap(&mut self.dock_files_collapsed, &mut other.files_collapsed);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -3187,6 +3221,7 @@ impl AppState {
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
+                dock_file_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -3230,6 +3265,15 @@ impl AppState {
             dock_diff_active_key: None,
             dock_diff_cache: std::collections::HashMap::new(),
             dock_diff_resolved_requests: std::collections::HashMap::new(),
+            dock_files_focused: false,
+            dock_files_selection: None,
+            dock_files_filter: String::new(),
+            dock_files_collapsed: std::collections::HashSet::new(),
+            dock_file_cache: std::collections::HashMap::new(),
+            dock_files_root: None,
+            dock_files_cwd: None,
+            dock_files_roots_by_cwd: std::collections::HashMap::new(),
+            files_icons: crate::config::FilesIconConfig::Badges,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,

@@ -11,7 +11,8 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 pub(crate) mod chooser;
 pub(crate) mod diff;
-mod editor;
+pub(crate) mod editor;
+pub(crate) mod files;
 mod home;
 
 pub(crate) use chooser::{
@@ -87,6 +88,7 @@ pub(super) fn render_dock(
         Some(DockSurface::Home) => home::render_home(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Editor) => editor::render_editor_body(app, terminal_runtimes, frame),
         Some(DockSurface::Diff) => diff::render_diff(app, frame, app.view.dock_body_rect),
+        Some(DockSurface::Files) => files::render_files(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Shortcuts) => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)
         }

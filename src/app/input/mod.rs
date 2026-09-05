@@ -163,6 +163,9 @@ impl App {
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
         }
+        if self.handle_dock_files_key(&key) {
+            return None;
+        }
         if self.handle_dock_home_key(&key) {
             return None;
         }
@@ -290,6 +293,19 @@ impl App {
         {
             self.state.dock_maximized = false;
             return true;
+        }
+
+        let dock_surface_focused = self.state.dock_home_focused
+            || self.state.dock_files_focused
+            || self.state.dock_chooser_focused;
+        if dock_surface_focused && self.state.dock_tab.is_some() {
+            if let KeyCode::Char(character) = event.code {
+                if Self::dock_shortcut_modifiers(event.modifiers) {
+                    if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
+                        return self.state.activate_dock_surface(surface);
+                    }
+                }
+            }
         }
 
         if self.state.dock_tab.is_some() || !self.state.dock_chooser_focused {

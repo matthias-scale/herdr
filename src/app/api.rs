@@ -108,7 +108,17 @@ impl App {
                 generation,
                 results,
                 cache_updates,
-            } => self.handle_git_status_refreshed(generation, results, cache_updates),
+                file_fingerprints,
+            } => self.handle_git_status_refreshed(
+                generation,
+                results,
+                cache_updates,
+                file_fingerprints,
+            ),
+            AppEvent::DockFilesRefreshed {
+                generation,
+                snapshot,
+            } => self.handle_dock_files_refreshed(generation, snapshot),
             AppEvent::DiffRefreshed { generation, result } => {
                 self.handle_diff_refreshed(generation, *result)
             }
@@ -146,6 +156,7 @@ impl App {
         generation: u64,
         results: Vec<crate::workspace::WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
+        file_fingerprints: Vec<(std::path::PathBuf, u64)>,
     ) -> bool {
         let Some(refresh) = self.git_refresh_in_flight else {
             return false;
@@ -175,9 +186,20 @@ impl App {
             .state
             .status_bar_enabled
             .then(|| self.focused_status_context_key());
-        let changed = self
+        let mut changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+        for (root, fingerprint) in file_fingerprints {
+            let stale = self
+                .state
+                .dock_file_cache
+                .get(&root)
+                .is_some_and(|snapshot| snapshot.fingerprint != fingerprint);
+            if stale {
+                self.state.dock_file_cache.remove(&root);
+                changed = true;
+            }
+        }
         if let Some(projected_focus) = projected_focus {
             self.status_context_focus = projected_focus;
         }
@@ -273,9 +295,19 @@ impl App {
             generation,
             results,
             cache_updates,
+            file_fingerprints,
         } = ev
         {
-            self.handle_git_status_refreshed(generation, results, cache_updates);
+            self.handle_git_status_refreshed(generation, results, cache_updates, file_fingerprints);
+            return None;
+        }
+
+        if let AppEvent::DockFilesRefreshed {
+            generation,
+            snapshot,
+        } = ev
+        {
+            self.handle_dock_files_refreshed(generation, snapshot);
             return None;
         }
 

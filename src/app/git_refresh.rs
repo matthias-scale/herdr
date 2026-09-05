@@ -38,6 +38,7 @@ struct WorkspaceGitRefreshJob {
 struct WorkspaceGitRefreshOutput {
     results: Vec<WorkspaceGitStatus>,
     cache_updates: Vec<(PathBuf, GitStatusCacheEntry)>,
+    file_fingerprints: Vec<(PathBuf, u64)>,
 }
 
 impl App {
@@ -112,16 +113,31 @@ impl App {
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
         let git_program = self.git_program_for_refresh();
+        let file_roots = self
+            .state
+            .dock_files_root
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         self.git_identity_refresh_requested = false;
         if refresh_repo_discovery {
             self.last_git_repo_discovery_refresh = now;
         }
         std::thread::spawn(move || {
-            let output = refresh_workspace_git_statuses(workspaces, &cache, deadline, &git_program);
+            let mut output =
+                refresh_workspace_git_statuses(workspaces, &cache, deadline, &git_program);
+            output.file_fingerprints = file_roots
+                .into_iter()
+                .filter_map(|root| {
+                    crate::files::git_file_fingerprint(&root, &git_program)
+                        .map(|fingerprint| (root, fingerprint))
+                })
+                .collect();
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
                 generation,
                 results: output.results,
                 cache_updates: output.cache_updates,
+                file_fingerprints: output.file_fingerprints,
             });
         });
     }
@@ -173,6 +189,9 @@ impl App {
         let mut demand = self.sidebar_git_refresh_demand();
         demand.branch |= self.state.status_bar_enabled;
         demand.ahead_behind |= self.state.view.git_menu_button_hit_area.width > 0;
+        demand.branch |= !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Files);
+        demand.branch |= self.dock_files_refresh_demand;
         demand
     }
 
@@ -196,6 +215,9 @@ impl App {
         workspace_demand.branch |= self.git_identity_refresh_requested;
         let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
         workspace_demand.ahead_behind |= git_menu_visible;
+        workspace_demand.branch |= !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Files);
+        workspace_demand.branch |= self.dock_files_refresh_demand;
         let mut items = if workspace_demand.is_empty() {
             Vec::new()
         } else {
@@ -374,6 +396,7 @@ fn refresh_workspace_git_statuses(
     WorkspaceGitRefreshOutput {
         results,
         cache_updates,
+        file_fingerprints: Vec::new(),
     }
 }
 
@@ -960,6 +983,7 @@ mod tests {
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(app.git_refresh_in_flight.is_none());
@@ -971,6 +995,30 @@ mod tests {
             .git_refresh_deadline()
             .expect("refresh should be due once a workspace exists");
         assert!(deadline <= Instant::now());
+    }
+
+    #[test]
+    fn git_refresh_invalidates_changed_file_snapshot_for_its_root() {
+        let mut app = test_app(&crate::config::Config::default());
+        let root = std::env::current_dir().expect("current directory");
+        app.state.dock_file_cache.insert(
+            root.clone(),
+            crate::files::FileTreeSnapshot {
+                root: root.clone(),
+                files: Vec::new(),
+                fingerprint: 1,
+            },
+        );
+        app.test_begin_git_refresh(7);
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 7,
+            results: Vec::new(),
+            cache_updates: Vec::new(),
+            file_fingerprints: vec![(root.clone(), 2)],
+        });
+
+        assert!(!app.state.dock_file_cache.contains_key(&root));
     }
 
     // ac1: an expired refresh is invalidated, retried, and keeps the last good branch visible.

@@ -180,6 +180,12 @@ pub enum AppEvent {
         generation: u64,
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
+        file_fingerprints: Vec<(std::path::PathBuf, u64)>,
+    },
+    /// A focused pane's file tree finished loading outside the render thread.
+    DockFilesRefreshed {
+        generation: u64,
+        snapshot: crate::files::FileTreeSnapshot,
     },
     /// A dock diff summary or expanded file finished loading from git.
     DiffRefreshed {

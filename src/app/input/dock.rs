@@ -68,6 +68,7 @@ impl AppState {
         self.dock_editor_focused = surface == DockSurface::Editor;
         self.dock_home_focused = surface == DockSurface::Home;
         self.dock_diff_focused = surface == DockSurface::Diff;
+        self.dock_files_focused = surface == DockSurface::Files;
         true
     }
 
