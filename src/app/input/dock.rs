@@ -1,6 +1,59 @@
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 
-use crate::app::state::{AppState, DockSurface};
+use crate::{
+    app::{
+        state::{AppState, DockSurface},
+        App,
+    },
+    input::TerminalKey,
+};
+
+impl App {
+    /// The open surface menu owns every key so the focused surface cannot
+    /// receive input until the menu closes.
+    pub(crate) fn handle_dock_surface_menu_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.dock_surface_menu.is_none() {
+            return false;
+        }
+
+        let event = key.as_key_event();
+        let count = DockSurface::ALL.len();
+        match event.code {
+            KeyCode::Esc => {
+                self.state.dock_surface_menu = None;
+            }
+            KeyCode::Down => {
+                if let Some(menu) = self.state.dock_surface_menu.as_mut() {
+                    menu.selected = (menu.selected + 1) % count;
+                }
+            }
+            KeyCode::Up => {
+                if let Some(menu) = self.state.dock_surface_menu.as_mut() {
+                    menu.selected = (menu.selected + count - 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .state
+                    .dock_surface_menu
+                    .and_then(|menu| DockSurface::ALL.get(menu.selected).copied());
+                if let Some(surface) = selected {
+                    self.state.activate_dock_surface(surface);
+                }
+            }
+            KeyCode::Char(character)
+                if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(surface) = DockSurface::from_shortcut(character) {
+                    self.state.activate_dock_surface(surface);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+}
 
 impl AppState {
     pub(crate) fn on_dock_toggle(&self, col: u16, row: u16) -> bool {

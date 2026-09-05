@@ -145,6 +145,9 @@ impl App {
         if self.state.popup_pane.is_some() {
             return self.handle_terminal_key(key).await;
         }
+        if self.handle_dock_surface_menu_key(&key) {
+            return None;
+        }
         let key_event = key.as_key_event();
         if self.state.sidebar_settled_menu_target.is_some()
             && self.handle_sidebar_settled_key(key_event)
@@ -245,45 +248,6 @@ impl App {
             return false;
         }
         let event = key.as_key_event();
-
-        if self.state.dock_surface_menu.is_some() {
-            let count = crate::app::DockSurface::ALL.len();
-            match event.code {
-                KeyCode::Esc => {
-                    self.state.dock_surface_menu = None;
-                }
-                KeyCode::Down => {
-                    if let Some(menu) = self.state.dock_surface_menu.as_mut() {
-                        menu.selected = (menu.selected + 1) % count;
-                    }
-                }
-                KeyCode::Up => {
-                    if let Some(menu) = self.state.dock_surface_menu.as_mut() {
-                        menu.selected = (menu.selected + count - 1) % count;
-                    }
-                }
-                KeyCode::Enter => {
-                    let selected = self
-                        .state
-                        .dock_surface_menu
-                        .and_then(|menu| crate::app::DockSurface::ALL.get(menu.selected).copied());
-                    if let Some(surface) = selected {
-                        if self.state.activate_dock_surface(surface) {
-                            self.state.dock_surface_menu = None;
-                        }
-                    }
-                }
-                KeyCode::Char(character) if Self::dock_shortcut_modifiers(event.modifiers) => {
-                    if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
-                        if self.state.activate_dock_surface(surface) {
-                            self.state.dock_surface_menu = None;
-                        }
-                    }
-                }
-                _ => return false,
-            }
-            return true;
-        }
 
         // The uppercase card shortcuts remain available while a non-terminal
         // dock surface owns focus. Requiring Shift here preserves Home's
@@ -2309,7 +2273,7 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_menu_takes_the_keyboard_while_it_is_open() {
+    fn the_surface_menu_handles_navigation_and_selection() {
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
@@ -2318,18 +2282,68 @@ mod tests {
         app.state.dock_collapsed = false;
         app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
 
-        assert!(
-            app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Down, KeyModifiers::empty()))
-        );
+        assert!(app
+            .handle_dock_surface_menu_key(&TerminalKey::new(KeyCode::Down, KeyModifiers::empty())));
         assert_eq!(
             app.state.dock_surface_menu.map(|menu| menu.selected),
             Some(1)
         );
-        assert!(
-            app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
-        );
+        assert!(app.handle_dock_surface_menu_key(&TerminalKey::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
         assert!(app.state.dock_surface_menu.is_none());
+    }
+
+    fn files_with_open_surface_menu() -> App {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
+        app.state.dock_files_focused = true;
+        app.state.dock_files_filter = "needle".to_string();
+        app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
+        app
+    }
+
+    #[tokio::test]
+    async fn open_surface_menu_swallows_files_input_and_handles_terminal_shortcut() {
+        let mut app = files_with_open_surface_menu();
+
+        assert!(app
+            .handle_key(TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty()))
+            .await
+            .is_none());
+        assert_eq!(app.state.dock_files_filter, "needle");
+        assert!(app.state.dock_surface_menu.is_some());
+
+        assert!(app
+            .handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+            .await
+            .is_none());
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Terminal));
+        assert_eq!(app.state.dock_files_filter, "needle");
+        assert!(app.state.dock_surface_menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn surface_menu_escape_restores_files_focus() {
+        let mut app = files_with_open_surface_menu();
+
+        assert!(app
+            .handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await
+            .is_none());
+
+        assert!(app.state.dock_surface_menu.is_none());
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(app.state.dock_files_focused);
+        assert_eq!(app.state.dock_files_filter, "needle");
     }
 
     fn dock_home_test_app(pr_numbers: &[u64]) -> App {
