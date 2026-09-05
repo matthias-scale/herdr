@@ -187,6 +187,11 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             app.home.is_some(),
         ),
         (
+            StatusButtonAction::Work,
+            " ⑂ ".to_string(),
+            app.work_view.is_some(),
+        ),
+        (
             StatusButtonAction::BlockedFilter,
             if blocked > 0 {
                 format!(" blocked {blocked} ")
@@ -1699,6 +1704,7 @@ mod tests {
             actions,
             vec![
                 StatusButtonAction::Home,
+                StatusButtonAction::Work,
                 StatusButtonAction::BlockedFilter,
                 StatusButtonAction::Dock,
                 StatusButtonAction::StatusDetail

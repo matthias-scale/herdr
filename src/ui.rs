@@ -44,6 +44,7 @@ mod tabs;
 mod text;
 mod widgets;
 mod work_link_picker;
+pub(crate) mod work_list_detail;
 mod work_view;
 
 use self::dialogs::{
@@ -934,8 +935,8 @@ fn render_with_runtime_registry_inner(
             detail.observed_at,
             frame,
         );
-    } else if let Some(state) = app.work_view.as_ref() {
-        render_work_view(&app.palette, state, terminal_area, frame);
+    } else if app.work_view.is_some() {
+        render_work_view(app, terminal_area, frame);
     } else if app.home.is_some() {
         let queue = app.blocked_agents();
         let counts = app.home_counts(&queue);

@@ -410,12 +410,22 @@ impl App {
 
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
-        let detail_visible = !self.state.dock_collapsed
-            && self.state.dock_tab == Some(crate::app::DockSurface::Home);
+        let work_view_selection = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone());
+        let detail_visible = self.state.work_view.is_some()
+            || !self.state.dock_collapsed
+                && self.state.dock_tab == Some(crate::app::DockSurface::Home);
         self.start_work_item_detail_refresh_if_due(
             now,
-            self.state.dock_home_section,
-            self.state.dock_home_active_selection(),
+            if self.state.work_view.is_some() {
+                crate::app::state::DockHomeSection::Prs
+            } else {
+                self.state.dock_home_section
+            },
+            work_view_selection.or_else(|| self.state.dock_home_active_selection()),
             detail_visible,
         );
         self.start_foreground_process_refresh_if_due(now);

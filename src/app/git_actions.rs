@@ -61,6 +61,76 @@ fn apply_pr_url_from_screen(
 }
 
 impl App {
+    pub(crate) fn apply_pr_land_request(&mut self) -> bool {
+        let Some(request) = self.state.request_pr_land.take() else {
+            return false;
+        };
+        let cwd = self.state.workspaces.iter().find_map(|workspace| {
+            let matches = workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.panes.values())
+                .any(|pane| {
+                    self.state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+                        .is_some_and(|repo| {
+                            crate::work_context::repo_slugs_match(repo, &request.repo)
+                        })
+                });
+            matches.then(|| workspace.identity_cwd.clone())
+        });
+        let Some(ws_idx) = self.state.active else {
+            return false;
+        };
+        let before = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        self.runtime_pane_split(
+            "tui.pr-land.split",
+            crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: None,
+                direction: crate::api::schema::SplitDirection::Down,
+                ratio: None,
+                cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
+                focus: true,
+                env: Default::default(),
+                work_context: None,
+            },
+        );
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+            .filter(|pane_id| Some(*pane_id) != before)
+        else {
+            return false;
+        };
+        let Some(runtime) =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+        else {
+            return false;
+        };
+        if !request
+            .head_sha
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        {
+            tracing::warn!("refusing PR land request with a non-hex head SHA");
+            return false;
+        }
+        let command = pr_land_argv(&request).join(" ");
+        runtime.send_bytes_after(Bytes::from(format!("{command}\r")), COMMAND_SEND_DELAY);
+        self.state.clear_work_view();
+        true
+    }
+
     pub(crate) fn apply_git_action_request(&mut self) -> bool {
         let Some(action) = self.state.request_git_action.take() else {
             return false;
@@ -232,6 +302,18 @@ impl App {
     }
 }
 
+pub(crate) fn pr_land_argv(request: &crate::app::state::PrLandConfirmation) -> Vec<String> {
+    vec![
+        "gh".into(),
+        "pr".into(),
+        "merge".into(),
+        request.number.to_string(),
+        "--squash".into(),
+        "--match-head-commit".into(),
+        request.head_sha.clone(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +336,27 @@ mod tests {
         assert_eq!(exit_code_from_screen("$ command\n__t3_exit=0\n$ "), Some(0));
         assert_eq!(exit_code_from_screen("failure\n__t3_exit=7\n$ "), Some(7));
         assert_eq!(exit_code_from_screen("echo __t3_exit=$?\n"), None);
+    }
+
+    #[test]
+    fn land_command_is_bound_to_confirmed_head() {
+        let request = crate::app::state::PrLandConfirmation {
+            repo: "owner/repo".into(),
+            number: 42,
+            head_sha: "abc123".into(),
+        };
+        assert_eq!(
+            pr_land_argv(&request),
+            [
+                "gh",
+                "pr",
+                "merge",
+                "42",
+                "--squash",
+                "--match-head-commit",
+                "abc123"
+            ]
+        );
     }
 
     #[test]

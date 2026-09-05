@@ -34,6 +34,8 @@ pub(crate) struct WorkPrRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Kept for the review-queue compatibility tests while the generic PR list owns 5a rendering.
+#[allow(dead_code)]
 pub(crate) struct WorkPrGroup {
     pub(crate) header: String,
     /// The trailing `no ticket (N)` group. Required: on real data it is about
@@ -43,6 +45,8 @@ pub(crate) struct WorkPrGroup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Kept for the review-queue compatibility tests while the generic PR list owns 5a rendering.
+#[allow(dead_code)]
 pub(crate) struct WorkPrProjection {
     pub(crate) groups: Vec<WorkPrGroup>,
     pub(crate) row_count: usize,
@@ -93,6 +97,8 @@ impl WorkReviewQueueProjection {
     }
 }
 
+// The dock still consumes the row vocabulary, and its full projection moves to 5b.
+#[allow(dead_code)]
 impl WorkPrProjection {
     pub(crate) fn flat_rows<'a>(&'a self) -> impl Iterator<Item = &'a WorkPrRow> + 'a {
         self.groups.iter().flat_map(|group| group.rows.iter())
@@ -176,6 +182,8 @@ fn project_row(item: &WorkItem) -> WorkPrRow {
 
 /// Project the snapshot into the flat, repo-grouped PR list with the trailing
 /// `no ticket (N)` group. Rows sort by PR number descending inside a group.
+// The generic list supersedes this renderer projection in 5a; 5b can remove it with the dock migration.
+#[allow(dead_code)]
 pub(crate) fn project_pull_requests(
     snapshot: &Snapshot,
     repo_filter: Option<&str>,
@@ -299,6 +307,8 @@ pub(crate) fn project_review_queue(
     }
 }
 
+// Rotation and legacy repo-filter helpers remain covered until the deferred projections replace them.
+#[allow(dead_code)]
 impl WorkViewState {
     /// The PR projection of the current snapshot, or `None` when another
     /// projection is active (placeholder) or no snapshot has been collected.
@@ -1196,6 +1206,13 @@ mod tests {
             draft: false,
             review_decision: None,
             created_at: None,
+            updated_at: None,
+            additions: 0,
+            deletions: 0,
+            author: None,
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Unknown,
+            audience: crate::work_index::PrAudience::Unclassified,
             ticket_ids: tickets.iter().map(|ticket| ticket.to_string()).collect(),
             ticket_title: None,
             ticket_state: None,

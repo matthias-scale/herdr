@@ -57,13 +57,22 @@ pub(crate) fn resolve_diff_base(
 
 impl App {
     pub(crate) fn start_dock_diff_refresh_if_needed(&mut self) {
-        if self.state.dock_collapsed
-            || self.state.dock_tab != Some(crate::app::DockSurface::Diff)
+        let work_view_code = self
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.detail_tab == crate::app::state::PrDetailTab::Code);
+        if (!work_view_code
+            && (self.state.dock_collapsed
+                || self.state.dock_tab != Some(crate::app::DockSurface::Diff)))
             || self.diff_refresh_in_flight.is_some()
         {
             return;
         }
-        let Some(request) = self.focused_diff_refresh_request() else {
+        let Some(request) = self
+            .work_view_diff_refresh_request()
+            .or_else(|| self.focused_diff_refresh_request())
+        else {
             self.state.dock_diff_active_key = None;
             return;
         };
@@ -120,6 +129,44 @@ impl App {
                 result: Box::new(result),
             });
         });
+    }
+
+    fn work_view_diff_refresh_request(&self) -> Option<DiffRefreshRequest> {
+        let view = self.state.work_view.as_ref()?;
+        if view.detail_tab != crate::app::state::PrDetailTab::Code {
+            return None;
+        }
+        let key = view.selected.clone().or_else(|| {
+            view.snapshot.as_ref()?.items.iter().find_map(|item| {
+                item.pr_number.map(|number| crate::app::state::WorkItemKey {
+                    repo: item.repo.clone(),
+                    pr_number: Some(number),
+                    pr_url: item.pr_url.clone(),
+                    ticket_id: None,
+                })
+            })
+        })?;
+        let detail = self.state.work_item_detail_cache.get(&key)?;
+        let cwd = self.state.workspaces.iter().find_map(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.panes.values())
+                .any(|pane| {
+                    self.state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+                        .is_some_and(|repo| crate::work_context::repo_slugs_match(repo, &key.repo))
+                })
+                .then(|| workspace.identity_cwd.clone())
+        })?;
+        Some(DiffRefreshRequest {
+            cwd,
+            pr_base: detail.base_ref_name.clone(),
+            branch: detail.head_ref_name.clone(),
+            ignore_whitespace: self.state.dock_diff_ignore_whitespace,
+        })
     }
 
     fn git_program_for_diff(&self) -> PathBuf {

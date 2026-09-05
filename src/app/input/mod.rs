@@ -946,6 +946,7 @@ impl App {
             StatusButtonAction::Home => {
                 self.state.toggle_home();
             }
+            StatusButtonAction::Work => self.toggle_work_view(),
             StatusButtonAction::BlockedFilter => {
                 self.state.blocked_filter = !self.state.blocked_filter;
                 self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -989,79 +990,344 @@ impl App {
         let enabled = self.work_index_config.enabled;
         let snapshot = enabled.then(|| self.work_index_snapshot.clone()).flatten();
         self.state.toggle_work_view(enabled, snapshot);
+        if self.state.work_view.is_some() && enabled {
+            self.next_work_index_refresh = std::time::Instant::now();
+            if let Some(view) = self.state.work_view.as_mut() {
+                view.refreshing = true;
+            }
+        }
     }
 
     pub(crate) fn handle_work_view_key(&mut self, key: KeyEvent) -> bool {
-        let Some(state) = self.state.work_view.as_mut() else {
+        let Some(state) = self.state.work_view.as_ref() else {
             return false;
         };
+        if state.pending_land.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        self.state.request_pr_land = state.pending_land.take();
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.pending_land = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if state.checkout_menu.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.checkout_menu = Some(match state.checkout_menu {
+                            Some(crate::app::state::PrCheckoutChoice::CurrentCheckout) => {
+                                crate::app::state::PrCheckoutChoice::NewWorktree
+                            }
+                            _ => crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                        });
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.open_selected_pr_checkout(),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.checkout_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if state.search_focused {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.search_focused = false;
+                    }
+                }
+                KeyCode::Backspace if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.search.pop();
+                        state.selected = None;
+                    }
+                }
+                KeyCode::Char(character)
+                    if key.modifiers.is_empty()
+                        || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.search.push(character);
+                        state.selected = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_work_view();
                 self.state.mode = Mode::Terminal;
             }
             KeyCode::Left if key.modifiers.is_empty() => {
-                state.rotate(false);
-                state.hint = None;
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.rotate(false);
+                    state.hint = None;
+                }
             }
             KeyCode::Right if key.modifiers.is_empty() => {
-                state.rotate(true);
-                state.hint = None;
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.rotate(true);
+                    state.hint = None;
+                }
             }
             KeyCode::Up if key.modifiers.is_empty() => {
-                state.move_selection(-1);
-                state.hint = None;
+                self.move_pr_view_selection(-1);
             }
             KeyCode::Down if key.modifiers.is_empty() => {
-                state.move_selection(1);
-                state.hint = None;
+                self.move_pr_view_selection(1);
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                self.focus_work_view_selected_pane();
+            KeyCode::Char('/') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.search_focused = true;
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.sort = state.sort.next();
+                    state.selected = None;
+                }
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
-                self.cycle_work_view_repo_filter();
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.open_only = !state.open_only;
+                    state.selected = None;
+                }
+            }
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.detail_tab = state.detail_tab.next();
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.checkout_menu = Some(Default::default());
+                }
+            }
+            KeyCode::Char('l') if key.modifiers.is_empty() => self.stage_selected_pr_land(),
+            KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                self.next_work_index_refresh = std::time::Instant::now();
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.refreshing = true;
+                }
             }
             _ => {}
         }
         true
     }
 
-    fn focus_work_view_selected_pane(&mut self) {
-        let Some(row) = self
+    fn visible_pr_view_keys(&self) -> Vec<crate::app::state::WorkItemKey> {
+        let Some(view) = self.state.work_view.as_ref() else {
+            return Vec::new();
+        };
+        let observed_at = view
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observed_at)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        view.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                crate::ui::work_list_detail::sorted_filtered_prs(
+                    &snapshot.items,
+                    &self.state.work_item_detail_cache,
+                    &view.search,
+                    view.sort,
+                    view.open_only,
+                    observed_at,
+                )
+                .into_iter()
+                .map(|item| crate::app::state::WorkItemKey {
+                    repo: item.summary.repo.clone(),
+                    pr_number: item.summary.pr_number,
+                    pr_url: item.summary.pr_url.clone(),
+                    ticket_id: None,
+                })
+                .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn move_pr_view_selection(&mut self, delta: i64) {
+        let keys = self.visible_pr_view_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let current = self
             .state
             .work_view
             .as_ref()
-            .and_then(|state| state.selected_row())
+            .and_then(|view| view.selected.as_ref())
+            .and_then(|selected| keys.iter().position(|key| key == selected))
+            .unwrap_or(0);
+        let next = (current as i64 + delta).clamp(0, keys.len().saturating_sub(1) as i64) as usize;
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.selected = keys.get(next).cloned();
+            view.hint = None;
+        }
+    }
+
+    fn selected_pr_parts(&self) -> Option<(crate::app::state::WorkItemKey, String)> {
+        let keys = self.visible_pr_view_keys();
+        let key = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone())
+            .or_else(|| keys.first().cloned())?;
+        let head = self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .and_then(|detail| detail.head_ref_name.clone())
+            .or_else(|| {
+                self.state
+                    .work_view
+                    .as_ref()?
+                    .snapshot
+                    .as_ref()?
+                    .items
+                    .iter()
+                    .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)
+                    .and_then(|item| item.branch.clone())
+            })?;
+        Some((key, head))
+    }
+
+    fn open_selected_pr_checkout(&mut self) {
+        let Some((key, head)) = self.selected_pr_parts() else {
+            return;
+        };
+        let choice = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.checkout_menu)
+            .unwrap_or_default();
+        self.open_pr_home(key, head, choice, String::new());
+    }
+
+    fn fix_selected_pr_comment(&mut self) {
+        let Some((key, head)) = self.selected_pr_parts() else {
+            return;
+        };
+        let Some(body) = self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .and_then(|detail| {
+                detail
+                    .comments
+                    .iter()
+                    .max_by_key(|comment| comment.created_at)
+            })
+            .map(|comment| comment.body.clone())
         else {
             return;
         };
-        let Some(pane_id) = row.owner_pane_id else {
-            if let Some(state) = self.state.work_view.as_mut() {
-                state.hint = Some(format!("no owning pane for #{}", row.number));
-            }
-            return;
-        };
-        if self.parse_pane_id(&pane_id).is_none() {
-            if let Some(state) = self.state.work_view.as_mut() {
-                state.hint = Some(format!("owning pane {pane_id} is no longer open"));
-            }
-            return;
-        }
-        self.runtime_pane_focus("tui.work_view.focus_owner", pane_id);
-        self.state.clear_work_view();
-        self.state.mode = Mode::Terminal;
+        self.open_pr_home(
+            key,
+            head,
+            crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            body,
+        );
     }
 
-    fn cycle_work_view_repo_filter(&mut self) {
-        let Some(state) = self.state.work_view.as_mut() else {
+    fn open_pr_home(
+        &mut self,
+        key: crate::app::state::WorkItemKey,
+        head: String,
+        choice: crate::app::state::PrCheckoutChoice,
+        prompt: String,
+    ) {
+        let directory = self
+            .state
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.values())
+                    .any(|pane| {
+                        self.state
+                            .terminals
+                            .get(&pane.attached_terminal_id)
+                            .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+                            .is_some_and(|repo| {
+                                crate::work_context::repo_slugs_match(repo, &key.repo)
+                            })
+                    })
+            })
+            .map(|workspace| workspace.identity_cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            });
+        let directory = self
+            .state
+            .git_root_for_cwd
+            .get(&directory)
+            .and_then(Clone::clone)
+            .unwrap_or(directory);
+        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        home.directory = directory.clone();
+        home.ref_directory = directory.clone();
+        home.ref_repo_root = Some(directory);
+        home.workspace = match choice {
+            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                crate::app::home::HomeWorkspace::CurrentCheckout
+            }
+            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                crate::app::home::HomeWorkspace::NewWorktree
+            }
+        };
+        home.selected_ref = Some(crate::app::home_refs::HomeRef {
+            name: head,
+            oid: String::new(),
+            tag: None,
+        });
+        home.prompt = prompt;
+        self.state.work_view = None;
+        self.state.inbox = None;
+        self.state.home = Some(home);
+    }
+
+    fn stage_selected_pr_land(&mut self) {
+        let Some((key, _)) = self.selected_pr_parts() else {
             return;
         };
-        let next = state.cycle_repo_filter();
-        state.hint = Some(
-            next.map(|repo| format!("filter repo: {repo}"))
-                .unwrap_or_else(|| "showing all repos".into()),
-        );
+        let Some(number) = key.pr_number else {
+            return;
+        };
+        let Some(detail) = self.state.work_item_detail_cache.get(&key) else {
+            return;
+        };
+        let enabled = !detail.actions.is_empty()
+            && detail.actions.iter().all(|check| check.state == "SUCCESS")
+            && detail.merge_state_status.as_deref() == Some("CLEAN");
+        let Some(head_sha) = enabled.then(|| detail.head_sha.clone()).flatten() else {
+            return;
+        };
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.pending_land = Some(crate::app::state::PrLandConfirmation {
+                repo: key.repo,
+                number,
+                head_sha,
+            });
+        }
     }
 
     fn open_selected_symphony_workflow(&mut self) {

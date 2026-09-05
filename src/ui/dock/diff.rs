@@ -11,7 +11,7 @@ use crate::app::state::{AppState, DiffCacheEntry};
 
 const WHITESPACE_TOGGLE_WIDTH: u16 = 8;
 
-pub(super) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
+pub(crate) fn render_diff(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
