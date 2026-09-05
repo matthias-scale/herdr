@@ -1808,6 +1808,25 @@ pub(crate) fn collapsed_sidebar_scroll_for_target(
     current_scroll
 }
 
+/// Paint the sidebar's own background before any row renders.
+///
+/// Without this the sidebar — the widest themed surface in the UI — keeps
+/// whatever background the terminal has, so a palette that disagrees with the
+/// terminal draws its foregrounds onto a background it never chose. Painting
+/// here bounds a mismatched theme to looking wrong instead of unreadable.
+fn fill_sidebar_background(frame: &mut Frame, area: Rect, p: &Palette) {
+    let bg = p.sidebar_background();
+    if bg == Color::Reset {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            buf[(x, y)].set_style(Style::default().bg(bg));
+        }
+    }
+}
+
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1816,6 +1835,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
     let p = &app.palette;
+    fill_sidebar_background(frame, area, p);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {
@@ -2046,6 +2066,7 @@ pub(super) fn render_sidebar(
     area: Rect,
 ) {
     let p = &app.palette;
+    fill_sidebar_background(frame, area, p);
     let is_navigating = matches!(app.mode, Mode::Navigate);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
@@ -5004,13 +5025,15 @@ row_gap = 1
         assert_eq!(workspace_style.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
+        // Sidebar rows sit on the palette's own background, never the
+        // terminal's: a row must stay readable under a mismatched theme.
+        assert_eq!(workspace_style.bg, Some(app.palette.sidebar_background()));
 
         let title_x = find_symbol_x(buffer, tab_row, 59, "F");
         let title_style = buffer[(title_x, tab_row)].style();
         assert_eq!(title_style.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(title_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(title_style.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(title_style.bg, Some(app.palette.sidebar_background()));
     }
 
     #[test]
@@ -5826,14 +5849,14 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(active.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
-        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(active.bg, Some(app.palette.sidebar_background()));
 
         let inactive = buffer[(find_symbol_x(buffer, second_row, 25, "t"), second_row)].style();
         assert_eq!(inactive.fg, Some(app.palette.subtext0));
         assert!(!inactive
             .add_modifier
             .intersects(Modifier::BOLD | Modifier::DIM));
-        assert_eq!(inactive.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(inactive.bg, Some(app.palette.sidebar_background()));
     }
 
     #[test]

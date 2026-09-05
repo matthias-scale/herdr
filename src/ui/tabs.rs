@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use super::text::{display_width, display_width_u16, truncate_end};
-use super::widgets::panel_contrast_fg;
+use super::widgets::{panel_contrast_fg, readable_fg_on};
 use crate::app::AppState;
 
 /// The pin lives in the leading pad column every tab cell already renders, so
@@ -434,7 +434,9 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
         let active = idx == ws.active_tab;
         let style = if active {
-            let base = Style::default().fg(panel_contrast_fg(p)).bg(p.accent);
+            let base = Style::default()
+                .fg(readable_fg_on(p.accent, &[panel_contrast_fg(p), p.text]))
+                .bg(p.accent);
             if tab.is_auto_named() {
                 base
             } else {

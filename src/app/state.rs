@@ -110,8 +110,9 @@ pub struct Palette {
     pub accent: Color,
     /// Background for the tab bar, floating panels, overlays, and modals.
     pub panel_bg: Color,
-    /// Optional desktop sidebar background. Reset preserves the terminal background.
-    pub sidebar_bg: Color,
+    /// Desktop sidebar background. `None` follows `panel_bg`; an explicit
+    /// `Some(Color::Reset)` hands the sidebar back to the terminal.
+    pub sidebar_bg: Option<Color>,
     /// Subtle surface background for selected/focused items.
     pub surface0: Color,
     /// Slightly lighter surface for hover/active states.
@@ -142,13 +143,76 @@ pub struct Palette {
     pub peach: Color,
 }
 
+/// Resolve a ratatui color to concrete channels for legibility decisions.
+///
+/// `Rgb` is exact. Named and indexed colors resolve through the xterm default
+/// palette: the real terminal may have retinted them, but herdr has to choose
+/// a readable foreground with the information it has, and the xterm defaults
+/// are a far better estimate than treating the color as unknowable. `Reset`
+/// stays `None` — it means "whatever the terminal uses", which is genuinely
+/// not knowable here.
+pub fn color_rgb(color: Color) -> Option<crate::terminal_theme::RgbColor> {
+    use crate::terminal_theme::RgbColor;
+    let rgb = |r: u8, g: u8, b: u8| Some(RgbColor { r, g, b });
+    match color {
+        Color::Rgb(r, g, b) => rgb(r, g, b),
+        Color::Reset => None,
+        Color::Black => rgb(0, 0, 0),
+        Color::Red => rgb(128, 0, 0),
+        Color::Green => rgb(0, 128, 0),
+        Color::Yellow => rgb(128, 128, 0),
+        Color::Blue => rgb(0, 0, 128),
+        Color::Magenta => rgb(128, 0, 128),
+        Color::Cyan => rgb(0, 128, 128),
+        Color::Gray => rgb(192, 192, 192),
+        Color::DarkGray => rgb(128, 128, 128),
+        Color::LightRed => rgb(255, 0, 0),
+        Color::LightGreen => rgb(0, 255, 0),
+        Color::LightYellow => rgb(255, 255, 0),
+        Color::LightBlue => rgb(0, 0, 255),
+        Color::LightMagenta => rgb(255, 0, 255),
+        Color::LightCyan => rgb(0, 255, 255),
+        Color::White => rgb(255, 255, 255),
+        Color::Indexed(index) => match index {
+            0..=15 => color_rgb(match index {
+                0 => Color::Black,
+                1 => Color::Red,
+                2 => Color::Green,
+                3 => Color::Yellow,
+                4 => Color::Blue,
+                5 => Color::Magenta,
+                6 => Color::Cyan,
+                7 => Color::Gray,
+                8 => Color::DarkGray,
+                9 => Color::LightRed,
+                10 => Color::LightGreen,
+                11 => Color::LightYellow,
+                12 => Color::LightBlue,
+                13 => Color::LightMagenta,
+                14 => Color::LightCyan,
+                _ => Color::White,
+            }),
+            16..=231 => {
+                // 6x6x6 color cube, xterm's non-linear level steps.
+                let level = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+                let index = index - 16;
+                rgb(level(index / 36), level((index % 36) / 6), level(index % 6))
+            }
+            _ => {
+                let value = 8 + (index - 232) * 10;
+                rgb(value, value, value)
+            }
+        },
+    }
+}
+
 impl Palette {
     /// Catppuccin Mocha — the default.
     pub fn catppuccin() -> Self {
         Self {
             accent: Color::Rgb(137, 180, 250), // blue
             panel_bg: Color::Rgb(24, 24, 37),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(49, 50, 68),
             surface1: Color::Rgb(69, 71, 90),
             surface_dim: Color::Rgb(30, 30, 46),
@@ -171,7 +235,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(30, 102, 245),
             panel_bg: Color::Rgb(239, 241, 245),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(204, 208, 218),
             surface1: Color::Rgb(188, 192, 204),
             surface_dim: Color::Rgb(230, 233, 239),
@@ -194,7 +258,7 @@ impl Palette {
         Self {
             accent: Color::Blue,
             panel_bg: Color::Reset,
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Reset,
             surface1: Color::DarkGray,
             surface_dim: Color::DarkGray,
@@ -217,7 +281,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(122, 162, 247), // blue
             panel_bg: Color::Rgb(26, 27, 38),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(36, 40, 59),
             surface1: Color::Rgb(65, 72, 104),
             surface_dim: Color::Rgb(26, 27, 38),
@@ -240,7 +304,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(46, 125, 233),
             panel_bg: Color::Rgb(225, 226, 231),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(196, 200, 218),
             surface1: Color::Rgb(168, 174, 203),
             surface_dim: Color::Rgb(210, 211, 218),
@@ -263,7 +327,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(189, 147, 249), // purple
             panel_bg: Color::Rgb(40, 42, 54),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(68, 71, 90),
             surface1: Color::Rgb(98, 114, 164),
             surface_dim: Color::Rgb(40, 42, 54),
@@ -286,12 +350,15 @@ impl Palette {
         Self {
             accent: Color::Rgb(136, 192, 208), // frost
             panel_bg: Color::Rgb(46, 52, 64),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(59, 66, 82),
             surface1: Color::Rgb(67, 76, 94),
             surface_dim: Color::Rgb(46, 52, 64),
-            overlay0: Color::Rgb(76, 86, 106),
-            overlay1: Color::Rgb(100, 110, 130),
+            // Nord's own nord3 (#4c566a) is a comment color: on nord0 it lands
+            // at 1.69:1, dim enough to lose the sidebar's secondary text. Use
+            // the brighter muted tone the Nord UI ports settle on instead.
+            overlay0: Color::Rgb(123, 136, 161),
+            overlay1: Color::Rgb(143, 156, 178),
             text: Color::Rgb(236, 239, 244),
             subtext0: Color::Rgb(216, 222, 233),
             mauve: Color::Rgb(180, 142, 173),
@@ -309,7 +376,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(215, 153, 33), // yellow
             panel_bg: Color::Rgb(40, 40, 40),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(60, 56, 54),
             surface1: Color::Rgb(80, 73, 69),
             surface_dim: Color::Rgb(40, 40, 40),
@@ -332,7 +399,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(7, 102, 120),
             panel_bg: Color::Rgb(251, 241, 199),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(235, 219, 178),
             surface1: Color::Rgb(213, 196, 161),
             surface_dim: Color::Rgb(242, 229, 188),
@@ -355,7 +422,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(97, 175, 239), // blue
             panel_bg: Color::Rgb(40, 44, 52),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(44, 49, 58),
             surface1: Color::Rgb(62, 68, 81),
             surface_dim: Color::Rgb(40, 44, 52),
@@ -378,7 +445,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(64, 120, 242),
             panel_bg: Color::Rgb(250, 250, 250),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(240, 240, 241),
             surface1: Color::Rgb(229, 229, 230),
             surface_dim: Color::Rgb(245, 245, 246),
@@ -401,7 +468,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(113, 183, 255),
             panel_bg: Color::Rgb(10, 12, 16),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(39, 43, 51),
             surface1: Color::Rgb(82, 89, 100),
             surface_dim: Color::Rgb(1, 4, 9),
@@ -424,7 +491,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(3, 73, 180),
             panel_bg: Color::Rgb(255, 255, 255),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(231, 236, 240),
             surface1: Color::Rgb(172, 182, 192),
             surface_dim: Color::Rgb(231, 236, 240),
@@ -447,7 +514,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(38, 139, 210), // blue
             panel_bg: Color::Rgb(0, 43, 54),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(7, 54, 66),
             surface1: Color::Rgb(88, 110, 117),
             surface_dim: Color::Rgb(0, 43, 54),
@@ -470,7 +537,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(38, 139, 210),
             panel_bg: Color::Rgb(253, 246, 227),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(238, 232, 213),
             surface1: Color::Rgb(147, 161, 161),
             surface_dim: Color::Rgb(238, 232, 213),
@@ -493,7 +560,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(126, 156, 216), // blue
             panel_bg: Color::Rgb(31, 31, 40),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(42, 42, 55),
             surface1: Color::Rgb(54, 54, 70),
             surface_dim: Color::Rgb(31, 31, 40),
@@ -516,7 +583,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(77, 105, 155),
             panel_bg: Color::Rgb(242, 236, 188),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(220, 213, 172),
             surface1: Color::Rgb(201, 203, 209),
             surface_dim: Color::Rgb(213, 206, 163),
@@ -539,7 +606,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(196, 167, 231), // iris
             panel_bg: Color::Rgb(25, 23, 36),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(31, 29, 46),
             surface1: Color::Rgb(38, 35, 58),
             surface_dim: Color::Rgb(38, 35, 58),
@@ -562,7 +629,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(144, 122, 169),
             panel_bg: Color::Rgb(250, 244, 237),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(242, 233, 225),
             surface1: Color::Rgb(255, 250, 243),
             surface_dim: Color::Rgb(242, 233, 225),
@@ -585,7 +652,7 @@ impl Palette {
         Self {
             accent: Color::Rgb(255, 199, 153),
             panel_bg: Color::Rgb(26, 26, 26),
-            sidebar_bg: Color::Reset,
+            sidebar_bg: None,
             surface0: Color::Rgb(35, 35, 35),
             surface1: Color::Rgb(40, 40, 40),
             surface_dim: Color::Rgb(16, 16, 16),
@@ -601,6 +668,26 @@ impl Palette {
             teal: Color::Rgb(102, 221, 204),
             peach: Color::Rgb(255, 199, 153),
         }
+    }
+
+    /// Background the desktop sidebar paints under its rows.
+    ///
+    /// An unset `sidebar_bg` follows the palette's own panel background rather
+    /// than the terminal's. Borrowing the terminal background is what makes a
+    /// mismatched palette unreadable: theme foregrounds land on a background
+    /// chosen by something else. The `terminal` palette keeps `panel_bg` at
+    /// `Reset`, so it still inherits, and so does an explicit
+    /// `theme.custom.sidebar_bg = "reset"`.
+    pub fn sidebar_background(&self) -> Color {
+        self.sidebar_bg.unwrap_or(self.panel_bg)
+    }
+
+    /// Appearance this palette was built for, inferred from `panel_bg`.
+    ///
+    /// `None` when the palette leaves its panel background to the terminal
+    /// (the `terminal` theme), where no appearance can be claimed.
+    pub fn appearance(&self) -> Option<crate::terminal_theme::HostAppearance> {
+        Some(color_rgb(self.panel_bg)?.inferred_appearance())
     }
 
     /// Resolve a theme by name. Returns None for unknown names.
@@ -644,7 +731,9 @@ impl Palette {
             self.panel_bg = parse_color(c);
         }
         if let Some(c) = &custom.sidebar_bg {
-            self.sidebar_bg = parse_color(c);
+            // An explicit `reset` is a choice, not an absence: it hands the
+            // sidebar back to the terminal background.
+            self.sidebar_bg = Some(parse_color(c));
         }
         if let Some(c) = &custom.surface0 {
             self.surface0 = parse_color(c);
@@ -1938,6 +2027,10 @@ pub struct AppState {
     pub host_terminal_appearance: Option<HostAppearance>,
     /// True when the foreground host explicitly reported appearance via Mode 2031.
     pub host_terminal_appearance_explicit: bool,
+    /// Set when the active palette contradicts the appearance the host terminal
+    /// reports, e.g. a light theme pinned in front of a dark terminal. Surfaced
+    /// as a config-reload diagnostic so the mismatch is named, not guessed at.
+    pub theme_appearance_mismatch: Option<String>,
     /// Settings panel state.
     pub settings: SettingsState,
     /// Cached integration recommendations for onboarding/settings UI.
@@ -2820,6 +2913,7 @@ impl AppState {
             },
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
+            theme_appearance_mismatch: None,
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),
@@ -3365,8 +3459,7 @@ mod tests {
         for name in THEME_NAMES {
             let palette = Palette::from_name(name).unwrap();
             assert_eq!(
-                palette.sidebar_bg,
-                Color::Reset,
+                palette.sidebar_bg, None,
                 "built-in theme changed the sidebar background: {name}"
             );
         }
@@ -3381,8 +3474,47 @@ mod tests {
 
         assert_eq!(
             Palette::catppuccin().with_overrides(&custom).sidebar_bg,
+            Some(Color::Rgb(24, 24, 37))
+        );
+    }
+
+    /// `reset` is documented as a value for this token, and it means something
+    /// an unset field cannot: hand the sidebar back to the terminal on a themed
+    /// palette. Unset follows `panel_bg` instead, so the two cannot share a
+    /// representation.
+    #[test]
+    fn an_explicit_reset_sidebar_background_still_inherits_the_terminal() {
+        let custom = crate::config::CustomThemeColors {
+            sidebar_bg: Some("reset".to_string()),
+            ..Default::default()
+        };
+        let palette = Palette::catppuccin().with_overrides(&custom);
+
+        assert_eq!(palette.sidebar_bg, Some(Color::Reset));
+        assert_eq!(palette.sidebar_background(), Color::Reset);
+        assert_eq!(
+            Palette::catppuccin().sidebar_background(),
             Color::Rgb(24, 24, 37)
         );
+    }
+
+    /// Named and indexed colors are legal everywhere a hex color is, so a
+    /// mismatch must still be classified when a palette carries them.
+    #[test]
+    fn appearance_classifies_named_and_indexed_panel_backgrounds() {
+        use crate::terminal_theme::HostAppearance;
+
+        let mut light = Palette::catppuccin();
+        light.panel_bg = Color::White;
+        assert_eq!(light.appearance(), Some(HostAppearance::Light));
+
+        let mut dark = Palette::catppuccin_latte();
+        dark.panel_bg = Color::Indexed(16);
+        assert_eq!(dark.appearance(), Some(HostAppearance::Dark));
+
+        let mut inherited = Palette::catppuccin();
+        inherited.panel_bg = Color::Reset;
+        assert_eq!(inherited.appearance(), None);
     }
 
     #[test]

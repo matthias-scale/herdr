@@ -1014,6 +1014,134 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     use std::path::PathBuf;
 
+    use super::widgets::contrast_ratio;
+
+    fn themed_app(theme: &str) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("space");
+        ws.test_add_tab(Some("home"));
+        ws.test_add_tab(Some("dock"));
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.palette =
+            crate::app::state::Palette::from_name(theme).expect("built-in theme resolves");
+        app.theme_name = theme.to_string();
+        app
+    }
+
+    /// A cell that only carries the right half of a double-width glyph is
+    /// never painted on its own, so it keeps ratatui's default style.
+    fn is_wide_glyph_continuation(
+        buffer: &ratatui::buffer::Buffer,
+        rect: Rect,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        x > rect.x && self::text::display_width(buffer[(x - 1, y)].symbol()) > 1
+    }
+
+    fn chrome_rects(app: &crate::app::state::AppState) -> [Rect; 2] {
+        [app.view.sidebar_rect, app.view.tab_bar_rect]
+    }
+
+    /// The regression this pins: herdr painted its tab bar from the palette but
+    /// left the sidebar — the widest chrome surface — on the terminal's own
+    /// background. Pin a light theme in front of a dark terminal and the
+    /// sidebar became #4b535d text on near-black: rendered, unreadable. Chrome
+    /// must carry its own background so a mismatched theme can only look wrong.
+    #[test]
+    fn themed_chrome_never_borrows_the_terminal_background() {
+        let mut violations: Vec<String> = Vec::new();
+        for theme in crate::app::state::THEME_NAMES {
+            // The `terminal` palette opts into the terminal's colors by design.
+            if *theme == "terminal" {
+                continue;
+            }
+            let mut app = themed_app(theme);
+            let area = Rect::new(0, 0, 80, 24);
+            compute_view(&mut app, area);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+
+            for rect in chrome_rects(&app) {
+                for y in rect.y..rect.y + rect.height {
+                    for x in rect.x..rect.x + rect.width {
+                        if is_wide_glyph_continuation(buffer, rect, x, y) {
+                            continue;
+                        }
+                        if buffer[(x, y)].style().bg == Some(Color::Reset) {
+                            violations.push(format!(
+                                "{theme}: chrome cell ({x},{y}) fell back to the terminal background"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
+
+    /// Guards the invisibility class, not dimness: text the same color as the
+    /// surface it sits on, which is how a mismatched palette used to hide the
+    /// sidebar and how a white-on-white style hides a selected tab. The dimmest
+    /// built-in chrome measures 2.07:1 today (catppuccin-latte's inactive tab
+    /// label), so the floor sits just below it — the selected tab, which has to
+    /// be found at a glance, is held to the WCAG 4.5:1 text bar instead.
+    #[test]
+    fn themed_chrome_keeps_a_contrast_floor() {
+        const CHROME_FLOOR: f64 = 1.8;
+        const ACTIVE_TAB_FLOOR: f64 = 4.5;
+        let mut violations: Vec<String> = Vec::new();
+        for theme in crate::app::state::THEME_NAMES {
+            if *theme == "terminal" {
+                continue;
+            }
+            let mut app = themed_app(theme);
+            let area = Rect::new(0, 0, 80, 24);
+            compute_view(&mut app, area);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+
+            let active_tab = app
+                .active
+                .and_then(|idx| app.workspaces.get(idx))
+                .map(|ws| ws.active_tab)
+                .and_then(|idx| app.view.tab_hit_areas.get(idx).copied())
+                .expect("fixture has an active tab");
+
+            for rect in chrome_rects(&app) {
+                for y in rect.y..rect.y + rect.height {
+                    for x in rect.x..rect.x + rect.width {
+                        let cell = &buffer[(x, y)];
+                        if cell.symbol().trim().is_empty() {
+                            continue;
+                        }
+                        let (Some(fg), Some(bg)) = (cell.style().fg, cell.style().bg) else {
+                            continue;
+                        };
+                        let Some(ratio) = contrast_ratio(fg, bg) else {
+                            continue;
+                        };
+                        let floor = if active_tab.contains(ratatui::layout::Position::new(x, y)) {
+                            ACTIVE_TAB_FLOOR
+                        } else {
+                            CHROME_FLOOR
+                        };
+                        if ratio < floor {
+                            violations.push(format!(
+                                "{theme}: {:?} at ({x},{y}) renders {fg:?} on {bg:?} at {ratio:.2}:1, floor {floor:.1}:1",
+                                cell.symbol()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
+
     #[test]
     fn copy_feedback_offset_only_increases_when_toast_rect_overlaps() {
         let area = Rect::new(0, 0, 80, 24);
@@ -1939,7 +2067,7 @@ mod tests {
 
         assert_eq!(active_style.fg, Some(app.palette.text));
         assert!(active_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(active_style.bg, Some(Color::Reset));
+        assert_eq!(active_style.bg, Some(app.palette.sidebar_background()));
     }
 
     #[test]
