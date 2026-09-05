@@ -38,6 +38,97 @@ pub(crate) fn tab_width(surface: DockSurface, active: bool) -> u16 {
         .saturating_add(if active { 2 } else { 0 })
 }
 
+/// Columns the `+` occupies. The space in front of it belongs to the last tab.
+pub(crate) const PLUS_WIDTH: u16 = 1;
+
+/// Where the strip draws each of its parts. One rect per open surface, in the
+/// order of `dock_open_surfaces`, so a hit test can map an index back to a
+/// surface; a tab scrolled out of the strip gets a zero-width rect no click can
+/// land in.
+pub(crate) struct StripLayout {
+    pub tabs: Vec<Rect>,
+    pub close: Rect,
+    pub plus: Rect,
+}
+
+/// Lay the tab strip out exactly as `render_tab_strip` draws it: every tab keeps
+/// its label plus one separating space, the active tab keeps its close glyph,
+/// and the `+` takes the cell after the last tab that fits. Squeezing the tabs
+/// into equal shares instead would run the labels together and put the `+`
+/// somewhere the strip never draws it.
+pub(crate) fn strip_layout(
+    strip: Rect,
+    open: &[DockSurface],
+    active: Option<DockSurface>,
+) -> StripLayout {
+    let mut tabs = vec![Rect::default(); open.len()];
+    if strip.width == 0 || strip.height == 0 {
+        return StripLayout {
+            tabs,
+            close: Rect::default(),
+            plus: Rect::default(),
+        };
+    }
+
+    let widths: Vec<u16> = open
+        .iter()
+        .map(|surface| tab_width(*surface, active == Some(*surface)))
+        .collect();
+    let available = strip.width.saturating_sub(PLUS_WIDTH);
+    let active_index = active.and_then(|surface| open.iter().position(|open| *open == surface));
+    let first = first_visible_tab(&widths, available, active_index);
+
+    let mut x = strip.x;
+    let tabs_right = strip.x.saturating_add(available);
+    for index in first..widths.len() {
+        let remaining = tabs_right.saturating_sub(x);
+        if remaining == 0 {
+            break;
+        }
+        let width = widths[index].min(remaining);
+        tabs[index] = Rect::new(x, strip.y, width, 1);
+        x = x.saturating_add(width);
+        if width < widths[index] {
+            // A clipped tab ends the strip: whatever follows has no room left.
+            break;
+        }
+    }
+
+    let close = active_index
+        .and_then(|index| tabs.get(index).copied())
+        .zip(active)
+        .map(|(tab, surface)| close_rect(tab, surface))
+        .unwrap_or_default();
+    let plus = Rect::new(
+        x.min(strip.right().saturating_sub(PLUS_WIDTH)),
+        strip.y,
+        PLUS_WIDTH,
+        1,
+    );
+
+    StripLayout { tabs, close, plus }
+}
+
+/// First tab the strip can draw while still showing the active one. Scrolling
+/// starts at the left and only advances until the active tab fits.
+fn first_visible_tab(widths: &[u16], available: u16, active: Option<usize>) -> usize {
+    let Some(active) = active else {
+        return 0;
+    };
+    let mut first = 0;
+    while first < active {
+        let used = widths[first..=active]
+            .iter()
+            .copied()
+            .fold(0u16, u16::saturating_add);
+        if used <= available {
+            break;
+        }
+        first += 1;
+    }
+    first
+}
+
 /// Column of the close glyph inside an active tab's rect.
 pub(crate) fn close_rect(tab: Rect, surface: DockSurface) -> Rect {
     let offset = u16::try_from(surface.label().chars().count())
@@ -128,6 +219,9 @@ fn render_tab_strip(app: &AppState, frame: &mut Frame) {
         .copied()
         .zip(app.view.dock_tab_hit_areas.iter().copied())
     {
+        if area.width == 0 {
+            continue;
+        }
         let active = app.dock_tab == Some(surface);
         let style = if active {
             Style::default()
@@ -136,10 +230,14 @@ fn render_tab_strip(app: &AppState, frame: &mut Frame) {
         } else {
             Style::default().fg(app.palette.overlay0)
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(surface.label(), style))),
-            area,
-        );
+        // The last column of a tab is its separating space, so a clipped label
+        // still never touches its neighbour.
+        let label: String = surface
+            .label()
+            .chars()
+            .take(usize::from(area.width.saturating_sub(1)))
+            .collect();
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), area);
         if active {
             let close = close_rect(area, surface);
             if close.width > 0 {
