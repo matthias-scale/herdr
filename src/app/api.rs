@@ -109,6 +109,9 @@ impl App {
                 results,
                 cache_updates,
             } => self.handle_git_status_refreshed(generation, results, cache_updates),
+            AppEvent::DiffRefreshed { generation, result } => {
+                self.handle_diff_refreshed(generation, *result)
+            }
             AppEvent::GitWorkContextRefreshed {
                 generation,
                 observations,
@@ -283,6 +286,11 @@ impl App {
         } = ev
         {
             self.handle_git_work_context_refreshed(generation, observations, cache_updates);
+            return None;
+        }
+
+        if let AppEvent::DiffRefreshed { generation, result } = ev {
+            self.handle_diff_refreshed(generation, *result);
             return None;
         }
 

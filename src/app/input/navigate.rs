@@ -295,6 +295,7 @@ impl App {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
                     self.state.dock_editor_focused = false;
                     self.state.dock_home_focused = false;
+                    self.state.dock_diff_focused = false;
                 }
                 leave_navigate_mode(&mut self.state);
             }
@@ -472,6 +473,7 @@ impl App {
                 if self.state.dock_collapsed {
                     self.state.dock_home_focused = false;
                     self.state.dock_editor_focused = false;
+                    self.state.dock_diff_focused = false;
                 } else {
                     sync_dock_tab_focus(&mut self.state);
                 }
@@ -1885,6 +1887,7 @@ fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::P
 fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_home_focused = state.dock_tab == Some(crate::app::DockSurface::Home);
     state.dock_editor_focused = state.dock_tab == Some(crate::app::DockSurface::Editor);
+    state.dock_diff_focused = state.dock_tab == Some(crate::app::DockSurface::Diff);
     state.dock_chooser_focused = state.dock_tab.is_none();
 }
 
@@ -2195,6 +2198,7 @@ pub(super) fn execute_navigate_action_in_context(
                 state.focus_pane_in_workspace(ws_idx, pane_id);
                 state.dock_editor_focused = false;
                 state.dock_home_focused = false;
+                state.dock_diff_focused = false;
             }
             leave_navigate_mode(state);
         }
@@ -2361,6 +2365,7 @@ pub(super) fn execute_navigate_action_in_context(
             if state.dock_collapsed {
                 state.dock_home_focused = false;
                 state.dock_editor_focused = false;
+                state.dock_diff_focused = false;
             } else {
                 sync_dock_tab_focus(state);
             }

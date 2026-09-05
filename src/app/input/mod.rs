@@ -166,6 +166,9 @@ impl App {
         if self.handle_dock_home_key(&key) {
             return None;
         }
+        if self.handle_dock_diff_key(&key) {
+            return None;
+        }
         if self.handle_dock_chooser_key(&key) {
             return None;
         }
@@ -262,6 +265,19 @@ impl App {
                 _ => return false,
             }
             return true;
+        }
+
+        // The uppercase card shortcuts remain available while a non-terminal
+        // dock surface owns focus. Requiring Shift here preserves Home's
+        // lowercase action keys and never steals input from the editor PTY.
+        if (self.state.dock_home_focused || self.state.dock_diff_focused)
+            && event.modifiers == KeyModifiers::SHIFT
+        {
+            if let KeyCode::Char(character) = event.code {
+                if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
+                    return self.state.activate_dock_surface(surface);
+                }
+            }
         }
 
         // A maximised dock leaves no pane to type into, so one Esc gives the
@@ -397,6 +413,44 @@ impl App {
         false
     }
 
+    fn handle_dock_diff_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Diff)
+            || !self.state.dock_diff_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        let file_count = self
+            .state
+            .dock_diff_active_key
+            .as_ref()
+            .and_then(|key| self.state.dock_diff_cache.get(key))
+            .map_or(0, |entry| entry.files.len());
+        match event.code {
+            KeyCode::Char('w') => self.state.toggle_dock_diff_whitespace(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if file_count > 0 {
+                    self.state.dock_diff_selected =
+                        (self.state.dock_diff_selected + 1).min(file_count - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.state.dock_diff_selected = self.state.dock_diff_selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                self.state.toggle_selected_dock_diff_file();
+            }
+            KeyCode::Esc => self.state.dock_diff_focused = false,
+            _ => return false,
+        }
+        true
+    }
+
     /// Stage a pull request action for confirmation. Returns false when the
     /// selection is not a pull request, so the key falls through unchanged.
     fn stage_pull_request_action(&mut self, action: PullRequestAction) -> bool {
@@ -496,6 +550,10 @@ impl App {
     /// the headless input path must offer it keys before choosing a pane target.
     pub(crate) fn handle_dock_home_key_headless(&mut self, key: &TerminalKey) -> bool {
         self.state.popup_pane.is_none() && self.handle_dock_home_key(key)
+    }
+
+    pub(crate) fn handle_dock_diff_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_diff_key(key)
     }
 
     /// Same for the surface chooser: an empty dock owns its card shortcuts
@@ -1629,6 +1687,7 @@ impl App {
 
         self.state.dock_editor_focused = false;
         self.state.dock_home_focused = false;
+        self.state.dock_diff_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
@@ -2094,6 +2153,27 @@ mod tests {
     }
 
     #[test]
+    fn shifted_surface_shortcut_switches_an_already_open_focused_dock() {
+        let mut app = test_app();
+        let mut workspace = crate::workspace::Workspace::test_new("one");
+        workspace.cached_git_space = crate::workspace::git_space_metadata(
+            &std::env::current_dir().expect("current test directory"),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
+        app.state.dock_home_focused = true;
+
+        assert!(app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('D'), KeyModifiers::SHIFT,)));
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Diff));
+        assert!(app.state.dock_diff_focused);
+    }
+
+    #[test]
     fn one_escape_restores_a_maximised_dock() {
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
@@ -2120,6 +2200,30 @@ mod tests {
             !app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
         );
         assert!(app.state.dock_maximized);
+    }
+
+    #[test]
+    fn diff_whitespace_key_updates_session_state_and_invalidates_the_active_projection() {
+        let mut app = test_app();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Diff);
+        app.state.dock_diff_focused = true;
+        app.state.dock_diff_active_key = Some(crate::app::state::DiffCacheKey {
+            root: std::path::PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        });
+
+        assert!(
+            app.handle_dock_diff_key(&TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+        );
+        assert!(app.state.dock_diff_ignore_whitespace);
+        assert!(app.state.dock_diff_active_key.is_none());
+
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
+        app.state.dock_tab = Some(crate::app::DockSurface::Diff);
+        assert!(app.state.dock_diff_ignore_whitespace);
     }
 
     #[test]

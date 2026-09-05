@@ -824,6 +824,12 @@ pub(crate) struct DockPresentationState {
     pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
     pub(crate) editor_focused: bool,
+    pub(crate) diff_focused: bool,
+    pub(crate) diff_ignore_whitespace: bool,
+    pub(crate) diff_selected: usize,
+    pub(crate) diff_collapsed: std::collections::HashSet<String>,
+    pub(crate) diff_request: Option<super::diff::DiffRefreshRequest>,
+    pub(crate) diff_active_key: Option<DiffCacheKey>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -850,6 +856,12 @@ impl Default for DockPresentationState {
             chooser_focused: false,
             scroll: 0,
             editor_focused: false,
+            diff_focused: false,
+            diff_ignore_whitespace: false,
+            diff_selected: 0,
+            diff_collapsed: std::collections::HashSet::new(),
+            diff_request: None,
+            diff_active_key: None,
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -1148,6 +1160,36 @@ impl DockSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DockSurfaceMenu {
     pub(crate) selected: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DiffCacheKey {
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) base: String,
+    pub(crate) ignore_whitespace: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffFileSummary {
+    pub(crate) path: String,
+    pub(crate) display_path: String,
+    pub(crate) additions: usize,
+    pub(crate) deletions: usize,
+    pub(crate) binary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffFileContent {
+    pub(crate) committed: Vec<super::diff::DiffLine>,
+    pub(crate) uncommitted: Vec<super::diff::DiffLine>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffCacheEntry {
+    pub(crate) branch: String,
+    pub(crate) files: Vec<DiffFileSummary>,
+    pub(crate) contents: std::collections::HashMap<String, DiffFileContent>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2120,6 +2162,17 @@ pub struct AppState {
     pub(crate) dock_chooser_focused: bool,
     pub dock_scroll: u16,
     pub(crate) dock_editor_focused: bool,
+    /// Diff interaction state is attach-local TUI state. The whitespace choice
+    /// survives surface switches for the lifetime of the client session.
+    pub(crate) dock_diff_focused: bool,
+    pub(crate) dock_diff_ignore_whitespace: bool,
+    pub(crate) dock_diff_selected: usize,
+    pub(crate) dock_diff_collapsed: std::collections::HashSet<String>,
+    pub(crate) dock_diff_request: Option<super::diff::DiffRefreshRequest>,
+    pub(crate) dock_diff_active_key: Option<DiffCacheKey>,
+    pub(crate) dock_diff_cache: std::collections::HashMap<DiffCacheKey, DiffCacheEntry>,
+    pub(crate) dock_diff_resolved_requests:
+        std::collections::HashMap<super::diff::DiffRefreshRequest, DiffCacheKey>,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
@@ -2503,6 +2556,7 @@ impl AppState {
         self.dock_collapsed = false;
         self.open_dock_surface(DockSurface::Scratchpad);
         self.dock_editor_focused = false;
+        self.dock_diff_focused = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
@@ -2623,6 +2677,7 @@ impl AppState {
         if self.dock_tab.is_none() {
             self.dock_editor_focused = false;
             self.dock_home_focused = false;
+            self.dock_diff_focused = false;
             self.dock_chooser_focused = true;
         }
     }
@@ -2659,6 +2714,15 @@ impl AppState {
         std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
         std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
+        std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
+        std::mem::swap(
+            &mut self.dock_diff_ignore_whitespace,
+            &mut other.diff_ignore_whitespace,
+        );
+        std::mem::swap(&mut self.dock_diff_selected, &mut other.diff_selected);
+        std::mem::swap(&mut self.dock_diff_collapsed, &mut other.diff_collapsed);
+        std::mem::swap(&mut self.dock_diff_request, &mut other.diff_request);
+        std::mem::swap(&mut self.dock_diff_active_key, &mut other.diff_active_key);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -3158,6 +3222,14 @@ impl AppState {
             dock_chooser_focused: false,
             dock_scroll: 0,
             dock_editor_focused: false,
+            dock_diff_focused: false,
+            dock_diff_ignore_whitespace: false,
+            dock_diff_selected: 0,
+            dock_diff_collapsed: std::collections::HashSet::new(),
+            dock_diff_request: None,
+            dock_diff_active_key: None,
+            dock_diff_cache: std::collections::HashMap::new(),
+            dock_diff_resolved_requests: std::collections::HashMap::new(),
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,

@@ -14,6 +14,7 @@ pub(crate) use api_helpers::read_terminal_snapshot;
 pub(crate) mod claude_subagents;
 mod config_io;
 mod creation;
+pub(crate) mod diff;
 pub(crate) mod foreground_process;
 mod git_actions;
 mod git_refresh;
@@ -154,6 +155,8 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) diff_refresh_in_flight: Option<(u64, diff::DiffRefreshTarget)>,
+    pub(crate) last_diff_refresh_generation: u64,
     pub(crate) git_work_context_refresh_in_flight:
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) git_work_context_refresh_due_after_in_flight: bool,
@@ -831,6 +834,14 @@ impl App {
             dock_chooser_focused: false,
             dock_scroll: 0,
             dock_editor_focused: false,
+            dock_diff_focused: false,
+            dock_diff_ignore_whitespace: false,
+            dock_diff_selected: 0,
+            dock_diff_collapsed: std::collections::HashSet::new(),
+            dock_diff_request: None,
+            dock_diff_active_key: None,
+            dock_diff_cache: std::collections::HashMap::new(),
+            dock_diff_resolved_requests: std::collections::HashMap::new(),
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -1021,6 +1032,8 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            diff_refresh_in_flight: None,
+            last_diff_refresh_generation: 0,
             git_work_context_refresh_in_flight: None,
             git_work_context_refresh_due_after_in_flight: false,
             git_work_context_rotation: 0,
@@ -2168,6 +2181,13 @@ impl App {
                                 continue;
                             }
                             if self.handle_dock_home_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_diff_key_headless(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,

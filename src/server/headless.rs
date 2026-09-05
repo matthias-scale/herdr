@@ -4863,6 +4863,7 @@ impl HeadlessServer {
             // Work-context links matter only while a TUI is attached and viewing panes.
             self.app.start_git_work_context_refresh_if_due(now);
             self.app.start_git_status_refresh_if_due(now);
+            changed |= self.start_foreground_dock_diff_refresh_if_needed();
         }
         // Without a TUI, only idle agents need foreground-child promotion. Keeping the
         // target set narrow avoids recurring process-tree scans for ordinary API panes.
@@ -4946,6 +4947,25 @@ impl HeadlessServer {
             changed |= self
                 .app
                 .start_pending_agent_resumes(self.app.pending_agent_resume_due(now));
+        }
+        changed
+    }
+
+    fn start_foreground_dock_diff_refresh_if_needed(&mut self) -> bool {
+        let Some(client_id) = self.foreground_client_id else {
+            return false;
+        };
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        let mut presentation = std::mem::take(&mut client.dock_presentation);
+        let before = presentation.clone();
+        self.app.state.swap_dock_presentation(&mut presentation);
+        self.app.start_dock_diff_refresh_if_needed();
+        self.app.state.swap_dock_presentation(&mut presentation);
+        let changed = presentation != before;
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.dock_presentation = presentation;
         }
         changed
     }
@@ -6026,6 +6046,12 @@ mod tests {
                 chooser_focused: false,
                 scroll: 0,
                 editor_focused,
+                diff_focused: false,
+                diff_ignore_whitespace: false,
+                diff_selected: 0,
+                diff_collapsed: std::collections::HashSet::new(),
+                diff_request: None,
+                diff_active_key: None,
                 home_selection: None,
                 home_ticket_selection: None,
                 home_poll_selection: None,

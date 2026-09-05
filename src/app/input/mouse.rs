@@ -589,6 +589,8 @@ impl AppState {
                     self.dock_collapsed = !self.dock_collapsed;
                     self.dock_home_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Home);
+                    self.dock_diff_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Diff);
                     self.mark_session_dirty();
                     return None;
                 }
@@ -619,6 +621,8 @@ impl AppState {
                             self.dock_tab == Some(crate::app::DockSurface::Editor);
                         self.dock_home_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Home);
+                        self.dock_diff_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Diff);
                     }
                     return None;
                 }
@@ -634,6 +638,18 @@ impl AppState {
                     self.open_dock_surface(tab);
                     self.dock_editor_focused = tab == crate::app::DockSurface::Editor;
                     self.dock_home_focused = tab == crate::app::DockSurface::Home;
+                    self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
+                    return None;
+                }
+                if self.on_dock_diff_whitespace_toggle(mouse.column, mouse.row) {
+                    self.toggle_dock_diff_whitespace();
+                    self.dock_diff_focused = true;
+                    return None;
+                }
+                if let Some(index) = self.dock_diff_file_at(mouse.column, mouse.row) {
+                    self.dock_diff_selected = index;
+                    self.dock_diff_focused = true;
+                    self.toggle_selected_dock_diff_file();
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -691,6 +707,7 @@ impl AppState {
                 if in_dock {
                     self.dock_editor_focused =
                         self.dock_tab == Some(crate::app::DockSurface::Editor);
+                    self.dock_diff_focused = self.dock_tab == Some(crate::app::DockSurface::Diff);
                     // Clicking an empty dock hands it the keyboard so the card
                     // shortcuts work without a tab to focus first.
                     self.dock_chooser_focused = self.dock_tab.is_none();
