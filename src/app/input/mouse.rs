@@ -350,21 +350,29 @@ impl AppState {
         }
 
         if self.mode == Mode::GitMenu {
+            let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(self);
             match mouse.kind {
                 MouseEventKind::Moved => {
                     let hovered = self
                         .git_menu_row_at(mouse.column, mouse.row)
-                        .filter(|index| *index < crate::app::state::GitAction::ALL.len());
+                        .filter(|index| {
+                            in_git_repo && *index < crate::app::state::GitAction::ALL.len()
+                        });
                     self.git_menu.hover(hovered);
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(index) = self.git_menu_row_at(mouse.column, mouse.row) {
-                        if let Some(action) = crate::app::state::GitAction::ALL.get(index).copied()
-                        {
-                            self.request_git_action = Some(action);
+                    if in_git_repo {
+                        if let Some(index) = self.git_menu_row_at(mouse.column, mouse.row) {
+                            if let Some(action) =
+                                crate::app::state::GitAction::ALL.get(index).copied()
+                            {
+                                self.request_git_action = Some(action);
+                                self.mode = Mode::Terminal;
+                            }
+                        } else {
                             self.mode = Mode::Terminal;
                         }
-                    } else {
+                    } else if self.git_menu_row_at(mouse.column, mouse.row).is_none() {
                         self.mode = Mode::Terminal;
                     }
                 }
@@ -5249,6 +5257,23 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.ensure_test_terminals();
+        let focused_pane = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(focused_pane)
+            .expect("terminal")
+            .clone();
+        let cwd = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal state")
+            .cwd
+            .clone();
+        app.state
+            .git_root_for_cwd
+            .insert(cwd.clone(), Some(cwd.clone()));
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let button = app.state.view.git_menu_button_hit_area;
@@ -5283,6 +5308,18 @@ mod tests {
             MouseEventKind::Down(MouseButton::Left),
             status.x + 1,
             status.y,
+        ));
+        assert_eq!(app.state.request_git_action, None);
+        assert_eq!(app.state.mode, Mode::GitMenu);
+
+        app.state.git_root_for_cwd.insert(cwd, None);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        assert_eq!(app.state.view.git_menu_row_hit_areas.len(), 1);
+        let info = app.state.view.git_menu_row_hit_areas[0];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.x + 1,
+            info.y,
         ));
         assert_eq!(app.state.request_git_action, None);
         assert_eq!(app.state.mode, Mode::GitMenu);

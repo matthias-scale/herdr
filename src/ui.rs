@@ -400,11 +400,13 @@ fn compute_view_internal(
         };
 
     let git_menu_layout = (app.mode == Mode::GitMenu).then(|| {
+        let in_git_repo = dock::chooser::focused_in_git_repo(app);
         tabs::git_menu_dropdown_layout(
             git_menu_button_hit_area,
             area,
             app.git_menu.highlighted,
             app.status_git_ahead_behind,
+            in_git_repo,
         )
     });
     let git_menu_layout = git_menu_layout.flatten();
@@ -1780,6 +1782,19 @@ mod tests {
             app.mouse_capture = true;
             app.workspaces = vec![Workspace::test_new("one")];
             app.active = Some(0);
+            app.ensure_test_terminals();
+            let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+            let terminal_id = app.workspaces[0]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            let cwd = app
+                .terminals
+                .get(&terminal_id)
+                .expect("terminal state")
+                .cwd
+                .clone();
+            app.git_root_for_cwd.insert(cwd.clone(), Some(cwd));
 
             compute_view(&mut app, Rect::new(0, 0, width, height));
             app.status_git_cwd = app.status_focused_cwd.clone();

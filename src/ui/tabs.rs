@@ -26,6 +26,7 @@ pub(crate) const PANE_TOGGLE_BELOW_GLYPH: char = '\u{25ad}';
 pub(crate) const PANE_TOGGLE_RIGHT_GLYPH: char = '\u{25af}';
 pub(crate) const GIT_MENU_BUTTON_WIDTH: u16 = 10;
 pub(crate) const GIT_MENU_STATUS: &str = "⚠ Behind upstream. Pull first.";
+pub(crate) const GIT_MENU_UNAVAILABLE: &str = "Not a git repository";
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 
@@ -355,14 +356,22 @@ pub(crate) fn git_menu_dropdown_layout(
     area: Rect,
     selected: usize,
     ahead_behind: Option<(usize, usize)>,
+    in_git_repo: bool,
 ) -> Option<crate::ui::dropdown::DropdownLayout> {
-    let item_count = crate::app::state::GitAction::ALL.len()
-        + usize::from(git_menu_status_visible(ahead_behind));
+    let item_count = if in_git_repo {
+        crate::app::state::GitAction::ALL.len() + usize::from(git_menu_status_visible(ahead_behind))
+    } else {
+        1
+    };
     crate::ui::dropdown::layout_dropdown(
         &crate::ui::dropdown::DropdownSpec {
             anchor,
             item_count,
-            selected: selected.min(crate::app::state::GitAction::ALL.len() - 1),
+            selected: if in_git_repo {
+                selected.min(crate::app::state::GitAction::ALL.len() - 1)
+            } else {
+                0
+            },
             has_filter: false,
             max_rows: item_count,
             min_width: 34,
@@ -530,13 +539,19 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
     let p = &app.palette;
     let menu_rect = app.view.git_menu_button_hit_area;
     if app.mouse_capture && menu_rect.width > 0 {
+        let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(app);
         let open = app.mode == crate::app::Mode::GitMenu;
         let label = if open && app.view.git_menu_popup_rect.width == 0 {
             " no room "
         } else {
             " ⇣ Pull ▾ "
         };
-        let style = if open {
+        let style = if !in_git_repo {
+            Style::default()
+                .fg(p.overlay0)
+                .bg(p.surface0)
+                .add_modifier(Modifier::DIM)
+        } else if open {
             Style::default()
                 .fg(panel_contrast_fg(p))
                 .bg(p.accent)
@@ -578,6 +593,22 @@ pub(super) fn render_git_menu(app: &AppState, frame: &mut Frame) {
     }
 
     frame.render_widget(Clear, app.view.git_menu_popup_rect);
+    if !crate::ui::dock::chooser::focused_in_git_repo(app) {
+        if let Some(rect) = app.view.git_menu_row_hit_areas.first().copied() {
+            let style = Style::default()
+                .fg(app.palette.overlay0)
+                .bg(app.palette.panel_bg);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {GIT_MENU_UNAVAILABLE}"),
+                    style,
+                )))
+                .style(Style::default().bg(app.palette.panel_bg)),
+                rect,
+            );
+        }
+        return;
+    }
     let action_count = crate::app::state::GitAction::ALL.len();
     for (offset, rect) in app.view.git_menu_row_hit_areas.iter().copied().enumerate() {
         let index = app.view.git_menu_first_visible + offset;
@@ -774,6 +805,25 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn set_focused_git_availability(app: &mut AppState, in_git_repo: bool) {
+        if app.workspaces.is_empty() {
+            app.workspaces = vec![Workspace::test_new("git-menu")];
+            app.active = Some(0);
+            app.ensure_test_terminals();
+        }
+        let workspace = &app.workspaces[app.active.expect("active workspace")];
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal").clone();
+        let cwd = app
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal state")
+            .cwd
+            .clone();
+        app.git_root_for_cwd
+            .insert(cwd.clone(), in_git_repo.then_some(cwd));
     }
 
     #[test]
@@ -1219,16 +1269,22 @@ mod tests {
                 git_menu_status_visible(ahead_behind),
                 ahead_behind.is_some_and(|(_, behind)| behind > 0)
             );
-            let layout = git_menu_dropdown_layout(anchor, area, 0, ahead_behind)
+            let layout = git_menu_dropdown_layout(anchor, area, 0, ahead_behind, true)
                 .expect("menu fits below the tab row");
             assert_eq!(layout.rect.y, anchor.y + anchor.height);
             assert_eq!(layout.visible_rows, expected_rows);
         }
+
+        let unavailable = git_menu_dropdown_layout(anchor, area, 3, Some((2, 3)), false)
+            .expect("info row fits below the tab row");
+        assert_eq!(unavailable.rect.y, anchor.y + anchor.height);
+        assert_eq!(unavailable.visible_rows, 1);
     }
 
     #[test]
     fn git_menu_renders_actions_in_order_then_nonselectable_status() {
         let mut app = AppState::test_new();
+        set_focused_git_availability(&mut app, true);
         app.mode = crate::app::Mode::GitMenu;
         app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 5);
         app.view.git_menu_row_hit_areas = (1..=5).map(|y| Rect::new(0, y, 34, 1)).collect();
@@ -1247,5 +1303,32 @@ mod tests {
         assert!(rows[3].contains("Create PR"), "{rows:?}");
         assert!(rows[4].contains(GIT_MENU_STATUS), "{rows:?}");
         assert_ne!(buffer[(1, 5)].style().bg, Some(app.palette.accent));
+    }
+
+    #[test]
+    fn git_menu_dims_button_and_renders_only_info_outside_repository() {
+        let mut app = AppState::test_new();
+        set_focused_git_availability(&mut app, false);
+        app.mouse_capture = true;
+        app.mode = crate::app::Mode::GitMenu;
+        app.view.git_menu_button_hit_area = Rect::new(0, 0, GIT_MENU_BUTTON_WIDTH, 1);
+        app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 1);
+        app.view.git_menu_row_hit_areas = vec![Rect::new(0, 1, 34, 1)];
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_tab_action_buttons(&app, frame);
+                render_git_menu(&app, frame);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let button_style = buffer[(1, 0)].style();
+        assert_eq!(button_style.fg, Some(app.palette.overlay0));
+        assert!(button_style.add_modifier.contains(Modifier::DIM));
+        let row = buffer_row_text(buffer, Rect::new(0, 1, 34, 1), 1);
+        assert!(row.contains(GIT_MENU_UNAVAILABLE), "menu row: {row:?}");
+        assert!(!row.contains("Pull"), "menu row: {row:?}");
     }
 }
