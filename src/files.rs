@@ -360,7 +360,12 @@ mod tests {
             .map(|file| file.path.as_path())
             .collect::<Vec<_>>();
 
-        assert_eq!(snapshot.root, temp.0);
+        // git prints the canonical toplevel; on macOS the temp dir lives under
+        // /var, a symlink to /private/var, so compare canonical paths.
+        assert_eq!(
+            snapshot.root.canonicalize().expect("canonical root"),
+            temp.0.canonicalize().expect("canonical fixture")
+        );
         assert!(paths.contains(&Path::new("src/lib.rs")));
         assert!(paths.contains(&Path::new("src/nested/data.json")));
         assert!(paths.contains(&Path::new(".gitignore")));
