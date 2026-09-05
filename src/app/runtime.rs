@@ -404,6 +404,7 @@ impl App {
         }
 
         changed |= self.clear_due_selection_highlight(now);
+        changed |= self.process_git_action_panes(now);
 
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
@@ -897,6 +898,7 @@ impl App {
             self.loop_receipt_fallback_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
+            self.git_action_deadline(),
             render_deadline,
         ]
         .into_iter()

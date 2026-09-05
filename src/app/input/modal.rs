@@ -99,6 +99,23 @@ pub(super) fn open_global_menu(state: &mut AppState) {
     state.mode = Mode::GlobalMenu;
 }
 
+pub(crate) fn handle_git_menu_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => state.mode = Mode::Terminal,
+        KeyCode::Up | KeyCode::Char('k') => state.git_menu.move_prev(),
+        KeyCode::Down | KeyCode::Char('j') => state
+            .git_menu
+            .move_next(crate::app::state::GitAction::ALL.len()),
+        KeyCode::Enter => {
+            state.request_git_action = crate::app::state::GitAction::ALL
+                .get(state.git_menu.highlighted)
+                .copied();
+            state.mode = Mode::Terminal;
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn open_keybind_help(state: &mut AppState) {
     state.keybind_help.scroll = 0;
     state.keybind_help.query.clear();

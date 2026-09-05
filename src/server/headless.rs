@@ -898,6 +898,11 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_pane_toggle");
         }
 
+        if self.app.apply_git_action_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_git_action");
+        }
+
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
@@ -4852,6 +4857,7 @@ impl HeadlessServer {
         }
 
         changed |= self.app.clear_due_selection_highlight(now);
+        changed |= self.app.process_git_action_panes(now);
 
         if self.has_app_client() {
             // Work-context links matter only while a TUI is attached and viewing panes.

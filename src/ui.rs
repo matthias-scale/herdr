@@ -98,7 +98,7 @@ use self::symphony::render as render_symphony;
 pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
-use self::tabs::render_tab_bar;
+use self::tabs::{render_git_menu, render_tab_action_buttons, render_tab_bar};
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
@@ -138,7 +138,7 @@ pub(crate) use self::{
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
-    tabs::{compute_tab_bar_view, pane_toggle_fallback_hit_areas},
+    tabs::{compute_tab_bar_view, tab_action_fallback_hit_areas},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -376,17 +376,50 @@ fn compute_view_internal(
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
     // A hidden tab row leaves the toggles homeless; the status row takes them.
-    let (pane_toggle_below_hit_area, pane_toggle_right_hit_area) =
+    let (git_menu_button_hit_area, pane_toggle_below_hit_area, pane_toggle_right_hit_area) =
         if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
             (
+                tab_bar_view.git_menu_button_hit_area,
                 tab_bar_view.pane_toggle_below_hit_area,
                 tab_bar_view.pane_toggle_right_hit_area,
             )
         } else if app.active.is_some() {
-            tabs::pane_toggle_fallback_hit_areas(status_bar_rect, app.mouse_capture)
+            tabs::tab_action_fallback_hit_areas(status_bar_rect, app.mouse_capture)
         } else {
-            (Rect::default(), Rect::default())
+            (Rect::default(), Rect::default(), Rect::default())
         };
+
+    let git_menu_layout = (app.mode == Mode::GitMenu).then(|| {
+        tabs::git_menu_dropdown_layout(
+            git_menu_button_hit_area,
+            area,
+            app.git_menu.highlighted,
+            app.status_git_ahead_behind,
+        )
+    });
+    let git_menu_layout = git_menu_layout.flatten();
+    let git_menu_popup_rect = git_menu_layout
+        .as_ref()
+        .map(|layout| layout.rect)
+        .unwrap_or_default();
+    let git_menu_first_visible = git_menu_layout
+        .as_ref()
+        .map(|layout| layout.first_visible)
+        .unwrap_or_default();
+    let git_menu_row_hit_areas = git_menu_layout
+        .map(|layout| {
+            (0..layout.visible_rows)
+                .map(|offset| {
+                    Rect::new(
+                        layout.list_rect.x,
+                        layout.list_rect.y + offset as u16,
+                        layout.list_rect.width,
+                        1,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let TabSurfaceLayout {
         pane_infos,
@@ -509,6 +542,10 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        git_menu_button_hit_area,
+        git_menu_popup_rect,
+        git_menu_first_visible,
+        git_menu_row_hit_areas,
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
         terminal_area,
@@ -707,6 +744,10 @@ fn compute_mobile_view(
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
+        git_menu_button_hit_area: Rect::default(),
+        git_menu_popup_rect: Rect::default(),
+        git_menu_first_visible: 0,
+        git_menu_row_hit_areas: Vec::new(),
         pane_toggle_below_hit_area: Rect::default(),
         pane_toggle_right_hit_area: Rect::default(),
         terminal_area,
@@ -791,7 +832,7 @@ fn render_with_runtime_registry_inner(
         render_tab_bar(app, frame, tab_bar_area);
     }
     if app.view.layout != ViewLayout::Mobile {
-        tabs::render_pane_toggle_buttons(app, frame);
+        render_tab_action_buttons(app, frame);
     }
     if let Some(detail) = app.symphony_detail.as_ref() {
         render_symphony(
@@ -875,6 +916,7 @@ fn render_with_runtime_registry_inner(
         Mode::ContextMenu => {
             render_context_menu(app, frame);
         }
+        Mode::GitMenu => render_git_menu(app, frame),
         Mode::Settings => render_settings_overlay(app, frame, frame.area()),
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
             render_rename_overlay(app, frame, frame.area())
@@ -1524,8 +1566,13 @@ mod tests {
 
             assert_eq!(app.view.tab_bar_rect, Rect::default(), "{width}x{height}");
             let status = app.view.status_bar_rect;
+            let git = app.view.git_menu_button_hit_area;
             let below = app.view.pane_toggle_below_hit_area;
             let right = app.view.pane_toggle_right_hit_area;
+            assert_eq!(
+                git,
+                Rect::new(status.x + status.width - 16, status.y, 10, 1)
+            );
             assert_eq!(
                 below,
                 Rect::new(status.x + status.width - 6, status.y, 3, 1)
@@ -1543,6 +1590,41 @@ mod tests {
                 row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH),
                 "{width}x{height} status row: {row:?}"
             );
+            assert!(
+                row.contains("⇣ Pull ▾"),
+                "{width}x{height} status row: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_view_records_git_menu_button_popup_and_row_hit_areas() {
+        for (width, height) in [(120u16, 40u16), (80, 24)] {
+            let mut app = crate::app::state::AppState::test_new();
+            let defaults = crate::config::Config::default();
+            app.tab_bar_position = defaults.ui.tab_bar_position;
+            app.mouse_capture = true;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            app.status_git_cwd = app.status_focused_cwd.clone();
+            app.status_git_ahead_behind = Some((0, 1));
+            app.mode = Mode::GitMenu;
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+
+            assert_eq!(app.view.git_menu_button_hit_area.width, 10);
+            assert_eq!(
+                app.view.git_menu_popup_rect.y,
+                app.view.git_menu_button_hit_area.y + 1
+            );
+            assert_eq!(app.view.git_menu_row_hit_areas.len(), 5);
+            assert!(app
+                .view
+                .git_menu_row_hit_areas
+                .iter()
+                .all(|row| app.view.git_menu_popup_rect.contains((row.x, row.y).into())));
         }
     }
 
@@ -1561,6 +1643,7 @@ mod tests {
 
         assert_eq!(app.view.pane_toggle_below_hit_area, Rect::default());
         assert_eq!(app.view.pane_toggle_right_hit_area, Rect::default());
+        assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| render(&app, frame)).unwrap();

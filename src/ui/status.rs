@@ -54,7 +54,7 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         .unwrap_or(&unavailable);
     // The pane toggles sit at the far right of this row when the tab row is
     // hidden, so the segments must stop short of them instead of underlapping.
-    let reserved = super::tabs::pane_toggle_status_bar_reserved_width(app, area);
+    let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
     let content_width = area.width.saturating_sub(reserved);
     if usize::from(content_width) < minimum_required_status_width(app) {
         return;
