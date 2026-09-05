@@ -162,14 +162,32 @@ fn tab_focus(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn tab_rename(args: &[String]) -> std::io::Result<i32> {
-    if args.len() < 2 {
-        eprintln!("usage: herdr tab rename <tab_id> <label>");
+    let Some(params) = parse_tab_rename_args(args) else {
+        eprintln!("usage: herdr tab rename <tab_id> <label>|--clear");
         return Ok(2);
+    };
+
+    super::runtime::tab_rename(params)
+}
+
+fn parse_tab_rename_args(args: &[String]) -> Option<TabRenameParams> {
+    let (raw_tab_id, rest) = args.split_first()?;
+    if rest.is_empty() {
+        return None;
     }
 
-    super::runtime::tab_rename(TabRenameParams {
-        tab_id: super::normalize_tab_id(&args[0]),
-        label: args[1..].join(" "),
+    // Mirrors `agent rename --clear`: the flag stands in for the label rather
+    // than sitting beside it, so the two can never disagree. A label may contain
+    // spaces, so anything past the first word is joined back together.
+    let label = if rest == ["--clear"] {
+        None
+    } else {
+        Some(rest.join(" "))
+    };
+
+    Some(TabRenameParams {
+        tab_id: super::normalize_tab_id(raw_tab_id),
+        label,
     })
 }
 
@@ -266,4 +284,42 @@ fn print_tab_help() {
     eprintln!("  herdr tab rename <tab_id> <label>");
     eprintln!("  herdr tab prio [<tab_id>|--tab ID|--current] [--toggle|--on|--off]");
     eprintln!("  herdr tab close <tab_id>");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn tab_rename_joins_a_multi_word_label() {
+        let params = parse_tab_rename_args(&args(&["w1:t2", "Find", "repairable", "GPUs"]))
+            .expect("a label should parse");
+        assert_eq!(params.label.as_deref(), Some("Find repairable GPUs"));
+    }
+
+    #[test]
+    fn tab_rename_clear_drops_the_label() {
+        let params =
+            parse_tab_rename_args(&args(&["w1:t2", "--clear"])).expect("--clear should parse");
+        assert_eq!(params.label, None);
+    }
+
+    #[test]
+    fn tab_rename_treats_clear_among_words_as_a_literal_label() {
+        // Only a lone `--clear` clears; otherwise it is part of the name the
+        // user typed and must not silently wipe the tab label instead.
+        let params = parse_tab_rename_args(&args(&["w1:t2", "--clear", "later"]))
+            .expect("a label should parse");
+        assert_eq!(params.label.as_deref(), Some("--clear later"));
+    }
+
+    #[test]
+    fn tab_rename_needs_a_tab_and_a_label() {
+        assert!(parse_tab_rename_args(&args(&[])).is_none());
+        assert!(parse_tab_rename_args(&args(&["w1:t2"])).is_none());
+    }
 }

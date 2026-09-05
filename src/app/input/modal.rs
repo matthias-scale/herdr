@@ -1088,7 +1088,7 @@ impl App {
                             "tui.tab.rename",
                             crate::api::schema::TabRenameParams {
                                 tab_id,
-                                label: new_name,
+                                label: Some(new_name),
                             },
                         );
                     }
