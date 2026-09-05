@@ -693,6 +693,7 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pane_toggle: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -752,6 +753,8 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                pane_toggle_below_hit_area: Rect::default(),
+                pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 info_panel_rect: Rect::default(),
                 info_panel_link_rows: Vec::new(),
@@ -1304,6 +1307,10 @@ impl App {
 
             if let Some((ws_idx, tab_idx)) = self.state.request_pin_toggle.take() {
                 self.toggle_pin_tab_via_api(ws_idx, tab_idx);
+                needs_render = true;
+            }
+
+            if self.apply_pane_toggle_request() {
                 needs_render = true;
             }
 

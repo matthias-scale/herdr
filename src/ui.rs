@@ -496,6 +496,8 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        pane_toggle_below_hit_area: tab_bar_view.pane_toggle_below_hit_area,
+        pane_toggle_right_hit_area: tab_bar_view.pane_toggle_right_hit_area,
         terminal_area,
         info_panel_rect,
         // Both surfaces feed one list because one click handler serves it: the panel
@@ -692,6 +694,8 @@ fn compute_mobile_view(
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
+        pane_toggle_below_hit_area: Rect::default(),
+        pane_toggle_right_hit_area: Rect::default(),
         terminal_area,
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),

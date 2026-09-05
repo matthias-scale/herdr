@@ -636,6 +636,11 @@ impl AppState {
                     return None;
                 }
 
+                if let Some(direction) = self.pane_toggle_at(mouse.column, mouse.row) {
+                    self.request_pane_toggle = Some(direction);
+                    self.mode = Mode::Terminal;
+                    return None;
+                }
                 if self.on_tab_scroll_left_button(mouse.column, mouse.row) {
                     self.scroll_tabs_left();
                     return None;
@@ -1577,6 +1582,32 @@ impl AppState {
         }
 
         Some(last_idx + 1)
+    }
+
+    pub(super) fn pane_toggle_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::PaneToggleDirection> {
+        [
+            (
+                self.view.pane_toggle_below_hit_area,
+                crate::app::state::PaneToggleDirection::Below,
+            ),
+            (
+                self.view.pane_toggle_right_hit_area,
+                crate::app::state::PaneToggleDirection::Right,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(area, direction)| {
+            (area.width > 0
+                && row >= area.y
+                && row < area.y + area.height
+                && col >= area.x
+                && col < area.x + area.width)
+                .then_some(direction)
+        })
     }
 
     pub(super) fn on_new_tab_button(&self, col: u16, row: u16) -> bool {
@@ -4939,5 +4970,89 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    #[test]
+    fn tab_row_pane_toggle_requests_a_split_when_no_sibling_exists() {
+        for direction in [
+            crate::app::state::PaneToggleDirection::Below,
+            crate::app::state::PaneToggleDirection::Right,
+        ] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.ensure_test_terminals();
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let area = match direction {
+                crate::app::state::PaneToggleDirection::Below => {
+                    app.state.view.pane_toggle_below_hit_area
+                }
+                crate::app::state::PaneToggleDirection::Right => {
+                    app.state.view.pane_toggle_right_hit_area
+                }
+            };
+            assert!(area.width > 0, "{direction:?} button should be visible");
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 1,
+                area.y,
+            ));
+
+            assert_eq!(app.state.request_pane_toggle, Some(direction));
+            // No sibling on that side, so the toggle resolves to a split.
+            assert_eq!(app.state.pane_toggle_sibling(direction), None);
+        }
+    }
+
+    #[test]
+    fn tab_row_pane_toggle_closes_the_pane_already_in_that_direction() {
+        for (direction, split) in [
+            (
+                crate::app::state::PaneToggleDirection::Below,
+                ratatui::layout::Direction::Vertical,
+            ),
+            (
+                crate::app::state::PaneToggleDirection::Right,
+                ratatui::layout::Direction::Horizontal,
+            ),
+        ] {
+            let mut app = app_for_mouse_test();
+            let mut ws = Workspace::test_new("one");
+            let sibling = ws.test_split(split);
+            let root = ws.tabs[0].root_pane;
+            ws.tabs[0].layout.focus_pane(root);
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.ensure_test_terminals();
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let area = match direction {
+                crate::app::state::PaneToggleDirection::Below => {
+                    app.state.view.pane_toggle_below_hit_area
+                }
+                crate::app::state::PaneToggleDirection::Right => {
+                    app.state.view.pane_toggle_right_hit_area
+                }
+            };
+            assert_eq!(app.state.pane_toggle_sibling(direction), Some(sibling));
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 1,
+                area.y,
+            ));
+            assert_eq!(app.state.request_pane_toggle, Some(direction));
+            assert!(app.apply_pane_toggle_request());
+
+            let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
+            assert_eq!(panes, vec![root], "{direction:?} should close {sibling:?}");
+            assert!(app.state.request_pane_toggle.is_none());
+        }
     }
 }

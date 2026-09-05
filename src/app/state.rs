@@ -1000,6 +1000,30 @@ pub(crate) struct HomeHitArea {
     pub(crate) rect: Rect,
 }
 
+/// Which pane-toggle button in the tab row was pressed. TUI-only presentation
+/// state: it is resolved into the existing split/close runtime calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneToggleDirection {
+    Below,
+    Right,
+}
+
+impl PaneToggleDirection {
+    pub(crate) fn nav(self) -> crate::layout::NavDirection {
+        match self {
+            PaneToggleDirection::Below => crate::layout::NavDirection::Down,
+            PaneToggleDirection::Right => crate::layout::NavDirection::Right,
+        }
+    }
+
+    pub(crate) fn split(self) -> crate::api::schema::SplitDirection {
+        match self {
+            PaneToggleDirection::Below => crate::api::schema::SplitDirection::Down,
+            PaneToggleDirection::Right => crate::api::schema::SplitDirection::Right,
+        }
+    }
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
@@ -1013,6 +1037,8 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub pane_toggle_below_hit_area: Rect,
+    pub pane_toggle_right_hit_area: Rect,
     pub terminal_area: Rect,
     pub info_panel_rect: Rect,
     pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
@@ -1759,6 +1785,9 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    /// Set by a click on a tab-row pane toggle, drained by the runtime loop
+    /// into the same split/close calls the keybindings use.
+    pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
     pub request_pin_toggle: Option<(usize, usize)>,
@@ -2663,6 +2692,7 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pane_toggle: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -2717,6 +2747,8 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                pane_toggle_below_hit_area: Rect::default(),
+                pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 info_panel_rect: Rect::default(),
                 info_panel_link_rows: Vec::new(),

@@ -1937,6 +1937,8 @@ impl AppState {
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
+            self.view.pane_toggle_below_hit_area = ratatui::layout::Rect::default();
+            self.view.pane_toggle_right_hit_area = ratatui::layout::Rect::default();
             return;
         };
 
@@ -1953,6 +1955,8 @@ impl AppState {
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
+        self.view.pane_toggle_below_hit_area = layout.pane_toggle_below_hit_area;
+        self.view.pane_toggle_right_hit_area = layout.pane_toggle_right_hit_area;
     }
 }
 
@@ -2228,6 +2232,19 @@ impl AppState {
                 .unwrap_or(0);
             pane_count <= 1 && ws.tabs.len() <= 1
         })
+    }
+
+    /// The pane a tab-row toggle button would close, i.e. the focused pane's
+    /// nearest layout sibling in that direction. `None` means the button splits.
+    pub(crate) fn pane_toggle_sibling(
+        &self,
+        direction: crate::app::state::PaneToggleDirection,
+    ) -> Option<PaneId> {
+        self.workspaces
+            .get(self.active?)?
+            .active_tab()?
+            .layout
+            .adjacent_sibling_pane(direction.nav())
     }
 
     pub(crate) fn close_pane_would_close_workspace(&self, ws_idx: usize, pane_id: PaneId) -> bool {
