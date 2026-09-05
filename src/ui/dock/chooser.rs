@@ -12,9 +12,12 @@ use ratatui::{
     Frame,
 };
 
+use std::path::Path;
+
 use crate::app::state::{AppState, DockSurface};
 use crate::ui::dropdown::{layout_dropdown, DropdownLayout, DropdownSpec};
 use crate::work_context::PaneWorkContext;
+use crate::workspace::Workspace;
 
 /// Width of the `+` menu. Wide enough for the longest title plus its hint,
 /// narrow enough for the minimum dock.
@@ -43,14 +46,31 @@ pub(crate) fn focused_availability(app: &AppState) -> (PaneWorkContext, bool) {
     let Some(workspace) = app.active.and_then(|index| app.workspaces.get(index)) else {
         return (PaneWorkContext::default(), false);
     };
-    let in_git_repo = workspace.cached_git_space.is_some();
     let context = workspace
         .focused_pane_id()
         .and_then(|pane_id| workspace.terminal_id(pane_id))
         .and_then(|terminal_id| app.terminals.get(terminal_id))
         .map(|terminal| terminal.effective_work_context().clone())
         .unwrap_or_default();
+    let in_git_repo = workspace
+        .focused_cached_cwd(&app.terminals)
+        .is_some_and(|cwd| cwd_in_git_repo(app, workspace, &cwd));
     (context, in_git_repo)
+}
+
+/// Is `cwd` inside a repository? Answered from the cache the Git work context
+/// refresh fills, never by touching the filesystem during render.
+///
+/// A pane the refresh has not observed yet falls back to the workspace's own
+/// repository, and only when the pane sits inside it: a workspace rooted in a
+/// repository says nothing about a pane that walked out of it.
+fn cwd_in_git_repo(app: &AppState, workspace: &Workspace, cwd: &Path) -> bool {
+    if let Some(root) = app.git_root_for_cwd.get(cwd) {
+        return root.is_some();
+    }
+    workspace
+        .git_space()
+        .is_some_and(|space| cwd.starts_with(&space.repo_root))
 }
 
 /// Rows of the card grid, top to bottom, one rect per `DockSurface::CARDS`
@@ -274,6 +294,79 @@ mod tests {
             ticket_ids: tickets.iter().map(|id| (*id).to_string()).collect(),
             ..PaneWorkContext::default()
         }
+    }
+
+    #[test]
+    fn availability_follows_the_focused_pane_not_the_workspace() {
+        use std::path::PathBuf;
+
+        let repo_root = PathBuf::from("/repo/herdr");
+        let outside = PathBuf::from("/tmp/t3-3a-outside");
+
+        let mut app = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mixed");
+        let inside_pane = workspace.focused_pane_id().expect("focused pane");
+        let outside_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "herdr".into(),
+            checkout_key: repo_root.display().to_string(),
+            repo_name: "herdr".into(),
+            repo_root: repo_root.clone(),
+            is_linked_worktree: false,
+        });
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        let cwd_of = |app: &AppState, pane| {
+            app.workspaces[0]
+                .terminal_id(pane)
+                .expect("terminal")
+                .clone()
+        };
+        let inside_terminal = cwd_of(&app, inside_pane);
+        let outside_terminal = cwd_of(&app, outside_pane);
+        app.terminals
+            .get_mut(&inside_terminal)
+            .expect("inside terminal")
+            .cwd = repo_root.join("src");
+        app.terminals
+            .get_mut(&outside_terminal)
+            .expect("outside terminal")
+            .cwd = outside.clone();
+
+        // The split focused the new pane, which sits outside every repository.
+        assert_eq!(app.workspaces[0].focused_pane_id(), Some(outside_pane));
+        let (_, in_git_repo) = focused_availability(&app);
+        assert!(
+            !in_git_repo,
+            "a pane outside the repository must not offer Diff"
+        );
+        assert!(!surface_available(
+            DockSurface::Diff,
+            &context(&[], &[]),
+            in_git_repo
+        ));
+
+        // Observations from the Git refresh answer both panes, and still per cwd.
+        app.git_root_for_cwd.insert(outside.clone(), None);
+        app.git_root_for_cwd
+            .insert(repo_root.join("src"), Some(repo_root.clone()));
+        let (_, in_git_repo) = focused_availability(&app);
+        assert!(!in_git_repo);
+
+        app.workspaces[0]
+            .active_tab_mut()
+            .expect("active tab")
+            .layout
+            .focus_pane(inside_pane);
+        let (_, in_git_repo) = focused_availability(&app);
+        assert!(in_git_repo, "a pane inside the repository offers Diff");
+        assert!(surface_available(
+            DockSurface::Diff,
+            &context(&[], &[]),
+            in_git_repo
+        ));
     }
 
     #[test]

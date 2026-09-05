@@ -242,12 +242,26 @@ impl App {
                 continue;
             }
 
+            // Record the repository root for this cwd before any early exit:
+            // the chooser reads it for the focused pane, so it must be present
+            // even when the observation itself is unchanged.
+            let previous_root = self.state.git_root_for_cwd.insert(
+                observation.input.cwd.clone(),
+                observation.input.repo_root.clone(),
+            );
+            // Only a repository root that moved is a visible change. The first
+            // observation for a cwd rides on the observation's own signal, so
+            // recording it never forces a redraw on its own.
+            let root_changed =
+                previous_root.is_some_and(|previous| previous != observation.input.repo_root);
+
             let cache_refreshed = cache_key(&observation.input)
                 .is_some_and(|key| refreshed_cache_keys.contains(&key));
             if !cache_refreshed
                 && self.git_work_context_inputs.get(&observation.pane_id)
                     == Some(&observation.input)
             {
+                changed |= root_changed;
                 continue;
             }
 
@@ -261,6 +275,7 @@ impl App {
             self.git_work_context_inputs
                 .insert(observation.pane_id, observation.input);
             if !observation_changed {
+                changed |= root_changed;
                 continue;
             }
 
@@ -305,6 +320,15 @@ impl App {
             .collect();
         self.git_work_context_inputs
             .retain(|pane_id, _| active_panes.contains(pane_id));
+
+        let active_cwds: HashSet<_> = self
+            .git_work_context_targets()
+            .into_iter()
+            .map(|target| target.cwd)
+            .collect();
+        self.state
+            .git_root_for_cwd
+            .retain(|cwd, _| active_cwds.contains(cwd));
 
         let active_cache_keys: HashSet<_> = self
             .git_work_context_inputs
