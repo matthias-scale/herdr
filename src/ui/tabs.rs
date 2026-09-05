@@ -295,6 +295,44 @@ pub(crate) fn compute_tab_bar_view(
     compute_tab_bar_view_inner(ws, terminals, area, current_scroll, follow_active, true)
 }
 
+/// Where the toggles go when the tab row cannot host them.
+///
+/// The tab row is optional and absent by default: `tab_bar_position` defaults
+/// to `hidden`, and `hide_tab_bar_when_single_tab` removes it again for a
+/// one-tab workspace. Anchoring the buttons to that row alone made them
+/// unreachable in the configuration most sessions actually run, so they fall
+/// back to the right end of the status row -- the same "title row" the design
+/// draws them on -- and keep their geometry, hit testing and toggle semantics.
+pub(crate) fn pane_toggle_fallback_hit_areas(
+    status_bar_rect: Rect,
+    mouse_chrome: bool,
+) -> (Rect, Rect) {
+    let toggles_width = PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2);
+    if !mouse_chrome || status_bar_rect.height == 0 || status_bar_rect.width <= toggles_width {
+        return (Rect::default(), Rect::default());
+    }
+    let below_x = status_bar_rect.x + status_bar_rect.width - toggles_width;
+    (
+        Rect::new(below_x, status_bar_rect.y, PANE_TOGGLE_BUTTON_WIDTH, 1),
+        Rect::new(
+            below_x + PANE_TOGGLE_BUTTON_WIDTH,
+            status_bar_rect.y,
+            PANE_TOGGLE_BUTTON_WIDTH,
+            1,
+        ),
+    )
+}
+
+/// The width the status row must keep clear when it hosts the toggles.
+pub(crate) fn pane_toggle_status_bar_reserved_width(app: &AppState, status_bar_rect: Rect) -> u16 {
+    let below = app.view.pane_toggle_below_hit_area;
+    let right = app.view.pane_toggle_right_hit_area;
+    if below.width == 0 || below.y != status_bar_rect.y || status_bar_rect.height == 0 {
+        return 0;
+    }
+    below.width.saturating_add(right.width)
+}
+
 fn compute_tab_bar_view_inner(
     ws: &crate::workspace::Workspace,
     terminals: &std::collections::HashMap<
@@ -445,6 +483,36 @@ fn tab_drop_indicator_x(
     None
 }
 
+/// Drawn from the top-level render pass rather than from `render_tab_bar`,
+/// because the buttons follow their hit areas onto the status row whenever the
+/// tab row is hidden.
+pub(super) fn render_pane_toggle_buttons(app: &AppState, frame: &mut Frame) {
+    let p = &app.palette;
+    for (rect, glyph, direction) in [
+        (
+            app.view.pane_toggle_below_hit_area,
+            PANE_TOGGLE_BELOW_GLYPH,
+            crate::app::state::PaneToggleDirection::Below,
+        ),
+        (
+            app.view.pane_toggle_right_hit_area,
+            PANE_TOGGLE_RIGHT_GLYPH,
+            crate::app::state::PaneToggleDirection::Right,
+        ),
+    ] {
+        if !app.mouse_capture || rect.width == 0 {
+            continue;
+        }
+        // Accent means "a pane is already there", so the same click closes it.
+        let style = if app.pane_toggle_sibling(direction).is_some() {
+            Style::default().fg(p.accent)
+        } else {
+            Style::default().fg(p.overlay1)
+        };
+        frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), rect);
+    }
+}
+
 pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -561,30 +629,6 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
                     .set_style(Style::default().fg(p.accent));
             }
         }
-    }
-
-    for (rect, glyph, direction) in [
-        (
-            app.view.pane_toggle_below_hit_area,
-            PANE_TOGGLE_BELOW_GLYPH,
-            crate::app::state::PaneToggleDirection::Below,
-        ),
-        (
-            app.view.pane_toggle_right_hit_area,
-            PANE_TOGGLE_RIGHT_GLYPH,
-            crate::app::state::PaneToggleDirection::Right,
-        ),
-    ] {
-        if !app.mouse_capture || rect.width == 0 {
-            continue;
-        }
-        // Accent means "a pane is already there", so the same click closes it.
-        let style = if app.pane_toggle_sibling(direction).is_some() {
-            Style::default().fg(p.accent)
-        } else {
-            Style::default().fg(p.overlay1)
-        };
-        frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), rect);
     }
 
     if app.mouse_capture && app.view.new_tab_hit_area.width > 0 {
@@ -1039,7 +1083,10 @@ mod tests {
         let backend = TestBackend::new(40, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
+            .draw(|frame| {
+                render_tab_bar(&app, frame, app.view.tab_bar_rect);
+                render_pane_toggle_buttons(&app, frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row = buffer_row_text(buffer, app.view.tab_bar_rect, 0);

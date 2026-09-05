@@ -1955,8 +1955,18 @@ impl AppState {
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
-        self.view.pane_toggle_below_hit_area = layout.pane_toggle_below_hit_area;
-        self.view.pane_toggle_right_hit_area = layout.pane_toggle_right_hit_area;
+        // Mirrors `compute_view`: a hidden or too-narrow tab row hands the
+        // toggles to the status row instead of dropping them.
+        let (below, right) = if layout.pane_toggle_below_hit_area.width > 0 {
+            (
+                layout.pane_toggle_below_hit_area,
+                layout.pane_toggle_right_hit_area,
+            )
+        } else {
+            crate::ui::pane_toggle_fallback_hit_areas(self.view.status_bar_rect, self.mouse_capture)
+        };
+        self.view.pane_toggle_below_hit_area = below;
+        self.view.pane_toggle_right_hit_area = right;
     }
 }
 

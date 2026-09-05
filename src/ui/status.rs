@@ -52,13 +52,17 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         .as_ref()
         .map(|snapshot| &snapshot.metrics)
         .unwrap_or(&unavailable);
-    if usize::from(area.width) < minimum_required_status_width(app) {
+    // The pane toggles sit at the far right of this row when the tab row is
+    // hidden, so the segments must stop short of them instead of underlapping.
+    let reserved = super::tabs::pane_toggle_status_bar_reserved_width(app, area);
+    let content_width = area.width.saturating_sub(reserved);
+    if usize::from(content_width) < minimum_required_status_width(app) {
         return;
     }
-    let segments = fitted_segments(status_segments(app, metrics, p), area.width as usize);
+    let segments = fitted_segments(status_segments(app, metrics, p), content_width as usize);
 
     let used = segment_width(&segments);
-    let pad = (area.width as usize).saturating_sub(used);
+    let pad = (content_width as usize).saturating_sub(used);
     let mut spans: Vec<Span> = Vec::new();
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
@@ -71,8 +75,11 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         };
         spans.push(Span::styled(seg.text.clone(), style));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), area);
-    render_focused_pane_title(app, frame, area, used);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(bg),
+        Rect::new(area.x, area.y, content_width, area.height),
+    );
+    render_focused_pane_title(app, frame, area, used + usize::from(reserved));
 
     for button in &app.view.status_buttons {
         let style = if button.active {
