@@ -303,6 +303,13 @@ fn browse_completion(input: &str, children: &[String]) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomePrContext {
+    pub(crate) url: String,
+    pub(crate) number: u64,
+    pub(crate) repo: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeDispatchPlan {
     pub(crate) agent: Agent,
     pub(crate) model: String,
@@ -310,6 +317,7 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) directory: PathBuf,
     pub(crate) workspace: HomeWorkspace,
     pub(crate) git_ref: Option<HomeRef>,
+    pub(crate) pr: Option<HomePrContext>,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
@@ -385,6 +393,8 @@ pub(crate) struct HomeState {
     pub(crate) worktree_options: Vec<PathBuf>,
     pub(crate) ref_filter: DropdownFilterState,
     pub(crate) selected_ref: Option<HomeRef>,
+    /// Pull request that opened this composer. TUI-only launch context.
+    pub(crate) pr: Option<HomePrContext>,
     pub(crate) ref_repo_root: Option<PathBuf>,
     pub(crate) ref_directory: PathBuf,
     workspace_options: Vec<HomeWorkspace>,
@@ -415,6 +425,7 @@ impl Default for HomeState {
             worktree_options: Vec::new(),
             ref_filter: DropdownFilterState::default(),
             selected_ref: None,
+            pr: None,
             ref_repo_root: None,
             ref_directory: default_directory(),
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
@@ -752,6 +763,7 @@ impl HomeState {
             directory,
             workspace: self.workspace.clone(),
             git_ref: self.selected_ref.clone(),
+            pr: self.pr.clone(),
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -1844,6 +1856,21 @@ mod tests {
         assert_eq!(plan.argv, vec!["claude", "implement the retry cap"]);
     }
 
+    #[test]
+    fn dispatch_plan_carries_pull_request_context() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "review the requested changes".into();
+        home.pr = Some(HomePrContext {
+            url: "https://github.com/owner/repo/pull/42".into(),
+            number: 42,
+            repo: "owner/repo".into(),
+        });
+
+        let plan = home.dispatch_plan().expect("PR context should dispatch");
+
+        assert_eq!(plan.pr, home.pr);
+    }
+
     /// Characterization: pins `dispatch_plan()` before the T3 card layout moves
     /// the fields around. Layout may change; the plan for the same inputs may
     /// not.
@@ -1868,6 +1895,7 @@ mod tests {
                 directory: PathBuf::from("/tmp/frozen-plan"),
                 workspace: HomeWorkspace::CurrentCheckout,
                 git_ref: None,
+                pr: None,
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![

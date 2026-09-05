@@ -540,7 +540,7 @@ fn secondary_specs(
     if !target_in_chip_row(app, home, composer) {
         specs.push((HomeFocus::Target, target_chip_label(app, home)));
     }
-    specs.push((HomeFocus::Ref, format!("⎇ {} ▾", ref_label(app))));
+    specs.push((HomeFocus::Ref, pr_ref_label(app, home)));
     specs
 }
 
@@ -562,7 +562,7 @@ const MINIMUM_CHIP_WIDTH: usize = 4;
 fn target_in_chip_row(app: &AppState, home: &HomeState, composer: ComposerBands) -> bool {
     let wanted = display_width(&workspace_label(home))
         + display_width(&target_chip_label(app, home))
-        + display_width(&format!("⎇ {} ▾", ref_label(app)))
+        + display_width(&pr_ref_label(app, home))
         + BOTTOM_ROW_GAP * 2;
     if wanted <= composer.bottom.width as usize {
         return false;
@@ -570,6 +570,13 @@ fn target_in_chip_row(app: &AppState, home: &HomeState, composer: ComposerBands)
     let chips = 2 + usize::from(home.effort.is_some()) + usize::from(home.context_window.is_some());
     let minimum = (chips + 1) * MINIMUM_CHIP_WIDTH + chips;
     minimum <= composer.chips.width as usize
+}
+
+fn pr_ref_label(app: &AppState, home: &HomeState) -> String {
+    match home.pr.as_ref() {
+        Some(pr) => format!("⑂ #{} · ⎇ {} ▾", pr.number, ref_label(app)),
+        None => format!("⎇ {} ▾", ref_label(app)),
+    }
 }
 
 fn workspace_label(home: &HomeState) -> String {
@@ -1915,6 +1922,24 @@ mod tests {
     }
 
     #[test]
+    fn composer_card_shows_pull_request_context() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::test_with_prompt("continue the review");
+        home.pr = Some(crate::app::home::HomePrContext {
+            url: "https://github.com/owner/repo/pull/42".into(),
+            number: 42,
+            repo: "owner/repo".into(),
+        });
+        app.home = Some(home);
+        let area = Rect::new(0, 0, 100, 20);
+        let composer = bands(area, 0).composer.expect("composer");
+
+        let buffer = draw_home(&app, &[], area);
+
+        assert!(row_text(&buffer, composer.frame, composer.bottom.y).contains("⑂ #42"));
+    }
+
+    #[test]
     fn composer_renders_worktree_progress_and_inline_failure() {
         let mut app = AppState::test_new();
         let mut home = HomeState::test_with_prompt("keep this prompt");
@@ -1925,6 +1950,7 @@ mod tests {
             directory: "/repo/herdr".into(),
             workspace: crate::app::home::HomeWorkspace::NewWorktree,
             git_ref: None,
+            pr: None,
             target: HomeTarget::NewSpace,
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],
@@ -2745,7 +2771,11 @@ mod tests {
     #[test]
     fn the_headline_name_is_the_directory_field_and_opens_its_picker_below_the_headline() {
         let mut app = AppState::test_new();
-        app.home = Some(HomeState::test_with_focus(HomeFocus::Directory));
+        let mut home = HomeState::test_with_focus(HomeFocus::Directory);
+        // Keep this layout test independent of how many linked worktrees the
+        // repository running the test happens to have.
+        home.directory = std::env::temp_dir();
+        app.home = Some(home);
         app.home_open_picker(HomePicker::Directory);
         let queue = [blocked(0)];
         let area = Rect::new(0, 0, 100, 40);

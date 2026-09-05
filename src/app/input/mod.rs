@@ -1180,7 +1180,13 @@ impl App {
         }
     }
 
-    fn selected_pr_parts(&self) -> Option<(crate::app::state::WorkItemKey, String)> {
+    fn selected_pr_parts(
+        &self,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        String,
+        crate::app::home::HomePrContext,
+    )> {
         let keys = self.visible_pr_view_keys();
         let key = self
             .state
@@ -1188,27 +1194,38 @@ impl App {
             .as_ref()
             .and_then(|view| view.selected.clone())
             .or_else(|| keys.first().cloned())?;
+        let summary = self
+            .state
+            .work_view
+            .as_ref()?
+            .snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)?;
+        let number = summary.pr_number?;
+        let url = summary.pr_url.clone().or_else(|| {
+            self.state
+                .work_item_detail_cache
+                .get(&key)
+                .and_then(|detail| detail.url.clone())
+        })?;
         let head = self
             .state
             .work_item_detail_cache
             .get(&key)
             .and_then(|detail| detail.head_ref_name.clone())
-            .or_else(|| {
-                self.state
-                    .work_view
-                    .as_ref()?
-                    .snapshot
-                    .as_ref()?
-                    .items
-                    .iter()
-                    .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)
-                    .and_then(|item| item.branch.clone())
-            })?;
-        Some((key, head))
+            .or_else(|| summary.branch.clone())?;
+        let pr = crate::app::home::HomePrContext {
+            url,
+            number,
+            repo: summary.repo.clone(),
+        };
+        Some((key, head, pr))
     }
 
     fn open_selected_pr_checkout(&mut self) {
-        let Some((key, head)) = self.selected_pr_parts() else {
+        let Some((_key, head, pr)) = self.selected_pr_parts() else {
             return;
         };
         let choice = self
@@ -1217,11 +1234,11 @@ impl App {
             .as_ref()
             .and_then(|view| view.checkout_menu)
             .unwrap_or_default();
-        self.open_pr_home(key, head, choice, String::new());
+        self.open_pr_home(head, choice, String::new(), pr);
     }
 
     fn fix_selected_pr_comment(&mut self) {
-        let Some((key, head)) = self.selected_pr_parts() else {
+        let Some((key, head, pr)) = self.selected_pr_parts() else {
             return;
         };
         let Some(body) = self
@@ -1239,19 +1256,19 @@ impl App {
             return;
         };
         self.open_pr_home(
-            key,
             head,
             crate::app::state::PrCheckoutChoice::CurrentCheckout,
             body,
+            pr,
         );
     }
 
     fn open_pr_home(
         &mut self,
-        key: crate::app::state::WorkItemKey,
         head: String,
         choice: crate::app::state::PrCheckoutChoice,
         prompt: String,
+        pr: crate::app::home::HomePrContext,
     ) {
         let directory = self
             .state
@@ -1268,7 +1285,7 @@ impl App {
                             .get(&pane.attached_terminal_id)
                             .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
                             .is_some_and(|repo| {
-                                crate::work_context::repo_slugs_match(repo, &key.repo)
+                                crate::work_context::repo_slugs_match(repo, &pr.repo)
                             })
                     })
             })
@@ -1299,6 +1316,7 @@ impl App {
             oid: String::new(),
             tag: None,
         });
+        home.pr = Some(pr);
         home.prompt = prompt;
         self.state.work_view = None;
         self.state.inbox = None;
@@ -1306,7 +1324,7 @@ impl App {
     }
 
     fn stage_selected_pr_land(&mut self) {
-        let Some((key, _)) = self.selected_pr_parts() else {
+        let Some((key, _, _)) = self.selected_pr_parts() else {
             return;
         };
         let Some(number) = key.pr_number else {
@@ -2632,6 +2650,58 @@ mod tests {
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
         assert!(app.state.dock_files_focused);
         assert_eq!(app.state.dock_files_filter, "needle");
+    }
+
+    #[test]
+    fn selected_pr_checkout_carries_context_into_home_plan() {
+        let mut app = test_app();
+        let item = crate::work_index::WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            pr_title: Some("repair parser".into()),
+            pr_state: Some("open".into()),
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 1,
+            deletions: 0,
+            author: Some("ada".into()),
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Passing,
+            audience: crate::work_index::PrAudience::Authored,
+            ticket_ids: Vec::new(),
+            ticket_title: None,
+            ticket_state: None,
+            ticket_details: Vec::new(),
+            branch: Some("fix/parser".into()),
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: Default::default(),
+        };
+        app.state.work_view = Some(crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![item],
+                unavailable: None,
+                observed_at: std::time::SystemTime::now(),
+            }),
+        ));
+
+        app.open_selected_pr_checkout();
+
+        let home = app.state.home.as_mut().expect("checkout should open home");
+        assert_eq!(
+            home.pr,
+            Some(crate::app::home::HomePrContext {
+                url: "https://github.com/owner/repo/pull/42".into(),
+                number: 42,
+                repo: "owner/repo".into(),
+            })
+        );
+        home.prompt = "continue the review".into();
+        assert_eq!(home.dispatch_plan().expect("dispatch plan").pr, home.pr);
     }
 
     fn dock_home_test_app(pr_numbers: &[u64]) -> App {
