@@ -90,6 +90,7 @@ struct ClientState {
     repaint_pending: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+    first_frame_received: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1425,6 +1426,7 @@ async fn run_client_loop(
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
         draw_host_cursor,
+        first_frame_received: false,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1720,6 +1722,10 @@ async fn run_client_loop(
                     let _ = stdout.flush();
                     state.blit_encoder.commit(frame_data, encoded);
                     state.repaint_pending = false;
+                    if !state.first_frame_received {
+                        state.first_frame_received = true;
+                        crate::logging::client_first_frame();
+                    }
                 }
                 ServerMessage::Terminal(frame) => {
                     if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {

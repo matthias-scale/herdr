@@ -4456,6 +4456,7 @@ impl HeadlessServer {
                             &self.app.render_notify,
                             &self.app.render_dirty,
                         );
+                    self.app.record_pending_first_frame();
                     // The editor PTY is a shared runtime resource. Its size follows the
                     // foreground client's layout, while every app client still renders its
                     // own dock geometry above.

@@ -2225,6 +2225,13 @@ impl PaneRuntime {
 
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
+        tracing::info!(
+            event = "pane.pty_spawn.complete",
+            subsystem = "pane",
+            outcome = "ok",
+            pane_id = pane_id.raw(),
+            "pty spawn returned"
+        );
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
@@ -2268,11 +2275,16 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
+            let first_output = Arc::new(AtomicBool::new(false));
+            let first_output_for_read = first_output.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                if !bytes.is_empty() && !first_output_for_read.swap(true, Ordering::AcqRel) {
+                    crate::logging::pane_first_output(pane_id.raw(), bytes.len());
+                }
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);

@@ -241,6 +241,7 @@ pub struct App {
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
+    pub(crate) pending_first_frame_pane: Option<crate::layout::PaneId>,
     pub(crate) input_leases: input::InputLeaseTable,
     pub render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
@@ -1147,6 +1148,7 @@ impl App {
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
+            pending_first_frame_pane: None,
             input_leases: input::InputLeaseTable::default(),
             api_rx,
             event_hub,
@@ -1290,6 +1292,22 @@ impl App {
             return false;
         }
         self.project_status_context_from_cached()
+    }
+
+    pub(crate) fn record_pending_first_frame(&mut self) {
+        let Some(pane_id) = self.pending_first_frame_pane else {
+            return;
+        };
+        if self
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .any(|info| info.id == pane_id)
+        {
+            crate::logging::pane_first_frame(pane_id.raw());
+            self.pending_first_frame_pane = None;
+        }
     }
 
     pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
@@ -2626,6 +2644,27 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn pending_first_frame_marker_waits_for_visible_pane() {
+        let mut app = test_app();
+        let pane_id = crate::layout::PaneId::alloc();
+        app.pending_first_frame_pane = Some(pane_id);
+
+        app.record_pending_first_frame();
+        assert_eq!(app.pending_first_frame_pane, Some(pane_id));
+
+        app.state.view.pane_infos.push(crate::layout::PaneInfo {
+            id: pane_id,
+            rect: ratatui::layout::Rect::new(0, 0, 80, 24),
+            inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
+            is_focused: true,
+        });
+        app.record_pending_first_frame();
+        assert!(app.pending_first_frame_pane.is_none());
     }
 
     #[test]
