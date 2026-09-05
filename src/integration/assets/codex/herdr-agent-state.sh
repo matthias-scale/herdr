@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 set -eu
 
@@ -13,21 +13,26 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session|title) ;;
+  session|title|session-name) ;;
   *) exit 0 ;;
 esac
 
 [ "${HERDR_ENV:-}" = "1" ] || exit 0
 [ -n "${HERDR_SOCKET_PATH:-}" ] || exit 0
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
-if [ "$action" = "title" ]; then
+if [ "$action" = "title" ] || [ "$action" = "session-name" ]; then
   herdr_bin="${HERDR_BIN_PATH:-herdr}"
   if [ "$herdr_bin" = "herdr" ]; then
     command -v herdr >/dev/null 2>&1 || exit 0
   elif [ ! -x "$herdr_bin" ]; then
     exit 0
   fi
-  "$herdr_bin" agent turn-title --provider codex <"$hook_input_file" >/dev/null 2>&1 || true
+  if [ "$action" = "title" ]; then
+    "$herdr_bin" agent turn-title --provider codex <"$hook_input_file" >/dev/null 2>&1 || true
+  fi
+  # Codex names a thread a few seconds after the turn starts, so publish the
+  # current name on every event this hook receives, not only at turn start.
+  "$herdr_bin" agent session-name --provider codex <"$hook_input_file" >/dev/null 2>&1 || true
   exit 0
 fi
 command -v python3 >/dev/null 2>&1 || exit 0

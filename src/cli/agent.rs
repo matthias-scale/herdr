@@ -74,17 +74,30 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return Ok(0);
     }
-    let Some(transcript_path) = crate::work_title::transcript_path_from_hook_input(&input) else {
+    // Claude names a session inside the transcript the hook payload points at.
+    // Codex names a thread in a single machine-wide index instead, so there is
+    // no per-session path to bind and none is reported.
+    let name_source_path = match provider {
+        crate::work_title::WorkTitleProvider::Claude => {
+            crate::work_title::transcript_path_from_hook_input(&input)
+        }
+        crate::work_title::WorkTitleProvider::Codex => codex_session_index_path(),
+    };
+    let Some(name_source_path) = name_source_path else {
         return Ok(0);
     };
-    let Ok(transcript) = std::fs::read_to_string(&transcript_path) else {
+    let Ok(name_source) = std::fs::read_to_string(&name_source_path) else {
         return Ok(0);
+    };
+    let agent_session_path = match provider {
+        crate::work_title::WorkTitleProvider::Claude => Some(name_source_path),
+        crate::work_title::WorkTitleProvider::Codex => None,
     };
     let Some(metadata) = crate::work_title::request_from_session_name(
         provider,
         pane_id.as_deref(),
         &input,
-        &transcript,
+        &name_source,
         seq,
     ) else {
         return Ok(0);
@@ -104,7 +117,7 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
             agent,
             seq: Some(seq),
             agent_session_id: Some(session_id),
-            agent_session_path: Some(transcript_path),
+            agent_session_path,
             session_start_source: None,
         }),
     };
@@ -125,6 +138,16 @@ fn agent_session_name(args: &[String]) -> std::io::Result<i32> {
         tracing::debug!(?provider, "could not deliver the guarded session name");
     }
     Ok(0)
+}
+
+/// Codex keeps every thread name in one index under its home directory, which
+/// `CODEX_HOME` may relocate.
+fn codex_session_index_path() -> Option<String> {
+    crate::integration::codex_dir()
+        .ok()?
+        .join("session_index.jsonl")
+        .to_str()
+        .map(str::to_string)
 }
 
 fn agent_turn_title(args: &[String]) -> std::io::Result<i32> {
