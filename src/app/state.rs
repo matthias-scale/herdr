@@ -1249,6 +1249,7 @@ pub(crate) enum HomeHitTarget {
     Agent,
     Model,
     Effort,
+    Context,
     Directory,
     Workspace,
     Ref,

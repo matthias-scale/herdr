@@ -1023,6 +1023,9 @@ impl App {
         if !cfg!(test) {
             let catalog_tx = event_tx.clone();
             std::thread::spawn(move || {
+                if let Some(catalog) = crate::app::home_catalog::refresh_claude_catalog() {
+                    let _ = catalog_tx.blocking_send(AppEvent::HomeCatalogRefreshed { catalog });
+                }
                 if let Some(catalog) = crate::app::home_catalog::refresh_codex_catalog() {
                     let _ = catalog_tx.blocking_send(AppEvent::HomeCatalogRefreshed { catalog });
                 }
