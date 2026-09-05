@@ -763,7 +763,12 @@ mod tests {
         home.directory = std::env::temp_dir();
         home.target = target;
         home.prompt = "characterize home dispatch".into();
-        home.dispatch_plan().expect("fixed inputs should dispatch")
+        let mut plan = home.dispatch_plan().expect("fixed inputs should dispatch");
+        // The plan is characterized for its directory, target and workspace; the
+        // agent binary itself is not under test and is absent on CI runners, so
+        // spawn a command that exists everywhere.
+        plan.argv = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+        plan
     }
 
     #[tokio::test]
