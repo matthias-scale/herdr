@@ -594,6 +594,7 @@ fn pane_command() -> Command {
                         .arg(required("pane_id", "PANE_ID"))
                         .arg(repeatable_option("ticket", "ID"))
                         .arg(repeatable_option("pr", "URL"))
+                        .arg(repeatable_option("missive-url", "URL"))
                         .arg(option("branch", "BRANCH"))
                         .arg(option("repo", "OWNER/REPO"))
                         .arg(option("title", "TITLE"))

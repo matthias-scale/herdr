@@ -247,6 +247,10 @@ fn ac1_pane_work_context_set_sends_one_atomic_patch() {
             "SCA-2",
             "--pr",
             "https://github.com/o/r/pull/9",
+            "--missive-url",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-1",
+            "--missive-url",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-2",
             "--title",
             "Context model",
             "--role",
@@ -272,6 +276,13 @@ fn ac1_pane_work_context_set_sends_one_atomic_patch() {
     assert_eq!(
         request["params"]["pr_urls"],
         serde_json::json!(["https://github.com/o/r/pull/9"])
+    );
+    assert_eq!(
+        request["params"]["missive_urls"],
+        serde_json::json!([
+            "https://mail.missiveapp.com/#inbox/conversations/sample-1",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-2"
+        ])
     );
     assert_eq!(request["params"]["work_title"], "Context model");
     assert_eq!(request["params"]["role"], "ship");
