@@ -100,13 +100,14 @@ pub(super) fn open_global_menu(state: &mut AppState) {
 }
 
 pub(crate) fn handle_git_menu_key(state: &mut AppState, key: KeyEvent) {
+    let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(state);
     match key.code {
         KeyCode::Esc => state.mode = Mode::Terminal,
-        KeyCode::Up | KeyCode::Char('k') => state.git_menu.move_prev(),
-        KeyCode::Down | KeyCode::Char('j') => state
+        KeyCode::Up | KeyCode::Char('k') if in_git_repo => state.git_menu.move_prev(),
+        KeyCode::Down | KeyCode::Char('j') if in_git_repo => state
             .git_menu
             .move_next(crate::app::state::GitAction::ALL.len()),
-        KeyCode::Enter => {
+        KeyCode::Enter if in_git_repo => {
             state.request_git_action = crate::app::state::GitAction::ALL
                 .get(state.git_menu.highlighted)
                 .copied();
@@ -1456,6 +1457,36 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[test]
+    fn git_menu_info_row_ignores_enter_and_escape_closes_it() {
+        let mut app = app_with_test_workspaces(&["outside"]);
+        let workspace = &app.state.workspaces[0];
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal").clone();
+        let cwd = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal state")
+            .cwd
+            .clone();
+        app.state.git_root_for_cwd.insert(cwd, None);
+        app.state.mode = Mode::GitMenu;
+
+        handle_git_menu_key(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(app.state.request_git_action, None);
+        assert_eq!(app.state.mode, Mode::GitMenu);
+
+        handle_git_menu_key(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

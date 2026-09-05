@@ -52,10 +52,20 @@ pub(crate) fn focused_availability(app: &AppState) -> (PaneWorkContext, bool) {
         .and_then(|terminal_id| app.terminals.get(terminal_id))
         .map(|terminal| terminal.effective_work_context().clone())
         .unwrap_or_default();
-    let in_git_repo = workspace
-        .focused_cached_cwd(&app.terminals)
-        .is_some_and(|cwd| cwd_in_git_repo(app, workspace, &cwd));
+    let in_git_repo = focused_in_git_repo(app);
     (context, in_git_repo)
+}
+
+/// Whether the focused pane's cwd is inside a repository, using the shared
+/// work-context Git observation cache.
+pub(crate) fn focused_in_git_repo(app: &AppState) -> bool {
+    let Some(workspace) = app.active.and_then(|index| app.workspaces.get(index)) else {
+        return false;
+    };
+    app.status_focused_cwd
+        .clone()
+        .or_else(|| workspace.focused_cached_cwd(&app.terminals))
+        .is_some_and(|cwd| cwd_in_git_repo(app, workspace, &cwd))
 }
 
 /// Is `cwd` inside a repository? Answered from the cache the Git work context
@@ -367,6 +377,13 @@ mod tests {
             &context(&[], &[]),
             in_git_repo
         ));
+
+        // The runtime projection changes before the terminal snapshot after a
+        // shell `cd`, so availability must prefer it when both are present.
+        app.status_focused_cwd = Some(outside);
+        assert!(!focused_in_git_repo(&app));
+        app.status_focused_cwd = Some(repo_root.join("src"));
+        assert!(focused_in_git_repo(&app));
     }
 
     #[test]
