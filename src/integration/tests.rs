@@ -1321,6 +1321,7 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
     assert_eq!(hook_content, CODEX_HOOK_ASSET);
     assert!(hook_content.contains("herdr_bin=\"${HERDR_BIN_PATH:-herdr}\""));
     assert!(hook_content.contains("agent turn-title --provider codex"));
+    assert!(hook_content.contains("agent session-name --provider codex"));
     assert!(hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
@@ -1341,7 +1342,21 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
         .any(|hook| hook["command"] == "echo keep-title-hook"));
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
+    // The thread name is republished at both turn boundaries because Codex
+    // names a thread a few seconds after the turn starts.
+    for event in ["UserPromptSubmit", "Stop"] {
+        assert!(
+            hooks["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+                .any(|hook| hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(" session-name"))),
+            "{event} should carry the session-name hook"
+        );
+    }
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1394,11 +1409,25 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
     assert_eq!(
         hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
-        1
+        2
     );
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
+    // The thread name is republished at both turn boundaries because Codex
+    // names a thread a few seconds after the turn starts.
+    for event in ["UserPromptSubmit", "Stop"] {
+        assert!(
+            hooks["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+                .any(|hook| hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(" session-name"))),
+            "{event} should carry the session-name hook"
+        );
+    }
     assert_eq!(config.matches("hooks = true").count(), 1);
     assert!(!config.contains("codex_hooks"));
     assert!(config.contains("other = true"));
@@ -2928,12 +2957,11 @@ fn ac1_ac7_title_hooks_forward_the_full_fixture_to_the_owning_binary() {
         let exact = fs::read_to_string(&exact_record).unwrap();
         assert!(exact.starts_with(&format!("agent turn-title --provider {provider}\n")));
         assert!(exact.contains(fixture));
-        // Claude also forwards the same payload to the session-name reporter,
-        // and it must reach the owning binary rather than whatever `herdr` is
-        // first on PATH.
-        assert_eq!(
+        // Both providers also forward the same payload to the session-name
+        // reporter, and it must reach the owning binary rather than whatever
+        // `herdr` is first on PATH.
+        assert!(
             exact.contains(&format!("agent session-name --provider {provider}")),
-            provider == "claude",
             "{exact}"
         );
         assert!(!stale_record.exists());
