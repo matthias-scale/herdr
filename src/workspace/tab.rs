@@ -522,6 +522,14 @@ impl Tab {
         self.name_origin = TabNameOrigin::User;
     }
 
+    /// Drop a manual name so the tab returns to the derived label. A user name
+    /// outranks every derived source, so without this a rename is permanent and
+    /// a tab can never follow its agent's session name again.
+    pub fn clear_custom_name(&mut self) {
+        self.custom_name = None;
+        self.name_origin = TabNameOrigin::Structural;
+    }
+
     pub(crate) fn expire_agent_scoped_name(&mut self) {
         if self.name_origin.expires_on_agent_session_change() {
             self.custom_name = None;
