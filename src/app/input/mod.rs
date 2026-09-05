@@ -595,6 +595,14 @@ impl App {
     }
 
     fn dispatch_home_prompt(&mut self) {
+        if self
+            .state
+            .home
+            .as_ref()
+            .is_some_and(|home| home.pending_dispatch.is_some())
+        {
+            return;
+        }
         let Some(plan) = self
             .state
             .home
@@ -619,21 +627,28 @@ impl App {
             return;
         };
 
-        match self.dispatch_home_composer(plan) {
+        let dispatch = if plan.workspace == crate::app::home::HomeWorkspace::NewWorktree {
+            self.start_home_worktree_add(plan)
+        } else {
+            self.dispatch_home_composer(plan)
+                .map_err(|error| error.to_string())
+        };
+        match dispatch {
             Ok(()) => {
-                self.state.clear_home();
-                self.state.mode = Mode::Terminal;
+                if self
+                    .state
+                    .home
+                    .as_ref()
+                    .is_none_or(|home| home.pending_dispatch.is_none())
+                {
+                    self.state.clear_home();
+                    self.state.mode = Mode::Terminal;
+                }
             }
             Err(error) => {
-                let previous_toast = self.state.toast.clone();
-                self.state.toast = Some(crate::app::state::ToastNotification {
-                    kind: crate::app::state::ToastKind::NeedsAttention,
-                    title: "dispatch failed".into(),
-                    context: error.to_string(),
-                    position: None,
-                    target: None,
-                });
-                self.sync_toast_deadline(previous_toast);
+                if let Some(home) = self.state.home.as_mut() {
+                    home.dispatch_error = Some(error);
+                }
             }
         }
     }

@@ -833,6 +833,35 @@ mod tests {
         assert_eq!(existing_app.state.mode, Mode::Terminal);
     }
 
+    #[tokio::test]
+    async fn home_dispatch_preserves_adversarial_identity_invariants() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state = crate::app::state::AppState::test_with_adversarial_identity_state();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let plan = crate::app::home::HomeDispatchPlan {
+            agent: crate::detect::Agent::Codex,
+            model: "gpt-5.3-codex".into(),
+            effort: Some("high".into()),
+            directory: std::env::temp_dir(),
+            workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
+            target: crate::app::home::HomeTarget::Existing(workspace_id),
+            prompt: "verify identity invariants".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+        };
+
+        app.dispatch_home_composer(plan)
+            .expect("adversarial dispatch should succeed");
+
+        app.state.assert_invariants_for_test();
+    }
+
     fn title_test_app() -> (App, crate::terminal::TerminalId) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
