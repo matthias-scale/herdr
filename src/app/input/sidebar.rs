@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
 use crate::app::state::{AppState, ViewLayout};
@@ -5,6 +6,51 @@ use crate::app::state::{AppState, ViewLayout};
 use super::ScrollbarClickTarget;
 
 impl AppState {
+    pub(crate) fn sidebar_group_mode_anchor_rect(&self) -> Rect {
+        crate::ui::sidebar_group_mode_anchor_rect(self.view.sidebar_rect)
+    }
+
+    pub(crate) fn sidebar_group_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar_group_menu_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
+    pub(crate) fn open_sidebar_group_menu(&mut self) {
+        self.sidebar_group_menu_selected = self.sidebar_group_mode.index();
+        self.sidebar_group_menu_open = true;
+    }
+
+    pub(crate) fn handle_sidebar_group_menu_key(&mut self, key: KeyEvent) -> bool {
+        if !self.sidebar_group_menu_open {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => self.sidebar_group_menu_open = false,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.sidebar_group_menu_selected =
+                    self.sidebar_group_menu_selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.sidebar_group_menu_selected =
+                    self.sidebar_group_menu_selected.saturating_add(1).min(
+                        crate::app::state::SidebarGroupMode::ALL
+                            .len()
+                            .saturating_sub(1),
+                    );
+            }
+            KeyCode::Enter => {
+                if let Some(mode) = crate::app::state::SidebarGroupMode::ALL
+                    .get(self.sidebar_group_menu_selected)
+                    .copied()
+                {
+                    self.set_sidebar_group_mode(mode);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
     pub(super) fn workspace_list_rect(&self) -> Rect {
         let sidebar = self.view.sidebar_rect;
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
@@ -239,8 +285,9 @@ impl AppState {
     /// round trip -- but it does change the row count, so the sidebar's own
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
-        if !self.collapsed_sidebar_groups.remove(title) {
-            self.collapsed_sidebar_groups.insert(title.to_string());
+        let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
+        if !self.collapsed_sidebar_groups.remove(&key) {
+            self.collapsed_sidebar_groups.insert(key);
         }
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
             self,
@@ -267,7 +314,8 @@ impl AppState {
                 crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
                 crate::ui::SidebarRow::Agent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
-                | crate::ui::SidebarRow::SectionHeader { .. } => None,
+                | crate::ui::SidebarRow::SectionHeader { .. }
+                | crate::ui::SidebarRow::NestedHeader { .. } => None,
             })
     }
 
@@ -287,7 +335,8 @@ impl AppState {
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. }
-                | crate::ui::SidebarRow::SectionHeader { .. } => None,
+                | crate::ui::SidebarRow::SectionHeader { .. }
+                | crate::ui::SidebarRow::NestedHeader { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -331,6 +380,8 @@ impl AppState {
                     indented: false,
                 } => Some(ws_idx),
                 crate::ui::WorkspaceListEntry::Workspace { .. } => None,
+                crate::ui::WorkspaceListEntry::NestedHeader { .. }
+                | crate::ui::WorkspaceListEntry::UnavailableHeader => None,
             })
             .collect::<Vec<_>>();
         let source_pos = roots.iter().position(|ws_idx| *ws_idx == source_ws_idx)?;
@@ -451,6 +502,31 @@ mod tests {
         ));
 
         assert_eq!(app.state.mode, Mode::GlobalMenu);
+    }
+
+    #[test]
+    fn clicking_sidebar_mode_header_opens_and_selects_dropdown() {
+        let mut app = app_for_mouse_test();
+        let anchor = app.state.sidebar_group_mode_anchor_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            anchor.x,
+            anchor.y,
+        ));
+        assert!(app.state.sidebar_group_menu_open);
+
+        let menu = crate::ui::sidebar_group_menu_layout(&app.state, Rect::new(0, 0, 106, 20))
+            .expect("mode menu");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            menu.list_rect.y + 1,
+        ));
+        assert_eq!(
+            app.state.sidebar_group_mode,
+            crate::app::state::SidebarGroupMode::RepoPr
+        );
+        assert!(!app.state.sidebar_group_menu_open);
     }
 
     #[test]
@@ -1214,10 +1290,7 @@ mod tests {
             header.rect.x + 1,
             header.rect.y,
         ));
-        assert!(app
-            .state
-            .collapsed_sidebar_groups
-            .contains(crate::ui::SPACES_SECTION_TITLE));
+        assert!(app.state.collapsed_sidebar_groups.contains("repo:Spaces"));
         assert!(crate::ui::sidebar_rows(&app.state).len() < rows_open);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
@@ -1226,10 +1299,7 @@ mod tests {
             header.rect.x + 1,
             header.rect.y,
         ));
-        assert!(!app
-            .state
-            .collapsed_sidebar_groups
-            .contains(crate::ui::SPACES_SECTION_TITLE));
+        assert!(!app.state.collapsed_sidebar_groups.contains("repo:Spaces"));
         assert_eq!(crate::ui::sidebar_rows(&app.state).len(), rows_open);
     }
 

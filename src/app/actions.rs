@@ -1460,8 +1460,10 @@ impl AppState {
         };
         let order = entries
             .into_iter()
-            .map(|entry| match entry {
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+                crate::ui::WorkspaceListEntry::NestedHeader { .. }
+                | crate::ui::WorkspaceListEntry::UnavailableHeader => None,
             })
             .collect::<Vec<_>>();
         if order.is_empty() {

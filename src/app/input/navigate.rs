@@ -456,6 +456,10 @@ impl App {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::CycleSidebarGroupMode => {
+                self.state.cycle_sidebar_group_mode();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::ToggleStatusDetail => {
                 self.state.status_bar_expanded = !self.state.status_bar_expanded;
                 leave_navigate_mode(&mut self.state);
@@ -1790,6 +1794,7 @@ pub(crate) enum NavigateAction {
     TogglePinTab,
     EnterResizeMode,
     ToggleSidebar,
+    CycleSidebarGroupMode,
     ToggleStatusDetail,
     ToggleDock,
     PreviousDockTab,
@@ -2005,6 +2010,10 @@ fn non_indexed_action_for_key(
         (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (
+            &kb.sidebar_cycle_group_mode,
+            NavigateAction::CycleSidebarGroupMode,
+        ),
         (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
@@ -2335,6 +2344,10 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::CycleSidebarGroupMode => {
+            state.cycle_sidebar_group_mode();
             leave_navigate_mode(state);
         }
         NavigateAction::ToggleStatusDetail => {
@@ -2820,6 +2833,30 @@ mod tests {
                 BindingDispatch::Prefix,
             ),
             Some(NavigateAction::ToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn sidebar_cycle_group_mode_binding_dispatches_and_cycles() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.sidebar_cycle_group_mode = crate::config::ActionKeybinds::prefix("g");
+
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::CycleSidebarGroupMode)
+        );
+        execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
+        assert_eq!(
+            state.sidebar_group_mode,
+            crate::app::state::SidebarGroupMode::RepoPr
+        );
+        assert_eq!(
+            state.take_sidebar_group_mode_persistence_request(),
+            Some(crate::app::state::SidebarGroupMode::RepoPr)
         );
     }
 

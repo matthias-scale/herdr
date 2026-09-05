@@ -2985,6 +2985,9 @@ impl HeadlessServer {
         if let Some(width) = self.app.state.take_dock_width_persistence_request() {
             self.send_to_client(client_id, ServerMessage::DockWidth { width });
         }
+        if let Some(mode) = self.app.state.take_sidebar_group_mode_persistence_request() {
+            crate::client::presentation::save_sidebar_group_mode(mode);
+        }
 
         if self.app.state.detach_requested {
             self.app.state.detach_requested = false;
@@ -3067,6 +3070,11 @@ impl HeadlessServer {
                         Some(writer),
                     ),
                 );
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    let group_mode = crate::client::presentation::load_sidebar_group_mode();
+                    client.sidebar_presentation.group_mode = group_mode;
+                    client.sidebar_presentation.group_menu_selected = group_mode.index();
+                }
                 if !direct_attach_requested {
                     self.foreground_client_id = Some(client_id);
                 }

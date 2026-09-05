@@ -168,6 +168,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
         help_entry(
+            keybind_label(&kb.sidebar_cycle_group_mode),
+            "cycle sidebar grouping mode",
+        ),
+        help_entry(
             keybind_label(&kb.toggle_blocked_filter),
             "toggle blocked filter",
         ),

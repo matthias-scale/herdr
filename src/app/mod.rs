@@ -639,12 +639,18 @@ impl App {
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        let sidebar_group_mode = crate::client::presentation::load_sidebar_group_mode();
 
         let mut state = AppState {
-            collapsed_sidebar_groups: std::iter::once(
-                crate::ui::RECENTLY_DONE_SECTION_TITLE.to_string(),
-            )
+            collapsed_sidebar_groups: std::iter::once(format!(
+                "{}:{}",
+                sidebar_group_mode.collapse_namespace(),
+                crate::ui::RECENTLY_DONE_SECTION_TITLE
+            ))
             .collect(),
+            sidebar_group_mode,
+            sidebar_group_menu_open: false,
+            sidebar_group_menu_selected: sidebar_group_mode.index(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
@@ -705,6 +711,7 @@ impl App {
             request_reload_config: false,
             request_client_config_reload: false,
             dock_width_persistence_request: None,
+            sidebar_group_mode_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -1393,6 +1400,9 @@ impl App {
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
             if let Some(width) = self.state.take_dock_width_persistence_request() {
                 crate::client::presentation::save_dock_width(width);
+            }
+            if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
+                crate::client::presentation::save_sidebar_group_mode(mode);
             }
 
             if needs_render && self.can_render_now(now) {

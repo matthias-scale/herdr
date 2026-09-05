@@ -145,6 +145,9 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        if self.state.handle_sidebar_group_menu_key(key_event) {
+            return None;
+        }
         if self.handle_symphony_key(key_event) {
             return None;
         }
