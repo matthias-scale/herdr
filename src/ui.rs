@@ -1397,6 +1397,57 @@ mod tests {
     }
 
     #[test]
+    fn the_plus_hit_area_is_the_cell_the_strip_draws_the_plus_in() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            for open in three_and_seven_tabs() {
+                let (row, app) = strip_row(width, height, &open);
+                let plus = app.view.dock_plus_rect;
+                assert_eq!(plus.width, crate::ui::dock::PLUS_WIDTH);
+                assert_eq!(plus.y, app.view.dock_tab_bar_rect.y);
+                let cell = usize::from(plus.x - app.view.dock_tab_bar_rect.x);
+                assert_eq!(
+                    row.chars().nth(cell),
+                    Some('+'),
+                    "{width}x{height}: the + is not at {plus:?} in {row:?}"
+                );
+                assert_eq!(
+                    row.matches('+').count(),
+                    1,
+                    "{width}x{height}: more than one + in {row:?}"
+                );
+                assert!(app.on_dock_plus(plus.x, plus.y));
+                // The tab left of the `+` must not claim its cell.
+                assert_eq!(app.dock_tab_at(plus.x, plus.y), None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolled_strip_gives_hidden_tabs_no_hit_area() {
+        use crate::app::DockSurface;
+        let open = three_and_seven_tabs()[1].clone();
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = open.clone();
+        app.dock_tab = Some(DockSurface::Diff);
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let hidden = app.view.dock_tab_hit_areas[0];
+        assert_eq!(hidden.width, 0, "the first tab scrolled out of the strip");
+        assert_eq!(
+            app.dock_tab_at(hidden.x, app.view.dock_tab_bar_rect.y),
+            None
+        );
+        let active = app.view.dock_tab_hit_areas[open.len() - 1];
+        assert!(active.width > 0, "the active tab stays visible");
+        assert!(active.right() <= app.view.dock_plus_rect.x);
+    }
+
+    #[test]
     fn the_dock_strip_ends_with_a_plus_and_a_maximise_glyph() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
