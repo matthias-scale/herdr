@@ -901,6 +901,7 @@ impl App {
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
+            land_approval_label: config.land.approval_label.clone(),
             work_index_linear_team_configured: config
                 .work_index
                 .linear_team
@@ -2078,6 +2079,10 @@ impl App {
 
         if !invalid_section("files") {
             self.state.files_icons = config.files.icons;
+        }
+
+        if !invalid_section("land") {
+            self.state.land_approval_label = config.land.approval_label.clone();
         }
 
         if !invalid_section("work_index") {

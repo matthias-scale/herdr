@@ -1148,6 +1148,7 @@ impl App {
                     view.sort,
                     view.open_only,
                     observed_at,
+                    &self.state.land_approval_label,
                 )
                 .into_iter()
                 .map(|item| crate::app::state::WorkItemKey {
@@ -1333,10 +1334,12 @@ impl App {
         let Some(detail) = self.state.work_item_detail_cache.get(&key) else {
             return;
         };
-        let enabled = !detail.actions.is_empty()
-            && detail.actions.iter().all(|check| check.state == "SUCCESS")
-            && detail.merge_state_status.as_deref() == Some("CLEAN");
-        let Some(head_sha) = enabled.then(|| detail.head_sha.clone()).flatten() else {
+        let crate::ui::work_list_detail::PrLandStatus::Enabled(approval_signal) =
+            crate::ui::work_list_detail::pr_land_status(detail, &self.state.land_approval_label)
+        else {
+            return;
+        };
+        let Some(head_sha) = detail.head_sha.clone() else {
             return;
         };
         if let Some(view) = self.state.work_view.as_mut() {
@@ -1344,6 +1347,7 @@ impl App {
                 repo: key.repo,
                 number,
                 head_sha,
+                approval_signal: approval_signal.confirmation_label(),
             });
         }
     }

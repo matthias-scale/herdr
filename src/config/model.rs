@@ -351,6 +351,7 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub land: LandConfig,
     pub files: FilesConfig,
 }
 
@@ -366,6 +367,23 @@ pub enum FilesIconConfig {
 #[serde(default)]
 pub struct FilesConfig {
     pub icons: FilesIconConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LandConfig {
+    /// PR label accepted as an explicit landing approval signal.
+    pub approval_label: String,
+}
+
+pub const DEFAULT_LAND_APPROVAL_LABEL: &str = "approved";
+
+impl Default for LandConfig {
+    fn default() -> Self {
+        Self {
+            approval_label: DEFAULT_LAND_APPROVAL_LABEL.into(),
+        }
+    }
 }
 
 pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
@@ -2264,5 +2282,12 @@ scrollback_lines = 12345
         assert_eq!(Config::default().files.icons, FilesIconConfig::Badges);
         let config: Config = toml::from_str("[files]\nicons = \"nerd\"\n").unwrap();
         assert_eq!(config.files.icons, FilesIconConfig::Nerd);
+    }
+
+    #[test]
+    fn land_approval_label_defaults_and_parses() {
+        assert_eq!(Config::default().land.approval_label, "approved");
+        let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
+        assert_eq!(config.land.approval_label, "ship-it");
     }
 }

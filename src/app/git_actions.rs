@@ -344,6 +344,7 @@ mod tests {
             repo: "owner/repo".into(),
             number: 42,
             head_sha: "abc123".into(),
+            approval_signal: "approved review".into(),
         };
         assert_eq!(
             pr_land_argv(&request),

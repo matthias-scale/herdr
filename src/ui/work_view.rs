@@ -129,6 +129,7 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
             state.sort,
             state.open_only,
             observed_at,
+            &app.land_approval_label,
         )
     });
     let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {
@@ -264,22 +265,42 @@ fn render_pr_detail(
 ) {
     let palette = &app.palette;
     let detail = item.detail();
-    let actions = item.actions();
-    let land = actions
-        .iter()
-        .find(|action| action.kind == crate::ui::work_list_detail::WorkActionKind::Land);
-    let land_label = if land.is_some_and(|action| action.enabled) {
-        "[Land]"
-    } else {
-        "[Land disabled]"
-    };
-    let mut lines = vec![
-        Line::styled(
-            format!(" {}     [Check out ▾] {land_label}", detail.heading),
+    let land_enabled = item.actions().iter().any(|action| {
+        action.kind == crate::ui::work_list_detail::WorkActionKind::Land && action.enabled
+    });
+    let land_status = item.land_status();
+    let awaiting_approval =
+        land_status == crate::ui::work_list_detail::PrLandStatus::AwaitingApproval;
+    let (land_label, land_style) = match (land_enabled, &land_status) {
+        (true, crate::ui::work_list_detail::PrLandStatus::Enabled(_)) => (
+            "[Land]",
             Style::default()
                 .fg(palette.text)
                 .add_modifier(Modifier::BOLD),
         ),
+        (false, crate::ui::work_list_detail::PrLandStatus::AwaitingApproval) => (
+            "[Land]",
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        ),
+        _ => (
+            "[Land disabled]",
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        ),
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            ratatui::text::Span::styled(
+                format!(" {}     [Check out ▾] ", detail.heading),
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ratatui::text::Span::styled(land_label, land_style),
+        ]),
         Line::styled(
             format!(" {}", detail.title),
             Style::default()
@@ -299,6 +320,17 @@ fn render_pr_detail(
             Style::default().fg(palette.accent),
         ),
     ];
+    if awaiting_approval {
+        lines.insert(
+            1,
+            Line::styled(
+                " awaiting approval",
+                Style::default()
+                    .fg(palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+        );
+    }
     match state.detail_tab {
         PrDetailTab::Summary => {
             lines.push(Line::styled(
@@ -383,8 +415,8 @@ fn render_pr_detail(
     if let Some(confirm) = state.pending_land.as_ref() {
         lines.push(Line::styled(
             format!(
-                " Confirm Land {}#{} at {}? [y/N]",
-                confirm.repo, confirm.number, confirm.head_sha
+                " Confirm Land {}#{} via {} at {}? [y/N]",
+                confirm.repo, confirm.number, confirm.approval_signal, confirm.head_sha
             ),
             Style::default()
                 .fg(palette.yellow)
@@ -592,19 +624,63 @@ mod tests {
     fn rendered_text(state: &WorkViewState) -> String {
         let mut app = AppState::test_new();
         app.work_view = Some(state.clone());
-        let backend = TestBackend::new(100, 12);
+        rendered_app_text(&app)
+    }
+
+    fn rendered_app_text(app: &AppState) -> String {
+        rendered_app_text_at(app, 100, 12)
+    }
+
+    fn rendered_app_text_at(app: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(&app, frame.area(), frame))
+            .draw(|frame| render(app, frame.area(), frame))
             .expect("render work view");
         terminal
             .backend()
             .buffer()
             .content()
-            .chunks(100)
+            .chunks(usize::from(width))
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn land_row_and_confirmation_name_the_approval_state() {
+        let item = pr("owner/repo", 42, &[]);
+        let key = crate::app::state::WorkItemKey {
+            repo: item.repo.clone(),
+            pr_number: item.pr_number,
+            pr_url: item.pr_url.clone(),
+            ticket_id: None,
+        };
+        let mut detail = crate::work_index::WorkItemDetail::empty();
+        detail.number = Some(42);
+        detail.actions = vec![crate::work_index::WorkItemAction {
+            name: "test".into(),
+            state: "SUCCESS".into(),
+        }];
+        detail.merge_state_status = Some("CLEAN".into());
+        detail.head_sha = Some("abc123".into());
+        let mut app = AppState::test_new();
+        app.work_item_detail_cache.insert(key, detail);
+        app.work_view = Some(WorkViewState::new(true, Some(snapshot(vec![item]))));
+
+        let awaiting = rendered_app_text_at(&app, 120, 24);
+        assert!(awaiting.contains("[Land]"));
+        assert!(awaiting.contains("awaiting approval"));
+
+        app.work_view.as_mut().expect("work view").pending_land =
+            Some(crate::app::state::PrLandConfirmation {
+                repo: "owner/repo".into(),
+                number: 42,
+                head_sha: "abc123".into(),
+                approval_signal: "approved review".into(),
+            });
+        let confirmation = rendered_app_text_at(&app, 120, 24);
+        assert!(confirmation.contains("via approved review at abc123"));
     }
 
     #[test]

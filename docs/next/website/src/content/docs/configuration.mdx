@@ -484,6 +484,16 @@ font includes Nerd Font glyphs, opt in to file icons:
 icons = "nerd"
 ```
 
+## Pull request landing
+
+The Land action requires successful checks, a clean merge state, and either an
+approved review or a configured label. The default label is `approved`:
+
+```toml
+[land]
+approval_label = "approved"
+```
+
 ## Notifications
 
 Herdr can notify you when a background agent finishes or needs input:

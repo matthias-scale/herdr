@@ -33,6 +33,9 @@ pub use self::{
     theme::{parse_color, CustomThemeColors, ThemeConfig},
 };
 
+#[cfg(test)]
+pub(crate) use self::model::DEFAULT_LAND_APPROVAL_LABEL;
+
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;
 #[cfg(test)]

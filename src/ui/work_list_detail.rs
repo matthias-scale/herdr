@@ -80,6 +80,49 @@ pub(crate) struct PrItem<'a> {
     pub(crate) summary: &'a IndexedWorkItem,
     pub(crate) cached_detail: Option<&'a IndexedWorkItemDetail>,
     pub(crate) observed_at: SystemTime,
+    pub(crate) approval_label: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PrApprovalSignal {
+    ApprovedReview,
+    Label(String),
+}
+
+impl PrApprovalSignal {
+    pub(crate) fn confirmation_label(&self) -> String {
+        match self {
+            Self::ApprovedReview => "approved review".into(),
+            Self::Label(label) => format!("label {label}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PrLandStatus {
+    Enabled(PrApprovalSignal),
+    AwaitingApproval,
+    Blocked,
+}
+
+pub(crate) fn pr_land_status(detail: &IndexedWorkItemDetail, approval_label: &str) -> PrLandStatus {
+    let checks_and_merge_ready = !detail.actions.is_empty()
+        && detail.actions.iter().all(|check| check.state == "SUCCESS")
+        && detail.merge_state_status.as_deref() == Some("CLEAN");
+    if !checks_and_merge_ready {
+        return PrLandStatus::Blocked;
+    }
+    if detail
+        .review_decision
+        .as_deref()
+        .is_some_and(|decision| decision.eq_ignore_ascii_case("APPROVED"))
+    {
+        return PrLandStatus::Enabled(PrApprovalSignal::ApprovedReview);
+    }
+    if detail.labels.iter().any(|label| label == approval_label) {
+        return PrLandStatus::Enabled(PrApprovalSignal::Label(approval_label.into()));
+    }
+    PrLandStatus::AwaitingApproval
 }
 
 impl PrItem<'_> {
@@ -120,9 +163,16 @@ impl PrItem<'_> {
         let Some(detail) = self.cached_detail else {
             return false;
         };
-        !detail.actions.is_empty()
-            && detail.actions.iter().all(|check| check.state == "SUCCESS")
-            && detail.merge_state_status.as_deref() == Some("CLEAN")
+        matches!(
+            pr_land_status(detail, self.approval_label),
+            PrLandStatus::Enabled(_)
+        )
+    }
+
+    pub(crate) fn land_status(&self) -> PrLandStatus {
+        self.cached_detail.map_or(PrLandStatus::Blocked, |detail| {
+            pr_land_status(detail, self.approval_label)
+        })
     }
 }
 
@@ -279,6 +329,7 @@ pub(crate) fn sorted_filtered_prs<'a>(
     sort: PrSort,
     open_only: bool,
     observed_at: SystemTime,
+    approval_label: &'a str,
 ) -> Vec<PrItem<'a>> {
     let mut rows = items
         .iter()
@@ -294,6 +345,7 @@ pub(crate) fn sorted_filtered_prs<'a>(
                 summary,
                 cached_detail: details.get(&key),
                 observed_at,
+                approval_label,
             }
         })
         .filter(|item| (!open_only || item.is_open()) && item.matches(query))
@@ -398,6 +450,7 @@ mod tests {
             PrSort::Updated,
             true,
             SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            "approved",
         );
         assert_eq!(
             rows.iter().map(|item| item.row().group).collect::<Vec<_>>(),
@@ -427,6 +480,7 @@ mod tests {
             summary: &summary,
             cached_detail: Some(&cached),
             observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            approval_label: "approved",
         };
         let projected = item.detail();
         assert_eq!(projected.heading, "owner/repo #7 ↗");
@@ -437,11 +491,16 @@ mod tests {
 
     #[test]
     fn pr_action_enablement_matrix() {
+        assert_eq!(
+            PrApprovalSignal::Label("approved".into()).confirmation_label(),
+            "label approved"
+        );
         let summary = item(7, PrAudience::Authored, 20);
         let uncached = PrItem {
             summary: &summary,
             cached_detail: None,
             observed_at: SystemTime::UNIX_EPOCH,
+            approval_label: "approved",
         };
         let uncached_actions = uncached.actions();
         assert!(uncached_actions
@@ -451,17 +510,76 @@ mod tests {
         assert!(!uncached_actions
             .iter()
             .any(|action| action.kind != WorkActionKind::CheckOut && action.enabled));
-        for (states, merge, comment, land, fix) in [
-            (vec!["SUCCESS"], "CLEAN", true, true, true),
-            (vec!["FAILURE"], "CLEAN", true, false, true),
-            (vec!["SUCCESS"], "BEHIND", false, false, false),
-            (Vec::new(), "CLEAN", false, false, false),
+        for (states, merge, review, labels, comment, land, status, fix) in [
+            (
+                vec!["SUCCESS"],
+                "CLEAN",
+                Some("APPROVED"),
+                Vec::new(),
+                true,
+                true,
+                PrLandStatus::Enabled(PrApprovalSignal::ApprovedReview),
+                true,
+            ),
+            (
+                vec!["SUCCESS"],
+                "CLEAN",
+                None,
+                Vec::new(),
+                false,
+                false,
+                PrLandStatus::AwaitingApproval,
+                false,
+            ),
+            (
+                vec!["SUCCESS"],
+                "CLEAN",
+                None,
+                vec!["approved"],
+                false,
+                true,
+                PrLandStatus::Enabled(PrApprovalSignal::Label("approved".into())),
+                false,
+            ),
+            (
+                vec!["FAILURE"],
+                "CLEAN",
+                Some("APPROVED"),
+                Vec::new(),
+                true,
+                false,
+                PrLandStatus::Blocked,
+                true,
+            ),
+            (
+                vec!["SUCCESS"],
+                "BEHIND",
+                Some("APPROVED"),
+                Vec::new(),
+                false,
+                false,
+                PrLandStatus::Blocked,
+                false,
+            ),
+            (
+                Vec::new(),
+                "CLEAN",
+                Some("APPROVED"),
+                Vec::new(),
+                false,
+                false,
+                PrLandStatus::Blocked,
+                false,
+            ),
         ] {
-            let cached = detail(&states, merge, comment);
+            let mut cached = detail(&states, merge, comment);
+            cached.review_decision = review.map(str::to_string);
+            cached.labels = labels.into_iter().map(str::to_string).collect();
             let item = PrItem {
                 summary: &summary,
                 cached_detail: Some(&cached),
                 observed_at: SystemTime::UNIX_EPOCH,
+                approval_label: "approved",
             };
             let actions = item.actions();
             assert!(actions
@@ -475,6 +593,7 @@ mod tests {
                     .map(|action| action.enabled),
                 Some(land)
             );
+            assert_eq!(item.land_status(), status);
             assert_eq!(
                 actions
                     .iter()
