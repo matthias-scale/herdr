@@ -1021,6 +1021,42 @@ mod tests {
         assert_eq!(plan.argv, vec!["claude", "implement the retry cap"]);
     }
 
+    /// Characterization: pins `dispatch_plan()` before the T3 card layout moves
+    /// the fields around. Layout may change; the plan for the same inputs may
+    /// not.
+    #[test]
+    fn dispatch_plan_is_frozen_for_a_fixed_set_of_inputs() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "  cap the retry loop\nand log it  ".into();
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        home.effort = Some("ultra".into());
+        home.directory = PathBuf::from("/tmp/frozen-plan");
+        home.target = HomeTarget::Existing("space-7".into());
+
+        let plan = home.dispatch_plan().expect("frozen inputs dispatch");
+
+        assert_eq!(
+            plan,
+            HomeDispatchPlan {
+                agent: Agent::Codex,
+                model: "gpt-5.6-sol".into(),
+                effort: Some("ultra".into()),
+                directory: PathBuf::from("/tmp/frozen-plan"),
+                target: HomeTarget::Existing("space-7".into()),
+                prompt: "cap the retry loop\nand log it".into(),
+                argv: vec![
+                    "codex".into(),
+                    "--model".into(),
+                    "gpt-5.6-sol".into(),
+                    "-c".into(),
+                    "model_reasoning_effort=ultra".into(),
+                    "cap the retry loop\nand log it".into(),
+                ],
+            }
+        );
+    }
+
     #[test]
     fn launch_argv_uses_exact_provider_flags_for_explicit_choices() {
         let mut home = home_with_codex_catalog();
