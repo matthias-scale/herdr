@@ -51,38 +51,27 @@ struct CachedRef {
     remote: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CachedWorktree {
-    path: PathBuf,
-    branch: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct HomeRefCacheEntry {
     refs: Vec<CachedRef>,
-    worktrees: Vec<CachedWorktree>,
+    worktree_branches: HashSet<String>,
+    current_branch: Option<String>,
 }
 
 impl HomeRefCacheEntry {
-    pub(crate) fn rows_for_directory(&self, directory: &Path) -> Vec<HomeRef> {
-        let current_branch = self
-            .worktrees
-            .iter()
-            .filter(|worktree| directory.starts_with(&worktree.path))
-            .max_by_key(|worktree| worktree.path.components().count())
-            .and_then(|worktree| worktree.branch.as_deref());
-        let worktree_branches = self
-            .worktrees
-            .iter()
-            .filter_map(|worktree| worktree.branch.as_deref())
-            .collect::<HashSet<_>>();
+    pub(crate) fn rows_for_directory(&self, _directory: &Path) -> Vec<HomeRef> {
+        let current_branch = self.current_branch.as_deref().filter(|current| {
+            self.refs
+                .iter()
+                .any(|item| !item.remote && item.name.as_str() == *current)
+        });
 
         let row = |item: &CachedRef| HomeRef {
             name: item.name.clone(),
             oid: item.oid.clone(),
             tag: if !item.remote && current_branch == Some(item.name.as_str()) {
                 Some(HomeRefTag::Current)
-            } else if !item.remote && worktree_branches.contains(item.name.as_str()) {
+            } else if !item.remote && self.worktree_branches.contains(item.name.as_str()) {
                 Some(HomeRefTag::Worktree)
             } else if item.remote {
                 Some(HomeRefTag::Remote)
@@ -108,55 +97,43 @@ impl HomeRefCacheEntry {
 pub(crate) fn parse_ref_cache(
     for_each_ref: &str,
     worktree_list: &str,
-    remotes: &str,
+    current_branch: &str,
 ) -> HomeRefCacheEntry {
-    let remote_names = remotes
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty());
-    let remote_names = remote_names.map(str::to_string).collect::<Vec<_>>();
-    let remote_prefixes = remote_names
-        .iter()
-        .map(|name| format!("{name}/"))
-        .collect::<Vec<_>>();
     let refs = for_each_ref
         .lines()
         .filter_map(|line| {
-            let (name, oid) = line.split_once('\t')?;
-            let name = name.trim();
-            let oid = oid.trim();
-            (!name.is_empty() && !oid.is_empty()).then(|| CachedRef {
-                remote: remote_names.iter().any(|remote| name == remote)
-                    || remote_prefixes
-                        .iter()
-                        .any(|prefix| name.starts_with(prefix)),
+            let mut fields = line.split('\t');
+            let full_name = fields.next()?.trim();
+            let oid = fields.next()?.trim();
+            let (name, remote) = if let Some(name) = full_name.strip_prefix("refs/heads/") {
+                (!name.is_empty()).then_some((name, false))?
+            } else if let Some(name) = full_name.strip_prefix("refs/remotes/") {
+                let (remote, branch) = name.split_once('/')?;
+                (!remote.is_empty() && !branch.is_empty() && !name.ends_with("/HEAD"))
+                    .then_some((name, true))?
+            } else {
+                return None;
+            };
+            (!oid.is_empty()).then(|| CachedRef {
+                remote,
                 name: name.to_string(),
                 oid: oid.to_string(),
             })
         })
         .collect();
+    let worktree_branches = worktree_list
+        .lines()
+        .filter_map(|line| line.strip_prefix("branch refs/heads/"))
+        .map(str::to_string)
+        .collect();
+    let current_branch = current_branch.trim();
+    let current_branch = (!current_branch.is_empty()).then(|| current_branch.to_string());
 
-    let mut worktrees = Vec::new();
-    let mut path = None;
-    let mut branch = None;
-    for line in worktree_list.lines().chain(std::iter::once("")) {
-        if line.is_empty() {
-            if let Some(path) = path.take() {
-                worktrees.push(CachedWorktree {
-                    path,
-                    branch: branch.take(),
-                });
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("worktree ") {
-            path = Some(PathBuf::from(value));
-        } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
-            branch = Some(value.to_string());
-        }
+    HomeRefCacheEntry {
+        refs,
+        worktree_branches,
+        current_branch,
     }
-
-    HomeRefCacheEntry { refs, worktrees }
 }
 
 fn output_error(action: &str, output: &std::process::Output) -> String {
@@ -188,7 +165,30 @@ fn run_git_output(
     String::from_utf8(output.stdout).map_err(|_| "git returned non-UTF-8 output".to_string())
 }
 
-fn refresh_home_refs(repo_root: &Path, git_program: &Path) -> Result<HomeRefCacheEntry, String> {
+fn run_optional_git_output(
+    git_program: &Path,
+    repo_root: &Path,
+    args: &[&str],
+    deadline: Instant,
+) -> Result<Option<String>, String> {
+    let mut command = crate::noninteractive_process::command(git_program);
+    command.arg("-C").arg(repo_root).args(args);
+    let output =
+        crate::noninteractive_process::output_with_deadline_limited(command, deadline, 1024 * 1024)
+            .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    String::from_utf8(output.stdout)
+        .map(Some)
+        .map_err(|_| "git returned non-UTF-8 output".to_string())
+}
+
+fn refresh_home_refs(
+    repo_root: &Path,
+    directory: &Path,
+    git_program: &Path,
+) -> Result<HomeRefCacheEntry, String> {
     let deadline = Instant::now() + HOME_REF_REFRESH_TIMEOUT;
     let refs = run_git_output(
         git_program,
@@ -196,7 +196,7 @@ fn refresh_home_refs(repo_root: &Path, git_program: &Path) -> Result<HomeRefCach
         &[
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:short)%09%(objectname:short)",
+            "--format=%(refname)%09%(objectname:short)%09%(committerdate:unix)",
             "refs/heads",
             "refs/remotes",
         ],
@@ -208,8 +208,17 @@ fn refresh_home_refs(repo_root: &Path, git_program: &Path) -> Result<HomeRefCach
         &["worktree", "list", "--porcelain"],
         deadline,
     )?;
-    let remotes = run_git_output(git_program, repo_root, &["remote"], deadline)?;
-    Ok(parse_ref_cache(&refs, &worktrees, &remotes))
+    let current_branch = run_optional_git_output(
+        git_program,
+        directory,
+        &["symbolic-ref", "--short", "HEAD"],
+        deadline,
+    )?;
+    Ok(parse_ref_cache(
+        &refs,
+        &worktrees,
+        current_branch.as_deref().unwrap_or_default(),
+    ))
 }
 
 trait HomeGitRunner {
@@ -279,8 +288,15 @@ impl App {
 
         let event_tx = self.event_tx.clone();
         let git_program = self.git_program_for_refresh();
+        let directory = self
+            .state
+            .home
+            .as_ref()
+            .filter(|home| home.ref_repo_root.as_ref() == Some(&repo_root))
+            .map(|home| home.ref_directory.clone())
+            .unwrap_or_else(|| repo_root.clone());
         std::thread::spawn(move || {
-            let result = refresh_home_refs(&repo_root, &git_program);
+            let result = refresh_home_refs(&repo_root, &directory, &git_program);
             let _ = event_tx.blocking_send(AppEvent::HomeRefsRefreshed { repo_root, result });
         });
     }
@@ -424,10 +440,10 @@ mod tests {
     #[test]
     fn fixture_outputs_assign_tags_and_sort_current_local_then_remote() {
         let refs = concat!(
-            "feature/recent\t2222222\n",
-            "origin/feature/remote\t3333333\n",
-            "main\t1111111\n",
-            "linked\t4444444\n",
+            "refs/heads/feature/recent\t2222222\t4\n",
+            "refs/remotes/origin/feature/remote\t3333333\t3\n",
+            "refs/heads/main\t1111111\t2\n",
+            "refs/heads/linked\t4444444\t1\n",
         );
         let worktrees = concat!(
             "worktree /repo/main\n",
@@ -438,7 +454,7 @@ mod tests {
             "branch refs/heads/linked\n\n",
         );
 
-        let cache = parse_ref_cache(refs, worktrees, "origin\n");
+        let cache = parse_ref_cache(refs, worktrees, "main\n");
         let rows = cache.rows_for_directory(Path::new("/repo/main/subdirectory"));
 
         assert_eq!(
@@ -455,13 +471,42 @@ mod tests {
     }
 
     #[test]
+    fn local_branch_named_like_a_remote_is_tagged_local() {
+        let refs = concat!(
+            "refs/remotes/upstream/HEAD\t4444444\t4\n",
+            "refs/heads/upstream\t1111111\t3\n",
+            "refs/remotes/upstream/main\t2222222\t2\n",
+            "refs/remotes/origin/upstream\t3333333\t1\n",
+        );
+        let worktrees = concat!(
+            "worktree /repo/main\n",
+            "HEAD 1111111111111111111111111111111111111111\n",
+            "branch refs/heads/upstream\n\n",
+        );
+
+        let cache = parse_ref_cache(refs, worktrees, "upstream\n");
+        let rows = cache.rows_for_directory(Path::new("/repo/main"));
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.name.as_str(), row.tag))
+                .collect::<Vec<_>>(),
+            vec![
+                ("upstream", Some(HomeRefTag::Current)),
+                ("upstream/main", Some(HomeRefTag::Remote)),
+                ("origin/upstream", Some(HomeRefTag::Remote)),
+            ]
+        );
+    }
+
+    #[test]
     fn ref_filter_fuzzy_matches_names_through_dropdown_widget() {
         let refs = concat!(
-            "main\t1111111\n",
-            "feature/ref-picker\t2222222\n",
-            "origin/release\t3333333\n",
+            "refs/heads/main\t1111111\t3\n",
+            "refs/heads/feature/ref-picker\t2222222\t2\n",
+            "refs/remotes/origin/release\t3333333\t1\n",
         );
-        let cache = parse_ref_cache(refs, "", "origin\n");
+        let cache = parse_ref_cache(refs, "", "main\n");
         let names = cache
             .rows_for_directory(Path::new("/repo"))
             .into_iter()
