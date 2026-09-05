@@ -710,11 +710,150 @@ mod tests {
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
-        app::state::{AgentPanelSort, DragTarget, Mode},
+        app::state::{AgentPanelSort, DragTarget, Mode, SidebarGroupMode},
         config::SidebarCollapsedModeConfig,
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    fn sidebar_order_app(settled: bool) -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = ["alpha", "beta"]
+            .into_iter()
+            .map(|name| {
+                let mut workspace = Workspace::test_new(name);
+                workspace.test_add_tab(Some("two"));
+                workspace.test_add_tab(Some("three"));
+                workspace
+            })
+            .collect();
+        app.state.ensure_test_terminals();
+        for ws_idx in 0..app.state.workspaces.len() {
+            for tab_idx in 0..app.state.workspaces[ws_idx].tabs.len() {
+                let pane_id = app.state.workspaces[ws_idx].tabs[tab_idx].root_pane;
+                if settled {
+                    app.state.workspaces[ws_idx].tabs[tab_idx]
+                        .panes
+                        .get_mut(&pane_id)
+                        .expect("root pane")
+                        .settled_at = Some(1_725_000_000);
+                }
+                let terminal_id = app.state.workspaces[ws_idx].tabs[tab_idx].panes[&pane_id]
+                    .attached_terminal_id
+                    .clone();
+                app.state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .expect("fixture terminal")
+                    .replace_prevalidated_manual_work_context(
+                        crate::work_context::PaneWorkContext {
+                            repo: Some(format!("acme/{}", ["alpha", "beta"][ws_idx])),
+                            branch: Some(format!("branch-{ws_idx}-{tab_idx}")),
+                            pr_urls: vec![format!(
+                                "https://github.com/acme/project/pull/{}",
+                                ws_idx * 10 + tab_idx + 1
+                            )],
+                            ticket_ids: vec![format!("SCA-{}", 100 + ws_idx * 10 + tab_idx)],
+                            missive_urls: vec![format!(
+                                "https://mail.missiveapp.com/#inbox/conversations/{ws_idx}{tab_idx}"
+                            )],
+                            work_title: Some(format!("work-{ws_idx}-{tab_idx}")),
+                            ..Default::default()
+                        },
+                    );
+            }
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.reconcile_sidebar_presentation();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        app
+    }
+
+    fn sidebar_order_signature(app: &crate::app::state::AppState) -> Vec<String> {
+        crate::ui::sidebar_rows(app)
+            .into_iter()
+            .map(|row| match row {
+                crate::ui::SidebarRow::Workspace { ws_idx, indented } => {
+                    format!("workspace:{ws_idx}:{indented}")
+                }
+                crate::ui::SidebarRow::Tab { entry, .. } => {
+                    format!("tab:{}:{}", entry.ws_idx, entry.tab_idx)
+                }
+                crate::ui::SidebarRow::Agent { entry, .. } => {
+                    format!(
+                        "pane:{}:{}:{}",
+                        entry.ws_idx,
+                        entry.tab_idx,
+                        entry.pane_id.raw()
+                    )
+                }
+                crate::ui::SidebarRow::SectionHeader { title, .. } => {
+                    format!("section:{title}")
+                }
+                crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
+            })
+            .collect()
+    }
+
+    fn assert_sidebar_click_preserves_order(mode: SidebarGroupMode, settled: bool) {
+        let mut app = sidebar_order_app(settled);
+        app.state.set_sidebar_group_mode(mode);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let before = sidebar_order_signature(&app.state);
+        let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .nth(2)
+            .expect("third sidebar tab row");
+        let target_rect = target.rect;
+        let target_ws_idx = target.ws_idx;
+        let target_tab_idx = target.tab_idx;
+        let target_pane_id = target.pane_id;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target_rect.x + 1,
+            target_rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            target_rect.x + 1,
+            target_rect.y,
+        ));
+
+        if settled {
+            let selected = app
+                .state
+                .sidebar_selected_settled
+                .as_ref()
+                .expect("settled click selects its row");
+            assert_eq!(
+                selected.workspace_id,
+                app.state.workspaces[target_ws_idx].id
+            );
+            assert_eq!(selected.pane_id, target_pane_id);
+        } else {
+            assert_eq!(app.state.active, Some(target_ws_idx));
+            assert_eq!(
+                app.state.workspaces[target_ws_idx].active_tab,
+                target_tab_idx
+            );
+        }
+        assert_eq!(
+            sidebar_order_signature(&app.state),
+            before,
+            "{mode:?}, settled={settled}"
+        );
+    }
+
+    #[test]
+    fn sidebar_click_preserves_order_in_every_group_mode_and_settled() {
+        for mode in SidebarGroupMode::ALL {
+            assert_sidebar_click_preserves_order(mode, false);
+            assert_sidebar_click_preserves_order(mode, true);
+        }
+    }
 
     fn settled_target(app: &mut crate::app::App) -> crate::app::state::PaneFocusTarget {
         if app.state.workspaces.is_empty() {

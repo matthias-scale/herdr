@@ -1153,13 +1153,6 @@ fn compact_sidebar_rows_inner(
 
     let mut rows = Vec::new();
     append_recently_done_rows(app, &mut rows, recently_done);
-    let mut entries_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
-    for entry in visible_entries {
-        entries_by_workspace
-            .entry(entry.ws_idx)
-            .or_default()
-            .push(entry);
-    }
     let workspaces = workspace_list_entries_for_mode(app, expand_worktrees, app.sidebar_group_mode);
     rows.push(SidebarRow::SectionHeader {
         title: SPACES_SECTION_TITLE,
@@ -1185,11 +1178,7 @@ fn compact_sidebar_rows_inner(
         app.sidebar_group_mode,
         SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
     ) {
-        let all_entries = entries_by_workspace
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
-        for group in sidebar_work_groups(app, &all_entries, app.sidebar_group_mode) {
+        for group in sidebar_work_groups(app, &visible_entries, app.sidebar_group_mode) {
             // A work item nobody has started is not a container, so it is never
             // collapsible; it is a row you press Enter on.
             let dim = group.entries.is_empty();
@@ -1210,6 +1199,13 @@ fn compact_sidebar_rows_inner(
         }
         append_settled_rows(app, &mut rows, settled_entries, expand_worktrees);
         return rows;
+    }
+    let mut entries_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
+    for entry in visible_entries {
+        entries_by_workspace
+            .entry(entry.ws_idx)
+            .or_default()
+            .push(entry);
     }
     for workspace in workspaces {
         let WorkspaceListEntry::Workspace { ws_idx, indented } = workspace else {
@@ -1673,7 +1669,9 @@ fn push_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntr
 
 /// Group panes by the work item they are bound to, joined with the work items
 /// the projection knows about. Work items without a pane stay in the list; the
-/// caller renders them dim.
+/// caller renders them dim. Linked groups keep projection or first-seen order,
+/// the unlinked group stays last, and rows keep workspace and tab order. Focus
+/// and lifecycle state never participate in this ordering.
 pub(crate) fn sidebar_work_groups(
     app: &AppState,
     entries: &[AgentPanelEntry],
@@ -8277,6 +8275,59 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         });
         app.reconcile_sidebar_presentation();
         app
+    }
+
+    fn sidebar_order_fixture() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = ["alpha", "beta"]
+            .into_iter()
+            .map(|name| {
+                let mut workspace = Workspace::test_new(name);
+                workspace.test_add_tab(Some("two"));
+                workspace.test_add_tab(Some("three"));
+                workspace
+            })
+            .collect();
+        app.ensure_test_terminals();
+        for ws_idx in 0..app.workspaces.len() {
+            for tab_idx in 0..app.workspaces[ws_idx].tabs.len() {
+                let pane_id = app.workspaces[ws_idx].tabs[tab_idx].root_pane;
+                let terminal_id = app.workspaces[ws_idx].tabs[tab_idx].panes[&pane_id]
+                    .attached_terminal_id
+                    .clone();
+                app.terminals
+                    .get_mut(&terminal_id)
+                    .expect("fixture terminal")
+                    .replace_prevalidated_manual_work_context(
+                        crate::work_context::PaneWorkContext {
+                            missive_urls: vec![format!(
+                                "https://mail.missiveapp.com/#inbox/conversations/{ws_idx}{tab_idx}"
+                            )],
+                            ..Default::default()
+                        },
+                    );
+            }
+        }
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    #[test]
+    fn missive_groups_preserve_workspace_tab_order() {
+        let mut app = sidebar_order_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let expected = vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)];
+
+        for _ in 0..64 {
+            let actual = sidebar_rows(&app)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
     }
 
     /// `(title, pane count, dim)` for every work-item header, with the pane
