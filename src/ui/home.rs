@@ -381,12 +381,54 @@ fn chip_specs(home: &HomeState) -> Vec<(HomeFocus, String)> {
             HomeFocus::Agent,
             format!("{} ▾", crate::detect::agent_label(home.agent)),
         ),
-        (HomeFocus::Model, format!("{} ▾", home.model)),
+        (HomeFocus::Model, format!("{} ▾", home.model_display_name())),
     ];
     if let Some(effort) = &home.effort {
         specs.push((HomeFocus::Effort, format!("{effort} ▾")));
     }
+    if let Some(context) = &home.context_window {
+        specs.push((HomeFocus::Context, format!("{context} ▾")));
+    }
     specs
+}
+
+fn picker_row_label(label: &str, width: usize) -> String {
+    if display_width(label) <= width {
+        return label.to_string();
+    }
+    let compact = label.strip_prefix("Claude ").unwrap_or(label);
+    if display_width(compact) <= width {
+        return compact.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let (body, suffix) = compact
+        .strip_suffix(" ▾")
+        .map(|body| (body, " ▾"))
+        .unwrap_or((compact, ""));
+    let suffix_width = display_width(suffix);
+    if width <= suffix_width + 1 {
+        return "…".to_string();
+    }
+    let words_width = width - suffix_width - 1;
+    let mut words = String::new();
+    for word in body.split_whitespace() {
+        let separator = usize::from(!words.is_empty());
+        if display_width(&words) + separator + display_width(word) > words_width {
+            break;
+        }
+        if separator > 0 {
+            words.push(' ');
+        }
+        words.push_str(word);
+    }
+    if words.is_empty() {
+        format!("…{suffix}")
+    } else {
+        format!("{words}…{suffix}")
+    }
 }
 
 fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
@@ -398,7 +440,7 @@ fn chip_rects(home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
     let minimum_widths = specs
         .iter()
         .map(|(focus, _)| match focus {
-            HomeFocus::Agent | HomeFocus::Model | HomeFocus::Effort => 4usize,
+            HomeFocus::Agent | HomeFocus::Model | HomeFocus::Effort | HomeFocus::Context => 4usize,
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -670,9 +712,14 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
         HomePicker::Model => home
             .model_options()
             .iter()
-            .map(|model| model.id.clone())
+            .map(|model| model.display_name.clone())
             .collect(),
         HomePicker::Effort => home.effort_options().to_vec(),
+        HomePicker::Context => home
+            .context_options()
+            .iter()
+            .map(|context| (*context).to_string())
+            .collect(),
         HomePicker::Directory => app
             .home_directory_options()
             .iter()
@@ -1075,6 +1122,7 @@ pub(super) fn home_hit_areas(
                     HomeFocus::Agent => HomeHitTarget::Agent,
                     HomeFocus::Model => HomeHitTarget::Model,
                     HomeFocus::Effort => HomeHitTarget::Effort,
+                    HomeFocus::Context => HomeHitTarget::Context,
                     HomeFocus::Directory => HomeHitTarget::Directory,
                     HomeFocus::Workspace => HomeHitTarget::Workspace,
                     HomeFocus::Ref => HomeHitTarget::Ref,
@@ -1291,7 +1339,7 @@ pub(super) fn render_home(
                 Style::default().fg(app.palette.subtext0)
             };
             frame.render_widget(
-                Paragraph::new(truncate_end(&label, rect.width as usize)).style(style),
+                Paragraph::new(picker_row_label(&label, rect.width as usize)).style(style),
                 rect,
             );
         }
@@ -1709,8 +1757,9 @@ mod tests {
     fn dropdowns_open_downward_from_their_field() {
         let mut app = AppState::test_new();
         let mut home = HomeState::default();
-        home.focus = Some(HomeFocus::Agent);
-        home.picker = Some(HomePicker::Agent);
+        home.set_model("claude-fable-5-1");
+        home.focus = Some(HomeFocus::Context);
+        home.picker = Some(HomePicker::Context);
         app.home = Some(home);
         let queue = [blocked(0)];
         let area = Rect::new(0, 0, 60, 24);
@@ -1718,7 +1767,7 @@ mod tests {
         let composer = layout.composer.expect("composer should fit");
         let home = app.home.as_ref().expect("home");
         let field =
-            composer_field_rect(&app, home, composer, HomeFocus::Agent).expect("agent field");
+            composer_field_rect(&app, home, composer, HomeFocus::Context).expect("context field");
         let popup = picker_popup_rect(&app, home, composer, area).expect("an open picker");
 
         assert_eq!(
@@ -1835,6 +1884,7 @@ mod tests {
                 HomeFocus::Agent => HomeHitTarget::Agent,
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
+                HomeFocus::Context => HomeHitTarget::Context,
                 HomeFocus::Directory => HomeHitTarget::Directory,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
@@ -1954,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn home_tab_order_includes_each_agents_supported_effort_options() {
+    fn home_tab_order_includes_effort_and_supported_context_options() {
         let mut home = HomeState::default();
         let claude_order = [
             HomeFocus::Agent,
@@ -1970,6 +2020,15 @@ mod tests {
             home.move_focus(false);
             assert_eq!(home.focus, Some(expected));
         }
+
+        home.set_model("claude-fable-5-1");
+        home.focus = Some(HomeFocus::Effort);
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Context));
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Directory));
+        home.move_focus(true);
+        assert_eq!(home.focus, Some(HomeFocus::Context));
 
         home.set_agent(crate::detect::Agent::Codex);
         home.focus = Some(HomeFocus::Model);
@@ -1997,9 +2056,9 @@ mod tests {
 
         // The row keeps all three pickers, elided rather than dropped.
         assert_eq!(rects.len(), 3);
-        assert!(chip_row.contains("clau"), "{chip_row:?}");
-        assert!(chip_row.contains("defa"), "{chip_row:?}");
-        assert!(chip_row.contains("aut"), "{chip_row:?}");
+        assert_eq!(chip_row.matches("… ▾").count(), 3, "{chip_row:?}");
+        assert!(!chip_row.contains("clau"), "{chip_row:?}");
+        assert!(!chip_row.contains("defa"), "{chip_row:?}");
         assert_eq!(rects[0].1.right() + 1, rects[1].1.x);
         assert!(rects.windows(2).all(|pair| pair[0].1.right() < pair[1].1.x));
         assert!(rects.iter().all(|(_, rect)| rect.right() <= area.right()));
@@ -2010,6 +2069,7 @@ mod tests {
                 HomeFocus::Agent => HomeHitTarget::Agent,
                 HomeFocus::Model => HomeHitTarget::Model,
                 HomeFocus::Effort => HomeHitTarget::Effort,
+                HomeFocus::Context => HomeHitTarget::Context,
                 HomeFocus::Directory => HomeHitTarget::Directory,
                 HomeFocus::Workspace => HomeHitTarget::Workspace,
                 HomeFocus::Ref => HomeHitTarget::Ref,
@@ -2340,6 +2400,51 @@ mod tests {
                 "the workspace field clipped at {columns}x{rows}"
             );
         }
+    }
+
+    #[test]
+    fn picker_labels_are_word_safe_at_80_and_120_columns() {
+        for columns in [80u16, 120] {
+            let area = Rect::new(0, 0, columns.saturating_sub(24), 24);
+            let mut app = AppState::test_new();
+            let mut home = HomeState::default();
+            home.set_model("claude-fable-5-1");
+            app.home = Some(home);
+            let queue = vec![blocked(0)];
+            let composer = bands(area, queue.len()).composer.expect("composer");
+            let buffer = draw_home(&app, &queue, area);
+            let row = row_text(&buffer, composer.frame, composer.chips.y);
+
+            assert!(
+                row.contains("claude ▾ │ Claude Fable 5.1 ▾ │ auto ▾ │ 200k ▾"),
+                "picker row at {columns} columns: {row:?}"
+            );
+            assert!(!row.to_ascii_lowercase().contains("fablet"), "{row:?}");
+        }
+
+        assert_eq!(picker_row_label("Claude Fable 5.1 ▾", 11), "Fable 5.1 ▾");
+        assert_eq!(picker_row_label("Claude Fable 5.1 ▾", 8), "Fable… ▾");
+    }
+
+    #[test]
+    fn model_picker_uses_display_names_instead_of_cli_ids() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::default();
+        home.focus = Some(HomeFocus::Model);
+        home.picker = Some(HomePicker::Model);
+        app.home = Some(home);
+        let labels = picker_labels(&app, app.home.as_ref().expect("home"), HomePicker::Model);
+
+        assert_eq!(
+            labels,
+            [
+                "default",
+                "Claude Fable 5.1",
+                "Claude Opus 5",
+                "Claude Sonnet 5",
+                "Claude Haiku 4.5",
+            ]
+        );
     }
 
     /// 1a-1: the card reads headline, prompt, pickers, divider, workspace/ref.

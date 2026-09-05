@@ -16,7 +16,10 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::{app::inbox::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilterState};
 
-use super::home_catalog::{HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_MODEL};
+use super::home_catalog::{
+    ClaudeContextWindowForm, HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_MODEL, LARGE_CONTEXT_WINDOW,
+};
 use super::home_refs::HomeRef;
 
 pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 11;
@@ -29,6 +32,7 @@ pub(crate) enum HomeFocus {
     Agent,
     Model,
     Effort,
+    Context,
     Directory,
     Workspace,
     Ref,
@@ -36,14 +40,17 @@ pub(crate) enum HomeFocus {
 }
 
 impl HomeFocus {
-    pub(crate) fn next(self, effort_visible: bool) -> Self {
+    pub(crate) fn next(self, effort_visible: bool, context_visible: bool) -> Self {
         match self {
             Self::Reply => Self::Prompt,
             Self::Prompt => Self::Agent,
             Self::Agent => Self::Model,
             Self::Model if effort_visible => Self::Effort,
+            Self::Model if context_visible => Self::Context,
             Self::Model => Self::Directory,
+            Self::Effort if context_visible => Self::Context,
             Self::Effort => Self::Directory,
+            Self::Context => Self::Directory,
             Self::Directory => Self::Workspace,
             Self::Workspace => Self::Ref,
             Self::Ref => Self::Target,
@@ -51,13 +58,16 @@ impl HomeFocus {
         }
     }
 
-    pub(crate) fn previous(self, effort_visible: bool) -> Self {
+    pub(crate) fn previous(self, effort_visible: bool, context_visible: bool) -> Self {
         match self {
             Self::Reply => Self::Target,
             Self::Prompt => Self::Target,
             Self::Agent => Self::Prompt,
             Self::Model => Self::Agent,
             Self::Effort => Self::Model,
+            Self::Context if effort_visible => Self::Effort,
+            Self::Context => Self::Model,
+            Self::Directory if context_visible => Self::Context,
             Self::Directory if effort_visible => Self::Effort,
             Self::Directory => Self::Model,
             Self::Workspace => Self::Directory,
@@ -72,6 +82,7 @@ pub(crate) enum HomePicker {
     Agent,
     Model,
     Effort,
+    Context,
     Directory,
     Workspace,
     Ref,
@@ -86,6 +97,7 @@ impl HomePicker {
             HomeFocus::Agent => Some(Self::Agent),
             HomeFocus::Model => Some(Self::Model),
             HomeFocus::Effort => Some(Self::Effort),
+            HomeFocus::Context => Some(Self::Context),
             HomeFocus::Directory => Some(Self::Directory),
             HomeFocus::Workspace => Some(Self::Workspace),
             HomeFocus::Ref => Some(Self::Ref),
@@ -182,6 +194,7 @@ pub(crate) struct HomeState {
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
+    pub(crate) context_window: Option<String>,
     pub(crate) directory: PathBuf,
     pub(crate) workspace: HomeWorkspace,
     pub(crate) target: HomeTarget,
@@ -209,6 +222,7 @@ impl Default for HomeState {
             agent: Agent::Claude,
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
+            context_window: None,
             directory: default_directory(),
             workspace: HomeWorkspace::CurrentCheckout,
             target: HomeTarget::NewSpace,
@@ -270,11 +284,13 @@ impl HomeState {
             if !selected_effort_exists {
                 self.effort = self.effort_options().first().cloned();
             }
+            self.reconcile_context_window();
         }
 
         let picker_len = match self.picker {
             Some(HomePicker::Model) => Some(self.model_options().len()),
             Some(HomePicker::Effort) => Some(self.effort_options().len()),
+            Some(HomePicker::Context) => Some(self.context_options().len()),
             _ => None,
         };
         if let Some(picker_len) = picker_len {
@@ -300,6 +316,22 @@ impl HomeState {
             .and_then(|provider| provider.model(&self.model))
             .map(|model| model.efforts.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn model_display_name(&self) -> &str {
+        self.catalog
+            .provider(self.agent)
+            .and_then(|provider| provider.model(&self.model))
+            .map(|model| model.display_name.as_str())
+            .unwrap_or(&self.model)
+    }
+
+    pub(crate) fn context_options(&self) -> &'static [&'static str] {
+        if self.context_visible() {
+            &[DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
+        } else {
+            &[]
+        }
     }
 
     /// The row the cursor is on, or nothing when the queue is empty.
@@ -360,12 +392,16 @@ impl HomeState {
         self.effort.is_some()
     }
 
+    pub(crate) fn context_visible(&self) -> bool {
+        self.context_window.is_some()
+    }
+
     pub(crate) fn move_focus(&mut self, backwards: bool) {
         let current = self.focus.unwrap_or(HomeFocus::Prompt);
         self.focus = Some(if backwards {
-            current.previous(self.effort_visible())
+            current.previous(self.effort_visible(), self.context_visible())
         } else {
-            current.next(self.effort_visible())
+            current.next(self.effort_visible(), self.context_visible())
         });
     }
 
@@ -397,6 +433,7 @@ impl HomeState {
             .and_then(|catalog| catalog.model(&self.model))
             .and_then(|model| model.efforts.first())
             .cloned();
+        self.reconcile_context_window();
     }
 
     pub(crate) fn set_model(&mut self, model: impl Into<String>) {
@@ -417,6 +454,26 @@ impl HomeState {
             .is_some_and(|effort| efforts.iter().any(|known| known == effort))
         {
             self.effort = efforts.first().cloned();
+        }
+        self.reconcile_context_window();
+    }
+
+    fn reconcile_context_window(&mut self) {
+        let supports_large_context = self.agent == Agent::Claude
+            && self
+                .catalog
+                .provider(self.agent)
+                .and_then(|provider| provider.model(&self.model))
+                .is_some_and(|model| model.supports_large_context);
+        if supports_large_context {
+            let selected_is_valid = self.context_window.as_deref().is_some_and(|context| {
+                matches!(context, DEFAULT_CONTEXT_WINDOW | LARGE_CONTEXT_WINDOW)
+            });
+            if !selected_is_valid {
+                self.context_window = Some(DEFAULT_CONTEXT_WINDOW.into());
+            }
+        } else {
+            self.context_window = None;
         }
     }
 
@@ -455,12 +512,34 @@ impl HomeState {
         if !model.efforts.iter().any(|known| known == effort) {
             return Err("select an effort supported by that model".into());
         }
+        if self.context_window.is_some() && !model.supports_large_context {
+            return Err("select a context window supported by that model".into());
+        }
+        if self.context_window.as_deref().is_some_and(|context| {
+            !matches!(context, DEFAULT_CONTEXT_WINDOW | LARGE_CONTEXT_WINDOW)
+        }) {
+            return Err("select a supported context window".into());
+        }
 
         let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
         match self.agent {
             Agent::Claude => {
+                let large_context = self.context_window.as_deref() == Some(LARGE_CONTEXT_WINDOW);
+                let context_form = catalog.claude_context_form.as_ref();
+                let model_arg = if large_context
+                    && !matches!(context_form, Some(ClaudeContextWindowForm::Flag(_)))
+                {
+                    format!("{}[1m]", self.model)
+                } else {
+                    self.model.clone()
+                };
                 if self.model != DEFAULT_MODEL {
-                    argv.extend(["--model".into(), self.model.clone()]);
+                    argv.extend(["--model".into(), model_arg]);
+                }
+                if large_context {
+                    if let Some(ClaudeContextWindowForm::Flag(flag)) = context_form {
+                        argv.extend([flag.clone(), "1m".into()]);
+                    }
                 }
                 if effort != AUTO_EFFORT {
                     argv.extend(["--effort".into(), effort.into()]);
@@ -872,6 +951,11 @@ impl crate::app::state::AppState {
                 .as_ref()
                 .map(|home| home.effort_options().len())
                 .unwrap_or(0),
+            HomePicker::Context => self
+                .home
+                .as_ref()
+                .map(|home| home.context_options().len())
+                .unwrap_or(0),
             HomePicker::Directory => self.home_directory_match_indices().len(),
             HomePicker::Workspace => self.home_workspace_options().len(),
             HomePicker::Ref => self.home_ref_match_indices().len(),
@@ -950,6 +1034,11 @@ impl crate::app::state::AppState {
                     home.effort_options()
                         .iter()
                         .position(|option| *option == effort)
+                }),
+                HomePicker::Context => home.context_window.as_deref().and_then(|context| {
+                    home.context_options()
+                        .iter()
+                        .position(|option| *option == context)
                 }),
                 HomePicker::Directory => self
                     .home_directory_options()
@@ -1085,6 +1174,16 @@ impl crate::app::state::AppState {
                     .cloned();
                 if let Some(home) = self.home.as_mut() {
                     home.effort = effort;
+                }
+            }
+            HomePicker::Context => {
+                let context = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.context_options().get(selected))
+                    .map(|context| (*context).to_string());
+                if let Some(home) = self.home.as_mut() {
+                    home.context_window = context;
                 }
             }
             HomePicker::Directory => {
@@ -1320,7 +1419,13 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["default", "fable", "opus", "sonnet", "haiku"]
+            [
+                "default",
+                "claude-fable-5-1",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "claude-haiku-4-5-20251001",
+            ]
         );
         home.set_agent(Agent::Codex);
         home.set_model("gpt-5.6-sol");
@@ -1548,16 +1653,16 @@ mod tests {
     fn launch_argv_uses_exact_provider_flags_for_explicit_choices() {
         let mut home = home_with_codex_catalog();
         home.prompt = "implement the retry cap".into();
-        home.set_model("fable");
-        home.effort = Some("max".into());
+        home.set_model("claude-fable-5-1");
+        home.effort = Some("high".into());
         assert_eq!(
             home.dispatch_plan().expect("Claude plan").argv,
             vec![
                 "claude",
                 "--model",
-                "fable",
+                "claude-fable-5-1",
                 "--effort",
-                "max",
+                "high",
                 "implement the retry cap",
             ]
         );
@@ -1574,6 +1679,64 @@ mod tests {
                 "-c",
                 "model_reasoning_effort=ultra",
                 "implement the retry cap",
+            ]
+        );
+    }
+
+    #[test]
+    fn context_window_is_visible_only_for_supported_claude_models() {
+        let mut home = HomeState::default();
+        assert!(!home.context_visible());
+
+        home.set_model("claude-fable-5-1");
+        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
+        assert_eq!(
+            home.context_options(),
+            [DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
+        );
+
+        home.set_model("claude-haiku-4-5-20251001");
+        assert!(!home.context_visible());
+        home.set_agent(Agent::Codex);
+        assert!(!home.context_visible());
+    }
+
+    #[test]
+    fn one_million_context_uses_the_fallback_model_alias() {
+        let mut home = HomeState::test_with_prompt("use the larger window");
+        home.set_model("claude-opus-5");
+        home.context_window = Some(LARGE_CONTEXT_WINDOW.into());
+
+        assert_eq!(
+            home.dispatch_plan().expect("Claude plan").argv,
+            [
+                "claude",
+                "--model",
+                "claude-opus-5[1m]",
+                "use the larger window",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_million_context_uses_a_documented_cli_flag() {
+        let claude = super::super::home_catalog::parse_claude_help(
+            "--effort <level> (low, medium, high)\n--context-window <size> (200k, 1m)\n",
+        );
+        let mut home = HomeState::with_catalog(HomeCatalog::with_claude(claude));
+        home.prompt = "use the larger window".into();
+        home.set_model("claude-sonnet-5");
+        home.context_window = Some(LARGE_CONTEXT_WINDOW.into());
+
+        assert_eq!(
+            home.dispatch_plan().expect("Claude plan").argv,
+            [
+                "claude",
+                "--model",
+                "claude-sonnet-5",
+                "--context-window",
+                "1m",
+                "use the larger window",
             ]
         );
     }
