@@ -211,8 +211,37 @@ impl AppState {
             && !self.sidebar_collapsed
             && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
-        let group_anchor_hit =
-            group_menu_enabled && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        let filter_anchor = self.sidebar_filter_anchor_rect();
+        let filter_anchor_hit =
+            group_menu_enabled && self.point_in_rect(filter_anchor, mouse.column, mouse.row);
+        // The filter chip sits inside the mode anchor, so it claims the click
+        // first; the rest of the header still opens the mode dropdown.
+        let group_anchor_hit = group_menu_enabled
+            && !filter_anchor_hit
+            && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_filter_menu_open {
+            if let Some(index) = self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
+                self.sidebar_filter_menu_selected = index;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && filter_anchor_hit {
+            if self.sidebar_filter_menu_open {
+                self.sidebar_filter_menu_open = false;
+            } else {
+                self.open_sidebar_filter_menu();
+            }
+            return None;
+        }
+        if self.sidebar_filter_menu_open {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                match self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
+                    Some(index) => self.select_sidebar_filter_option(index),
+                    None => self.sidebar_filter_menu_open = false,
+                }
+            }
+            return None;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_group_menu_open {
             if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
                 self.sidebar_group_menu_selected = index;
@@ -890,6 +919,10 @@ impl AppState {
                     }
                     if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
                         self.toggle_sidebar_group(&key);
+                        return None;
+                    }
+                    if let Some(key) = crate::ui::sidebar_dim_header_at(self, mouse.row) {
+                        self.sidebar_selected_work_group = Some(key);
                         return None;
                     }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {

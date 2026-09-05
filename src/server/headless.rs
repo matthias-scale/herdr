@@ -2993,6 +2993,13 @@ impl HeadlessServer {
         if let Some(mode) = self.app.state.take_sidebar_group_mode_persistence_request() {
             crate::client::presentation::save_sidebar_group_mode(mode);
         }
+        if let Some(filter) = self
+            .app
+            .state
+            .take_sidebar_work_filter_persistence_request()
+        {
+            crate::client::presentation::save_sidebar_work_filter(filter);
+        }
 
         if self.app.state.detach_requested {
             self.app.state.detach_requested = false;
@@ -3079,6 +3086,8 @@ impl HeadlessServer {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
                     client.sidebar_presentation.group_mode = group_mode;
                     client.sidebar_presentation.group_menu_selected = group_mode.index();
+                    client.sidebar_presentation.work_filter =
+                        crate::client::presentation::load_sidebar_work_filter();
                 }
                 if !direct_attach_requested {
                     self.foreground_client_id = Some(client_id);

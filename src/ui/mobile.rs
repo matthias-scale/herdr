@@ -757,10 +757,10 @@ fn render_mobile_switcher_content(
             SidebarRow::NestedHeader {
                 title,
                 collapsed,
-                unavailable,
+                dim,
                 ..
             } => {
-                let label = if *unavailable {
+                let label = if *dim {
                     format!("   {title}")
                 } else {
                     format!("   {} {title}", if *collapsed { "▸" } else { "▾" })

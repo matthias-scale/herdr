@@ -604,6 +604,28 @@ impl crate::app::state::AppState {
         }
     }
 
+    /// Start a thread for a work item that has no pane yet: home opens with the
+    /// item as the prompt, in the checkout the item is linked to when one is
+    /// known and on the last used directory otherwise.
+    pub(crate) fn open_home_composer_for_work_group(&mut self, key: &str) -> bool {
+        let Some(activation) = crate::ui::sidebar_work_group_activation(self, key) else {
+            return false;
+        };
+        let mut home = self
+            .home
+            .take()
+            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+        home.prompt = activation.prompt;
+        home.focus = Some(HomeFocus::Prompt);
+        home.picker = None;
+        if let Some(directory) = activation.directory {
+            home.directory = directory;
+        }
+        self.inbox = None;
+        self.home = Some(home);
+        true
+    }
+
     pub(crate) fn clear_home(&mut self) {
         self.home = None;
     }

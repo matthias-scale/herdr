@@ -656,6 +656,7 @@ impl App {
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
         let sidebar_group_mode = crate::client::presentation::load_sidebar_group_mode();
+        let sidebar_work_filter = crate::client::presentation::load_sidebar_work_filter();
 
         let mut state = AppState {
             collapsed_sidebar_groups: std::iter::once(format!(
@@ -667,6 +668,10 @@ impl App {
             sidebar_group_mode,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: sidebar_group_mode.index(),
+            sidebar_work_filter,
+            sidebar_filter_menu_open: false,
+            sidebar_filter_menu_selected: 0,
+            sidebar_selected_work_group: None,
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
@@ -731,6 +736,7 @@ impl App {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -1464,6 +1470,9 @@ impl App {
             }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);
+            }
+            if let Some(filter) = self.state.take_sidebar_work_filter_persistence_request() {
+                crate::client::presentation::save_sidebar_work_filter(filter);
             }
 
             if needs_render && self.can_render_now(now) {

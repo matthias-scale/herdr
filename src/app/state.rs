@@ -726,6 +726,31 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
+/// Team / assignee narrowing for the work-item grouping modes. TUI-only
+/// presentation state: it selects which of the projection's tickets the
+/// sidebar shows and never reaches the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SidebarWorkFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) team: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) assignee: Option<String>,
+}
+
+impl SidebarWorkFilter {
+    /// Header chip: what the current narrowing is, in the operator's words.
+    pub(crate) fn label(&self) -> String {
+        match (self.team.as_deref(), self.assignee.as_deref()) {
+            (_, Some(assignee)) => format!("assigned to {assignee}"),
+            (_, None) => "all assignees".into(),
+        }
+    }
+
+    pub(crate) fn team_label(&self) -> String {
+        self.team.clone().unwrap_or_else(|| "all teams".into())
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
 )]
@@ -807,6 +832,10 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) group_mode: SidebarGroupMode,
     pub(crate) group_menu_open: bool,
     pub(crate) group_menu_selected: usize,
+    pub(crate) work_filter: SidebarWorkFilter,
+    pub(crate) filter_menu_open: bool,
+    pub(crate) filter_menu_selected: usize,
+    pub(crate) selected_work_group: Option<String>,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -2094,6 +2123,7 @@ pub struct AppState {
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
+    pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -2114,6 +2144,12 @@ pub struct AppState {
     pub(crate) sidebar_group_mode: SidebarGroupMode,
     pub(crate) sidebar_group_menu_open: bool,
     pub(crate) sidebar_group_menu_selected: usize,
+    pub(crate) sidebar_work_filter: SidebarWorkFilter,
+    pub(crate) sidebar_filter_menu_open: bool,
+    pub(crate) sidebar_filter_menu_selected: usize,
+    /// Dim work-item header the operator selected with the mouse. Enter on it
+    /// starts a thread for that ticket or conversation.
+    pub(crate) sidebar_selected_work_group: Option<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -2625,6 +2661,8 @@ impl AppState {
         self.sidebar_group_menu_selected = mode.index();
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
+        self.sidebar_selected_work_group = None;
+        self.sidebar_filter_menu_open = false;
         self.workspace_scroll = 0;
         self.mark_sidebar_projection_changed();
     }
@@ -2637,6 +2675,24 @@ impl AppState {
         &mut self,
     ) -> Option<SidebarGroupMode> {
         self.sidebar_group_mode_persistence_request.take()
+    }
+
+    pub(crate) fn set_sidebar_work_filter(&mut self, filter: SidebarWorkFilter) {
+        self.sidebar_filter_menu_open = false;
+        if self.sidebar_work_filter == filter {
+            return;
+        }
+        self.sidebar_work_filter = filter.clone();
+        self.sidebar_work_filter_persistence_request = Some(filter);
+        self.sidebar_selected_work_group = None;
+        self.workspace_scroll = 0;
+        self.mark_sidebar_projection_changed();
+    }
+
+    pub(crate) fn take_sidebar_work_filter_persistence_request(
+        &mut self,
+    ) -> Option<SidebarWorkFilter> {
+        self.sidebar_work_filter_persistence_request.take()
     }
 
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
@@ -2669,6 +2725,19 @@ impl AppState {
         std::mem::swap(
             &mut self.sidebar_group_menu_selected,
             &mut other.group_menu_selected,
+        );
+        std::mem::swap(&mut self.sidebar_work_filter, &mut other.work_filter);
+        std::mem::swap(
+            &mut self.sidebar_filter_menu_open,
+            &mut other.filter_menu_open,
+        );
+        std::mem::swap(
+            &mut self.sidebar_filter_menu_selected,
+            &mut other.filter_menu_selected,
+        );
+        std::mem::swap(
+            &mut self.sidebar_selected_work_group,
+            &mut other.selected_work_group,
         );
     }
 
@@ -3148,6 +3217,7 @@ impl AppState {
             request_client_config_reload: false,
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
+            sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -3162,6 +3232,10 @@ impl AppState {
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_group_menu_open: false,
             sidebar_group_menu_selected: 0,
+            sidebar_work_filter: SidebarWorkFilter::default(),
+            sidebar_filter_menu_open: false,
+            sidebar_filter_menu_selected: 0,
+            sidebar_selected_work_group: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
