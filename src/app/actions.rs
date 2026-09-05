@@ -3375,11 +3375,14 @@ impl AppState {
                 generation: _,
                 results,
                 cache_updates,
+                file_fingerprints,
             } => {
                 let _ = results;
                 let _ = cache_updates;
+                let _ = file_fingerprints;
                 Vec::new()
             }
+            AppEvent::DockFilesRefreshed { .. } => Vec::new(),
             AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
             AppEvent::DiffRefreshed { .. } => Vec::new(),
             AppEvent::WorkIndexRefreshed { .. } | AppEvent::WorkItemDetailRefreshed { .. } => {

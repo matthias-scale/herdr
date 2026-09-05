@@ -67,6 +67,7 @@ mod connectivity;
 mod contract_false_positive;
 mod detect;
 mod events;
+mod files;
 mod ghostty;
 mod handoff_runtime;
 mod input;
@@ -401,6 +402,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
+
+# File tree badges are portable. Set this to "nerd" only when the terminal font
+# includes Nerd Font glyphs.
+[files]
+# icons = "badges"
 
 # Full-width top status row on desktop layouts.
 [ui.status_bar]

@@ -348,6 +348,21 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub files: FilesConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesIconConfig {
+    #[default]
+    Badges,
+    Nerd,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct FilesConfig {
+    pub icons: FilesIconConfig,
 }
 
 pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
@@ -2236,5 +2251,12 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn files_icons_default_to_badges_and_parse_nerd() {
+        assert_eq!(Config::default().files.icons, FilesIconConfig::Badges);
+        let config: Config = toml::from_str("[files]\nicons = \"nerd\"\n").unwrap();
+        assert_eq!(config.files.icons, FilesIconConfig::Nerd);
     }
 }

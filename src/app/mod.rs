@@ -15,6 +15,7 @@ pub(crate) mod claude_subagents;
 mod config_io;
 mod creation;
 pub(crate) mod diff;
+mod files;
 pub(crate) mod foreground_process;
 mod git_actions;
 mod git_refresh;
@@ -103,6 +104,12 @@ pub(crate) struct GitRefreshInFlight {
     pub(crate) deadline: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FilesRefreshInFlight {
+    pub(crate) generation: u64,
+    pub(crate) cwd: std::path::PathBuf,
+}
+
 impl PaneClickState {
     fn is_double_click_for(self, next: Self) -> bool {
         self.pane_id == next.pane_id
@@ -157,6 +164,9 @@ pub struct App {
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
     pub(crate) diff_refresh_in_flight: Option<(u64, diff::DiffRefreshTarget)>,
     pub(crate) last_diff_refresh_generation: u64,
+    pub(crate) files_refresh_in_flight: Option<FilesRefreshInFlight>,
+    pub(crate) last_files_refresh_generation: u64,
+    pub(crate) dock_files_refresh_demand: bool,
     pub(crate) git_work_context_refresh_in_flight:
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) git_work_context_refresh_due_after_in_flight: bool,
@@ -799,6 +809,7 @@ impl App {
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
+                dock_file_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -842,6 +853,15 @@ impl App {
             dock_diff_active_key: None,
             dock_diff_cache: std::collections::HashMap::new(),
             dock_diff_resolved_requests: std::collections::HashMap::new(),
+            dock_files_focused: false,
+            dock_files_selection: None,
+            dock_files_filter: String::new(),
+            dock_files_collapsed: std::collections::HashSet::new(),
+            dock_file_cache: std::collections::HashMap::new(),
+            dock_files_root: None,
+            dock_files_cwd: None,
+            dock_files_roots_by_cwd: std::collections::HashMap::new(),
+            files_icons: config.files.icons,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -1034,6 +1054,9 @@ impl App {
             git_status_cache: HashMap::new(),
             diff_refresh_in_flight: None,
             last_diff_refresh_generation: 0,
+            files_refresh_in_flight: None,
+            last_files_refresh_generation: 0,
+            dock_files_refresh_demand: false,
             git_work_context_refresh_in_flight: None,
             git_work_context_refresh_due_after_in_flight: false,
             git_work_context_rotation: 0,
@@ -1996,6 +2019,10 @@ impl App {
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
         }
 
+        if !invalid_section("files") {
+            self.state.files_icons = config.files.icons;
+        }
+
         if !invalid_section("work_index") {
             self.work_index_config = config.work_index.clone();
             self.state.work_index_enabled = self.work_index_config.enabled;
@@ -2188,6 +2215,13 @@ impl App {
                                 continue;
                             }
                             if self.handle_dock_diff_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_files_key(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
@@ -3025,6 +3059,7 @@ mod tests {
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(!changed);
@@ -3042,6 +3077,7 @@ mod tests {
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(app.git_refresh_in_flight.is_none());
@@ -3077,6 +3113,7 @@ mod tests {
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert_eq!(
@@ -3115,6 +3152,7 @@ mod tests {
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert_eq!(
@@ -3150,6 +3188,7 @@ mod tests {
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(app.render_dirty.is_pending());
@@ -3383,6 +3422,7 @@ mod tests {
                 generation: 1,
                 results: Vec::new(),
                 cache_updates: Vec::new(),
+                file_fingerprints: Vec::new(),
             })
             .unwrap();
 
@@ -6541,6 +6581,7 @@ last_pane = "prefix+tab"
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert_eq!(app.status_context_focus, first_focus);

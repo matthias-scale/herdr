@@ -4862,8 +4862,20 @@ impl HeadlessServer {
         if self.has_app_client() {
             // Work-context links matter only while a TUI is attached and viewing panes.
             self.app.start_git_work_context_refresh_if_due(now);
+            self.app.dock_files_refresh_demand = self
+                .foreground_client_id
+                .and_then(|client_id| self.clients.get(&client_id))
+                .is_some_and(|client| {
+                    !client.dock_presentation.collapsed
+                        && client.dock_presentation.tab == Some(crate::app::DockSurface::Files)
+                });
+            if self.app.dock_files_refresh_demand {
+                self.app.start_dock_files_refresh();
+            }
             self.app.start_git_status_refresh_if_due(now);
             changed |= self.start_foreground_dock_diff_refresh_if_needed();
+        } else {
+            self.app.dock_files_refresh_demand = false;
         }
         // Without a TUI, only idle agents need foreground-child promotion. Keeping the
         // target set narrow avoids recurring process-tree scans for ordinary API panes.
@@ -6052,6 +6064,10 @@ mod tests {
                 diff_collapsed: std::collections::HashSet::new(),
                 diff_request: None,
                 diff_active_key: None,
+                files_focused: false,
+                files_selection: None,
+                files_filter: String::new(),
+                files_collapsed: std::collections::HashSet::new(),
                 home_selection: None,
                 home_ticket_selection: None,
                 home_poll_selection: None,
@@ -7422,6 +7438,7 @@ next_tab = ""
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(!changed);
@@ -7451,6 +7468,7 @@ next_tab = ""
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(changed);

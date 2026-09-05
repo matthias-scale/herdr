@@ -20,7 +20,7 @@ pub use self::{
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, FleetConfig, FleetHostConfig, HostCursorModeConfig,
+        ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
         NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
         TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
         ToastHerdrPosition, UpdateChannelConfig, WorkIndexConfig, MAX_TOAST_DELAY_SECONDS,

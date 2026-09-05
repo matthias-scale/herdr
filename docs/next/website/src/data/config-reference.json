@@ -956,6 +956,22 @@
       ]
     },
     {
+      "id": "files",
+      "title": "Files",
+      "keys": [
+        {
+          "key": "files.icons",
+          "type": "enum",
+          "default": "\"badges\"",
+          "description": "File marker style in the Files dock. Badges are portable; nerd uses Nerd Font glyphs.",
+          "values": [
+            "badges",
+            "nerd"
+          ]
+        }
+      ]
+    },
+    {
       "id": "notifications",
       "title": "Notifications",
       "keys": [
