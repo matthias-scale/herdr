@@ -64,12 +64,6 @@ pub(crate) struct PopupPaneState {
     pub height: Option<crate::popup_size::PopupSize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DockEditorSession {
-    pub pane_id: PaneId,
-    pub terminal_id: crate::terminal::TerminalId,
-}
-
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -745,15 +739,13 @@ pub(crate) struct SidebarPresentationState {
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
-/// `AppState` while routing input or rendering that client; editor PTYs remain
-/// server-owned runtime resources in `AppState`.
+/// `AppState` while routing input or rendering that client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockPresentationState {
     pub(crate) width: u16,
     pub(crate) collapsed: bool,
     pub(crate) tab: DockTab,
     pub(crate) scroll: u16,
-    pub(crate) editor_focused: bool,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -775,7 +767,6 @@ impl Default for DockPresentationState {
             collapsed: true,
             tab: DockTab::Home,
             scroll: 0,
-            editor_focused: false,
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -941,29 +932,19 @@ pub enum ViewLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockTab {
     Home,
-    Editor,
     Shortcuts,
     Context,
     Scratchpad,
 }
 
 impl DockTab {
-    pub const ALL: [Self; 5] = [
-        Self::Home,
-        Self::Editor,
-        Self::Shortcuts,
-        Self::Context,
-        Self::Scratchpad,
-    ];
+    pub const ALL: [Self; 4] = [Self::Home, Self::Shortcuts, Self::Context, Self::Scratchpad];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "home",
-            Self::Editor => "edit",
             Self::Shortcuts => "keys",
             Self::Context => "ctx",
-            // Five labels plus one space each must fit the 32-column default
-            // dock; longer names truncate their left neighbour instead.
             Self::Scratchpad => "note",
         }
     }
@@ -1844,7 +1825,6 @@ pub struct AppState {
     pub dock_collapsed: bool,
     pub dock_tab: DockTab,
     pub dock_scroll: u16,
-    pub(crate) dock_editor_focused: bool,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
@@ -1883,11 +1863,6 @@ pub struct AppState {
     /// one indistinguishable `unknown` for both.
     pub(crate) work_index_enabled: bool,
     pub(crate) work_index_linear_team_configured: bool,
-    pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
-    pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
-    /// A file the next editor spawn for this agent pane should open. Absent, the
-    /// editor opens the pane's directory exactly as it always has.
-    pub(crate) dock_editor_requested_paths: std::collections::HashMap<PaneId, std::path::PathBuf>,
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
@@ -2227,7 +2202,6 @@ impl AppState {
     pub(crate) fn show_scratchpad_tab(&mut self) {
         self.dock_collapsed = false;
         self.dock_tab = DockTab::Scratchpad;
-        self.dock_editor_focused = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
@@ -2287,7 +2261,6 @@ impl AppState {
         std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
-        std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -2765,7 +2738,6 @@ impl AppState {
             dock_collapsed: true,
             dock_tab: DockTab::Home,
             dock_scroll: 0,
-            dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -2782,9 +2754,6 @@ impl AppState {
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
             work_index_linear_team_configured: false,
-            dock_editor_sessions: std::collections::HashMap::new(),
-            dock_editor_errors: std::collections::HashMap::new(),
-            dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,

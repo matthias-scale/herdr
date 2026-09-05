@@ -822,7 +822,7 @@ fn render_with_runtime_registry_inner(
         render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
     }
     if app.view.layout != ViewLayout::Mobile {
-        render_dock(app, terminal_runtimes, frame);
+        render_dock(app, frame);
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
@@ -1177,8 +1177,8 @@ mod tests {
     fn an_open_dock_exposes_every_named_tab_and_a_body_area() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
-        // Home is the default tab now; this case still asserts the editor body.
-        app.dock_tab = crate::app::DockTab::Editor;
+        // Exercise the scratchpad body independently of the Home tab.
+        app.dock_tab = crate::app::DockTab::Scratchpad;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1207,7 +1207,7 @@ mod tests {
                 tab.label()
             );
         }
-        assert!(screen.contains("focus an agent first"));
+        assert!(screen.contains("no repository for this pane"));
     }
 
     #[test]
@@ -1259,7 +1259,7 @@ mod tests {
         assert!(app.view.dock_home_detail_tab_hit_areas.is_empty());
 
         app.dock_collapsed = false;
-        app.dock_tab = crate::app::DockTab::Editor;
+        app.dock_tab = crate::app::DockTab::Scratchpad;
         compute_view(&mut app, screen);
         assert!(app.view.dock_home_tab_hit_areas.is_empty());
         assert!(app.view.dock_home_tab_keys.is_empty());

@@ -518,11 +518,7 @@ impl AppState {
                 }
                 if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
                     self.dock_tab = tab;
-                    self.dock_editor_focused = tab == crate::app::DockTab::Editor;
                     self.dock_home_focused = tab == crate::app::DockTab::Home;
-                    if self.dock_editor_focused {
-                        self.retry_dock_editor();
-                    }
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -586,7 +582,6 @@ impl AppState {
                     return None;
                 }
                 if in_dock {
-                    self.dock_editor_focused = self.dock_tab == crate::app::DockTab::Editor;
                     return None;
                 }
 
@@ -2314,7 +2309,7 @@ mod tests {
             Rect::new(93, 0, 6, 1),
         ];
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 94, 0));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 88, 0));
 
         assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
         assert!(!app.state.dock_home_focused);
@@ -2379,7 +2374,11 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
-        let shortcuts = app.state.view.dock_tab_hit_areas[2];
+        let shortcuts_index = crate::app::DockTab::ALL
+            .iter()
+            .position(|tab| *tab == crate::app::DockTab::Shortcuts)
+            .expect("Shortcuts tab");
+        let shortcuts = app.state.view.dock_tab_hit_areas[shortcuts_index];
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),

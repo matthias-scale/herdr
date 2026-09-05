@@ -800,7 +800,6 @@ impl App {
             dock_collapsed: true,
             dock_tab: state::DockTab::Home,
             dock_scroll: 0,
-            dock_editor_focused: false,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -821,9 +820,6 @@ impl App {
                 .linear_team
                 .as_deref()
                 .is_some_and(|team| !team.trim().is_empty()),
-            dock_editor_sessions: std::collections::HashMap::new(),
-            dock_editor_errors: std::collections::HashMap::new(),
-            dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
@@ -1085,23 +1081,8 @@ impl App {
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
         >,
-        dock_editors: &[crate::server::handoff::DockEditorHandoff],
     ) -> io::Result<Self> {
         let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
-        // Dock editors follow an agent pane rather than living in a tab, so the
-        // snapshot restore below cannot claim their runtimes. Take them out
-        // first: the restore is strict about unconsumed imports.
-        let editor_imports: Vec<(
-            crate::server::handoff::DockEditorHandoff,
-            crate::handoff_runtime::ImportedHandoffRuntime,
-        )> = dock_editors
-            .iter()
-            .filter_map(|editor| {
-                imports
-                    .remove(&editor.editor_pane_id)
-                    .map(|import| (editor.clone(), import))
-            })
-            .collect();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1158,75 +1139,9 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
-        app.restore_handoff_dock_editors(config, editor_imports);
         app.sync_agent_metadata_deadline();
         app.sync_agent_activity_refresh_deadline(now);
         Ok(app)
-    }
-
-    /// Reattach imported dock editors to the panes they follow. Pane ids are
-    /// reallocated by the restore, so both the agent pane and the editor's own
-    /// pane id are renamed here; an editor whose agent pane did not come back
-    /// is shut down the same way `reap_orphaned_dock_editors` would.
-    #[cfg(unix)]
-    fn restore_handoff_dock_editors(
-        &mut self,
-        config: &Config,
-        editor_imports: Vec<(
-            crate::server::handoff::DockEditorHandoff,
-            crate::handoff_runtime::ImportedHandoffRuntime,
-        )>,
-    ) {
-        for (editor, import) in editor_imports {
-            let agent_pane_id = self
-                .state
-                .pane_id_aliases
-                .get(&editor.agent_pane_id)
-                .copied()
-                .unwrap_or_else(|| crate::layout::PaneId::from_raw(editor.agent_pane_id));
-            if self.find_pane(agent_pane_id).is_none() {
-                tracing::warn!(
-                    agent_pane = agent_pane_id.raw(),
-                    "dropping imported dock editor whose agent pane did not restore"
-                );
-                continue;
-            }
-            // A fresh pane id keeps the editor clear of the ids the restore just
-            // handed out, so a pane exit cannot be mistaken for the editor's.
-            let editor_pane_id = crate::layout::PaneId::alloc();
-            let terminal_id = crate::terminal::TerminalId::alloc();
-            let import = crate::handoff_runtime::ImportedHandoffRuntime {
-                master_fd: import.master_fd,
-                state: import.state.with_pane_id(editor_pane_id),
-            };
-            match crate::terminal::TerminalRuntime::from_handoff_fd(
-                import,
-                config.advanced.scrollback_limit_bytes,
-                self.state.host_terminal_theme,
-                self.state.host_terminal_appearance,
-                self.event_tx.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            ) {
-                Ok(runtime) => {
-                    self.terminal_runtimes.insert(terminal_id.clone(), runtime);
-                    self.state.dock_editor_sessions.insert(
-                        agent_pane_id,
-                        state::DockEditorSession {
-                            pane_id: editor_pane_id,
-                            terminal_id,
-                        },
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to import a dock editor runtime");
-                    self.state.dock_editor_errors.insert(
-                        agent_pane_id,
-                        "editor did not survive the update".to_string(),
-                    );
-                }
-            }
-        }
     }
 
     #[cfg(unix)]
@@ -1506,8 +1421,6 @@ impl App {
                             area,
                         );
                     }
-                    self.ensure_dock_editor();
-                    self.resize_dock_editor();
                     self.ensure_scratchpad();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
@@ -2450,135 +2363,6 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::rc::Rc;
-
-    /// Spawn a real editor-shaped pane and hand its pty back the way a live
-    /// handoff does: a duplicated master fd plus the exported runtime state.
-    #[cfg(unix)]
-    fn imported_editor_runtime(
-        pane_id: crate::layout::PaneId,
-    ) -> (
-        crate::terminal::TerminalRuntime,
-        crate::handoff_runtime::ImportedHandoffRuntime,
-    ) {
-        let (events, _events_rx) = tokio::sync::mpsc::channel(16);
-        let runtime = TerminalRuntime::spawn_argv_command(
-            pane_id,
-            24,
-            80,
-            std::env::temp_dir(),
-            &[
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "sleep 30".to_string(),
-            ],
-            &crate::pane::PaneLaunchEnv::default(),
-            crate::pane::AgentDetection::Disabled,
-            0,
-            crate::terminal_theme::TerminalTheme::default(),
-            None,
-            events,
-            std::sync::Arc::new(tokio::sync::Notify::new()),
-            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
-        )
-        .expect("spawn editor pane");
-        runtime
-            .pause_handoff_reader(std::time::Duration::from_secs(2))
-            .expect("quiesce the pty actor");
-        let master_fd = runtime.duplicate_handoff_fd().expect("duplicate pty fd");
-        let state = runtime.handoff_runtime_state(pane_id.raw());
-        (
-            runtime,
-            crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state },
-        )
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_imported_dock_editor_reattaches_to_its_renamed_agent_pane() {
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            tokio::sync::mpsc::unbounded_channel().1,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("editor")];
-        app.state.active = Some(0);
-        app.state.ensure_test_terminals();
-        let agent_pane_id = app.state.workspaces[0]
-            .focused_pane_id()
-            .expect("focused pane");
-        // The restore renames pane ids, so the manifest's agent pane only
-        // resolves through the alias table.
-        let exported_agent_pane_id = agent_pane_id.raw() + 1_000;
-        app.state
-            .pane_id_aliases
-            .insert(exported_agent_pane_id, agent_pane_id);
-        let exported_editor_pane_id = crate::layout::PaneId::alloc();
-        let (source, import) = imported_editor_runtime(exported_editor_pane_id);
-        let child_pid = source.child_pid().expect("editor child pid");
-
-        app.restore_handoff_dock_editors(
-            &Config::default(),
-            vec![(
-                crate::server::handoff::DockEditorHandoff {
-                    agent_pane_id: exported_agent_pane_id,
-                    editor_pane_id: exported_editor_pane_id.raw(),
-                },
-                import,
-            )],
-        );
-
-        let session = app
-            .state
-            .dock_editor_sessions
-            .get(&agent_pane_id)
-            .expect("editor reattached to its agent pane")
-            .clone();
-        assert!(
-            app.terminal_runtimes.get(&session.terminal_id).is_some(),
-            "the imported editor runtime is registered"
-        );
-        assert_ne!(
-            session.pane_id, exported_editor_pane_id,
-            "the editor gets a pane id the restore cannot hand out again"
-        );
-        assert_eq!(
-            unsafe { libc::kill(child_pid as i32, 0) },
-            0,
-            "the editor child is still running"
-        );
-
-        drop(source);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_imported_dock_editor_is_dropped_when_its_agent_pane_is_gone() {
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            tokio::sync::mpsc::unbounded_channel().1,
-            crate::api::EventHub::default(),
-        );
-        let exported_editor_pane_id = crate::layout::PaneId::alloc();
-        let (source, import) = imported_editor_runtime(exported_editor_pane_id);
-
-        app.restore_handoff_dock_editors(
-            &Config::default(),
-            vec![(
-                crate::server::handoff::DockEditorHandoff {
-                    agent_pane_id: 4_242,
-                    editor_pane_id: exported_editor_pane_id.raw(),
-                },
-                import,
-            )],
-        );
-
-        assert!(app.state.dock_editor_sessions.is_empty());
-        drop(source);
-    }
 
     fn raw_key(
         code: KeyCode,

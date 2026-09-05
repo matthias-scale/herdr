@@ -369,9 +369,6 @@ impl App {
                 self.schedule_session_save();
                 self.emit_pane_updated(ws_idx, *pane_id);
             }
-            if self.handle_dock_editor_exit(*pane_id) {
-                return None;
-            }
             if self
                 .state
                 .popup_pane

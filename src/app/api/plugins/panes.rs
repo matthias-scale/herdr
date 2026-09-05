@@ -55,11 +55,16 @@ impl App {
                 Err((code, message)) => return encode_error(id, &code, message),
             };
         let cwd = Some(self.plugin_pane_cwd(plugin, params.cwd));
-        let (ws_idx, new_pane) =
-            match self.spawn_overlay_argv_command(&pane.command, cwd, extra_env, Vec::new()) {
-                Ok(result) => result,
-                Err(err) => return encode_error(id, "plugin_pane_open_failed", err.to_string()),
-            };
+        let (ws_idx, new_pane) = match self.spawn_overlay_argv_command(
+            &pane.command,
+            cwd,
+            extra_env,
+            Vec::new(),
+            true,
+        ) {
+            Ok(result) => result,
+            Err(err) => return encode_error(id, "plugin_pane_open_failed", err.to_string()),
+        };
         let layout_tab_idx = self
             .overlay_panes
             .get(&new_pane.pane_id)
