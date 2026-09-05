@@ -64,7 +64,14 @@ impl AppState {
             self.dock_scroll = 0;
             return;
         };
-        let height = usize::from(self.view.dock_body_rect.height.saturating_sub(1).max(1));
+        let header = crate::ui::dock::files::header_rows(self);
+        let height = usize::from(
+            self.view
+                .dock_body_rect
+                .height
+                .saturating_sub(header)
+                .max(1),
+        );
         let max_scroll = row_count.saturating_sub(height);
         let current = usize::from(self.dock_scroll).min(max_scroll);
         let scroll = if index < current {
@@ -445,6 +452,8 @@ mod tests {
                     status: None,
                 }],
                 fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
             },
         );
         app.state.dock_collapsed = false;

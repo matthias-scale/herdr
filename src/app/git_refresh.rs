@@ -1007,6 +1007,8 @@ mod tests {
                 root: root.clone(),
                 files: Vec::new(),
                 fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
             },
         );
         app.test_begin_git_refresh(7);

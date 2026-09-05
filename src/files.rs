@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FileStatus {
@@ -26,12 +27,33 @@ pub(crate) struct FileRecord {
     pub(crate) status: Option<FileStatus>,
 }
 
+/// Where a listing came from. Outside a git repository `git ls-files` has
+/// nothing to say, so the tree is a plain directory walk and the surface says
+/// so instead of pretending the repository is empty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FileTreeSource {
+    #[default]
+    Git,
+    Directory,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileTreeSnapshot {
     pub(crate) root: PathBuf,
     pub(crate) files: Vec<FileRecord>,
     pub(crate) fingerprint: u64,
+    pub(crate) source: FileTreeSource,
+    /// Why the listing is incomplete. Shown as a row instead of the tree, so a
+    /// walk that never finishes cannot leave the surface on its spinner.
+    pub(crate) error: Option<String>,
 }
+
+/// How long a directory walk may run before the surface gives up on it.
+pub(crate) const DIRECTORY_WALK_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Directories a plain walk never descends into: not interesting, and big
+/// enough to spend the whole deadline on.
+const IGNORED_DIRECTORIES: [&str; 3] = [".git", "target", "node_modules"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileTreeRowKind {
@@ -124,9 +146,18 @@ fn append_rows(
 }
 
 pub(crate) fn build_file_tree(cwd: &Path, git_program: &Path) -> FileTreeSnapshot {
+    build_file_tree_until(cwd, git_program, Instant::now() + DIRECTORY_WALK_DEADLINE)
+}
+
+/// `build_file_tree` with an explicit deadline for the non-git walk.
+pub(crate) fn build_file_tree_until(
+    cwd: &Path,
+    git_program: &Path,
+    deadline: Instant,
+) -> FileTreeSnapshot {
     match git_repo_root(cwd, git_program) {
         Some(root) => build_git_file_tree(root, git_program),
-        None => build_directory_file_tree(cwd.to_path_buf()),
+        None => build_directory_file_tree(cwd.to_path_buf(), deadline),
     }
 }
 
@@ -190,6 +221,8 @@ fn build_git_file_tree(root: PathBuf, git_program: &Path) -> FileTreeSnapshot {
         root,
         files,
         fingerprint: hash_git_outputs(&paths, &porcelain),
+        source: FileTreeSource::Git,
+        error: None,
     }
 }
 
@@ -258,10 +291,10 @@ fn hash_git_outputs(paths: &[u8], status: &[u8]) -> u64 {
     hasher.finish()
 }
 
-fn build_directory_file_tree(root: PathBuf) -> FileTreeSnapshot {
+fn build_directory_file_tree(root: PathBuf, deadline: Instant) -> FileTreeSnapshot {
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let mut paths = Vec::new();
-    walk_directory(&root, &root, &mut paths);
+    let outcome = walk_directory(&root, &root, &mut paths, deadline);
     paths.sort();
     let files = paths
         .into_iter()
@@ -269,21 +302,61 @@ fn build_directory_file_tree(root: PathBuf) -> FileTreeSnapshot {
         .collect::<Vec<_>>();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     files.hash(&mut hasher);
+    let error = match outcome {
+        WalkOutcome::Complete => None,
+        WalkOutcome::TimedOut => Some(format!(
+            "listing timed out after {}s",
+            DIRECTORY_WALK_DEADLINE.as_secs()
+        )),
+        WalkOutcome::Unreadable => Some(format!("cannot read {}", root.display())),
+    };
+    if let Some(error) = error.as_deref() {
+        tracing::warn!(root = %root.display(), error, "directory file listing incomplete");
+    }
     FileTreeSnapshot {
         root,
         files,
         fingerprint: hasher.finish(),
+        source: FileTreeSource::Directory,
+        error,
     }
 }
 
-fn walk_directory(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalkOutcome {
+    Complete,
+    TimedOut,
+    /// The walk root itself could not be read; a directory deeper down that is
+    /// unreadable is skipped instead, the same as before.
+    Unreadable,
+}
+
+fn walk_directory(
+    root: &Path,
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+    deadline: Instant,
+) -> WalkOutcome {
+    if Instant::now() >= deadline {
+        return WalkOutcome::TimedOut;
+    }
     let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
+        return if directory == root {
+            WalkOutcome::Unreadable
+        } else {
+            WalkOutcome::Complete
+        };
     };
     let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        if entry.file_name() == ".git" {
+        if Instant::now() >= deadline {
+            return WalkOutcome::TimedOut;
+        }
+        if IGNORED_DIRECTORIES
+            .iter()
+            .any(|ignored| entry.file_name() == *ignored)
+        {
             continue;
         }
         let path = entry.path();
@@ -291,11 +364,14 @@ fn walk_directory(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) {
             continue;
         };
         if kind.is_dir() {
-            walk_directory(root, &path, paths);
+            if walk_directory(root, &path, paths, deadline) == WalkOutcome::TimedOut {
+                return WalkOutcome::TimedOut;
+            }
         } else if let Ok(relative) = path.strip_prefix(root) {
             paths.push(relative.to_path_buf());
         }
     }
+    WalkOutcome::Complete
 }
 
 #[cfg(test)]
@@ -337,6 +413,71 @@ mod tests {
             .status()
             .expect("run git");
         assert!(status.success());
+    }
+
+    #[test]
+    fn a_cwd_outside_a_repository_falls_back_to_a_directory_walk() {
+        let temp = TempDir::new("no-repo");
+        let root = &temp.0;
+        std::fs::write(root.join("notes.md"), "hello").expect("write file");
+        for noise in ["target", "node_modules", ".git"] {
+            std::fs::create_dir_all(root.join(noise)).expect("create dir");
+            std::fs::write(root.join(noise).join("ignored.txt"), "x").expect("write file");
+        }
+        std::fs::create_dir_all(root.join("src")).expect("create dir");
+        std::fs::write(root.join("src").join("lib.rs"), "fn main() {}").expect("write file");
+
+        // A git program that cannot exist keeps the fixture independent of the
+        // machine's git and of any repository above the temp directory.
+        let snapshot = build_file_tree(root, Path::new("herdr-no-such-git"));
+
+        assert_eq!(snapshot.source, FileTreeSource::Directory);
+        assert_eq!(snapshot.error, None);
+        let paths = snapshot
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&PathBuf::from("notes.md")));
+        assert!(paths.contains(&PathBuf::from("src/lib.rs")));
+        for noise in ["target", "node_modules", ".git"] {
+            assert!(
+                !paths.iter().any(|path| path.starts_with(noise)),
+                "{noise} should not be walked: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_walk_that_runs_past_its_deadline_reports_an_error() {
+        let temp = TempDir::new("slow-walk");
+        std::fs::write(temp.0.join("notes.md"), "hello").expect("write file");
+
+        let snapshot = build_file_tree_until(
+            &temp.0,
+            Path::new("herdr-no-such-git"),
+            Instant::now() - Duration::from_secs(1),
+        );
+
+        assert_eq!(snapshot.source, FileTreeSource::Directory);
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("listing timed out after 5s")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_walk_root_reports_an_error() {
+        let temp = TempDir::new("missing-root");
+        let missing = temp.0.join("gone");
+
+        let snapshot = build_file_tree(&missing, Path::new("herdr-no-such-git"));
+
+        assert_eq!(snapshot.source, FileTreeSource::Directory);
+        assert!(snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("cannot read ")));
     }
 
     #[test]
@@ -391,6 +532,8 @@ mod tests {
                 status: None,
             }],
             fingerprint: 1,
+            source: FileTreeSource::Git,
+            error: None,
         };
         let collapsed = [PathBuf::from("src"), PathBuf::from("src/nested")]
             .into_iter()
