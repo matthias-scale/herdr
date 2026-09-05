@@ -2283,9 +2283,9 @@ mod tests {
             app.home_ref_cache.insert(
                 "/repo".into(),
                 crate::app::home_refs::parse_ref_cache(
-                    "main\t1234567\n",
+                    "refs/heads/main\t1234567\t1\n",
                     "worktree /repo\nHEAD 1234567890\nbranch refs/heads/main\n\n",
-                    "",
+                    "main\n",
                 ),
             );
             let queue = vec![blocked(0)];

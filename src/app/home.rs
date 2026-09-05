@@ -1461,12 +1461,12 @@ mod tests {
         app.home_ref_cache.insert(
             repo_root.clone(),
             super::super::home_refs::parse_ref_cache(
-                "cached/topic\t1234567\n",
+                "refs/heads/cached/topic\t1234567\t1\n",
                 &format!(
                     "worktree {}\nHEAD 1234567890\nbranch refs/heads/cached/topic\n\n",
                     directory.display()
                 ),
-                "",
+                "cached/topic\n",
             ),
         );
 
