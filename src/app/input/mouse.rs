@@ -169,6 +169,8 @@ impl AppState {
                                 HomeHitTarget::Model => crate::app::home::HomePicker::Model,
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
+                                HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,
+                                HomeHitTarget::Ref => crate::app::home::HomePicker::Ref,
                                 HomeHitTarget::Target => crate::app::home::HomePicker::Target,
                                 HomeHitTarget::QueueRow(_)
                                 | HomeHitTarget::NewTask

@@ -990,6 +990,8 @@ pub(crate) enum HomeHitTarget {
     Model,
     Effort,
     Directory,
+    Workspace,
+    Ref,
     Target,
     PickerOption(usize),
 }

@@ -18,7 +18,7 @@ use crate::{app::inbox::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilte
 
 use super::home_catalog::{HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_MODEL};
 
-pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 9;
+pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 11;
 pub(crate) const HOME_LENS_MIN_HEIGHT: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,8 @@ pub(crate) enum HomeFocus {
     Model,
     Effort,
     Directory,
+    Workspace,
+    Ref,
     Target,
 }
 
@@ -41,7 +43,9 @@ impl HomeFocus {
             Self::Model if effort_visible => Self::Effort,
             Self::Model => Self::Directory,
             Self::Effort => Self::Directory,
-            Self::Directory => Self::Target,
+            Self::Directory => Self::Workspace,
+            Self::Workspace => Self::Ref,
+            Self::Ref => Self::Target,
             Self::Target => Self::Prompt,
         }
     }
@@ -55,7 +59,9 @@ impl HomeFocus {
             Self::Effort => Self::Model,
             Self::Directory if effort_visible => Self::Effort,
             Self::Directory => Self::Model,
-            Self::Target => Self::Directory,
+            Self::Workspace => Self::Directory,
+            Self::Ref => Self::Workspace,
+            Self::Target => Self::Ref,
         }
     }
 }
@@ -66,6 +72,8 @@ pub(crate) enum HomePicker {
     Model,
     Effort,
     Directory,
+    Workspace,
+    Ref,
     Target,
 }
 
@@ -78,6 +86,8 @@ impl HomePicker {
             HomeFocus::Model => Some(Self::Model),
             HomeFocus::Effort => Some(Self::Effort),
             HomeFocus::Directory => Some(Self::Directory),
+            HomeFocus::Workspace => Some(Self::Workspace),
+            HomeFocus::Ref => Some(Self::Ref),
             HomeFocus::Target => Some(Self::Target),
         }
     }
@@ -98,6 +108,19 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
+}
+
+/// Placeholder option of the workspace picker until slice 1b fills it.
+pub(crate) const CURRENT_CHECKOUT_LABEL: &str = "Current checkout";
+/// Shown when no pane in the selected directory has reported a branch yet.
+pub(crate) const UNKNOWN_REF_LABEL: &str = "current branch";
+
+/// Last path component, or the whole path when there is none (`/`).
+fn directory_basename(directory: &Path) -> String {
+    directory
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| directory.display().to_string())
 }
 
 fn default_directory() -> PathBuf {
@@ -557,6 +580,67 @@ impl crate::app::state::AppState {
         options
     }
 
+    /// Every pane work context observed for a workspace rooted at `directory`.
+    ///
+    /// Home names a directory, not a pane, so the repo and branch it shows are
+    /// whatever the panes already working there have observed. Nothing is
+    /// derived here: an unlinked directory simply yields nothing.
+    fn work_contexts_for_directory<'a>(
+        &'a self,
+        directory: &'a Path,
+    ) -> impl Iterator<Item = &'a crate::work_context::PaneWorkContext> + 'a {
+        self.workspaces
+            .iter()
+            .filter(move |workspace| workspace.identity_cwd == directory)
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| terminal.effective_work_context())
+    }
+
+    fn home_directory(&self) -> PathBuf {
+        self.home
+            .as_ref()
+            .map(|home| home.directory.clone())
+            .unwrap_or_else(default_directory)
+    }
+
+    /// What the headline calls the place this thread will start in.
+    ///
+    /// The declared repo outranks the path because a worktree directory is
+    /// named after the task, not the project.
+    pub(crate) fn home_headline_name(&self) -> String {
+        let directory = self.home_directory();
+        let repo = self
+            .work_contexts_for_directory(&directory)
+            .find_map(|context| context.repo.as_deref())
+            .map(|repo| {
+                repo.rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(repo)
+                    .to_string()
+            });
+        repo.unwrap_or_else(|| directory_basename(&directory))
+    }
+
+    /// The single ref option the bottom-right picker shows. Slice 1c replaces
+    /// it with the real ref list; until then it names the branch the panes in
+    /// that directory already report.
+    pub(crate) fn home_ref_options(&self) -> Vec<String> {
+        let directory = self.home_directory();
+        let branch = self
+            .work_contexts_for_directory(&directory)
+            .find_map(|context| context.branch.clone());
+        vec![branch.unwrap_or_else(|| UNKNOWN_REF_LABEL.to_string())]
+    }
+
+    /// The single workspace option the bottom-left picker shows. Slice 1b adds
+    /// the new and previous worktree options.
+    pub(crate) fn home_workspace_options(&self) -> Vec<String> {
+        vec![CURRENT_CHECKOUT_LABEL.to_string()]
+    }
+
     pub(crate) fn home_target_options(&self) -> Vec<HomeTarget> {
         let mut options = vec![HomeTarget::NewSpace];
         options.extend(
@@ -581,6 +665,8 @@ impl crate::app::state::AppState {
                 .map(|home| home.effort_options().len())
                 .unwrap_or(0),
             HomePicker::Directory => self.home_directory_match_indices().len(),
+            HomePicker::Workspace => self.home_workspace_options().len(),
+            HomePicker::Ref => self.home_ref_options().len(),
             HomePicker::Target => self.home_target_options().len(),
         }
     }
@@ -633,6 +719,9 @@ impl crate::app::state::AppState {
                     .home_directory_options()
                     .iter()
                     .position(|directory| directory == &home.directory),
+                // Both placeholders carry a single option, so the cursor has
+                // nowhere else to be until 1b and 1c give them real lists.
+                HomePicker::Workspace | HomePicker::Ref => Some(0),
                 HomePicker::Target => self
                     .home_target_options()
                     .iter()
@@ -743,6 +832,8 @@ impl crate::app::state::AppState {
                     }
                 }
             }
+            // Selecting the only option cannot change anything.
+            HomePicker::Workspace | HomePicker::Ref => {}
             HomePicker::Target => {
                 if let Some(target) = self.home_target_options().get(selected).cloned() {
                     if let Some(home) = self.home.as_mut() {
