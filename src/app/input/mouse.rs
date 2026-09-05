@@ -147,6 +147,8 @@ impl AppState {
                             if let Some(home) = self.home.as_mut() {
                                 if home.picker == Some(crate::app::home::HomePicker::Directory) {
                                     home.directory_filter.selected = index;
+                                } else if home.picker == Some(crate::app::home::HomePicker::Ref) {
+                                    home.ref_filter.selected = index;
                                 } else {
                                     home.picker_selected = index;
                                 }

@@ -486,10 +486,7 @@ fn workspace_label(home: &HomeState) -> String {
 }
 
 fn ref_label(app: &AppState) -> String {
-    app.home_ref_options()
-        .first()
-        .cloned()
-        .unwrap_or_else(|| crate::app::home::UNKNOWN_REF_LABEL.to_string())
+    app.home_ref_label()
 }
 
 fn secondary_rects(app: &AppState, home: &HomeState, area: Rect) -> Vec<(HomeFocus, Rect)> {
@@ -686,7 +683,11 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
             .iter()
             .map(crate::app::home::HomeWorkspace::label)
             .collect(),
-        HomePicker::Ref => app.home_ref_options(),
+        HomePicker::Ref => app
+            .home_ref_options()
+            .iter()
+            .map(crate::app::home_refs::HomeRef::display_label)
+            .collect(),
         HomePicker::Target => app
             .home_target_options()
             .iter()
@@ -696,18 +697,30 @@ fn picker_labels(app: &AppState, home: &HomeState, picker: HomePicker) -> Vec<St
 }
 
 fn picker_matches<'a>(
+    app: &AppState,
     home: &HomeState,
     picker: HomePicker,
     labels: &'a [String],
 ) -> Vec<(usize, &'a str)> {
-    if picker == HomePicker::Directory {
-        home.directory_filter.matches(labels)
-    } else {
-        labels
+    match picker {
+        HomePicker::Directory => home.directory_filter.matches(labels),
+        HomePicker::Ref => {
+            let names = app
+                .home_ref_options()
+                .iter()
+                .map(|git_ref| git_ref.name.clone())
+                .collect::<Vec<_>>();
+            home.ref_filter
+                .matches(&names)
+                .into_iter()
+                .filter_map(|(index, _)| labels.get(index).map(|label| (index, label.as_str())))
+                .collect()
+        }
+        _ => labels
             .iter()
             .enumerate()
             .map(|(index, label)| (index, label.as_str()))
-            .collect()
+            .collect(),
     }
 }
 
@@ -921,10 +934,15 @@ fn picker_layout(
     if labels.is_empty() || area.width == 0 || area.height == 0 {
         return None;
     }
-    let has_filter = picker == HomePicker::Directory;
-    let matches = picker_matches(home, picker, &labels);
+    let has_filter = matches!(picker, HomePicker::Directory | HomePicker::Ref);
+    let matches = picker_matches(app, home, picker, &labels);
     let filter_width = if has_filter {
-        display_width(&home.directory_filter.query).saturating_add(4)
+        let query = if picker == HomePicker::Directory {
+            &home.directory_filter.query
+        } else {
+            &home.ref_filter.query
+        };
+        display_width(query).saturating_add(4)
     } else {
         0
     };
@@ -942,10 +960,10 @@ fn picker_layout(
         &DropdownSpec {
             anchor: field,
             item_count: matches.len(),
-            selected: if has_filter {
-                home.directory_filter.selected
-            } else {
-                home.picker_selected
+            selected: match picker {
+                HomePicker::Directory => home.directory_filter.selected,
+                HomePicker::Ref => home.ref_filter.selected,
+                _ => home.picker_selected,
             },
             has_filter,
             max_rows: labels.len().max(1),
@@ -1300,14 +1318,19 @@ pub(super) fn render_home(
         if let Some(dropdown) = picker_viewport(app, home, composer, area) {
             if let Some(picker) = home.picker {
                 let labels = picker_labels(app, home, picker);
-                let matches = picker_matches(home, picker, &labels);
-                let selected = if picker == HomePicker::Directory {
-                    home.directory_filter.selected
-                } else {
-                    home.picker_selected
+                let matches = picker_matches(app, home, picker, &labels);
+                let selected = match picker {
+                    HomePicker::Directory => home.directory_filter.selected,
+                    HomePicker::Ref => home.ref_filter.selected,
+                    _ => home.picker_selected,
                 };
                 if let Some(filter_rect) = dropdown.filter_rect {
-                    let query = format!(" / {}_", home.directory_filter.query);
+                    let filter = if picker == HomePicker::Directory {
+                        &home.directory_filter
+                    } else {
+                        &home.ref_filter
+                    };
+                    let query = format!(" / {}_", filter.query);
                     frame.render_widget(
                         Paragraph::new(truncate_end(&query, filter_rect.width as usize)).style(
                             Style::default()
@@ -1738,6 +1761,7 @@ mod tests {
             effort: Some("high".into()),
             directory: "/repo/herdr".into(),
             workspace: crate::app::home::HomeWorkspace::NewWorktree,
+            git_ref: None,
             target: HomeTarget::NewSpace,
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],
@@ -2056,12 +2080,12 @@ mod tests {
         app.home = Some(HomeState::default());
         app.home_open_picker(HomePicker::Directory);
         for character in "absolutematch".chars() {
-            app.home_push_directory_filter(character);
+            app.home_push_picker_filter(character);
         }
 
         let home = app.home.as_ref().expect("home");
         let labels = picker_labels(&app, home, HomePicker::Directory);
-        let matches = picker_matches(home, HomePicker::Directory, &labels);
+        let matches = picker_matches(&app, home, HomePicker::Directory, &labels);
         assert_eq!(
             matches
                 .iter()
@@ -2253,7 +2277,17 @@ mod tests {
             let mut home = HomeState::default();
             home.focus = Some(HomeFocus::Ref);
             home.picker = Some(HomePicker::Ref);
+            home.ref_repo_root = Some("/repo".into());
+            home.ref_directory = "/repo".into();
             app.home = Some(home);
+            app.home_ref_cache.insert(
+                "/repo".into(),
+                crate::app::home_refs::parse_ref_cache(
+                    "main\t1234567\n",
+                    "worktree /repo\nHEAD 1234567890\nbranch refs/heads/main\n\n",
+                    "",
+                ),
+            );
             let queue = vec![blocked(0)];
             let layout = bands(area, queue.len());
             let composer = layout
@@ -2461,7 +2495,8 @@ mod tests {
                 crate::app::home::HomeWorkspace::NewWorktree,
             ]
         );
-        assert_eq!(app.home_ref_options(), vec!["current branch"]);
+        assert!(app.home_ref_options().is_empty());
+        assert_eq!(app.home_ref_label(), "current branch");
         app.home_accept_picker();
         assert!(app.home.as_ref().and_then(|home| home.picker).is_none());
     }

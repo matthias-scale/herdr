@@ -42,7 +42,7 @@ struct WorkspaceGitRefreshOutput {
 }
 
 impl App {
-    fn git_program_for_refresh(&self) -> PathBuf {
+    pub(super) fn git_program_for_refresh(&self) -> PathBuf {
         #[cfg(test)]
         if let Some(program) = self.git_program_override.as_ref() {
             return program.clone();

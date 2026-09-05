@@ -75,6 +75,16 @@ pub enum AppEvent {
     HomeCatalogRefreshed {
         catalog: crate::app::home_catalog::HomeProviderCatalog,
     },
+    /// Background ref discovery completed for one repository.
+    HomeRefsRefreshed {
+        repo_root: std::path::PathBuf,
+        result: Result<crate::app::home_refs::HomeRefCacheEntry, String>,
+    },
+    /// A requested Home checkout completed before agent launch.
+    HomeCheckoutFinished {
+        plan: Box<crate::app::home::HomeDispatchPlan>,
+        result: Result<(), String>,
+    },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.

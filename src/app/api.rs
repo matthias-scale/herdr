@@ -104,6 +104,12 @@ impl App {
                     false
                 }
             }
+            AppEvent::HomeRefsRefreshed { repo_root, result } => {
+                self.handle_home_refs_refreshed(repo_root, result)
+            }
+            AppEvent::HomeCheckoutFinished { plan, result } => {
+                self.handle_home_checkout_finished(*plan, result)
+            }
             AppEvent::GitStatusRefreshed {
                 generation,
                 results,
@@ -263,6 +269,16 @@ impl App {
             if let Some(home) = self.state.home.as_mut() {
                 home.replace_provider_catalog(catalog);
             }
+            return None;
+        }
+
+        if let AppEvent::HomeRefsRefreshed { repo_root, result } = ev {
+            self.handle_home_refs_refreshed(repo_root, result);
+            return None;
+        }
+
+        if let AppEvent::HomeCheckoutFinished { plan, result } = ev {
+            self.handle_home_checkout_finished(*plan, result);
             return None;
         }
 

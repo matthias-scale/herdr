@@ -17,6 +17,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use crate::{app::inbox::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilterState};
 
 use super::home_catalog::{HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_MODEL};
+use super::home_refs::HomeRef;
 
 pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 11;
 pub(crate) const HOME_LENS_MIN_HEIGHT: u16 = 10;
@@ -129,6 +130,7 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) effort: Option<String>,
     pub(crate) directory: PathBuf,
     pub(crate) workspace: HomeWorkspace,
+    pub(crate) git_ref: Option<HomeRef>,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
@@ -186,6 +188,10 @@ pub(crate) struct HomeState {
     pub(crate) picker: Option<HomePicker>,
     pub(crate) picker_selected: usize,
     pub(crate) directory_filter: DropdownFilterState,
+    pub(crate) ref_filter: DropdownFilterState,
+    pub(crate) selected_ref: Option<HomeRef>,
+    pub(crate) ref_repo_root: Option<PathBuf>,
+    pub(crate) ref_directory: PathBuf,
     workspace_options: Vec<HomeWorkspace>,
     pub(crate) pending_dispatch: Option<HomeDispatchPlan>,
     pub(crate) dispatch_error: Option<String>,
@@ -209,6 +215,10 @@ impl Default for HomeState {
             picker: None,
             picker_selected: 0,
             directory_filter: DropdownFilterState::default(),
+            ref_filter: DropdownFilterState::default(),
+            selected_ref: None,
+            ref_repo_root: None,
+            ref_directory: default_directory(),
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
             pending_dispatch: None,
             dispatch_error: None,
@@ -478,6 +488,7 @@ impl HomeState {
             effort: self.effort.clone(),
             directory,
             workspace: self.workspace.clone(),
+            git_ref: self.selected_ref.clone(),
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -715,15 +726,86 @@ impl crate::app::state::AppState {
         repo.unwrap_or_else(|| directory_basename(&directory))
     }
 
-    /// The single ref option the bottom-right picker shows. Slice 1c replaces
-    /// it with the real ref list; until then it names the branch the panes in
-    /// that directory already report.
-    pub(crate) fn home_ref_options(&self) -> Vec<String> {
-        let directory = self.home_directory();
-        let branch = self
-            .work_contexts_for_directory(&directory)
-            .find_map(|context| context.branch.clone());
-        vec![branch.unwrap_or_else(|| UNKNOWN_REF_LABEL.to_string())]
+    pub(crate) fn home_ref_options(&self) -> Vec<HomeRef> {
+        let Some(home) = self.home.as_ref() else {
+            return Vec::new();
+        };
+        let Some(repo_root) = home.ref_repo_root.as_ref() else {
+            return Vec::new();
+        };
+        self.home_ref_cache
+            .get(repo_root)
+            .map(|entry| entry.rows_for_directory(&home.ref_directory))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn home_ref_label(&self) -> String {
+        let Some(home) = self.home.as_ref() else {
+            return UNKNOWN_REF_LABEL.to_string();
+        };
+        if let Some(selected) = home.selected_ref.as_ref() {
+            return selected.name.clone();
+        }
+        if let Some(current) = self
+            .home_ref_options()
+            .into_iter()
+            .find(HomeRef::is_current)
+        {
+            return current.name;
+        }
+        self.work_contexts_for_directory(&home.directory)
+            .find_map(|context| context.branch.clone())
+            .unwrap_or_else(|| UNKNOWN_REF_LABEL.to_string())
+    }
+
+    fn reset_home_ref_context(&mut self, request_refresh: bool) {
+        let directory = crate::worktree::canonical_or_original(&self.home_directory());
+        let repo_root = super::worktrees::worktree_repo_root(&directory)
+            .map(|root| crate::worktree::canonical_or_original(&root));
+        if let Some(home) = self.home.as_mut() {
+            let context_changed =
+                home.ref_directory != directory || home.ref_repo_root != repo_root;
+            home.ref_directory = directory;
+            home.ref_repo_root = repo_root.clone();
+            if context_changed {
+                home.selected_ref = None;
+            }
+            home.ref_filter.set_query("");
+            home.dispatch_error = None;
+        }
+        if request_refresh {
+            self.request_home_ref_refresh = repo_root.clone();
+        }
+        if let Some(repo_root) = repo_root.as_deref() {
+            self.sync_home_ref_selection(repo_root);
+        }
+    }
+
+    pub(crate) fn sync_home_ref_selection(&mut self, repo_root: &Path) {
+        let relevant = self
+            .home
+            .as_ref()
+            .is_some_and(|home| home.ref_repo_root.as_deref() == Some(repo_root));
+        if !relevant {
+            return;
+        }
+        let rows = self.home_ref_options();
+        let selected_name = self
+            .home
+            .as_ref()
+            .and_then(|home| home.selected_ref.as_ref())
+            .map(|selected| selected.name.as_str());
+        let selected = selected_name
+            .and_then(|name| rows.iter().find(|row| row.name == name).cloned())
+            .or_else(|| rows.iter().find(|row| row.is_current()).cloned());
+        if let Some(home) = self.home.as_mut() {
+            home.selected_ref = selected;
+            let matches = home
+                .ref_filter
+                .matches(&rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>())
+                .len();
+            home.ref_filter.selected = home.ref_filter.selected.min(matches.saturating_sub(1));
+        }
     }
 
     pub(crate) fn home_workspace_options(&self) -> Vec<HomeWorkspace> {
@@ -774,7 +856,7 @@ impl crate::app::state::AppState {
                 .unwrap_or(0),
             HomePicker::Directory => self.home_directory_match_indices().len(),
             HomePicker::Workspace => self.home_workspace_options().len(),
-            HomePicker::Ref => self.home_ref_options().len(),
+            HomePicker::Ref => self.home_ref_match_indices().len(),
             HomePicker::Target => self.home_target_options().len(),
         }
     }
@@ -797,17 +879,42 @@ impl crate::app::state::AppState {
             .unwrap_or_default()
     }
 
+    fn home_ref_match_indices(&self) -> Vec<usize> {
+        let names = self
+            .home_ref_options()
+            .iter()
+            .map(|git_ref| git_ref.name.clone())
+            .collect::<Vec<_>>();
+        self.home
+            .as_ref()
+            .map(|home| {
+                home.ref_filter
+                    .matches(&names)
+                    .into_iter()
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn home_open_picker(&mut self, picker: HomePicker) {
         if picker == HomePicker::Workspace {
             self.refresh_home_workspace_options();
         }
-        if picker == HomePicker::Directory {
+        if picker == HomePicker::Ref {
+            self.reset_home_ref_context(true);
+        }
+        if matches!(picker, HomePicker::Directory | HomePicker::Ref) {
             if let Some(home) = self.home.as_mut() {
-                home.directory_filter.set_query("");
+                if picker == HomePicker::Directory {
+                    home.directory_filter.set_query("");
+                } else {
+                    home.ref_filter.set_query("");
+                }
             }
         }
         let length = self.home_picker_len(picker);
-        if length == 0 {
+        if length == 0 && picker != HomePicker::Ref {
             return;
         }
         let current = self
@@ -834,8 +941,11 @@ impl crate::app::state::AppState {
                     .home_workspace_options()
                     .iter()
                     .position(|workspace| workspace == &home.workspace),
-                // Slice 1c replaces the single ref placeholder.
-                HomePicker::Ref => Some(0),
+                HomePicker::Ref => home.selected_ref.as_ref().and_then(|selected| {
+                    self.home_ref_options()
+                        .iter()
+                        .position(|git_ref| git_ref.name == selected.name)
+                }),
                 HomePicker::Target => self
                     .home_target_options()
                     .iter()
@@ -846,6 +956,8 @@ impl crate::app::state::AppState {
             home.picker = Some(picker);
             if picker == HomePicker::Directory {
                 home.directory_filter.selected = current.min(length - 1);
+            } else if picker == HomePicker::Ref {
+                home.ref_filter.selected = current.min(length.saturating_sub(1));
             } else {
                 home.picker_selected = current.min(length - 1);
             }
@@ -860,6 +972,8 @@ impl crate::app::state::AppState {
         if let Some(home) = self.home.as_mut() {
             if picker == HomePicker::Directory {
                 home.directory_filter.move_selection(delta, length);
+            } else if picker == HomePicker::Ref {
+                home.ref_filter.move_selection(delta, length);
             } else if length > 0 {
                 let selected =
                     (home.picker_selected as i32 + delta).clamp(0, length as i32 - 1) as usize;
@@ -868,46 +982,62 @@ impl crate::app::state::AppState {
         }
     }
 
-    pub(crate) fn home_push_directory_filter(&mut self, character: char) {
+    pub(crate) fn home_push_picker_filter(&mut self, character: char) {
         if let Some(home) = self
             .home
             .as_mut()
-            .filter(|home| home.picker == Some(HomePicker::Directory))
+            .filter(|home| matches!(home.picker, Some(HomePicker::Directory | HomePicker::Ref)))
         {
-            home.directory_filter.push(character);
+            match home.picker {
+                Some(HomePicker::Directory) => home.directory_filter.push(character),
+                Some(HomePicker::Ref) => home.ref_filter.push(character),
+                _ => {}
+            }
         }
     }
 
-    pub(crate) fn home_pop_directory_filter(&mut self) {
+    pub(crate) fn home_pop_picker_filter(&mut self) {
         if let Some(home) = self
             .home
             .as_mut()
-            .filter(|home| home.picker == Some(HomePicker::Directory))
+            .filter(|home| matches!(home.picker, Some(HomePicker::Directory | HomePicker::Ref)))
         {
-            home.directory_filter.pop();
+            match home.picker {
+                Some(HomePicker::Directory) => home.directory_filter.pop(),
+                Some(HomePicker::Ref) => home.ref_filter.pop(),
+                _ => {}
+            }
         }
     }
 
     pub(crate) fn home_accept_picker(&mut self) {
         let Some((picker, selected)) = self.home.as_ref().and_then(|home| {
             home.picker.map(|picker| {
-                let selected = if picker == HomePicker::Directory {
-                    home.directory_filter.selected
-                } else {
-                    home.picker_selected
+                let selected = match picker {
+                    HomePicker::Directory => home.directory_filter.selected,
+                    HomePicker::Ref => home.ref_filter.selected,
+                    _ => home.picker_selected,
                 };
                 (picker, selected)
             })
         }) else {
             return;
         };
-        let selected = if picker == HomePicker::Directory {
-            let Some(selected) = self.home_directory_match_indices().get(selected).copied() else {
-                return;
-            };
-            selected
-        } else {
-            selected
+        let selected = match picker {
+            HomePicker::Directory => {
+                let Some(selected) = self.home_directory_match_indices().get(selected).copied()
+                else {
+                    return;
+                };
+                selected
+            }
+            HomePicker::Ref => {
+                let Some(selected) = self.home_ref_match_indices().get(selected).copied() else {
+                    return;
+                };
+                selected
+            }
+            _ => selected,
         };
         match picker {
             HomePicker::Agent => {
@@ -945,6 +1075,7 @@ impl crate::app::state::AppState {
                         home.directory = directory;
                     }
                     self.refresh_home_workspace_options();
+                    self.reset_home_ref_context(false);
                 }
             }
             HomePicker::Workspace => {
@@ -955,8 +1086,14 @@ impl crate::app::state::AppState {
                     }
                 }
             }
-            // Selecting the only ref option cannot change anything.
-            HomePicker::Ref => {}
+            HomePicker::Ref => {
+                if let Some(git_ref) = self.home_ref_options().get(selected).cloned() {
+                    if let Some(home) = self.home.as_mut() {
+                        home.selected_ref = Some(git_ref);
+                        home.dispatch_error = None;
+                    }
+                }
+            }
             HomePicker::Target => {
                 if let Some(target) = self.home_target_options().get(selected).cloned() {
                     if let Some(home) = self.home.as_mut() {
@@ -1258,6 +1395,7 @@ mod tests {
                 effort: Some("ultra".into()),
                 directory: PathBuf::from("/tmp/frozen-plan"),
                 workspace: HomeWorkspace::CurrentCheckout,
+                git_ref: None,
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![
@@ -1304,6 +1442,48 @@ mod tests {
                 HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/beta")),
             ]
         );
+    }
+
+    #[test]
+    fn opening_ref_picker_uses_cached_repo_rows_and_requests_refresh() {
+        let directory = crate::worktree::canonical_or_original(
+            &std::env::current_dir().expect("test current directory"),
+        );
+        let repo_root = super::super::worktrees::worktree_repo_root(&directory)
+            .map(|root| crate::worktree::canonical_or_original(&root))
+            .expect("tests run inside the Herdr repository");
+        let mut app = crate::app::state::AppState::test_new();
+        let home = HomeState {
+            directory: directory.clone(),
+            ..HomeState::default()
+        };
+        app.home = Some(home);
+        app.home_ref_cache.insert(
+            repo_root.clone(),
+            super::super::home_refs::parse_ref_cache(
+                "cached/topic\t1234567\n",
+                &format!(
+                    "worktree {}\nHEAD 1234567890\nbranch refs/heads/cached/topic\n\n",
+                    directory.display()
+                ),
+                "",
+            ),
+        );
+
+        app.home_open_picker(HomePicker::Ref);
+
+        assert_eq!(
+            app.home_ref_options()
+                .iter()
+                .map(|git_ref| git_ref.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cached/topic"]
+        );
+        assert_eq!(
+            app.home.as_ref().and_then(|home| home.picker),
+            Some(HomePicker::Ref)
+        );
+        assert_eq!(app.request_home_ref_refresh, Some(repo_root));
     }
 
     #[test]
