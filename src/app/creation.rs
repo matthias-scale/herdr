@@ -323,6 +323,8 @@ impl App {
                 )?;
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
+                self.pending_first_frame_pane = Some(workspace.tabs[0].root_pane);
+                crate::logging::home_dispatch_completed(workspace.tabs[0].root_pane.raw());
                 self.state.workspaces.push(workspace);
                 let ws_idx = self.state.workspaces.len() - 1;
                 self.state.remove_alias_shadowed_by_new_pane(
@@ -361,6 +363,8 @@ impl App {
                 };
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
+                self.pending_first_frame_pane = Some(root_pane);
+                crate::logging::home_dispatch_completed(root_pane.raw());
                 self.state.remove_alias_shadowed_by_new_pane(root_pane);
                 self.state.switch_workspace_tab(ws_idx, tab_idx);
                 self.state.mode = Mode::Terminal;

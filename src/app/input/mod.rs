@@ -740,7 +740,10 @@ impl App {
                 Some(crate::app::home::HomeFocus::Reply) => {
                     self.reply_to_selected_home_agent();
                 }
-                Some(crate::app::home::HomeFocus::Prompt) => self.dispatch_home_prompt(),
+                Some(crate::app::home::HomeFocus::Prompt) => {
+                    crate::logging::home_enter();
+                    self.dispatch_home_prompt();
+                }
                 Some(focus) => {
                     if let Some(picker) = crate::app::home::HomePicker::for_focus(focus) {
                         self.state.home_open_picker(picker);
@@ -838,6 +841,14 @@ impl App {
             self.sync_toast_deadline(previous_toast);
             return;
         };
+
+        crate::logging::home_dispatch_started(
+            &format!("{:?}", plan.agent),
+            plan.argv.first().map(String::as_str),
+            &format!("{:?}", plan.workspace),
+            &format!("{:?}", plan.target),
+            &plan.directory,
+        );
 
         let dispatch = match plan.workspace {
             crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),

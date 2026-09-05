@@ -191,6 +191,75 @@ pub(crate) fn pane_spawned(pane_id: u32, pid: u32) {
     );
 }
 
+pub(crate) fn pane_first_output(pane_id: u32, bytes: usize) {
+    tracing::info!(
+        event = "pane.first_output",
+        subsystem = "pane",
+        outcome = "ok",
+        pane_id,
+        bytes,
+        "pane produced first output"
+    );
+}
+
+pub(crate) fn home_enter() {
+    tracing::info!(
+        event = "home.enter",
+        subsystem = "home",
+        outcome = "started",
+        "home composer enter received"
+    );
+}
+
+pub(crate) fn pane_first_frame(pane_id: u32) {
+    tracing::info!(
+        event = "pane.first_frame",
+        subsystem = "pane",
+        outcome = "ok",
+        pane_id,
+        "pane included in first rendered frame"
+    );
+}
+
+pub(crate) fn home_dispatch_started(
+    agent: &str,
+    executable: Option<&str>,
+    workspace: &str,
+    target: &str,
+    cwd: &Path,
+) {
+    tracing::info!(
+        event = "home.dispatch.start",
+        subsystem = "home",
+        outcome = "started",
+        agent,
+        executable,
+        workspace,
+        target,
+        cwd = %cwd.display(),
+        "home dispatch accepted"
+    );
+}
+
+pub(crate) fn home_dispatch_completed(pane_id: u32) {
+    tracing::info!(
+        event = "home.dispatch.complete",
+        subsystem = "home",
+        outcome = "ok",
+        pane_id,
+        "home dispatch created pane"
+    );
+}
+
+pub(crate) fn client_first_frame() {
+    tracing::info!(
+        event = "client.first_frame",
+        subsystem = "client",
+        outcome = "ok",
+        "client received first rendered frame"
+    );
+}
+
 pub(crate) fn pane_exited(pane_id: u32, status: &str) {
     tracing::info!(
         event = "pane.exit",
