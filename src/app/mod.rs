@@ -671,6 +671,7 @@ impl App {
             status_git_branch: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
+            git_root_for_cwd: std::collections::HashMap::new(),
             forwarded_pane_input: None,
             status_bar_enabled: config.ui.status_bar.enabled,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(

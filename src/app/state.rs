@@ -1929,6 +1929,12 @@ pub struct AppState {
     /// source the Git refresh uses so rendering never re-derives a weaker one.
     pub(crate) status_focused_cwd: Option<std::path::PathBuf>,
     pub(crate) status_focus_projection_initialized: bool,
+    /// Git root observed for a pane cwd, keyed by that cwd, or `None` when the
+    /// cwd is not inside a repository. Filled by the background Git work
+    /// context refresh so pure rendering can answer "is this pane in a repo?"
+    /// without touching the filesystem.
+    pub(crate) git_root_for_cwd:
+        std::collections::HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
     /// Pane whose most recent mouse event was forwarded to its terminal.
     pub(crate) forwarded_pane_input: Option<PaneId>,
     /// Whether the full-width top status row is enabled by configuration.
@@ -2956,6 +2962,7 @@ impl AppState {
             status_git_branch: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
+            git_root_for_cwd: std::collections::HashMap::new(),
             forwarded_pane_input: None,
             status_bar_enabled: true,
             status_now_unix: None,
