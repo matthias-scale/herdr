@@ -105,6 +105,20 @@ fn render_editor_message(app: &AppState, frame: &mut Frame, area: Rect, message:
     );
 }
 
+impl AppState {
+    /// An editor that exits leaves a sticky error behind so that quitting it
+    /// with `:q` does not respawn one on the next frame. Nothing cleared that
+    /// error again, so the dock read `editor unavailable: editor exited` for
+    /// the rest of the session and the only way back was the scratchpad
+    /// binding. Selecting the Editor tab is an explicit request for an editor,
+    /// so it drops the error and lets `ensure_dock_editor` spawn one more.
+    pub(crate) fn retry_dock_editor(&mut self) {
+        if let Some(agent_pane_id) = focused_agent_pane_id(self) {
+            self.dock_editor_errors.remove(&agent_pane_id);
+        }
+    }
+}
+
 impl App {
     /// Sessions are keyed by the agent pane they follow, so a closed agent leaves
     /// its editor behind with nothing left to reach it: no focus can select the

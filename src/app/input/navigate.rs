@@ -1858,6 +1858,9 @@ fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::P
 fn sync_dock_tab_focus(state: &mut AppState) {
     state.dock_home_focused = state.dock_tab == crate::app::DockTab::Home;
     state.dock_editor_focused = state.dock_tab == crate::app::DockTab::Editor;
+    if state.dock_editor_focused {
+        state.retry_dock_editor();
+    }
 }
 
 fn indexed_navigation_action(
@@ -3089,6 +3092,46 @@ mod tests {
                 ..Default::default()
             })
             .expect("valid work context");
+    }
+
+    #[test]
+    fn selecting_the_editor_tab_retries_after_the_editor_exited() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+        let agent_pane_id = state.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = state.workspaces[0]
+            .terminal_id(agent_pane_id)
+            .expect("agent terminal")
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        // What `handle_dock_editor_exit` leaves behind when the editor quits.
+        state
+            .dock_editor_errors
+            .insert(agent_pane_id, "editor exited".to_string());
+
+        for _ in 0..8 {
+            if state.dock_tab == crate::app::DockTab::Editor {
+                break;
+            }
+            execute_navigate_action_in_context(
+                &mut state,
+                &mut terminal_runtimes,
+                NavigateAction::NextDockTab,
+                ActionContext::Prefix,
+            );
+        }
+
+        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
+        assert!(state.dock_editor_focused);
+        assert!(
+            !state.dock_editor_errors.contains_key(&agent_pane_id),
+            "selecting the editor tab must clear the exit error so an editor can spawn again"
+        );
     }
 
     #[test]
