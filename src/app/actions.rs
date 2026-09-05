@@ -3365,6 +3365,7 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::GitWorkContextRefreshed { .. } => Vec::new(),
+            AppEvent::DiffRefreshed { .. } => Vec::new(),
             AppEvent::WorkIndexRefreshed { .. } | AppEvent::WorkItemDetailRefreshed { .. } => {
                 Vec::new()
             }

@@ -181,6 +181,11 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// A dock diff summary or expanded file finished loading from git.
+    DiffRefreshed {
+        generation: u64,
+        result: Box<crate::app::diff::DiffRefreshResult>,
+    },
     /// Background git/gh work-context observations completed for live panes.
     GitWorkContextRefreshed {
         generation: u64,

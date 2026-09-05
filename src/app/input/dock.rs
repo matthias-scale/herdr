@@ -67,7 +67,45 @@ impl AppState {
         self.dock_scroll = 0;
         self.dock_editor_focused = surface == DockSurface::Editor;
         self.dock_home_focused = surface == DockSurface::Home;
+        self.dock_diff_focused = surface == DockSurface::Diff;
         true
+    }
+
+    pub(crate) fn toggle_dock_diff_whitespace(&mut self) {
+        self.dock_diff_ignore_whitespace = !self.dock_diff_ignore_whitespace;
+        self.dock_diff_active_key = None;
+        self.dock_diff_request = None;
+        self.dock_scroll = 0;
+    }
+
+    pub(crate) fn toggle_selected_dock_diff_file(&mut self) -> bool {
+        let Some(key) = self.dock_diff_active_key.as_ref() else {
+            return false;
+        };
+        let Some(file) = self
+            .dock_diff_cache
+            .get(key)
+            .and_then(|entry| entry.files.get(self.dock_diff_selected))
+        else {
+            return false;
+        };
+        if !self.dock_diff_collapsed.remove(&file.path) {
+            self.dock_diff_collapsed.insert(file.path.clone());
+        }
+        true
+    }
+
+    pub(crate) fn dock_diff_file_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.dock_collapsed || self.dock_tab != Some(DockSurface::Diff) {
+            return None;
+        }
+        crate::ui::dock::diff::file_index_at(self, self.view.dock_body_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_diff_whitespace_toggle(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed
+            && self.dock_tab == Some(DockSurface::Diff)
+            && crate::ui::dock::diff::whitespace_toggle_at(self.view.dock_body_rect, col, row)
     }
 
     pub(crate) fn toggle_dock_surface_menu(&mut self) {
@@ -142,6 +180,9 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::{DiffCacheEntry, DiffCacheKey, DiffFileSummary};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn dock_home_tab_at_maps_each_horizontal_hit_area() {
@@ -293,5 +334,46 @@ mod tests {
 
         app.dock_tab = Some(DockSurface::Home);
         assert_eq!(app.dock_surface_card_at(81, 5), None);
+    }
+
+    #[test]
+    fn diff_collapse_state_is_kept_per_file() {
+        let mut app = AppState::test_new();
+        let key = DiffCacheKey {
+            root: PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        };
+        app.dock_diff_cache.insert(
+            key.clone(),
+            DiffCacheEntry {
+                branch: "feature".into(),
+                files: ["one.rs", "two.rs"]
+                    .into_iter()
+                    .map(|path| DiffFileSummary {
+                        path: path.into(),
+                        display_path: path.into(),
+                        additions: 1,
+                        deletions: 0,
+                        binary: false,
+                    })
+                    .collect(),
+                contents: HashMap::new(),
+                error: None,
+            },
+        );
+        app.dock_diff_active_key = Some(key);
+
+        assert!(app.toggle_selected_dock_diff_file());
+        assert!(app.dock_diff_collapsed.contains("one.rs"));
+        assert!(!app.dock_diff_collapsed.contains("two.rs"));
+        app.dock_diff_selected = 1;
+        assert!(app.toggle_selected_dock_diff_file());
+        assert!(app.dock_diff_collapsed.contains("one.rs"));
+        assert!(app.dock_diff_collapsed.contains("two.rs"));
+        app.dock_diff_selected = 0;
+        assert!(app.toggle_selected_dock_diff_file());
+        assert!(!app.dock_diff_collapsed.contains("one.rs"));
+        assert!(app.dock_diff_collapsed.contains("two.rs"));
     }
 }
