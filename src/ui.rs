@@ -306,6 +306,10 @@ fn compute_view_internal(
     } else if available_after_sidebar < DOCK_MIN_WIDTH + DOCK_MIN_TERMINAL_WIDTH {
         app.dock_collapsed = true;
         DOCK_COLLAPSED_WIDTH
+    } else if app.dock_maximized {
+        // Maximised, the dock owns the whole main area; the sidebar keeps its
+        // width so the session stays navigable.
+        available_after_sidebar
     } else {
         app.dock_width
             .clamp(DOCK_MIN_WIDTH, DOCK_MAX_WIDTH)
@@ -314,7 +318,7 @@ fn compute_view_internal(
 
     let [sidebar_area, main_area, dock_area] = Layout::horizontal([
         Constraint::Length(sidebar_w),
-        Constraint::Min(1),
+        Constraint::Min(0),
         Constraint::Length(dock_w),
     ])
     .areas(body_area);
@@ -428,19 +432,32 @@ fn compute_view_internal(
     };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
-    let (
-        dock_handle_rect,
-        dock_divider_rect,
-        dock_tab_bar_rect,
-        dock_tab_hit_areas,
-        dock_body_rect,
-    ) = dock_geometry(dock_area, app.dock_collapsed);
+    let DockGeometry {
+        handle: dock_handle_rect,
+        divider: dock_divider_rect,
+        tab_bar: dock_tab_bar_rect,
+        tabs: dock_tab_hit_areas,
+        close: dock_tab_close_rect,
+        plus: dock_plus_rect,
+        maximize: dock_maximize_rect,
+        body: dock_body_rect,
+    } = dock_geometry(
+        dock_area,
+        app.dock_collapsed,
+        &app.dock_open_surfaces,
+        app.dock_tab,
+    );
+    let dock_surface_card_hit_areas = if app.dock_collapsed || app.dock_tab.is_some() {
+        Vec::new()
+    } else {
+        dock::chooser_card_hit_areas(dock_body_rect)
+    };
     let (
         dock_home_section_hit_areas,
         dock_home_tab_hit_areas,
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
-    ) = if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
+    ) = if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Home) {
         let projection = app.dock_home_projection();
         let layouts = match app.dock_home_section {
             crate::app::state::DockHomeSection::Prs => {
@@ -521,7 +538,7 @@ fn compute_view_internal(
             } else {
                 Vec::new()
             };
-            if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Context {
+            if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
                 rows.extend(dock_context::context_link_rows(app, dock_body_rect));
             }
             rows
@@ -532,7 +549,7 @@ fn compute_view_internal(
             Vec::new()
         },
         scratchpad_link_rows: if !app.dock_collapsed
-            && app.dock_tab == crate::app::DockTab::Scratchpad
+            && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
         {
             dock_scratchpad::scratchpad_link_rows(app, dock_body_rect)
         } else {
@@ -550,12 +567,20 @@ fn compute_view_internal(
         dock_divider_rect,
         dock_tab_bar_rect,
         dock_tab_hit_areas,
+        dock_tab_close_rect,
+        dock_plus_rect,
+        dock_maximize_rect,
+        dock_surface_card_hit_areas,
+        dock_surface_menu_layout: None,
         dock_home_section_hit_areas,
         dock_home_tab_hit_areas,
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
         dock_body_rect,
     };
+    // The menu anchors on the `+`, so its geometry needs the strip already
+    // stored on the view.
+    app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
     app.sync_copy_mode_search_geometry();
 }
 
@@ -565,48 +590,93 @@ fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
             && usize::from(area.width) < status::minimum_required_status_width(app))
 }
 
-/// Returns `(handle, divider, tab_bar, tab_hit_areas, body)`. Collapsed, the dock
-/// is nothing but its handle, so everything else comes back empty.
-fn dock_geometry(area: Rect, collapsed: bool) -> (Rect, Rect, Rect, Vec<Rect>, Rect) {
+/// Tab-strip and body geometry of the dock. Collapsed, the dock is nothing but
+/// its handle, so everything else comes back empty.
+pub(crate) struct DockGeometry {
+    pub handle: Rect,
+    pub divider: Rect,
+    pub tab_bar: Rect,
+    pub tabs: Vec<Rect>,
+    pub close: Rect,
+    pub plus: Rect,
+    pub maximize: Rect,
+    pub body: Rect,
+}
+
+impl DockGeometry {
+    fn empty(handle: Rect) -> Self {
+        Self {
+            handle,
+            divider: Rect::default(),
+            tab_bar: Rect::default(),
+            tabs: Vec::new(),
+            close: Rect::default(),
+            plus: Rect::default(),
+            maximize: Rect::default(),
+            body: Rect::default(),
+        }
+    }
+}
+
+fn dock_geometry(
+    area: Rect,
+    collapsed: bool,
+    open: &[crate::app::DockSurface],
+    active: Option<crate::app::DockSurface>,
+) -> DockGeometry {
     if area.width == 0 || area.height == 0 {
-        return (
-            Rect::default(),
-            Rect::default(),
-            Rect::default(),
-            Vec::new(),
-            Rect::default(),
-        );
+        return DockGeometry::empty(Rect::default());
     }
 
     let handle = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
     if collapsed || area.width < 3 || area.height < 2 {
-        return (
-            handle,
-            Rect::default(),
-            Rect::default(),
-            Vec::new(),
-            Rect::default(),
-        );
+        return DockGeometry::empty(handle);
     }
 
     let divider = Rect::new(area.x, area.y, 1, area.height);
     let content = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
     let [tab_bar, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
-    let tab_hit_areas = dock_tab_hit_areas(tab_bar);
-    (handle, divider, tab_bar, tab_hit_areas, body)
-}
 
-/// Tabs take the width their labels need so that adding one does not truncate the
-/// labels already there. Only when the labels genuinely do not fit does the bar
-/// fall back to equal shares, which truncates every label evenly rather than
-/// starving the ones at the end.
-fn dock_tab_hit_areas(tab_bar: Rect) -> Vec<Rect> {
-    let widths: Vec<u16> = crate::app::DockTab::ALL
+    // Widths the strip wants: every open tab, the trailing `+`, and the `⤢`
+    // pinned to the right edge. The maximise glyph only claims its two columns
+    // when the tabs do not need them.
+    let mut widths: Vec<u16> = open
         .iter()
-        .map(|tab| u16::try_from(tab.label().chars().count().saturating_add(1)).unwrap_or(u16::MAX))
+        .map(|surface| dock::tab_width(*surface, active == Some(*surface)))
         .collect();
-    horizontal_tab_hit_areas(tab_bar, &widths)
+    widths.push(2);
+    let wanted: u16 = widths.iter().copied().fold(0u16, u16::saturating_add);
+    let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
+        (
+            Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 2, 1),
+            Rect::new(tab_bar.right() - 1, tab_bar.y, 1, 1),
+        )
+    } else {
+        (tab_bar, Rect::default())
+    };
+
+    let mut areas = horizontal_tab_hit_areas(strip, &widths);
+    let plus = areas.pop().unwrap_or_default();
+    let close = active
+        .and_then(|surface| {
+            open.iter()
+                .position(|open| *open == surface)
+                .and_then(|index| areas.get(index).copied())
+                .map(|tab| dock::close_rect(tab, surface))
+        })
+        .unwrap_or_default();
+
+    DockGeometry {
+        handle,
+        divider,
+        tab_bar,
+        tabs: areas,
+        close,
+        plus,
+        maximize,
+        body,
+    }
 }
 
 pub(crate) fn horizontal_tab_hit_areas(tab_bar: Rect, widths: &[u16]) -> Vec<Rect> {
@@ -726,6 +796,11 @@ fn compute_mobile_view(
         dock_divider_rect: Rect::default(),
         dock_tab_bar_rect: Rect::default(),
         dock_tab_hit_areas: Vec::new(),
+        dock_tab_close_rect: Rect::default(),
+        dock_plus_rect: Rect::default(),
+        dock_maximize_rect: Rect::default(),
+        dock_surface_card_hit_areas: Vec::new(),
+        dock_surface_menu_layout: None,
         dock_home_section_hit_areas: Vec::new(),
         dock_home_tab_hit_areas: Vec::new(),
         dock_home_tab_keys: Vec::new(),
@@ -1199,7 +1274,7 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
         // Home is the default tab now; this case still asserts the editor body.
-        app.dock_tab = crate::app::DockTab::Editor;
+        app.dock_tab = Some(crate::app::DockSurface::Editor);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1218,10 +1293,10 @@ mod tests {
 
         assert_eq!(
             app.view.dock_tab_hit_areas.len(),
-            crate::app::DockTab::ALL.len()
+            app.dock_open_surfaces.len()
         );
         assert!(app.view.dock_body_rect.height > 0);
-        for tab in crate::app::DockTab::ALL {
+        for tab in app.dock_open_surfaces.iter().copied() {
             assert!(
                 screen.contains(tab.label()),
                 "missing {} in {screen:?}",
@@ -1236,7 +1311,7 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         app.mobile_width_threshold = 0;
         app.dock_collapsed = false;
-        app.dock_tab = crate::app::DockTab::Home;
+        app.dock_tab = Some(crate::app::DockSurface::Home);
         app.workspaces = vec![Workspace::test_new("review")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1280,7 +1355,7 @@ mod tests {
         assert!(app.view.dock_home_detail_tab_hit_areas.is_empty());
 
         app.dock_collapsed = false;
-        app.dock_tab = crate::app::DockTab::Editor;
+        app.dock_tab = Some(crate::app::DockSurface::Editor);
         compute_view(&mut app, screen);
         assert!(app.view.dock_home_tab_hit_areas.is_empty());
         assert!(app.view.dock_home_tab_keys.is_empty());

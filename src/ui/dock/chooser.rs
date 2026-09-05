@@ -1,0 +1,270 @@
+//! The dock surface chooser: the empty-dock card grid and the `+` dropdown.
+//!
+//! Pure presentation. Availability is derived from the focused pane's work
+//! context, never from the server, and every layout function is a function of
+//! its rect so the click targets and the drawn cells cannot disagree.
+
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
+    Frame,
+};
+
+use crate::app::state::{AppState, DockSurface};
+use crate::ui::dropdown::{layout_dropdown, DropdownLayout, DropdownSpec};
+use crate::work_context::PaneWorkContext;
+
+/// Width of the `+` menu. Wide enough for the longest title plus its hint,
+/// narrow enough for the minimum dock.
+const MENU_WIDTH: u16 = 20;
+
+/// Can this surface do anything for the focused pane right now?
+///
+/// Diff needs a repository to diff, PR needs a pull request, Linear needs a
+/// ticket. Everything else is always available.
+pub(crate) fn surface_available(
+    surface: DockSurface,
+    ctx: &PaneWorkContext,
+    in_git_repo: bool,
+) -> bool {
+    match surface {
+        DockSurface::Diff => in_git_repo,
+        DockSurface::Pr => !ctx.pr_urls.is_empty(),
+        DockSurface::Linear => !ctx.ticket_ids.is_empty(),
+        _ => true,
+    }
+}
+
+/// Work context and repository state of the focused pane, or the empty context
+/// when no pane is focused.
+pub(crate) fn focused_availability(app: &AppState) -> (PaneWorkContext, bool) {
+    let Some(workspace) = app.active.and_then(|index| app.workspaces.get(index)) else {
+        return (PaneWorkContext::default(), false);
+    };
+    let in_git_repo = workspace.cached_git_space.is_some();
+    let context = workspace
+        .focused_pane_id()
+        .and_then(|pane_id| workspace.terminal_id(pane_id))
+        .and_then(|terminal_id| app.terminals.get(terminal_id))
+        .map(|terminal| terminal.effective_work_context().clone())
+        .unwrap_or_default();
+    (context, in_git_repo)
+}
+
+/// Rows of the card grid, top to bottom, one rect per `DockSurface::CARDS`
+/// entry. Cards that do not fit are omitted rather than clipped, so a click can
+/// never land on a card the user cannot see.
+pub(crate) fn card_hit_areas(area: Rect) -> Vec<Rect> {
+    if area.width < 12 || area.height < HEADER_ROWS + 3 {
+        return Vec::new();
+    }
+    let columns: u16 = if area.width >= 24 { 2 } else { 1 };
+    let card_rows = usize::from(DockSurface::CARDS.len()).div_ceil(usize::from(columns));
+    let available = area.height.saturating_sub(HEADER_ROWS);
+    let card_height = if usize::from(available) >= card_rows * 4 {
+        4
+    } else {
+        3
+    };
+    let card_width = (area.width.saturating_sub(columns + 1)) / columns;
+    if card_width < 8 {
+        return Vec::new();
+    }
+
+    let mut areas = Vec::new();
+    for index in 0..DockSurface::CARDS.len() {
+        let index = u16::try_from(index).unwrap_or(u16::MAX);
+        let row = index / columns;
+        let column = index % columns;
+        let y = area
+            .y
+            .saturating_add(HEADER_ROWS)
+            .saturating_add(row.saturating_mul(card_height));
+        if y.saturating_add(card_height) > area.bottom() {
+            break;
+        }
+        let x = area
+            .x
+            .saturating_add(1)
+            .saturating_add(column.saturating_mul(card_width.saturating_add(1)));
+        areas.push(Rect::new(x, y, card_width, card_height));
+    }
+    areas
+}
+
+/// Title, subtitle and one blank row above the grid.
+const HEADER_ROWS: u16 = 3;
+
+pub(crate) fn render_chooser(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (context, in_git_repo) = focused_availability(app);
+
+    let title = Style::default()
+        .fg(app.palette.text)
+        .add_modifier(Modifier::BOLD);
+    let subtitle = Style::default().fg(app.palette.overlay1);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("Open a surface", title)).centered(),
+            Line::from(Span::styled("choose what to show here", subtitle)).centered(),
+        ]),
+        Rect::new(area.x, area.y, area.width, area.height.min(2)),
+    );
+
+    for (surface, card) in DockSurface::CARDS
+        .into_iter()
+        .zip(app.view.dock_surface_card_hit_areas.iter().copied())
+    {
+        let enabled = surface_available(surface, &context, in_git_repo);
+        render_card(app, frame, card, surface, enabled);
+    }
+}
+
+fn render_card(
+    app: &AppState,
+    frame: &mut Frame,
+    card: Rect,
+    surface: DockSurface,
+    enabled: bool,
+) {
+    if card.width < 4 || card.height < 3 {
+        return;
+    }
+    let border = Style::default().fg(if enabled {
+        app.palette.surface_dim
+    } else {
+        app.palette.overlay0
+    });
+    let label = Style::default().fg(if enabled {
+        app.palette.text
+    } else {
+        app.palette.overlay0
+    });
+    let key = Style::default().fg(if enabled {
+        app.palette.accent
+    } else {
+        app.palette.overlay0
+    });
+    let hint = Style::default().fg(app.palette.overlay1);
+
+    let inner = usize::from(card.width.saturating_sub(2));
+    let shortcut = surface.shortcut().unwrap_or(' ');
+    let title = surface.title();
+    let gap = inner.saturating_sub(title.chars().count() + 1);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("┌{}┐", "─".repeat(inner)),
+            border,
+        )),
+        Line::from(vec![
+            Span::styled("│", border),
+            Span::styled(format!("{title}{}", " ".repeat(gap)), label),
+            Span::styled(shortcut.to_string(), key),
+            Span::styled("│", border),
+        ]),
+    ];
+    if card.height >= 4 {
+        let text = surface.hint();
+        let padded: String = text.chars().take(inner).collect();
+        lines.push(Line::from(vec![
+            Span::styled("│", border),
+            Span::styled(
+                format!("{padded}{}", " ".repeat(inner.saturating_sub(padded.chars().count()))),
+                hint,
+            ),
+            Span::styled("│", border),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(inner)),
+        border,
+    )));
+
+    frame.render_widget(Paragraph::new(lines), card);
+}
+
+/// Popup geometry for the `+` menu, anchored below the `+` and clamped to the
+/// dock. `None` when the menu is closed or nothing fits below the anchor.
+pub(crate) fn menu_layout(app: &AppState, dock: Rect) -> Option<DropdownLayout> {
+    let menu = app.dock_surface_menu?;
+    layout_dropdown(
+        &DropdownSpec {
+            anchor: app.view.dock_plus_rect,
+            item_count: DockSurface::ALL.len(),
+            selected: menu.selected,
+            has_filter: false,
+            max_rows: DockSurface::ALL.len(),
+            min_width: MENU_WIDTH,
+        },
+        dock,
+    )
+}
+
+pub(crate) fn render_menu(app: &AppState, frame: &mut Frame) {
+    let Some(layout) = app.view.dock_surface_menu_layout else {
+        return;
+    };
+    let Some(menu) = app.dock_surface_menu else {
+        return;
+    };
+    let (context, in_git_repo) = focused_availability(app);
+
+    frame.render_widget(Clear, layout.rect);
+    frame.render_widget(
+        Paragraph::new(
+            (0..layout.rect.height)
+                .map(|_| Line::from(" ".repeat(usize::from(layout.rect.width))))
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::default().bg(app.palette.surface_dim)),
+        layout.rect,
+    );
+
+    for row in 0..layout.visible_rows {
+        let index = layout.first_visible + row;
+        let Some(surface) = DockSurface::ALL.get(index).copied() else {
+            break;
+        };
+        let enabled = surface_available(surface, &context, in_git_repo);
+        let selected = index == menu.selected;
+        let style = if !enabled {
+            Style::default().fg(app.palette.overlay0)
+        } else if selected {
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.palette.text)
+        };
+        let width = usize::from(layout.list_rect.width);
+        let title = surface.title();
+        let shortcut = surface
+            .shortcut()
+            .map(|key| key.to_string())
+            .unwrap_or_default();
+        let gap = width
+            .saturating_sub(2)
+            .saturating_sub(title.chars().count())
+            .saturating_sub(shortcut.chars().count());
+        let text = format!(" {title}{}{shortcut} ", " ".repeat(gap));
+        let area = Rect::new(
+            layout.list_rect.x,
+            layout
+                .list_rect
+                .y
+                .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
+            layout.list_rect.width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, style)))
+                .style(Style::default().bg(app.palette.surface_dim)),
+            area,
+        );
+    }
+}

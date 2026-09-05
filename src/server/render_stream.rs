@@ -183,7 +183,7 @@ fn focused_editor_terminal_id(app_state: &AppState) -> Option<crate::terminal::T
     if app_state.mode != Mode::Terminal
         || !app_state.dock_editor_focused
         || app_state.dock_collapsed
-        || app_state.dock_tab != crate::app::DockTab::Editor
+        || app_state.dock_tab != Some(crate::app::DockSurface::Editor)
     {
         return None;
     }

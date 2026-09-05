@@ -478,25 +478,25 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
-                if let (crate::app::DockTab::Home, Some(previous)) = (
+                if let (Some(crate::app::DockSurface::Home), Some(previous)) = (
                     self.state.dock_tab,
                     previous_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(previous);
-                } else {
-                    self.state.dock_tab = self.state.dock_tab.previous();
+                } else if let Some(previous) = self.state.adjacent_dock_surface(false) {
+                    self.state.dock_tab = Some(previous);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NextDockTab => {
-                if let (crate::app::DockTab::Home, Some(next)) = (
+                if let (Some(crate::app::DockSurface::Home), Some(next)) = (
                     self.state.dock_tab,
                     next_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(next);
-                } else {
-                    self.state.dock_tab = self.state.dock_tab.next();
+                } else if let Some(next) = self.state.adjacent_dock_surface(true) {
+                    self.state.dock_tab = Some(next);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -1883,8 +1883,9 @@ fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::P
 }
 
 fn sync_dock_tab_focus(state: &mut AppState) {
-    state.dock_home_focused = state.dock_tab == crate::app::DockTab::Home;
-    state.dock_editor_focused = state.dock_tab == crate::app::DockTab::Editor;
+    state.dock_home_focused = state.dock_tab == Some(crate::app::DockSurface::Home);
+    state.dock_editor_focused = state.dock_tab == Some(crate::app::DockSurface::Editor);
+    state.dock_chooser_focused = state.dock_tab.is_none();
 }
 
 fn indexed_navigation_action(
@@ -2366,24 +2367,24 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {
-            if let (crate::app::DockTab::Home, Some(previous)) = (
+            if let (Some(crate::app::DockSurface::Home), Some(previous)) = (
                 state.dock_tab,
                 previous_home_section(state.dock_home_section),
             ) {
                 state.set_dock_home_section(previous);
-            } else {
-                state.dock_tab = state.dock_tab.previous();
+            } else if let Some(previous) = state.adjacent_dock_surface(false) {
+                state.dock_tab = Some(previous);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
         NavigateAction::NextDockTab => {
-            if let (crate::app::DockTab::Home, Some(next)) =
+            if let (Some(crate::app::DockSurface::Home), Some(next)) =
                 (state.dock_tab, next_home_section(state.dock_home_section))
             {
                 state.set_dock_home_section(next);
-            } else {
-                state.dock_tab = state.dock_tab.next();
+            } else if let Some(next) = state.adjacent_dock_surface(true) {
+                state.dock_tab = Some(next);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
@@ -3166,7 +3167,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::Tickets
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(state.dock_home_focused);
 
         execute_navigate_action_in_context(
@@ -3179,7 +3180,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::XPolls
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
 
         execute_navigate_action_in_context(
             &mut state,
@@ -3187,7 +3188,7 @@ mod tests {
             NavigateAction::NextDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Editor);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Editor));
         assert!(state.dock_editor_focused);
         assert!(!state.dock_home_focused);
 
@@ -3197,7 +3198,7 @@ mod tests {
             NavigateAction::PreviousDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
         assert_eq!(
             state.dock_home_section,
             crate::app::state::DockHomeSection::XPolls
@@ -3215,7 +3216,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::Tickets
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
 
         execute_navigate_action_in_context(
             &mut state,
@@ -3227,7 +3228,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::Prs
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
 
         state.dock_collapsed = true;
         state.session_dirty = false;

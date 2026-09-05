@@ -4891,7 +4891,7 @@ impl HeadlessServer {
                             presentation.home_poll_selection.clone()
                         }
                     },
-                    !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
+                    !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Home),
                 )
             });
         let (section, selection, detail_visible) =
@@ -5892,7 +5892,7 @@ mod tests {
                 crate::detect::AgentState::Idle,
             );
         server.app.state.dock_collapsed = false;
-        server.app.state.dock_tab = crate::app::DockTab::Editor;
+        server.app.state.dock_tab = Some(crate::app::DockSurface::Editor);
 
         let editor_terminal_id = crate::terminal::TerminalId::alloc();
         server.app.state.dock_editor_sessions.insert(
@@ -6012,7 +6012,11 @@ mod tests {
             client.dock_presentation = crate::app::state::DockPresentationState {
                 width: dock_width,
                 collapsed: false,
-                tab: crate::app::DockTab::Editor,
+                tab: Some(crate::app::DockSurface::Editor),
+                open_surfaces: crate::app::DockSurface::DEFAULT_OPEN.to_vec(),
+                maximized: false,
+                surface_menu: None,
+                chooser_focused: false,
                 scroll: 0,
                 editor_focused,
                 home_selection: None,
@@ -9344,7 +9348,7 @@ next_tab = ""
 
         let mut client = test_app_client(Some(true), 1);
         client.dock_presentation.collapsed = false;
-        client.dock_presentation.tab = crate::app::DockTab::Home;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Home);
         client.dock_presentation.home_focused = true;
         client.dock_presentation.home_selection = Some(first_key);
         server.clients.insert(1, client);

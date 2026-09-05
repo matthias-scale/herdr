@@ -408,7 +408,7 @@ impl App {
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
         let detail_visible =
-            !self.state.dock_collapsed && self.state.dock_tab == crate::app::DockTab::Home;
+            !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Home);
         self.start_work_item_detail_refresh_if_due(
             now,
             self.state.dock_home_section,

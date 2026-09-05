@@ -67,7 +67,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::events::AppEvent;
 
-pub use state::{AppState, DockTab, Mode, ToastKind, ViewState};
+pub use state::{AppState, DockSurface, Mode, ToastKind, ViewState};
 
 pub(crate) fn load_plugin_manifest(
     path: &str,
@@ -777,6 +777,11 @@ impl App {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_tab_close_rect: Rect::default(),
+                dock_plus_rect: Rect::default(),
+                dock_maximize_rect: Rect::default(),
+                dock_surface_card_hit_areas: Vec::new(),
+                dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
@@ -808,7 +813,11 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: state::DockTab::Home,
+            dock_tab: Some(state::DockSurface::Home),
+            dock_open_surfaces: state::DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_maximized: false,
+            dock_surface_menu: None,
+            dock_chooser_focused: false,
             dock_scroll: 0,
             dock_editor_focused: false,
             dock_home_selection: None,
