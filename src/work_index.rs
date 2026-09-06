@@ -369,6 +369,7 @@ pub(crate) struct WorkIndexSession {
     pub(crate) linear: ProviderDirectory,
     pub(crate) github: ProviderDirectory,
     pub(crate) missive: ProviderDirectory,
+    missive_users: Vec<MissiveUser>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1201,6 +1202,7 @@ fn target_deadline(batch_deadline: Instant, target_timeout: Duration) -> Instant
 pub(crate) fn resolve_work_index_session(
     config: &WorkIndexConfig,
     mut session: WorkIndexSession,
+    missive_users: &[MissiveUser],
     batch_deadline: Instant,
     target_timeout: Duration,
     gh_program: &Path,
@@ -1218,9 +1220,9 @@ pub(crate) fn resolve_work_index_session(
             fetch_github_directory(&config.repos, gh_program, batch_deadline, target_timeout);
         session.github.resolved = true;
     }
-    if !session.missive.resolved {
-        session.missive = resolve_missive_assignees();
-        session.missive.resolved = true;
+    if !session.missive.resolved && !missive_users.is_empty() {
+        session.missive = resolve_missive_assignees(missive_users);
+        session.missive_users = missive_users.to_vec();
     }
     session
 }
@@ -1326,13 +1328,19 @@ fn include_viewer(assignees: &mut Vec<String>, viewer: Option<&str>) {
     assignees.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 }
 
-/// f12b replaces this seam with the read-only Missive `/users` result.
-/// Until then the UI can offer its semantic `me` choice without inventing a
-/// concrete user identity.
-pub(crate) fn resolve_missive_assignees() -> ProviderDirectory {
+pub(crate) fn resolve_missive_assignees(users: &[MissiveUser]) -> ProviderDirectory {
+    let viewer = users
+        .iter()
+        .find(|user| user.is_me)
+        .map(|user| user.name.clone());
+    let mut assignees = users
+        .iter()
+        .map(|user| user.name.clone())
+        .collect::<Vec<_>>();
+    include_viewer(&mut assignees, viewer.as_deref());
     ProviderDirectory {
-        viewer: Some("me".into()),
-        assignees: vec!["me".into()],
+        viewer,
+        assignees,
         resolved: true,
     }
 }
@@ -2457,11 +2465,8 @@ impl crate::app::App {
         let session = self.work_index_session.clone();
         let curl_program = self.work_index_curl_program();
         let missive = self.missive_config.clone();
-        let session_missive_users = self
-            .work_index_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.missive_users.clone())
-            .filter(|users| !users.is_empty());
+        let session_missive_users =
+            (!session.missive_users.is_empty()).then(|| session.missive_users.clone());
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
@@ -2481,6 +2486,7 @@ impl crate::app::App {
                 let session = resolve_work_index_session(
                     &config,
                     session,
+                    &snapshot.missive_users,
                     deadline,
                     WORK_INDEX_TARGET_TIMEOUT,
                     &gh_program,
@@ -3174,9 +3180,16 @@ esac
 "#,
         );
         let deadline = Instant::now() + WORK_INDEX_BATCH_TIMEOUT;
+        let missive_users = [MissiveUser {
+            id: "missive-1".into(),
+            name: "Mina".into(),
+            email: None,
+            is_me: true,
+        }];
         let session = resolve_work_index_session(
             &config(),
             WorkIndexSession::default(),
+            &missive_users,
             deadline,
             WORK_INDEX_TARGET_TIMEOUT,
             &gh,
@@ -3187,11 +3200,13 @@ esac
         assert_eq!(session.linear.assignees, ["Ada", "Matthias"]);
         assert_eq!(session.github.viewer.as_deref(), Some("matthias"));
         assert_eq!(session.github.assignees, ["grace", "matthias"]);
-        assert_eq!(session.missive.assignees, ["me"]);
+        assert_eq!(session.missive.viewer.as_deref(), Some("Mina"));
+        assert_eq!(session.missive.assignees, ["Mina"]);
 
         let unchanged = resolve_work_index_session(
             &config(),
             session.clone(),
+            &[],
             deadline,
             WORK_INDEX_TARGET_TIMEOUT,
             Path::new("/usr/bin/false"),
