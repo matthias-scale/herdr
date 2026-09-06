@@ -14,7 +14,9 @@ use ratatui::{
 
 use crate::app::state::{AppState, PrCheckoutChoice, WorkItemKey};
 use crate::ui::dropdown::{layout_dropdown, DropdownLayout, DropdownSpec};
-use crate::ui::work_list_detail::{PrItem, WorkActionKind, WorkItem as _};
+use crate::ui::work_list_detail::{
+    comment_header, section_separator, PrItem, WorkActionKind, WorkItem as _,
+};
 use crate::work_context::PaneWorkContext;
 
 /// Row of the action buttons inside the surface, counted from its top.
@@ -137,13 +139,12 @@ pub(crate) fn render_pr_item(app: &AppState, frame: &mut Frame, area: Rect, item
             Style::default().fg(palette.subtext0),
         )),
         action_row(app, &actions),
-        Line::from(Span::styled(
-            format!(" Checks  {}", detail.checks.len()),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        )),
     ];
+    lines.extend(section_separator(
+        palette,
+        format!("Checks  {}", detail.checks.len()),
+        area.width,
+    ));
     for (name, state) in &detail.checks {
         let glyph = match state.as_str() {
             "SUCCESS" => "✓",
@@ -155,16 +156,20 @@ pub(crate) fn render_pr_item(app: &AppState, frame: &mut Frame, area: Rect, item
             Style::default().fg(palette.subtext0),
         )));
     }
-    lines.push(Line::from(Span::styled(
-        format!(" Comments  {}  newest first", detail.comments.len()),
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
-    )));
-    for comment in &detail.comments {
+    lines.extend(section_separator(
+        palette,
+        format!("Comments  {}  newest first", detail.comments.len()),
+        area.width,
+    ));
+    for (index, comment) in detail.comments.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
         lines.push(Line::from(Span::styled(
-            format!("  ✦ {}", comment.author.as_deref().unwrap_or("unknown")),
-            Style::default().fg(palette.subtext0),
+            format!("  ✦ {}", comment_header(comment, item.observed_at)),
+            Style::default()
+                .fg(palette.subtext0)
+                .add_modifier(Modifier::DIM),
         )));
         lines.extend(crate::ui::markdown::body_lines(
             palette,
@@ -363,21 +368,19 @@ mod tests {
             observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
             approval_label: "approved",
         };
+        let rendered = body_text(&app, &item, 44, 11);
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], " #42 repair parser  ✓ 1/2");
+        assert_eq!(lines[2], " [Check out ▾] [Land disabled]");
+        assert_eq!(lines[3], "");
+        assert_eq!(lines[4].trim_matches('─').trim(), "Checks  2");
+        assert_eq!(lines[7], "");
         assert_eq!(
-            body_text(&app, &item, 44, 9),
-            [
-                " #42 repair parser  ✓ 1/2",
-                " main ← fix/parser",
-                " [Check out ▾] [Land disabled]",
-                " Checks  2",
-                "  ✓ check-0  SUCCESS",
-                "  ✗ check-1  FAILURE",
-                " Comments  1  newest first",
-                "  ✦ grace",
-                "    fix this",
-            ]
-            .join("\n")
+            lines[8].trim_matches('─').trim(),
+            "Comments  1  newest first"
         );
+        assert_eq!(lines[9], "  ✦ grace · 1m");
+        assert_eq!(lines[10], "    fix this");
     }
 
     #[test]

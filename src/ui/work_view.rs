@@ -12,7 +12,8 @@ use crate::{
         WorkViewState,
     },
     ui::work_list_detail::{
-        sorted_filtered_prs, sorted_filtered_tickets, TicketItem, WorkItem as _, WorkRow,
+        comment_header, section_separator, sorted_filtered_prs, sorted_filtered_tickets,
+        TicketItem, WorkItem as _, WorkRow,
     },
     work_projection::{project_review_queue, WorkReviewQueueRow},
 };
@@ -438,13 +439,12 @@ fn render_ticket_detail(
             format!(" {}", detail.byline),
             Style::default().fg(palette.subtext0),
         ),
-        Line::styled(
-            format!(" Linked PRs  {}", detail.linked_prs.len()),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
     ];
+    lines.extend(section_separator(
+        palette,
+        format!("Linked PRs  {}", detail.linked_prs.len()),
+        area.width,
+    ));
     for pr in &detail.linked_prs {
         let check = match pr.check_state {
             crate::work_index::PrCheckState::Passing => "✓",
@@ -457,12 +457,7 @@ fn render_ticket_detail(
             Style::default().fg(palette.subtext0),
         ));
     }
-    lines.push(Line::styled(
-        " Description",
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
-    ));
+    lines.extend(section_separator(palette, "Description", area.width));
     lines.extend(crate::ui::markdown::body_lines(
         palette,
         crate::ui::work_list_detail::description_without_checklist(detail.description.as_deref())
@@ -471,11 +466,10 @@ fn render_ticket_detail(
         " ",
     ));
     if !detail.checks.is_empty() {
-        lines.push(Line::styled(
-            " Acceptance criteria",
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
+        lines.extend(section_separator(
+            palette,
+            "Acceptance criteria",
+            area.width,
         ));
         for (text, state) in &detail.checks {
             lines.push(Line::styled(
@@ -484,16 +478,20 @@ fn render_ticket_detail(
             ));
         }
     }
-    lines.push(Line::styled(
-        format!(" Comments  {}  newest first", detail.comments.len()),
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
+    lines.extend(section_separator(
+        palette,
+        format!("Comments  {}  newest first", detail.comments.len()),
+        area.width,
     ));
-    for comment in &detail.comments {
+    for (index, comment) in detail.comments.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
         lines.push(Line::styled(
-            format!("  {}", comment.author.as_deref().unwrap_or("unknown")),
-            Style::default().fg(palette.subtext0),
+            format!("  {}", comment_header(comment, item.observed_at)),
+            Style::default()
+                .fg(palette.subtext0)
+                .add_modifier(Modifier::DIM),
         ));
         lines.extend(crate::ui::markdown::body_lines(
             palette,
@@ -608,23 +606,17 @@ fn render_pr_detail(
                 format!(" Reviewers  {}", detail.reviewers),
                 Style::default().fg(palette.text),
             ));
-            lines.push(Line::styled(
-                " Description",
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            lines.extend(section_separator(palette, "Description", area.width));
             lines.extend(crate::ui::markdown::body_lines(
                 palette,
                 detail.description.as_deref(),
                 usize::from(area.width.saturating_sub(2)),
                 " ",
             ));
-            lines.push(Line::styled(
-                format!(" Checks  {}", detail.checks.len()),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
+            lines.extend(section_separator(
+                palette,
+                format!("Checks  {}", detail.checks.len()),
+                area.width,
             ));
             for (name, status) in &detail.checks {
                 let glyph = if status == "SUCCESS" {
@@ -639,19 +631,23 @@ fn render_pr_detail(
                     Style::default().fg(palette.subtext0),
                 ));
             }
-            lines.push(Line::styled(
-                format!(" Comments  {}  newest first", detail.comments.len()),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
+            lines.extend(section_separator(
+                palette,
+                format!("Comments  {}  newest first", detail.comments.len()),
+                area.width,
             ));
-            for comment in detail.comments.iter().take(3) {
+            for (index, comment) in detail.comments.iter().take(3).enumerate() {
+                if index > 0 {
+                    lines.push(Line::default());
+                }
                 lines.push(Line::styled(
                     format!(
                         "  ✦ {}  [Fix in a thread]",
-                        comment.author.as_deref().unwrap_or("unknown")
+                        comment_header(comment, item.observed_at)
                     ),
-                    Style::default().fg(palette.subtext0),
+                    Style::default()
+                        .fg(palette.subtext0)
+                        .add_modifier(Modifier::DIM),
                 ));
                 lines.extend(crate::ui::markdown::body_lines(
                     palette,
@@ -662,16 +658,20 @@ fn render_pr_detail(
             }
         }
         PrDetailTab::Timeline => {
-            lines.push(Line::styled(
-                " Timeline · newest first",
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
+            lines.extend(section_separator(
+                palette,
+                "Timeline · newest first",
+                area.width,
             ));
-            for comment in &detail.comments {
+            for (index, comment) in detail.comments.iter().enumerate() {
+                if index > 0 {
+                    lines.push(Line::default());
+                }
                 lines.push(Line::styled(
-                    format!("  {}", comment.author.as_deref().unwrap_or("unknown")),
-                    Style::default().fg(palette.subtext0),
+                    format!("  {}", comment_header(comment, item.observed_at)),
+                    Style::default()
+                        .fg(palette.subtext0)
+                        .add_modifier(Modifier::DIM),
                 ));
                 lines.extend(crate::ui::markdown::body_lines(
                     palette,
@@ -1065,7 +1065,10 @@ mod tests {
             ticket_details: vec![crate::work_index::WorkTicket {
                 identifier: identifier.into(),
                 title: Some("ticket title".into()),
-                description: Some("- [x] done\n- [ ] left".into()),
+                description: Some(
+                    "Ticket body with https://example.invalid/a/very/long/path/that/must/wrap.\n- [x] done\n- [ ] left"
+                        .into(),
+                ),
                 state: Some("In Progress".into()),
                 assignee: Some("matthias".into()),
                 priority: Some(2),
@@ -1090,6 +1093,12 @@ mod tests {
         let mut app = AppState::test_new();
         app.work_view = Some(state.clone());
         rendered_app_text(&app)
+    }
+
+    fn rendered_text_at(state: &WorkViewState, width: u16, height: u16) -> String {
+        let mut app = AppState::test_new();
+        app.work_view = Some(state.clone());
+        rendered_app_text_at(&app, width, height)
     }
 
     fn rendered_app_text(app: &AppState) -> String {
@@ -1291,7 +1300,7 @@ mod tests {
         );
         state.projection = WorkProjection::Tickets;
         state.refreshing = true;
-        let text = rendered_text(&state);
+        let text = rendered_text_at(&state, 100, 24);
         assert!(text.contains("Tickets · refreshing…"), "{text}");
         assert!(text.contains("Assigned to me"), "{text}");
         assert!(text.contains("Triage"), "{text}");
@@ -1300,6 +1309,8 @@ mod tests {
             text.contains("In Progress · P2 · matthias · cycle 34"),
             "{text}"
         );
+        assert!(text.contains("Ticket body with"), "{text}");
+        assert!(text.contains("https://example.invalid"), "{text}");
         assert!(text.contains("Acceptance criteria"), "{text}");
         assert!(text.contains("[Start thread ▾]"), "{text}");
         assert!(text.contains("[Transition ▾]"), "{text}");

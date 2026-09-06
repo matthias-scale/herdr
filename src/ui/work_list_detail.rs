@@ -1,9 +1,42 @@
 use std::time::{Duration, SystemTime};
 
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
+
+use crate::app::state::Palette;
+use crate::ui::text::{display_width, truncate_end};
 use crate::work_index::{
     PrAudience, PrCheckState, WorkItem as IndexedWorkItem, WorkItemComment,
     WorkItemDetail as IndexedWorkItemDetail, WorkTicket,
 };
+
+pub(crate) fn section_separator(
+    palette: &Palette,
+    title: impl AsRef<str>,
+    width: u16,
+) -> [Line<'static>; 2] {
+    let width = usize::from(width);
+    let label = truncate_end(&format!("─ {} ", title.as_ref()), width);
+    let rule = format!(
+        "{label}{}",
+        "─".repeat(width.saturating_sub(display_width(&label)))
+    );
+    let style = Style::default()
+        .fg(palette.subtext0)
+        .add_modifier(Modifier::DIM);
+    [Line::default(), Line::from(Span::styled(rule, style))]
+}
+
+pub(crate) fn comment_header(comment: &WorkItemComment, observed_at: SystemTime) -> String {
+    let author = comment.author.as_deref().unwrap_or("unknown");
+    let age = comment
+        .created_at
+        .map(|created_at| age(Some(created_at), observed_at))
+        .unwrap_or_else(|| "—".into());
+    format!("{author} · {age}")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkRow {
@@ -871,6 +904,42 @@ mod tests {
             panes: Vec::new(),
             source: WorkItemSource::default(),
         }
+    }
+
+    #[test]
+    fn section_separator_is_blank_then_a_dim_named_rule() {
+        let palette = Palette::catppuccin();
+        let [blank, rule] = section_separator(&palette, "Description", 24);
+
+        assert!(blank.spans.is_empty());
+        assert_eq!(rule.width(), 24);
+        assert!(rule
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("Description"));
+        assert!(rule.spans.iter().all(|span| {
+            span.style.fg == Some(palette.subtext0)
+                && span.style.add_modifier.contains(Modifier::DIM)
+        }));
+    }
+
+    #[test]
+    fn comment_header_joins_author_and_age() {
+        let comment = WorkItemComment {
+            author: Some("Ada".into()),
+            body: String::new(),
+            created_at: Some(SystemTime::UNIX_EPOCH),
+        };
+
+        assert_eq!(
+            comment_header(
+                &comment,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2 * 3_600)
+            ),
+            "Ada · 2h"
+        );
     }
 
     #[test]

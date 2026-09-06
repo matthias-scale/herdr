@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, WorkItemKey};
-use crate::ui::work_list_detail::{TicketItem, WorkItem as _};
+use crate::ui::work_list_detail::{comment_header, section_separator, TicketItem, WorkItem as _};
 
 pub(crate) fn focused_ticket_key(app: &AppState) -> Option<WorkItemKey> {
     let (context, _) = super::chooser::focused_availability(app);
@@ -82,13 +82,12 @@ pub(crate) fn render_ticket_item(
             format!(" {}", detail.byline),
             Style::default().fg(app.palette.subtext0),
         )),
-        Line::from(Span::styled(
-            format!(" Linked PRs  {}", detail.linked_prs.len()),
-            Style::default()
-                .fg(app.palette.text)
-                .add_modifier(Modifier::BOLD),
-        )),
     ];
+    lines.extend(section_separator(
+        &app.palette,
+        format!("Linked PRs  {}", detail.linked_prs.len()),
+        area.width,
+    ));
     for pr in &detail.linked_prs {
         let glyph = match pr.check_state {
             crate::work_index::PrCheckState::Passing => "✓",
@@ -101,13 +100,20 @@ pub(crate) fn render_ticket_item(
             Style::default().fg(app.palette.subtext0),
         )));
     }
+    lines.extend(section_separator(&app.palette, "Description", area.width));
+    lines.extend(crate::ui::markdown::body_lines(
+        &app.palette,
+        crate::ui::work_list_detail::description_without_checklist(detail.description.as_deref())
+            .as_deref(),
+        usize::from(area.width.saturating_sub(2)),
+        " ",
+    ));
     if !detail.checks.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " Acceptance criteria",
-            Style::default()
-                .fg(app.palette.text)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.extend(section_separator(
+            &app.palette,
+            "Acceptance criteria",
+            area.width,
+        ));
         for (text, state) in &detail.checks {
             lines.push(Line::from(Span::styled(
                 format!("  {} {text}", if state == "done" { "✓" } else { "✗" }),
@@ -115,16 +121,20 @@ pub(crate) fn render_ticket_item(
             )));
         }
     }
-    lines.push(Line::from(Span::styled(
-        format!(" Comments  {}  newest first", detail.comments.len()),
-        Style::default()
-            .fg(app.palette.text)
-            .add_modifier(Modifier::BOLD),
-    )));
-    for comment in &detail.comments {
+    lines.extend(section_separator(
+        &app.palette,
+        format!("Comments  {}  newest first", detail.comments.len()),
+        area.width,
+    ));
+    for (index, comment) in detail.comments.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
         lines.push(Line::from(Span::styled(
-            format!("  {}", comment.author.as_deref().unwrap_or("unknown")),
-            Style::default().fg(app.palette.subtext0),
+            format!("  {}", comment_header(comment, item.observed_at)),
+            Style::default()
+                .fg(app.palette.subtext0)
+                .add_modifier(Modifier::DIM),
         )));
         lines.extend(crate::ui::markdown::body_lines(
             &app.palette,
@@ -201,36 +211,64 @@ mod tests {
         let ticket = ticket();
         let pr = pr();
         let mut cached = WorkItemDetail::empty();
+        cached.body = Some(
+            "Ticket body with https://example.invalid/a/very/long/path/that/must/wrap.\n- [x] doc exists\n- [ ] registry updated"
+                .into(),
+        );
         cached.comments.push(WorkItemComment {
             author: Some("ada".into()),
             body: "ready for review".into(),
             created_at: Some(SystemTime::UNIX_EPOCH),
         });
+        cached.comments.push(WorkItemComment {
+            author: Some("grace".into()),
+            body: "newer comment".into(),
+            created_at: Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60)),
+        });
         let item = TicketItem {
             summary: &ticket,
             cached_detail: Some(&cached),
             linked_prs: vec![&pr],
-            observed_at: SystemTime::UNIX_EPOCH,
+            observed_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(120),
             has_context_pr: false,
         };
-        let backend = TestBackend::new(60, 12);
+        let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| render_ticket_item(&app, frame, frame.area(), &item))
             .expect("render compact Linear surface");
-        let text = terminal
-            .backend()
-            .buffer()
+        let buffer = terminal.backend().buffer();
+        let text = buffer
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
+        let rows = (0..24)
+            .map(|row| {
+                (0..60)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
         assert!(text.contains("SCA-3165"));
         assert!(text.contains("In Progress · P2 · matthias · cycle 34"));
         assert!(text.contains("#166 skill data  ✓"));
+        assert!(text.contains("Description"));
+        assert!(text.contains("Ticket body with"));
+        assert!(text.contains("https://example.invalid"));
         assert!(text.contains("✓ doc exists"));
         assert!(text.contains("✗ registry updated"));
+        assert!(text.contains("grace · 1m"));
+        assert!(text.contains("ada · 2m"));
         assert!(text.contains("ready for review"));
+        let newer_body = rows
+            .iter()
+            .position(|row| row == "    newer comment")
+            .expect("newer comment row");
+        assert!(rows[newer_body + 1].is_empty());
+        assert_eq!(rows[newer_body + 2], "  ada · 2m");
     }
 
     #[test]
