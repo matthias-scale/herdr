@@ -20,6 +20,9 @@ enum GitActionPanePhase {
 enum BottomActionCompletion {
     Git(GitAction),
     User,
+    AddProjectClone {
+        target: std::path::PathBuf,
+    },
     WorktreeHooks {
         plan: Box<crate::app::home::HomeDispatchPlan>,
         create: Box<crate::app::state::WorktreeCreateState>,
@@ -65,6 +68,23 @@ pub(crate) fn wrapped_user_command(command: &str) -> String {
     format!(
         r#"sh -c {}; status=$?; printf "\n__t3_exit=%s\n" "$status""#,
         shell_single_quote(command)
+    )
+}
+
+pub(crate) fn wrapped_clone_command(
+    git_program: &std::path::Path,
+    url: &str,
+    target: &std::path::Path,
+) -> String {
+    let command = format!(
+        "{} clone -- {} {}",
+        shell_single_quote(&git_program.to_string_lossy()),
+        shell_single_quote(url),
+        shell_single_quote(&target.to_string_lossy())
+    );
+    format!(
+        r#"sh -c {}; status=$?; printf "\n__t3_exit=%s\n" "$status""#,
+        shell_single_quote(&command)
     )
 }
 
@@ -199,6 +219,42 @@ impl App {
             BottomActionCompletion::Git(action),
             None,
         )
+    }
+
+    pub(crate) fn apply_add_project_clone_request(&mut self) -> bool {
+        let request = self
+            .state
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+            .and_then(|project| project.clone_request.take());
+        let Some(request) = request else {
+            return false;
+        };
+        let command = wrapped_clone_command(
+            &self.git_program_for_refresh(),
+            &request.url,
+            &request.target,
+        );
+        if self.spawn_bottom_action_pane(
+            command,
+            BottomActionCompletion::AddProjectClone {
+                target: request.target,
+            },
+            None,
+        ) {
+            return true;
+        }
+        if let Some(project) = self
+            .state
+            .home
+            .as_mut()
+            .and_then(|home| home.add_project.as_mut())
+        {
+            project.clone_pending = false;
+            project.error = Some("A bottom pane is required to clone this project.".into());
+        }
+        true
     }
 
     pub(crate) fn apply_user_action_request(&mut self) -> bool {
@@ -381,6 +437,27 @@ impl App {
                     let Some(exit_code) = exit_code_from_screen(&screen) else {
                         continue;
                     };
+                    if let BottomActionCompletion::AddProjectClone { target } =
+                        state.completion.clone()
+                    {
+                        if exit_code == 0 {
+                            self.state.finish_add_project_clone(target, true);
+                            self.git_action_panes.insert(
+                                pane_id,
+                                GitActionPaneState {
+                                    phase: GitActionPanePhase::Succeeded {
+                                        close_at: now + SUCCESS_CLOSE_DELAY,
+                                    },
+                                    ..state
+                                },
+                            );
+                        } else {
+                            self.git_action_panes.remove(&pane_id);
+                            self.state.finish_add_project_clone(target, false);
+                        }
+                        changed = true;
+                        continue;
+                    }
                     if let BottomActionCompletion::WorktreeHooks {
                         plan,
                         create,
@@ -525,6 +602,39 @@ mod tests {
         );
         assert_eq!(command.matches(RESULT_PREFIX).count(), 1);
         assert!(command.contains("status=$code"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clone_command_runs_the_injected_git_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("herdr-clone-command-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("fixture directory");
+        let git = root.join("git fixture");
+        std::fs::write(&git, "#!/bin/sh\nprintf 'arg=%s\\n' \"$@\"\n").expect("fake git");
+        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("executable");
+
+        let command = wrapped_clone_command(
+            &git,
+            "https://github.com/acme/project.git",
+            &root.join("project with spaces"),
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .expect("run wrapped clone");
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 output");
+
+        assert!(output.status.success());
+        assert!(stdout.contains("arg=clone\narg=--\n"));
+        assert!(stdout.contains("arg=https://github.com/acme/project.git\n"));
+        assert!(stdout.contains("arg="));
+        assert!(stdout.contains("project with spaces"));
+        assert!(stdout.contains("__t3_exit=0"));
     }
 
     #[tokio::test(flavor = "current_thread")]

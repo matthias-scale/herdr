@@ -458,6 +458,7 @@ impl App {
         self.start_dock_diff_refresh_if_needed();
         self.start_dock_files_refresh_if_needed();
         self.start_home_ref_refresh_if_requested();
+        self.start_home_github_refresh_if_requested();
 
         if self
             .next_auto_update_check

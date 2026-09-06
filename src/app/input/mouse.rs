@@ -129,6 +129,31 @@ impl AppState {
             self.handle_onboarding_mouse(mouse);
             return None;
         }
+        if self.add_project_active() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let layout = self.view.add_project_layout.clone();
+                if rect_contains(layout.close, mouse.column, mouse.row) {
+                    self.close_add_project();
+                } else if let Some(tab) = layout.tabs.iter().find_map(|(tab, rect)| {
+                    rect_contains(*rect, mouse.column, mouse.row).then_some(*tab)
+                }) {
+                    self.add_project_select_tab(tab);
+                } else if let Some(index) = layout.list.as_ref().and_then(|dropdown| {
+                    crate::ui::dropdown::hit_test(dropdown, mouse.column, mouse.row)
+                }) {
+                    let tab = self
+                        .home
+                        .as_ref()
+                        .and_then(|home| home.add_project.as_ref())
+                        .map(|project| project.tab);
+                    self.add_project_select_row(index);
+                    if tab == Some(crate::app::home::AddProjectTab::GitHub) {
+                        self.accept_add_project();
+                    }
+                }
+            }
+            return None;
+        }
         if self.mode == Mode::AddAction {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if rect_contains(self.view.add_action_close_hit_area, mouse.column, mouse.row)

@@ -138,6 +138,9 @@ impl HomeWorkspace {
 /// The last row of the directory picker: type a path instead of picking one.
 pub(crate) const BROWSE_OPTION_LABEL: &str = "Browse…";
 
+/// The project importer follows the direct path input in the headline picker.
+pub(crate) const ADD_PROJECT_OPTION_LABEL: &str = "+ Add project…";
+
 /// Shown under the card when the typed path is not a directory.
 pub(crate) const NO_SUCH_DIRECTORY: &str = "no such directory";
 
@@ -148,6 +151,7 @@ pub(crate) enum HomeDirectoryOption {
     Recent(PathBuf),
     Worktree(PathBuf),
     Browse,
+    AddProject,
 }
 
 impl HomeDirectoryOption {
@@ -156,13 +160,76 @@ impl HomeDirectoryOption {
             Self::Recent(path) => directory_label(path),
             Self::Worktree(path) => format!("⎇ {}", directory_label(path)),
             Self::Browse => BROWSE_OPTION_LABEL.to_string(),
+            Self::AddProject => ADD_PROJECT_OPTION_LABEL.to_string(),
         }
     }
 
     pub(crate) fn path(&self) -> Option<&Path> {
         match self {
             Self::Recent(path) | Self::Worktree(path) => Some(path),
-            Self::Browse => None,
+            Self::Browse | Self::AddProject => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AddProjectTab {
+    #[default]
+    LocalFolder,
+    GitUrl,
+    GitHub,
+}
+
+impl AddProjectTab {
+    pub(crate) const ALL: [Self; 3] = [Self::LocalFolder, Self::GitUrl, Self::GitHub];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::LocalFolder => "Local folder",
+            Self::GitUrl => "Git URL",
+            Self::GitHub => "GitHub",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddProjectCloneRequest {
+    pub(crate) url: String,
+    pub(crate) target: PathBuf,
+}
+
+/// Client-local state for the centred project importer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddProjectState {
+    pub(crate) tab: AddProjectTab,
+    pub(crate) browse: HomeBrowse,
+    pub(crate) git_url: String,
+    pub(crate) github_query: String,
+    pub(crate) github_owner: String,
+    pub(crate) github_repos: Vec<String>,
+    pub(crate) github_filter: DropdownFilterState,
+    pub(crate) github_loading: bool,
+    pub(crate) github_refresh_request: Option<String>,
+    pub(crate) clone_request: Option<AddProjectCloneRequest>,
+    pub(crate) clone_pending: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl AddProjectState {
+    pub(crate) fn starting_at(directory: &Path) -> Self {
+        Self {
+            tab: AddProjectTab::LocalFolder,
+            browse: HomeBrowse::starting_at(directory),
+            git_url: String::new(),
+            github_query: String::new(),
+            github_owner: String::new(),
+            github_repos: Vec::new(),
+            github_filter: DropdownFilterState::default(),
+            github_loading: false,
+            github_refresh_request: None,
+            clone_request: None,
+            clone_pending: false,
+            error: None,
         }
     }
 }
@@ -406,6 +473,8 @@ pub(crate) struct HomeState {
     pub(crate) directory_filter: DropdownFilterState,
     /// Set while the directory picker's filter line is a path input.
     pub(crate) browse: Option<HomeBrowse>,
+    /// Centred add-project modal. TUI presentation state only.
+    pub(crate) add_project: Option<AddProjectState>,
     /// Linked worktrees of the selected directory's repository, refreshed when
     /// the picker opens so the render path stays off `git`.
     pub(crate) worktree_options: Vec<PathBuf>,
@@ -444,6 +513,7 @@ impl Default for HomeState {
             picker_selected: 0,
             directory_filter: DropdownFilterState::default(),
             browse: None,
+            add_project: None,
             worktree_options: Vec::new(),
             ref_filter: DropdownFilterState::default(),
             selected_ref: None,
@@ -1149,6 +1219,7 @@ impl crate::app::state::AppState {
             }
         }
         options.push(HomeDirectoryOption::Browse);
+        options.push(HomeDirectoryOption::AddProject);
         options
     }
 
@@ -1621,7 +1692,7 @@ impl crate::app::state::AppState {
         }
     }
 
-    fn home_set_directory(&mut self, directory: PathBuf) {
+    pub(crate) fn home_set_directory(&mut self, directory: PathBuf) {
         if let Some(home) = self.home.as_mut() {
             home.directory = directory;
             home.browse = None;
@@ -1712,6 +1783,16 @@ impl crate::app::state::AppState {
                         let directory = self.home_browse_start_directory();
                         if let Some(home) = self.home.as_mut() {
                             home.browse = Some(HomeBrowse::starting_at(&directory));
+                        }
+                        return;
+                    }
+                    Some(HomeDirectoryOption::AddProject) => {
+                        let directory = self.home_browse_start_directory();
+                        if let Some(home) = self.home.as_mut() {
+                            home.picker = None;
+                            home.browse = None;
+                            home.directory_filter.set_query("");
+                            home.add_project = Some(AddProjectState::starting_at(&directory));
                         }
                         return;
                     }
@@ -2365,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn the_directory_picker_lists_recents_then_worktrees_then_browse() {
+    fn the_directory_picker_lists_recents_then_worktrees_then_project_import() {
         let mut app = app_with_home(Path::new("/tmp/t3-f2-current"));
         app.home.as_mut().expect("home").worktree_options = vec![
             PathBuf::from("/tmp/t3-f2-current"),
@@ -2383,8 +2464,13 @@ mod tests {
         );
         assert_eq!(
             options.last(),
+            Some(&HomeDirectoryOption::AddProject),
+            "add project is always the last option"
+        );
+        assert_eq!(
+            options.get(options.len().saturating_sub(2)),
             Some(&HomeDirectoryOption::Browse),
-            "browse is always the last option"
+            "browse stays immediately before add project"
         );
         let worktrees = options
             .iter()
@@ -2411,7 +2497,31 @@ mod tests {
         );
         assert_eq!(
             options.last().map(HomeDirectoryOption::label),
-            Some(BROWSE_OPTION_LABEL.to_string())
+            Some(ADD_PROJECT_OPTION_LABEL.to_string())
+        );
+    }
+
+    #[test]
+    fn choosing_add_project_opens_modal_and_keeps_prompt() {
+        let directory = browse_fixture("add-project");
+        let mut app = app_with_home(&directory);
+        app.home.as_mut().expect("home").prompt = "preserve me".into();
+        app.home_open_picker(HomePicker::Directory);
+        let add_index = app
+            .home_directory_picker_options()
+            .iter()
+            .position(|option| *option == HomeDirectoryOption::AddProject)
+            .expect("add project option");
+        app.home.as_mut().expect("home").directory_filter.selected = add_index;
+
+        app.home_accept_picker();
+
+        let home = app.home.as_ref().expect("home");
+        assert_eq!(home.prompt, "preserve me");
+        assert!(home.picker.is_none());
+        assert_eq!(
+            home.add_project.as_ref().map(|project| project.tab),
+            Some(AddProjectTab::LocalFolder)
         );
     }
 
