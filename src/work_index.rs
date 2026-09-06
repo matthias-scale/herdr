@@ -757,21 +757,18 @@ fn pr_check_state(value: Option<&Value>) -> PrCheckState {
         return PrCheckState::Unknown;
     };
     if checks.iter().any(|check| {
-        check
-            .get("conclusion")
-            .and_then(Value::as_str)
-            .is_some_and(|state| {
-                matches!(
-                    state,
-                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
-                )
-            })
+        github_check_state(check).is_some_and(|state| {
+            matches!(
+                state,
+                "ERROR" | "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+            )
+        })
     }) {
         PrCheckState::Failing
     } else if checks.is_empty()
         || checks.iter().any(|check| {
             !matches!(
-                check.get("conclusion").and_then(Value::as_str),
+                github_check_state(check),
                 Some("SUCCESS" | "NEUTRAL" | "SKIPPED")
             )
         })
@@ -998,13 +995,23 @@ fn github_actions(value: Option<&Value>) -> Vec<WorkItemAction> {
         .filter_map(|action| {
             let name =
                 value_text(action.get("name")).or_else(|| value_text(action.get("context")))?;
-            let state = value_text(action.get("conclusion"))
-                .filter(|state| !state.is_empty())
-                .or_else(|| value_text(action.get("status")))
+            let state = github_check_state(action)
+                .map(str::to_string)
                 .unwrap_or_else(|| "unknown".to_string());
             Some(WorkItemAction { name, state })
         })
         .collect()
+}
+
+fn github_check_state(check: &Value) -> Option<&str> {
+    ["conclusion", "state", "status"]
+        .into_iter()
+        .find_map(|field| {
+            check
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|state| !state.is_empty())
+        })
 }
 
 fn github_files(value: Option<&Value>) -> Vec<WorkItemFile> {
@@ -1045,15 +1052,12 @@ fn status_check_summary(value: Option<&Value>) -> Option<WorkItemCheckSummary> {
     let failing = rollup
         .iter()
         .filter(|check| {
-            check
-                .get("conclusion")
-                .and_then(Value::as_str)
-                .is_some_and(|conclusion| {
-                    matches!(
-                        conclusion,
-                        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
-                    )
-                })
+            github_check_state(check).is_some_and(|state| {
+                matches!(
+                    state,
+                    "ERROR" | "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+                )
+            })
         })
         .count();
     Some(WorkItemCheckSummary {
@@ -2227,6 +2231,56 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
         );
         assert_eq!(detail.commits[0].short_id, "abcdef0");
         assert_eq!(detail.commits[0].subject, "fix detail");
+    }
+
+    #[test]
+    fn github_pull_request_detail_maps_the_real_cli_shape() {
+        let dir = fixture_dir("github-detail-real-shape");
+        let fixture = include_str!("../tests/fixtures/work-index/github-pr-view.json");
+        let script = format!(
+            "#!/bin/sh\ntest \"$*\" = \"pr view 125 --repo example/project --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}\" || exit 42\nprintf '%s' '{fixture}'\n"
+        );
+        let (gh, _linearis) = fake_programs(&dir, &script, "#!/bin/sh\nprintf '%s' '[]'\n");
+
+        let detail = fetch_github_pull_request_detail(
+            "example/project",
+            125,
+            &gh,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("GitHub pull request detail from captured CLI fixture");
+
+        assert_eq!(detail.number, Some(125));
+        assert_eq!(
+            detail.title.as_deref(),
+            Some("Render pull request details from the CLI response")
+        );
+        assert_eq!(detail.author.as_deref(), Some("example-author"));
+        assert_eq!(detail.base_ref_name.as_deref(), Some("main"));
+        assert_eq!(detail.head_ref_name.as_deref(), Some("fix/pr-detail"));
+        assert_eq!(detail.reviewers, vec!["example-reviewer"]);
+        assert_eq!(detail.review_decision.as_deref(), Some("APPROVED"));
+        assert_eq!(detail.actions.len(), 2);
+        assert!(detail
+            .actions
+            .iter()
+            .all(|action| action.state == "SUCCESS"));
+        assert_eq!(
+            detail.checks,
+            Some(WorkItemCheckSummary {
+                failing: 0,
+                total: 2,
+            })
+        );
+        assert_eq!(detail.comments.len(), 1);
+        assert_eq!(detail.files.len(), 1);
+        assert_eq!(detail.commits.len(), 1);
+
+        let value: Value = serde_json::from_str(fixture).expect("captured GitHub fixture JSON");
+        assert_eq!(
+            pr_check_state(value.get("statusCheckRollup")),
+            PrCheckState::Passing
+        );
     }
 
     #[test]
