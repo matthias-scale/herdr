@@ -42,6 +42,7 @@ mod symphony;
 mod tab_surface;
 mod tabs;
 mod text;
+pub(crate) mod usage;
 mod widgets;
 mod work_link_picker;
 pub(crate) mod work_list_detail;
@@ -103,6 +104,7 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::{render_git_menu, render_tab_action_buttons, render_tab_bar};
+use self::usage::render as render_usage;
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
@@ -477,6 +479,16 @@ fn compute_view_internal(
     } else {
         sidebar::sidebar_footer_work_hit_area(sidebar_area)
     };
+    let sidebar_footer_usage_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_usage_hit_area(sidebar_area)
+    };
+    let usage_hit_areas = if app.usage_view.is_some() {
+        usage::hit_areas(terminal_area)
+    } else {
+        Vec::new()
+    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
     let DockGeometry {
@@ -572,6 +584,8 @@ fn compute_view_internal(
         status_bar_rect,
         sidebar_rect: sidebar_area,
         sidebar_footer_work_hit_area,
+        sidebar_footer_usage_hit_area,
+        usage_hit_areas,
         workspace_card_areas,
         agent_card_areas,
         visible_agent_activity_instants,
@@ -820,6 +834,8 @@ fn compute_mobile_view(
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
         sidebar_footer_work_hit_area: Rect::default(),
+        sidebar_footer_usage_hit_area: Rect::default(),
+        usage_hit_areas: Vec::new(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
@@ -942,6 +958,8 @@ fn render_with_runtime_registry_inner(
             detail.observed_at,
             frame,
         );
+    } else if app.usage_view.is_some() {
+        render_usage(app, terminal_area, frame);
     } else if app.work_view.is_some() {
         render_work_view(app, terminal_area, frame);
     } else if app.home.is_some() {

@@ -18,6 +18,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "theme",
     "ui",
     "update",
+    "usage",
     "worktrees",
     "work_index",
 ];
@@ -367,6 +368,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.files = section,
+    );
+    load_live_section(
+        table,
+        "usage",
+        "usage config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.usage = section,
     );
     load_live_section(
         table,

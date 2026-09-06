@@ -69,6 +69,11 @@ pub enum AppEvent {
     ProviderUsageRefreshed {
         snapshot: Box<crate::provider_usage::ProviderUsageSnapshot>,
     },
+    /// A generation-bound local history scan completed off the render thread.
+    UsageScanFinished {
+        generation: u64,
+        result: Result<Box<crate::provider_usage::UsageSnapshot>, String>,
+    },
     /// A bounded background reachability probe completed.
     ConnectivityProbed { reachable: bool },
     /// The local Codex CLI returned an updated account-aware model catalog.

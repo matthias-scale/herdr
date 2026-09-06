@@ -2549,6 +2549,15 @@ impl HeadlessServer {
                 self.refresh_client_work_views();
                 changed || view_open
             }
+            AppEvent::UsageScanFinished { .. } => {
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                let view_open = self
+                    .clients
+                    .values()
+                    .any(|client| client.usage_view.is_some());
+                self.refresh_client_usage_views();
+                changed || view_open
+            }
             AppEvent::WorkItemDetailRefreshed { .. } => {
                 self.app.handle_internal_event_with_render_impact(ev)
             }
@@ -2585,6 +2594,19 @@ impl HeadlessServer {
             } else if let Some(snapshot) = snapshot.clone() {
                 view.replace_snapshot(snapshot);
             }
+        }
+    }
+
+    fn refresh_client_usage_views(&mut self) {
+        let snapshot = self.app.state.usage_snapshot.clone();
+        for client in self.clients.values_mut() {
+            let Some(view) = client.usage_view.as_mut() else {
+                continue;
+            };
+            if let Some(snapshot) = snapshot.clone() {
+                view.snapshot = Some(snapshot);
+            }
+            view.scanning = false;
         }
     }
 
@@ -2983,6 +3005,11 @@ impl HeadlessServer {
                 .get_mut(&client_id)
                 .and_then(|client| client.work_view.take())
         });
+        let mut usage_view = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .and_then(|client| client.usage_view.take())
+        });
         if let Some(presentation) = &mut sidebar_presentation {
             self.app.state.swap_sidebar_presentation(presentation);
             self.app.state.reconcile_sidebar_presentation();
@@ -3000,7 +3027,14 @@ impl HeadlessServer {
         if let Some(view) = &mut work_view {
             self.app.state.swap_work_view(view);
         }
+        if let Some(view) = &mut usage_view {
+            self.app.state.swap_usage_view(view);
+        }
         self.app.route_client_events_from(client_id, events, false);
+        self.app.start_usage_scan_if_requested();
+        if let Some(view) = &mut usage_view {
+            self.app.state.swap_usage_view(view);
+        }
         if let Some(view) = &mut work_view {
             self.app.state.swap_work_view(view);
         }
@@ -3035,6 +3069,11 @@ impl HeadlessServer {
         if let Some(view) = work_view {
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.work_view = view;
+            }
+        }
+        if let Some(view) = usage_view {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.usage_view = view;
             }
         }
         if self.app.take_config_reloaded_from_disk() {
@@ -4472,6 +4511,10 @@ impl HeadlessServer {
                         .clients
                         .get_mut(&client_id)
                         .and_then(|client| client.work_view.take());
+                    let mut usage_view = self
+                        .clients
+                        .get_mut(&client_id)
+                        .and_then(|client| client.usage_view.take());
                     self.app
                         .state
                         .swap_sidebar_presentation(&mut sidebar_presentation);
@@ -4490,6 +4533,7 @@ impl HeadlessServer {
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
+                    self.app.state.swap_usage_view(&mut usage_view);
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -4569,12 +4613,14 @@ impl HeadlessServer {
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
+                    self.app.state.swap_usage_view(&mut usage_view);
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
                         client.symphony_detail = symphony_detail;
                         client.work_view = work_view;
+                        client.usage_view = usage_view;
                     }
                     frame
                 }

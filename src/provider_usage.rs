@@ -12,9 +12,12 @@
 //! segment rather than a stalled frame.
 
 use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::ui::info_panel::{
@@ -30,6 +33,87 @@ const KIMI_TIMEOUT: Duration = Duration::from_secs(5);
 const KIMI_OUTPUT_LIMIT: usize = 64 * 1024;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const SEVEN_DAY_MINUTES: u64 = 10_080;
+
+/// Cached dashboard aggregates live beside the other local Herdr state.
+pub(crate) const USAGE_CACHE_FILE: &str = "usage-cache.json";
+const USAGE_CACHE_VERSION: u32 = 1;
+
+/// Provider attached to one locally observed token-usage record.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UsageProvider {
+    ClaudeCode,
+    Codex,
+}
+
+/// One billable response or turn, normalised across local provider logs.
+///
+/// `input_tokens` excludes cached reads. Claude reports all four buckets
+/// separately. Codex reports cached reads inside `input_tokens`, so its parser
+/// subtracts that bucket before storing the sample.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UsageSample {
+    pub provider: UsageProvider,
+    pub session_id: String,
+    pub timestamp: i64,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
+}
+
+impl UsageSample {
+    pub(crate) fn processed_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
+    }
+}
+
+/// Complete dashboard input produced by one filesystem scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UsageSnapshot {
+    pub samples: Vec<UsageSample>,
+    /// Files present below the two provider roots during this scan.
+    pub files_seen: usize,
+    /// Files parsed rather than restored from the fingerprint cache.
+    pub files_read: usize,
+}
+
+impl UsageSnapshot {
+    pub(crate) fn samples_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> impl Iterator<Item = &UsageSample> {
+        self.samples
+            .iter()
+            .filter(move |sample| sample.timestamp >= start && sample.timestamp < end)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct UsageFileFingerprint {
+    modified_seconds: u64,
+    modified_nanos: u32,
+    size: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CachedUsageFile {
+    fingerprint: UsageFileFingerprint,
+    samples: Vec<UsageSample>,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct UsageCache {
+    version: u32,
+    files: BTreeMap<PathBuf, CachedUsageFile>,
+}
 
 /// One quota window, normalised across providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +163,372 @@ pub(crate) fn collect(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnaps
         claude: load_claude_usage(now_unix, now),
         codex: load_codex_usage(now_unix),
         kimi: load_kimi_usage(now_unix),
+    }
+}
+
+/// Loads the last complete scan without touching provider logs, so opening the
+/// dashboard can paint immediately while its background refresh runs.
+pub(crate) fn load_cached_usage() -> Option<UsageSnapshot> {
+    let cache = read_usage_cache(&crate::config::state_dir().join(USAGE_CACHE_FILE));
+    if cache.version != USAGE_CACHE_VERSION {
+        return None;
+    }
+    let mut snapshot = UsageSnapshot {
+        files_seen: cache.files.len(),
+        files_read: 0,
+        samples: cache
+            .files
+            .into_values()
+            .flat_map(|file| file.samples)
+            .collect(),
+    };
+    sort_usage_samples(&mut snapshot.samples);
+    Some(snapshot)
+}
+
+/// Background-job entry point for a fresh scan of both provider histories.
+pub(crate) fn scan_historical_usage() -> Result<UsageSnapshot, String> {
+    let home = home_path("").ok_or_else(|| "home directory is not set".to_string())?;
+    Ok(collect_dashboard_usage_from(
+        &home,
+        &crate::config::state_dir().join(USAGE_CACHE_FILE),
+    ))
+}
+
+/// Explicit-root form used by tests and isolated runtime fixtures.
+pub(crate) fn collect_dashboard_usage_from(home: &Path, cache_path: &Path) -> UsageSnapshot {
+    let mut discovered = Vec::new();
+    for (provider, root) in [
+        (UsageProvider::ClaudeCode, home.join(".claude/projects")),
+        (UsageProvider::Codex, home.join(".codex/sessions")),
+    ] {
+        if let Err(error) = discover_jsonl_files(provider, &root, &mut discovered) {
+            tracing::warn!(path = %root.display(), %error, "failed to discover provider usage logs");
+        }
+    }
+    discovered.sort_by(|left, right| left.1.cmp(&right.1));
+
+    let previous = read_usage_cache(cache_path);
+    let mut next_files = BTreeMap::new();
+    let mut snapshot = UsageSnapshot {
+        files_seen: discovered.len(),
+        ..UsageSnapshot::default()
+    };
+    for (provider, path) in discovered {
+        let Ok(fingerprint) = usage_file_fingerprint(&path) else {
+            continue;
+        };
+        let (fingerprint, samples) = if let Some(cached) = previous
+            .files
+            .get(&path)
+            .filter(|cached| cached.fingerprint == fingerprint)
+        {
+            (fingerprint, cached.samples.clone())
+        } else {
+            snapshot.files_read = snapshot.files_read.saturating_add(1);
+            let mut samples = parse_usage_file(provider, &path);
+            let mut stable = usage_file_fingerprint(&path).unwrap_or(fingerprint.clone());
+            if stable != fingerprint {
+                samples = parse_usage_file(provider, &path);
+                stable = usage_file_fingerprint(&path).unwrap_or(stable);
+            }
+            (stable, samples)
+        };
+        snapshot.samples.extend(samples.iter().cloned());
+        next_files.insert(
+            path,
+            CachedUsageFile {
+                fingerprint,
+                samples,
+            },
+        );
+    }
+    sort_usage_samples(&mut snapshot.samples);
+
+    let cache = UsageCache {
+        version: USAGE_CACHE_VERSION,
+        files: next_files,
+    };
+    if let Err(error) = write_usage_cache(cache_path, &cache) {
+        tracing::warn!(path = %cache_path.display(), %error, "failed to persist provider usage cache");
+    }
+    snapshot
+}
+
+fn sort_usage_samples(samples: &mut [UsageSample]) {
+    samples.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+            .then_with(|| left.model.cmp(&right.model))
+    });
+}
+
+fn discover_jsonl_files(
+    provider: UsageProvider,
+    root: &Path,
+    files: &mut Vec<(UsageProvider, PathBuf)>,
+) -> io::Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            if let Err(error) = discover_jsonl_files(provider, &path, files) {
+                tracing::warn!(path = %path.display(), %error, "failed to inspect provider usage directory");
+            }
+        } else if file_type.is_file() && path.extension().is_some_and(|value| value == "jsonl") {
+            files.push((provider, path));
+        }
+    }
+    Ok(())
+}
+
+fn usage_file_fingerprint(path: &Path) -> io::Result<UsageFileFingerprint> {
+    let metadata = fs::metadata(path)?;
+    let modified = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(UsageFileFingerprint {
+        modified_seconds: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+        size: metadata.len(),
+    })
+}
+
+fn read_usage_cache(path: &Path) -> UsageCache {
+    let Ok(contents) = fs::read(path) else {
+        return UsageCache::default();
+    };
+    let Ok(cache) = serde_json::from_slice::<UsageCache>(&contents) else {
+        return UsageCache::default();
+    };
+    if cache.version == USAGE_CACHE_VERSION {
+        cache
+    } else {
+        UsageCache::default()
+    }
+}
+
+fn write_usage_cache(path: &Path, cache: &UsageCache) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("usage cache path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let contents = serde_json::to_vec_pretty(cache).map_err(io::Error::other)?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), unique));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    if let Err(error) = file.write_all(&contents).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = crate::platform::replace_file_durably(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn parse_usage_file(provider: UsageProvider, path: &Path) -> Vec<UsageSample> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let session_id = usage_session_id(path);
+    match provider {
+        UsageProvider::ClaudeCode => parse_claude_usage_samples(&contents, &session_id),
+        UsageProvider::Codex => parse_codex_usage_samples(&contents, &session_id),
+    }
+}
+
+fn usage_session_id(path: &Path) -> String {
+    let claude_parent_session = path
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "subagents"))
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty());
+    if let Some(session_id) = claude_parent_session {
+        return session_id.to_owned();
+    }
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn json_u64(value: Option<&serde_json::Value>) -> u64 {
+    value.and_then(serde_json::Value::as_u64).unwrap_or(0)
+}
+
+fn usage_timestamp(value: Option<&serde_json::Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(timestamp) = value.as_i64() {
+        return Some(if timestamp > 10_000_000_000 {
+            timestamp / 1_000
+        } else {
+            timestamp
+        });
+    }
+    value.as_str().and_then(parse_utc_timestamp)
+}
+
+fn nonempty_sample(sample: &UsageSample) -> bool {
+    sample.processed_tokens() > 0
+}
+
+/// Parses Claude Code assistant records. The fields used are
+/// `message.model`, `message.usage.{input_tokens,output_tokens,
+/// cache_creation_input_tokens,cache_read_input_tokens}`, and top-level
+/// `timestamp`. Session identity comes from the JSONL path.
+pub(crate) fn parse_claude_usage_samples(contents: &str, session_id: &str) -> Vec<UsageSample> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            let message = value.get("message")?;
+            let usage = message.get("usage")?;
+            let sample = UsageSample {
+                provider: UsageProvider::ClaudeCode,
+                session_id: session_id.to_owned(),
+                timestamp: usage_timestamp(value.get("timestamp"))?,
+                model: message
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                input_tokens: json_u64(usage.get("input_tokens")),
+                output_tokens: json_u64(usage.get("output_tokens")),
+                cache_write_tokens: json_u64(usage.get("cache_creation_input_tokens")),
+                cache_read_tokens: json_u64(usage.get("cache_read_input_tokens")),
+            };
+            nonempty_sample(&sample).then_some(sample)
+        })
+        .collect()
+}
+
+fn codex_sample(
+    usage: &serde_json::Value,
+    timestamp: i64,
+    model: &str,
+    session_id: &str,
+) -> UsageSample {
+    let reported_input = json_u64(usage.get("input_tokens"));
+    let cache_read_tokens = json_u64(usage.get("cached_input_tokens"));
+    let cache_write_tokens = json_u64(usage.get("cache_write_input_tokens"));
+    UsageSample {
+        provider: UsageProvider::Codex,
+        session_id: session_id.to_owned(),
+        timestamp,
+        model: model.to_owned(),
+        input_tokens: reported_input.saturating_sub(cache_read_tokens),
+        output_tokens: json_u64(usage.get("output_tokens")),
+        cache_write_tokens,
+        cache_read_tokens,
+    }
+}
+
+/// Parses Codex rollout records. Modern logs use incremental
+/// `token_usage_record.payload.usage` values joined to
+/// `turn_context.payload.model` by turn id. Older logs use
+/// `event_msg/token_count.info.last_token_usage`; those are read only when a
+/// file has no modern records because current rollouts contain both forms.
+pub(crate) fn parse_codex_usage_samples(contents: &str, session_id: &str) -> Vec<UsageSample> {
+    let mut models_by_turn = HashMap::new();
+    let mut current_model: Option<String> = None;
+    let mut modern = Vec::new();
+    let mut legacy = Vec::new();
+
+    for line in contents.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let record_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let payload = value.get("payload");
+        if record_type == "turn_context" {
+            let turn_id = payload
+                .and_then(|payload| payload.get("turn_id"))
+                .and_then(serde_json::Value::as_str);
+            let model = payload
+                .and_then(|payload| payload.get("model"))
+                .and_then(serde_json::Value::as_str);
+            if let Some(model) = model {
+                current_model = Some(model.to_owned());
+                if let Some(turn_id) = turn_id {
+                    models_by_turn.insert(turn_id.to_owned(), model.to_owned());
+                }
+            }
+            continue;
+        }
+
+        let Some(timestamp) = usage_timestamp(value.get("timestamp")) else {
+            continue;
+        };
+        if record_type == "token_usage_record" {
+            let Some(payload) = payload else {
+                continue;
+            };
+            let Some(usage) = payload.get("usage") else {
+                continue;
+            };
+            let model = payload
+                .get("turn_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|turn_id| models_by_turn.get(turn_id))
+                .or(current_model.as_ref())
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            let sample = codex_sample(usage, timestamp, model, session_id);
+            if nonempty_sample(&sample) {
+                modern.push(sample);
+            }
+            continue;
+        }
+
+        let legacy_usage = (record_type == "event_msg")
+            .then_some(payload)
+            .flatten()
+            .filter(|payload| {
+                payload.get("type").and_then(serde_json::Value::as_str) == Some("token_count")
+            })
+            .and_then(|payload| payload.get("info"))
+            .and_then(|info| info.get("last_token_usage"));
+        if let Some(usage) = legacy_usage {
+            let model = current_model.as_deref().unwrap_or("unknown");
+            let sample = codex_sample(usage, timestamp, model, session_id);
+            if nonempty_sample(&sample) {
+                legacy.push(sample);
+            }
+        }
+    }
+
+    if modern.is_empty() {
+        legacy
+    } else {
+        modern
     }
 }
 
@@ -451,6 +901,81 @@ mod tests {
 
     const NOW: i64 = 1_787_992_841;
 
+    struct UsageFixture {
+        root: PathBuf,
+        cache_path: PathBuf,
+        claude_path: PathBuf,
+        codex_path: PathBuf,
+    }
+
+    impl UsageFixture {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "herdr-usage-{name}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("test clock after epoch")
+                    .as_nanos()
+            ));
+            let claude_path = root
+                .join(".claude/projects/project-a/nested")
+                .join("claude-session.jsonl");
+            let codex_path = root
+                .join(".codex/sessions/2026/09/06")
+                .join("rollout-codex-session.jsonl");
+            fs::create_dir_all(claude_path.parent().expect("Claude fixture parent"))
+                .expect("create Claude fixture tree");
+            fs::create_dir_all(codex_path.parent().expect("Codex fixture parent"))
+                .expect("create Codex fixture tree");
+            fs::write(
+                &claude_path,
+                concat!(
+                    "{\"type\":\"user\",\"timestamp\":\"2026-09-05T10:00:00Z\"}\n",
+                    "{\"type\":\"assistant\",\"timestamp\":\"2026-09-05T10:01:00.123Z\",",
+                    "\"message\":{\"model\":\"claude-sonnet-5\",\"usage\":{",
+                    "\"input_tokens\":10,\"output_tokens\":5,",
+                    "\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30}}}\n"
+                ),
+            )
+            .expect("write Claude fixture");
+            fs::write(
+                &codex_path,
+                concat!(
+                    "{\"timestamp\":\"2026-09-05T11:00:00Z\",\"type\":\"turn_context\",",
+                    "\"payload\":{\"turn_id\":\"turn-1\",\"model\":\"gpt-5.6-sol\"}}\n",
+                    "{\"timestamp\":\"2026-09-05T11:01:00Z\",\"type\":\"token_usage_record\",",
+                    "\"payload\":{\"turn_id\":\"turn-1\",\"session_id\":\"ignored-payload-session\",",
+                    "\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":60,",
+                    "\"cache_write_input_tokens\":10,\"output_tokens\":7,",
+                    "\"reasoning_output_tokens\":99,\"total_tokens\":107}}}\n",
+                    "{\"timestamp\":\"2026-09-05T11:01:00Z\",\"type\":\"event_msg\",",
+                    "\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{",
+                    "\"input_tokens\":100,\"cached_input_tokens\":60,",
+                    "\"cache_write_input_tokens\":10,\"output_tokens\":7}}}}\n"
+                ),
+            )
+            .expect("write Codex fixture");
+            let cache_path = root.join("state/herdr-dev").join(USAGE_CACHE_FILE);
+            Self {
+                root,
+                cache_path,
+                claude_path,
+                codex_path,
+            }
+        }
+
+        fn scan(&self) -> UsageSnapshot {
+            collect_dashboard_usage_from(&self.root, &self.cache_path)
+        }
+    }
+
+    impl Drop for UsageFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     #[test]
     fn claude_cache_yields_both_windows_and_drops_a_rolled_over_one() {
         let contents = "R5=6\nR7=56\nR5_RST=1788003000\nR7_RST=1788307200\nTS=1787992841\n";
@@ -564,5 +1089,119 @@ mod tests {
             Some(start),
             start + PROVIDER_USAGE_REFRESH_INTERVAL
         ));
+    }
+
+    #[test]
+    fn dashboard_scan_reads_recursive_claude_and_codex_fixtures_without_double_counting() {
+        let fixture = UsageFixture::new("both-providers");
+
+        let snapshot = fixture.scan();
+
+        assert_eq!(snapshot.files_seen, 2);
+        assert_eq!(snapshot.files_read, 2);
+        assert_eq!(snapshot.samples.len(), 2);
+        assert_eq!(
+            snapshot.samples[0],
+            UsageSample {
+                provider: UsageProvider::ClaudeCode,
+                session_id: "claude-session".into(),
+                timestamp: 1_788_602_460,
+                model: "claude-sonnet-5".into(),
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_write_tokens: 20,
+                cache_read_tokens: 30,
+            }
+        );
+        assert_eq!(snapshot.samples[0].processed_tokens(), 65);
+        assert_eq!(snapshot.samples[1].provider, UsageProvider::Codex);
+        assert_eq!(snapshot.samples[1].session_id, "rollout-codex-session");
+        assert_eq!(snapshot.samples[1].model, "gpt-5.6-sol");
+        assert_eq!(snapshot.samples[1].input_tokens, 40);
+        assert_eq!(snapshot.samples[1].cache_read_tokens, 60);
+        assert_eq!(snapshot.samples[1].cache_write_tokens, 10);
+        assert_eq!(snapshot.samples[1].output_tokens, 7);
+        assert_eq!(
+            snapshot
+                .samples_between(1_788_602_000, 1_788_607_000)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn dashboard_cache_reuses_unchanged_files_and_reads_only_the_changed_file() {
+        let fixture = UsageFixture::new("changed-cache-file");
+        let first = fixture.scan();
+        assert_eq!(first.files_read, 2);
+        assert!(fixture.cache_path.is_file());
+
+        let cached = fixture.scan();
+        assert_eq!(cached.files_seen, 2);
+        assert_eq!(cached.files_read, 0);
+        assert_eq!(cached.samples, first.samples);
+
+        let mut claude = fs::read_to_string(&fixture.claude_path).expect("read Claude fixture");
+        claude.push_str(concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-09-06T10:01:00Z\",",
+            "\"message\":{\"model\":\"claude-opus-5\",\"usage\":{",
+            "\"input_tokens\":1,\"output_tokens\":2,",
+            "\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":4}}}\n"
+        ));
+        fs::write(&fixture.claude_path, claude).expect("change Claude fixture");
+
+        let changed = fixture.scan();
+        assert_eq!(changed.files_seen, 2);
+        assert_eq!(changed.files_read, 1);
+        assert_eq!(changed.samples.len(), 3);
+        assert_eq!(
+            changed
+                .samples
+                .iter()
+                .filter(|sample| sample.provider == UsageProvider::Codex)
+                .count(),
+            1,
+            "unchanged Codex file is restored once from cache"
+        );
+        let cache: UsageCache =
+            serde_json::from_slice(&fs::read(&fixture.cache_path).expect("read persisted cache"))
+                .expect("parse persisted cache");
+        assert_eq!(cache.version, USAGE_CACHE_VERSION);
+        assert_eq!(cache.files.len(), 2);
+        assert!(cache.files.contains_key(&fixture.codex_path));
+    }
+
+    #[test]
+    fn legacy_codex_token_count_is_used_when_incremental_records_are_absent() {
+        let samples = parse_codex_usage_samples(
+            concat!(
+                "{\"timestamp\":\"2026-09-05T11:00:00Z\",\"type\":\"turn_context\",",
+                "\"payload\":{\"turn_id\":\"turn-1\",\"model\":\"gpt-5.3-codex-spark\"}}\n",
+                "{\"timestamp\":\"2026-09-05T11:01:00Z\",\"type\":\"event_msg\",",
+                "\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{",
+                "\"input_tokens\":80,\"cached_input_tokens\":20,",
+                "\"cache_write_input_tokens\":5,\"output_tokens\":4}}}}\n"
+            ),
+            "legacy-session",
+        );
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].model, "gpt-5.3-codex-spark");
+        assert_eq!(samples[0].input_tokens, 60);
+        assert_eq!(samples[0].output_tokens, 4);
+    }
+
+    #[test]
+    fn claude_subagent_path_uses_the_parent_session_id() {
+        assert_eq!(
+            usage_session_id(Path::new(
+                "/home/.claude/projects/project/session-123/subagents/agent-456.jsonl"
+            )),
+            "session-123"
+        );
+        assert_eq!(
+            usage_session_id(Path::new("/home/.codex/sessions/rollout-session-789.jsonl")),
+            "rollout-session-789"
+        );
     }
 }

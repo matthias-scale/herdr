@@ -692,6 +692,12 @@
           "description": "Open the work projection view over the repo-wide work index."
         },
         {
+          "key": "keys.usage",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+y\"",
+          "description": "Open the local Claude Code and Codex usage dashboard."
+        },
+        {
           "key": "keys.inbox",
           "type": "keybinding",
           "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",
@@ -1341,6 +1347,18 @@
           "type": "list of strings",
           "default": "[]",
           "description": "GitHub repositories to index as owner/repo values."
+        }
+      ]
+    },
+    {
+      "id": "usage",
+      "title": "Usage",
+      "keys": [
+        {
+          "key": "usage.pricing",
+          "type": "table of model pricing entries",
+          "default": "built-in Claude and Codex model prices",
+          "description": "USD per million input, output, cache-write, and cache-read tokens keyed by model id. User entries extend or override the built-in defaults."
         }
       ]
     },

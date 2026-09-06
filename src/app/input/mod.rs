@@ -173,6 +173,9 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return None;
         }
+        if self.handle_usage_view_key(key_event) {
+            return None;
+        }
         if self.handle_work_view_key(key_event) {
             return None;
         }
@@ -994,6 +997,7 @@ impl App {
     }
 
     pub(crate) fn toggle_work_view(&mut self) {
+        self.state.clear_usage_view();
         let enabled = self.work_index_config.enabled;
         let snapshot = enabled.then(|| self.work_index_snapshot.clone()).flatten();
         self.state.toggle_work_view(enabled, snapshot);
@@ -1001,6 +1005,95 @@ impl App {
             self.next_work_index_refresh = std::time::Instant::now();
             if let Some(view) = self.state.work_view.as_mut() {
                 view.refreshing = true;
+            }
+        }
+    }
+
+    pub(crate) fn toggle_usage_view(&mut self) {
+        self.state.toggle_usage_view();
+        if self.state.usage_view.is_some() {
+            self.start_usage_scan();
+        }
+    }
+
+    pub(crate) fn handle_usage_view_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.usage_view.is_none() {
+            return false;
+        }
+        use crate::app::state::{UsageBreakdown, UsageMetric, UsageRange};
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.state.clear_usage_view();
+                self.state.mode = Mode::Terminal;
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.metric = UsageMetric::Cost;
+                }
+            }
+            KeyCode::Char('t') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.metric = UsageMetric::Tokens;
+                }
+            }
+            KeyCode::Char('1') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Hours24;
+                }
+            }
+            KeyCode::Char('7') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Days7;
+                }
+            }
+            KeyCode::Char('3') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Days30;
+                }
+            }
+            KeyCode::Char('9') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Days90;
+                }
+            }
+            KeyCode::Char('m') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.breakdown = UsageBreakdown::Model;
+                }
+            }
+            KeyCode::Char('d') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.breakdown = UsageBreakdown::Day;
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.scanning = true;
+                }
+                self.start_usage_scan();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn activate_usage_hit_target(&mut self, target: crate::app::state::UsageHitTarget) {
+        use crate::app::state::{UsageBreakdown, UsageHitTarget, UsageMetric, UsageRange};
+        let Some(view) = self.state.usage_view.as_mut() else {
+            return;
+        };
+        match target {
+            UsageHitTarget::Cost => view.metric = UsageMetric::Cost,
+            UsageHitTarget::Tokens => view.metric = UsageMetric::Tokens,
+            UsageHitTarget::Hours24 => view.range = UsageRange::Hours24,
+            UsageHitTarget::Days7 => view.range = UsageRange::Days7,
+            UsageHitTarget::Days30 => view.range = UsageRange::Days30,
+            UsageHitTarget::Days90 => view.range = UsageRange::Days90,
+            UsageHitTarget::Model => view.breakdown = UsageBreakdown::Model,
+            UsageHitTarget::Day => view.breakdown = UsageBreakdown::Day,
+            UsageHitTarget::Rescan => {
+                view.scanning = true;
+                self.start_usage_scan();
             }
         }
     }
@@ -1809,6 +1902,26 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        if self.state.usage_view.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let target = self
+                    .state
+                    .view
+                    .usage_hit_areas
+                    .iter()
+                    .find(|hit| {
+                        mouse.column >= hit.rect.x
+                            && mouse.column < hit.rect.right()
+                            && mouse.row >= hit.rect.y
+                            && mouse.row < hit.rect.bottom()
+                    })
+                    .map(|hit| hit.target);
+                if let Some(target) = target {
+                    self.activate_usage_hit_target(target);
+                }
+            }
+            return;
+        }
         if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
             return;
         }
@@ -1847,6 +1960,15 @@ impl App {
                 && mouse.row < work.y.saturating_add(work.height)
             {
                 self.toggle_work_view();
+                return;
+            }
+            let usage = self.state.view.sidebar_footer_usage_hit_area;
+            if mouse.column >= usage.x
+                && mouse.column < usage.right()
+                && mouse.row >= usage.y
+                && mouse.row < usage.bottom()
+            {
+                self.toggle_usage_view();
                 return;
             }
 
@@ -2777,6 +2899,112 @@ mod tests {
             app.state.work_item_detail_cache.insert(key.clone(), detail);
             assert_eq!(app.pr_land_confirmation(&key).is_some(), expected);
         }
+    }
+
+    #[test]
+    fn usage_view_keys_change_metric_range_breakdown_and_close() {
+        use crate::app::state::{UsageBreakdown, UsageMetric, UsageRange};
+
+        let mut app = test_app();
+        app.toggle_usage_view();
+        assert!(app.state.usage_view.is_some());
+        for (key, metric, range, breakdown) in [
+            (
+                't',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+            (
+                '1',
+                UsageMetric::Tokens,
+                UsageRange::Hours24,
+                UsageBreakdown::Model,
+            ),
+            (
+                '7',
+                UsageMetric::Tokens,
+                UsageRange::Days7,
+                UsageBreakdown::Model,
+            ),
+            (
+                '9',
+                UsageMetric::Tokens,
+                UsageRange::Days90,
+                UsageBreakdown::Model,
+            ),
+            (
+                '3',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+            (
+                'd',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Day,
+            ),
+            (
+                'm',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+            (
+                'c',
+                UsageMetric::Cost,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+        ] {
+            assert!(app
+                .handle_usage_view_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::empty(),)));
+            let view = app.state.usage_view.as_ref().expect("usage view");
+            assert_eq!(
+                (view.metric, view.range, view.breakdown),
+                (metric, range, breakdown)
+            );
+        }
+        assert!(app.handle_usage_view_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.usage_view.is_none());
+    }
+
+    #[test]
+    fn usage_view_opens_from_cached_snapshot_while_rescan_runs() {
+        let mut app = test_app();
+        app.state.usage_snapshot = Some(crate::provider_usage::UsageSnapshot::default());
+        app.toggle_usage_view();
+        let view = app.state.usage_view.as_ref().expect("usage view");
+        assert!(view.snapshot.is_some());
+        assert!(view.scanning, "cached rows remain visible during rescan");
+        assert_eq!(app.usage_scan_in_flight, Some(1));
+    }
+
+    #[test]
+    fn usage_scan_ignores_stale_generation_and_applies_current_result() {
+        let mut app = test_app();
+        app.toggle_usage_view();
+        app.start_usage_scan();
+        assert_eq!(app.usage_scan_in_flight, Some(2));
+        assert!(!app.handle_usage_scan_finished(
+            1,
+            Ok(Box::new(crate::provider_usage::UsageSnapshot::default())),
+        ));
+        assert!(app
+            .state
+            .usage_view
+            .as_ref()
+            .is_some_and(|view| view.scanning));
+        assert!(app.handle_usage_scan_finished(
+            2,
+            Ok(Box::new(crate::provider_usage::UsageSnapshot::default())),
+        ));
+        assert!(app
+            .state
+            .usage_view
+            .as_ref()
+            .is_some_and(|view| !view.scanning && view.snapshot.is_some()));
     }
 
     #[test]

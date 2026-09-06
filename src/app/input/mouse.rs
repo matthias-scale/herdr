@@ -5090,6 +5090,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sidebar_footer_usage_entry_and_every_view_toggle_are_clickable() {
+        use crate::app::state::{UsageBreakdown, UsageHitTarget, UsageMetric, UsageRange};
+
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let footer = app.state.view.sidebar_footer_usage_hit_area;
+            assert!(footer.width > 0);
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                footer.x,
+                footer.y,
+            ));
+            assert!(app.state.usage_view.is_some());
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+
+            for target in [
+                UsageHitTarget::Tokens,
+                UsageHitTarget::Hours24,
+                UsageHitTarget::Days7,
+                UsageHitTarget::Days30,
+                UsageHitTarget::Days90,
+                UsageHitTarget::Day,
+                UsageHitTarget::Model,
+                UsageHitTarget::Cost,
+                UsageHitTarget::Rescan,
+            ] {
+                let rect = app
+                    .state
+                    .view
+                    .usage_hit_areas
+                    .iter()
+                    .find(|hit| hit.target == target)
+                    .map(|hit| hit.rect)
+                    .expect("usage hit area");
+                app.handle_mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    rect.x,
+                    rect.y,
+                ));
+            }
+            let view = app.state.usage_view.as_ref().expect("usage view");
+            assert_eq!(view.metric, UsageMetric::Cost);
+            assert_eq!(view.range, UsageRange::Days90);
+            assert_eq!(view.breakdown, UsageBreakdown::Model);
+            assert!(view.scanning);
+        }
+    }
+
     #[tokio::test]
     async fn desktop_new_workspace_creates_immediately_by_default() {
         let mut app = app_for_mouse_test();

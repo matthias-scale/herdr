@@ -64,6 +64,8 @@ pub(crate) struct ClientConnection {
     pub(crate) symphony_detail: Option<crate::app::state::SymphonyDetail>,
     /// Client-local work projection view over the server-owned work index snapshot.
     pub(crate) work_view: Option<crate::app::state::WorkViewState>,
+    /// Client-local historical provider usage controls and scan snapshot.
+    pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
@@ -139,6 +141,7 @@ impl ClientConnection {
             loop_run_history_detail: None,
             symphony_detail: None,
             work_view: None,
+            usage_view: None,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             graphics_surface_reset_pending: false,
             render_pending: false,

@@ -558,6 +558,10 @@ impl App {
                 self.toggle_work_view();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenUsageView => {
+                self.toggle_usage_view();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::OpenInbox => {
                 self.state.toggle_inbox();
                 leave_navigate_mode(&mut self.state);
@@ -1871,6 +1875,7 @@ pub(crate) enum NavigateAction {
     ToggleInfoPanel,
     OpenSymphony,
     OpenWorkView,
+    OpenUsageView,
     Detach,
     OpenNavigator,
 }
@@ -2080,6 +2085,7 @@ fn non_indexed_action_for_key(
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.work, NavigateAction::OpenWorkView),
+        (&kb.usage, NavigateAction::OpenUsageView),
         (&kb.inbox, NavigateAction::OpenInbox),
         (&kb.home, NavigateAction::OpenHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -2498,6 +2504,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::OpenWorkView => {
             state.toggle_work_view(false, None);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenUsageView => {
+            state.toggle_usage_view();
             leave_navigate_mode(state);
         }
         NavigateAction::OpenInbox => {
@@ -4743,6 +4753,17 @@ last_pane = "prefix+tab"
         );
 
         assert_eq!(pane_action, Some(NavigateAction::LastPane));
+    }
+
+    #[test]
+    fn default_usage_keybinding_maps_to_the_usage_view() {
+        let state = state_with_workspaces(&["test"]);
+        let action = action_for_key(
+            &state,
+            TerminalKey::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            BindingDispatch::Prefix,
+        );
+        assert_eq!(action, Some(NavigateAction::OpenUsageView));
     }
 
     #[test]

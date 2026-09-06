@@ -1349,6 +1349,25 @@ pub(crate) struct HomeHitArea {
     pub(crate) rect: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum UsageHitTarget {
+    Cost,
+    Tokens,
+    Hours24,
+    Days7,
+    Days30,
+    Days90,
+    Model,
+    Day,
+    Rescan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsageHitArea {
+    pub(crate) target: UsageHitTarget,
+    pub(crate) rect: Rect,
+}
+
 /// Which pane-toggle button in the tab row was pressed. TUI-only presentation
 /// state: it is resolved into the existing split/close runtime calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1380,6 +1399,10 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
+    /// Sidebar-footer entry for the client-local historical usage view.
+    pub(crate) sidebar_footer_usage_hit_area: Rect,
+    /// Header and breakdown controls inside the historical usage view.
+    pub(crate) usage_hit_areas: Vec<UsageHitArea>,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -2136,6 +2159,14 @@ pub struct AppState {
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
+    /// Client-local historical usage view and its scan result.
+    pub(crate) usage_view: Option<UsageViewState>,
+    /// Cached local usage loaded before the first background rescan.
+    pub(crate) usage_snapshot: Option<crate::provider_usage::UsageSnapshot>,
+    /// Local list-price table used only by the usage presentation.
+    pub(crate) usage_pricing: crate::config::UsageConfig,
+    /// Set by client-local input and drained into the background scan job.
+    pub(crate) request_usage_scan: bool,
     /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
@@ -2665,6 +2696,62 @@ pub(crate) struct WorkViewState {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UsageMetric {
+    #[default]
+    Cost,
+    Tokens,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UsageRange {
+    Hours24,
+    Days7,
+    #[default]
+    Days30,
+    Days90,
+}
+
+impl UsageRange {
+    pub(crate) fn seconds(self) -> i64 {
+        match self {
+            Self::Hours24 => 24 * 60 * 60,
+            Self::Days7 => 7 * 24 * 60 * 60,
+            Self::Days30 => 30 * 24 * 60 * 60,
+            Self::Days90 => 90 * 24 * 60 * 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UsageBreakdown {
+    #[default]
+    Model,
+    Day,
+}
+
+/// Client-local controls and scan data for the full-screen usage view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsageViewState {
+    pub(crate) metric: UsageMetric,
+    pub(crate) range: UsageRange,
+    pub(crate) breakdown: UsageBreakdown,
+    pub(crate) snapshot: Option<crate::provider_usage::UsageSnapshot>,
+    pub(crate) scanning: bool,
+}
+
+impl UsageViewState {
+    pub(crate) fn new(snapshot: Option<crate::provider_usage::UsageSnapshot>) -> Self {
+        Self {
+            metric: UsageMetric::default(),
+            range: UsageRange::default(),
+            breakdown: UsageBreakdown::default(),
+            scanning: snapshot.is_none(),
+            snapshot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PrDetailTab {
     #[default]
     Summary,
@@ -2752,11 +2839,30 @@ impl AppState {
             self.work_view = None;
             return;
         }
+        self.usage_view = None;
         self.work_view = Some(WorkViewState::new(enabled, snapshot));
     }
 
     pub(crate) fn clear_work_view(&mut self) {
         self.work_view = None;
+    }
+
+    pub(crate) fn swap_usage_view(&mut self, other: &mut Option<UsageViewState>) {
+        std::mem::swap(&mut self.usage_view, other);
+    }
+
+    pub(crate) fn toggle_usage_view(&mut self) {
+        if self.usage_view.is_some() {
+            self.usage_view = None;
+            return;
+        }
+        self.work_view = None;
+        self.usage_view = Some(UsageViewState::new(self.usage_snapshot.clone()));
+        self.request_usage_scan = true;
+    }
+
+    pub(crate) fn clear_usage_view(&mut self) {
+        self.usage_view = None;
     }
 
     pub(crate) fn swap_loop_run_history_detail(
@@ -3347,6 +3453,10 @@ impl AppState {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            usage_view: None,
+            usage_snapshot: None,
+            usage_pricing: crate::config::UsageConfig::default(),
+            request_usage_scan: false,
             inbox: None,
             home: None,
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
@@ -3453,6 +3563,8 @@ impl AppState {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
+                sidebar_footer_usage_hit_area: Rect::default(),
+                usage_hit_areas: Vec::new(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),

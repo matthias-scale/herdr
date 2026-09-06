@@ -130,6 +130,8 @@ pub struct App {
     pub(crate) status_metrics_visible: bool,
     pub(crate) provider_usage_refreshed_at: Option<Instant>,
     pub(crate) provider_usage_in_flight: bool,
+    pub(crate) usage_scan_generation: u64,
+    pub(crate) usage_scan_in_flight: Option<u64>,
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
@@ -699,6 +701,14 @@ impl App {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            usage_view: None,
+            usage_snapshot: if cfg!(test) {
+                None
+            } else {
+                crate::provider_usage::load_cached_usage()
+            },
+            usage_pricing: config.usage.clone(),
+            request_usage_scan: false,
             inbox: None,
             home: None,
             home_catalog: if cfg!(test) {
@@ -807,6 +817,8 @@ impl App {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
+                sidebar_footer_usage_hit_area: Rect::default(),
+                usage_hit_areas: Vec::new(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -1076,6 +1088,8 @@ impl App {
             status_metrics_visible: false,
             provider_usage_refreshed_at: cfg!(test).then(Instant::now),
             provider_usage_in_flight: false,
+            usage_scan_generation: 0,
+            usage_scan_in_flight: None,
             connectivity_probed_at: cfg!(test).then(Instant::now),
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
@@ -2169,6 +2183,10 @@ impl App {
             self.state.files_icons = config.files.icons;
         }
 
+        if !invalid_section("usage") {
+            self.state.usage_pricing = config.usage.clone();
+        }
+
         if !invalid_section("land") {
             self.state.land_approval_label = config.land.approval_label.clone();
         }
@@ -2248,6 +2266,7 @@ impl App {
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
+            || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
             || self.state.home.is_some()
         {
@@ -2539,6 +2558,9 @@ impl App {
             return;
         }
         if self.handle_loop_run_history_key(key_event) {
+            return;
+        }
+        if self.handle_usage_view_key(key_event) {
             return;
         }
         if self.handle_work_view_key(key_event) {

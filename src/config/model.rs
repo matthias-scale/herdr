@@ -351,8 +351,87 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub usage: UsageConfig,
     pub land: LandConfig,
     pub files: FilesConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct UsageModelPricing {
+    /// USD per one million uncached input tokens.
+    pub input: f64,
+    /// USD per one million output tokens.
+    pub output: f64,
+    /// USD per one million cache-write input tokens.
+    pub cache_write: f64,
+    /// USD per one million cache-read input tokens.
+    pub cache_read: f64,
+}
+
+impl Default for UsageModelPricing {
+    fn default() -> Self {
+        Self {
+            input: 0.0,
+            output: 0.0,
+            cache_write: 0.0,
+            cache_read: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageConfig {
+    /// API list-price estimates keyed by the model id written to provider logs.
+    pub pricing: std::collections::BTreeMap<String, UsageModelPricing>,
+}
+
+impl<'de> serde::Deserialize<'de> for UsageConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, serde::Deserialize)]
+        #[serde(default)]
+        struct RawUsageConfig {
+            pricing: std::collections::BTreeMap<String, UsageModelPricing>,
+        }
+
+        let raw = RawUsageConfig::deserialize(deserializer)?;
+        let mut config = UsageConfig::default();
+        config.pricing.extend(raw.pricing);
+        Ok(config)
+    }
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        let entries = [
+            ("claude-fable-5-1", 1.0, 5.0, 1.25, 0.10),
+            ("claude-opus-5", 15.0, 75.0, 18.75, 1.50),
+            ("claude-sonnet-5", 3.0, 15.0, 3.75, 0.30),
+            ("claude-haiku-4-5", 1.0, 5.0, 1.25, 0.10),
+            ("gpt-5.6-sol", 1.25, 10.0, 1.25, 0.125),
+            ("gpt-5.6-luna", 0.25, 2.0, 0.25, 0.025),
+            ("gpt-5.3-codex-spark", 0.25, 2.0, 0.25, 0.025),
+        ];
+        Self {
+            pricing: entries
+                .into_iter()
+                .map(|(model, input, output, cache_write, cache_read)| {
+                    (
+                        model.to_string(),
+                        UsageModelPricing {
+                            input,
+                            output,
+                            cache_write,
+                            cache_read,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -602,6 +681,8 @@ pub struct KeysConfig {
     pub symphony: BindingConfig,
     /// Open the work projection view. Default: "prefix+ctrl+w"
     pub work: BindingConfig,
+    /// Open the historical provider usage view. Default: "prefix+ctrl+y"
+    pub usage: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
@@ -774,6 +855,8 @@ pub(crate) struct KeysConfigOverlay {
     symphony: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     work: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
     home: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -878,6 +961,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(work);
+        apply_field!(usage);
         apply_field!(inbox);
         apply_field!(home);
         apply_field!(toggle_status_detail);
@@ -1005,6 +1089,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(work, keybinds.work);
+        copy_effective_action_field!(usage, keybinds.usage);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
         copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
@@ -1397,6 +1482,7 @@ impl Default for KeysConfig {
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             work: BindingConfig::one("prefix+ctrl+w"),
+            usage: BindingConfig::one("prefix+ctrl+y"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),
@@ -1633,6 +1719,7 @@ new_cwd = "home"
 "#,
         )
         .unwrap();
+        assert!(config.usage.pricing.contains_key("claude-opus-5"));
         assert_eq!(config.terminal.new_cwd, NewTerminalCwdConfig::Home);
 
         let config: Config = toml::from_str(
@@ -2289,5 +2376,34 @@ scrollback_lines = 12345
         assert_eq!(Config::default().land.approval_label, "approved");
         let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
         assert_eq!(config.land.approval_label, "ship-it");
+    }
+
+    #[test]
+    fn usage_pricing_has_documented_defaults_and_accepts_model_overrides() {
+        let defaults = Config::default();
+        for model in [
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.3-codex-spark",
+        ] {
+            assert!(defaults.usage.pricing.contains_key(model), "{model}");
+        }
+        let config: Config = toml::from_str(
+            "[usage.pricing]\ncustom = { input = 2.0, output = 4.0, cache_write = 1.0, cache_read = 0.5 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.usage.pricing.get("custom"),
+            Some(&UsageModelPricing {
+                input: 2.0,
+                output: 4.0,
+                cache_write: 1.0,
+                cache_read: 0.5,
+            })
+        );
     }
 }
