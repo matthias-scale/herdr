@@ -223,7 +223,7 @@ pub enum AppEvent {
     /// Background repo-wide GitHub, Linear, and pane work observations completed.
     WorkIndexRefreshed {
         generation: u64,
-        snapshot: crate::work_index::Snapshot,
+        snapshot: Box<crate::work_index::Snapshot>,
         session: crate::work_index::WorkIndexSession,
     },
     /// One bounded batch of GitHub detail observations completed.

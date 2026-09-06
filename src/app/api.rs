@@ -138,7 +138,7 @@ impl App {
                 generation,
                 snapshot,
                 session,
-            } => self.handle_work_index_refreshed(generation, snapshot, session),
+            } => self.handle_work_index_refreshed(generation, *snapshot, session),
             AppEvent::UsageScanFinished { generation, result } => {
                 self.handle_usage_scan_finished(generation, result)
             }
@@ -358,7 +358,7 @@ impl App {
             session,
         } = ev
         {
-            self.handle_work_index_refreshed(generation, snapshot, session);
+            self.handle_work_index_refreshed(generation, *snapshot, session);
             return None;
         }
 
