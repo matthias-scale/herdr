@@ -22,6 +22,7 @@ mod git_refresh;
 pub(crate) mod home;
 pub(crate) mod home_catalog;
 pub(crate) mod home_refs;
+pub(crate) mod probes;
 mod ids;
 pub(crate) mod inbox;
 mod input;
@@ -1023,6 +1024,7 @@ impl App {
                 original_palette: None,
                 original_theme: None,
             },
+            tool_probes: crate::app::probes::ToolProbeState::Idle,
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),

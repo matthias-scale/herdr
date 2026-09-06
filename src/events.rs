@@ -85,6 +85,10 @@ pub enum AppEvent {
         repo_root: std::path::PathBuf,
         result: Result<crate::app::home_refs::HomeRefCacheEntry, String>,
     },
+    /// Background provider/integration probes for settings finished.
+    ToolProbesFinished {
+        probes: Vec<crate::app::probes::ToolProbe>,
+    },
     /// A requested Home checkout completed before agent launch.
     HomeCheckoutFinished {
         plan: Box<crate::app::home::HomeDispatchPlan>,

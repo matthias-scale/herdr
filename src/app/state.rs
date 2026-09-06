@@ -2579,6 +2579,9 @@ pub struct AppState {
     pub theme_appearance_mismatch: Option<String>,
     /// Settings panel state.
     pub settings: SettingsState,
+    /// Session cache of the settings Providers/Integrations probes. TUI-only:
+    /// nothing outside the settings screen reads it.
+    pub tool_probes: crate::app::probes::ToolProbeState,
     /// Cached integration recommendations for onboarding/settings UI.
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
     /// Cached detection manifest source/version summaries for runtime/API status.
@@ -3893,6 +3896,7 @@ impl AppState {
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
             theme_appearance_mismatch: None,
+            tool_probes: crate::app::probes::ToolProbeState::Idle,
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),
