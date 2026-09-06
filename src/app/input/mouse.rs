@@ -5259,7 +5259,7 @@ mod tests {
                     .iter()
                     .find(|hit| hit.target == target)
                     .map(|hit| hit.rect)
-                    .expect("usage hit area");
+                    .unwrap_or_else(|| panic!("usage hit area for {target:?}"));
                 app.handle_mouse(mouse(
                     MouseEventKind::Down(MouseButton::Left),
                     rect.x,

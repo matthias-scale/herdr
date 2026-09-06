@@ -2814,8 +2814,7 @@ pub struct AppState {
     pub(crate) sidebar_selected_work_group: Option<String>,
     /// Views whose Unassigned section has expanded past its ten newest rows.
     /// Attach-local TUI state; provider objects remain shared work-index facts.
-    pub(crate) sidebar_unassigned_expanded_views:
-        std::collections::HashSet<SidebarGroupMode>,
+    pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
@@ -3480,6 +3479,7 @@ impl AppState {
         self.work_view = None;
         self.usage_view = Some(UsageViewState::new(self.usage_snapshot.clone()));
         self.request_usage_scan = true;
+        self.follow_view(SidebarGroupMode::Repo);
     }
 
     pub(crate) fn clear_usage_view(&mut self) {
@@ -3681,14 +3681,13 @@ impl AppState {
     /// work view. A later explicit surface pick remains visible until another
     /// view change calls this function.
     pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
-        let surface = match view {
-            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => DockSurface::Agents,
-            SidebarGroupMode::LinearTeam => DockSurface::Linear,
-            SidebarGroupMode::RepoPr => DockSurface::Pr,
-            SidebarGroupMode::Missive => DockSurface::Missive,
-        };
         self.dock_collapsed = false;
-        self.select_dock_surface(surface);
+        match view {
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {}
+            SidebarGroupMode::LinearTeam => self.select_dock_surface(DockSurface::Linear),
+            SidebarGroupMode::RepoPr => self.select_dock_surface(DockSurface::Pr),
+            SidebarGroupMode::Missive => self.select_dock_surface(DockSurface::Missive),
+        }
         self.dock_surface_override = false;
     }
 

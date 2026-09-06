@@ -3760,6 +3760,11 @@ mod tests {
         app.toggle_work_view();
         assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Pr));
         assert!(!app.state.dock_surface_override);
+
+        app.state.open_dock_surface(crate::app::DockSurface::Files);
+        app.toggle_usage_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(!app.state.dock_surface_override);
     }
 
     #[test]
