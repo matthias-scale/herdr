@@ -261,6 +261,22 @@ Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WOR
 
 On Windows, custom command strings use `cmd.exe /d /c`, so environment variables use `%HERDR_BIN_PATH%` syntax. To run PowerShell syntax, invoke it explicitly, for example `powershell.exe -NoProfile -Command "..."`.
 
+## User-defined actions
+
+User-defined actions appear after `+ Action` in the top bar and under **User actions** in keybinding help. Add them through the top-bar modal or as `[[actions]]` tables:
+
+```toml
+[[actions]]
+name = "test"
+command = "just test"
+key = "ctrl-b t" # optional; uses the normal keybinding syntax
+run_on_worktree_create = false
+open_in_bottom_pane = true
+repo = "owner/project" # optional; omit to show the action in every repository
+```
+
+An action runs in the focused terminal only when `open_in_bottom_pane = false` and that pane's foreground process is a shell. Otherwise Herdr opens the shared bottom command pane. Worktree-create actions run sequentially before the new agent starts; a failed command leaves a warning without blocking the agent.
+
 ## Theme
 
 Choose a built-in theme:
