@@ -1278,6 +1278,7 @@ mod tests {
                 assignees: Vec::new(),
                 last_activity_at: None,
                 closed: false,
+                pane_bound: false,
                 messages: Vec::new(),
                 notes: Vec::new(),
                 drafts: Vec::new(),
