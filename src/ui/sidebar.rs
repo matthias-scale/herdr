@@ -9891,6 +9891,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = sidebar_work_item_fixture();
+        app.home_agent_choices = vec![crate::app::home::HomeAgentChoice {
+            agent: crate::detect::Agent::Claude,
+            model: "default".into(),
+            effort: Some("auto".into()),
+            context_window: None,
+            access: Some(crate::app::home::HomeAccess::ClaudeBypass),
+        }];
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         let mut unassigned_ticket = work_ticket("SCA-9999", "unassigned", "jacob", &[]);
         unassigned_ticket.url = Some("https://linear.app/scalable/issue/SCA-9999".into());
@@ -9914,6 +9921,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             plan.work_context_patch.ticket_ids,
             Some(vec!["SCA-9999".into()])
+        );
+        assert_eq!(
+            plan.argv,
+            [
+                "claude",
+                "--dangerously-skip-permissions",
+                plan.prompt.as_str()
+            ]
         );
 
         app.sidebar_group_mode = SidebarGroupMode::Missive;
