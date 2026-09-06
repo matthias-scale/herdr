@@ -1079,6 +1079,22 @@ impl crate::app::state::AppState {
             .map(|terminal| terminal.effective_work_context())
     }
 
+    /// Where `Browse…` opens: the configured `ui.add_project_start_dir` when
+    /// it names a real directory, otherwise the directory Home already shows.
+    ///
+    /// The key is a user-typed path, so `~` is expanded and a stale or
+    /// non-directory value falls back rather than opening on nothing.
+    pub(crate) fn home_browse_start_directory(&self) -> PathBuf {
+        let configured = self.add_project_start_dir.trim();
+        if !configured.is_empty() {
+            let expanded = crate::worktree::expand_tilde_path(configured);
+            if expanded.is_dir() {
+                return expanded;
+            }
+        }
+        self.home_directory()
+    }
+
     fn home_directory(&self) -> PathBuf {
         self.home
             .as_ref()
@@ -1586,7 +1602,7 @@ impl crate::app::state::AppState {
                     Some(HomeDirectoryOption::Browse) => {
                         // Browsing replaces the filter line rather than closing
                         // the picker, so the card stays open on the path input.
-                        let directory = self.home_directory();
+                        let directory = self.home_browse_start_directory();
                         if let Some(home) = self.home.as_mut() {
                             home.browse = Some(HomeBrowse::starting_at(&directory));
                         }
@@ -2271,6 +2287,58 @@ mod tests {
             options.last().map(HomeDirectoryOption::label),
             Some(BROWSE_OPTION_LABEL.to_string())
         );
+    }
+
+    #[test]
+    fn browse_starts_in_the_configured_add_project_start_dir() {
+        let directory = browse_fixture("home");
+        let configured = browse_fixture("configured");
+        let mut app = app_with_home(&directory);
+        app.add_project_start_dir = configured.display().to_string();
+
+        assert_eq!(app.home_browse_start_directory(), configured);
+
+        app.home_open_picker(HomePicker::Directory);
+        let browse_index = app
+            .home_directory_picker_options()
+            .iter()
+            .position(|option| *option == HomeDirectoryOption::Browse)
+            .expect("browse option");
+        app.home.as_mut().expect("home").directory_filter.selected = browse_index;
+        app.home_accept_picker();
+
+        let browse = app.home_browse().expect("path input");
+        assert!(
+            browse.input.starts_with(&configured.display().to_string()),
+            "the input starts on the configured directory: {:?}",
+            browse.input
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&configured);
+    }
+
+    #[test]
+    fn browse_falls_back_when_the_configured_start_dir_is_unset_or_missing() {
+        let directory = browse_fixture("fallback");
+        let mut app = app_with_home(&directory);
+
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        app.add_project_start_dir = "   ".to_string();
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        app.add_project_start_dir = directory
+            .join("does-not-exist")
+            .display()
+            .to_string();
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        // A file is not a directory the picker can open.
+        app.add_project_start_dir = directory.join("alpha.txt").display().to_string();
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
