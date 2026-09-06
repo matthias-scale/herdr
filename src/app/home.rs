@@ -991,6 +991,25 @@ impl crate::app::state::AppState {
         }
     }
 
+    /// Open the composer for a dim Linear ticket or Missive conversation.
+    /// The operator can edit the prefilled identifier and title before spawn.
+    pub(crate) fn open_home_composer_for_work_group(&mut self, key: &str) -> bool {
+        let Some(activation) = crate::ui::sidebar_work_group_activation(self, key) else {
+            return false;
+        };
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
+        home.prompt = activation.prompt;
+        home.focus = Some(HomeFocus::Prompt);
+        home.picker = None;
+        if let Some(directory) = activation.directory {
+            home.directory = directory;
+        }
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
+        true
+    }
+
     /// Build the same launch plan as the home composer without opening it.
     /// Unassigned sidebar rows use this for their one-key spawn action.
     pub(crate) fn sidebar_unassigned_dispatch_plan(
