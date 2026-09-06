@@ -353,7 +353,10 @@ pub(crate) struct Snapshot {
     pub items: Vec<WorkItem>,
     #[serde(default)]
     pub conversations: Vec<MissiveConversation>,
-    #[serde(default)]
+    /// Session-only Missive identity directory. The app reuses it across
+    /// refreshes, but the disk cache must not revive a previous token owner's
+    /// identity in a later session.
+    #[serde(skip)]
     pub missive_users: Vec<MissiveUser>,
     pub unavailable: Option<String>,
     pub observed_at: SystemTime,
@@ -763,6 +766,7 @@ fn fetch_missive_snapshot(
     config: &MissiveConfig,
     panes: &[AgentInfo],
     selected_conversation: Option<&str>,
+    session_users: Option<&[MissiveUser]>,
     program: &Path,
     batch_deadline: Instant,
     target_timeout: Duration,
@@ -777,18 +781,23 @@ fn fetch_missive_snapshot(
         return Ok((Vec::new(), Vec::new()));
     }
     let team = config.team.clone().unwrap_or_default();
-    let users_value = run_missive_get(
-        &MissiveRequest::Users {
-            organization: config.organization.clone(),
-        },
-        config,
-        program,
-        target_deadline(batch_deadline, target_timeout),
-    )?;
-    let users = value_array(&users_value, "users")
-        .iter()
-        .filter_map(missive_user)
-        .collect::<Vec<_>>();
+    let users = match session_users {
+        Some(users) => users.to_vec(),
+        None => {
+            let users_value = run_missive_get(
+                &MissiveRequest::Users {
+                    organization: config.organization.clone(),
+                },
+                config,
+                program,
+                target_deadline(batch_deadline, target_timeout),
+            )?;
+            value_array(&users_value, "users")
+                .iter()
+                .filter_map(missive_user)
+                .collect::<Vec<_>>()
+        }
+    };
     let current_user_id = users
         .iter()
         .find(|user| user.is_me)
@@ -857,6 +866,7 @@ pub(crate) fn refresh_work_index(
         &MissiveConfig::default(),
         panes,
         None,
+        None,
         now,
         batch_deadline,
         target_timeout,
@@ -871,6 +881,7 @@ pub(crate) fn refresh_work_index_with_missive(
     missive: &MissiveConfig,
     panes: &[AgentInfo],
     selected_missive: Option<&str>,
+    session_missive_users: Option<&[MissiveUser]>,
     now: Instant,
     batch_deadline: Instant,
     target_timeout: Duration,
@@ -954,6 +965,7 @@ pub(crate) fn refresh_work_index_with_missive(
         missive,
         panes,
         selected_missive,
+        session_missive_users,
         curl_program,
         batch_deadline,
         target_timeout,
@@ -2431,6 +2443,11 @@ impl crate::app::App {
         let session = self.work_index_session.clone();
         let curl_program = self.work_index_curl_program();
         let missive = self.missive_config.clone();
+        let session_missive_users = self
+            .work_index_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.missive_users.clone())
+            .filter(|users| !users.is_empty());
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
@@ -2439,6 +2456,7 @@ impl crate::app::App {
                     &missive,
                     &panes,
                     selected_missive.as_deref(),
+                    session_missive_users.as_deref(),
                     Instant::now(),
                     deadline,
                     WORK_INDEX_TARGET_TIMEOUT,
@@ -2899,6 +2917,7 @@ esac
             &config,
             &[],
             Some("selected"),
+            None,
             &curl,
             Instant::now() + Duration::from_secs(5),
             Duration::from_secs(2),
@@ -2936,7 +2955,63 @@ esac
             observed_at: SystemTime::UNIX_EPOCH,
         };
         assert_eq!(missive_assignees(Some(&snapshot))[0].name, "Ada");
+        assert_eq!(
+            missive_assignees(Some(&snapshot))
+                .iter()
+                .find(|user| user.is_me)
+                .map(|user| user.name.as_str()),
+            Some("Ada")
+        );
         assert!(missive_assignees(None).is_empty());
+        let persisted = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert!(persisted.get("missive_users").is_none());
+    }
+
+    #[test]
+    fn missive_users_are_reused_after_the_session_identity_is_resolved() {
+        let dir = fixture_dir("missive-session-users");
+        let curl = dir.join("curl");
+        write_executable(
+            &curl,
+            r#"#!/bin/sh
+for argument do url="$argument"; done
+case "$url" in
+  *"/users"*) exit 70 ;;
+  *"/conversations?team_all=team") printf '%s' '{"conversations":[]}' ;;
+  *) exit 71 ;;
+esac
+"#,
+        );
+        let token_env = format!(
+            "HERDR_TEST_MISSIVE_TOKEN_{}",
+            crate::config::test_unique_suffix().replace('-', "_")
+        );
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(&token_env, "test-token");
+        let config = MissiveConfig {
+            token_env,
+            team: Some("team".into()),
+            organization: Some("org".into()),
+        };
+        let users = vec![MissiveUser {
+            id: "me".into(),
+            name: "Ada".into(),
+            email: None,
+            is_me: true,
+        }];
+
+        let (_, reused) = fetch_missive_snapshot(
+            &config,
+            &[],
+            None,
+            Some(&users),
+            &curl,
+            Instant::now() + Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("cached session identity should avoid /users");
+
+        assert_eq!(reused, users);
     }
 
     #[test]

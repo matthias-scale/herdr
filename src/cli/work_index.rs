@@ -51,6 +51,7 @@ fn list_work_index(args: &[String]) -> io::Result<i32> {
         &config.missive,
         &[],
         None,
+        None,
         Instant::now(),
         Instant::now() + crate::work_index::WORK_INDEX_BATCH_TIMEOUT,
         crate::work_index::WORK_INDEX_TARGET_TIMEOUT,
