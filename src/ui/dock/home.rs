@@ -1437,6 +1437,8 @@ mod tests {
                     }],
                     source: crate::work_index::WorkItemSource::default(),
                 }],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: None,
                 observed_at: SystemTime::now(),
             });
@@ -1560,6 +1562,8 @@ mod tests {
         }
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items,
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::now(),
         });
@@ -1617,6 +1621,8 @@ mod tests {
                     }
                 })
                 .collect(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::now(),
         });
@@ -1856,6 +1862,8 @@ mod tests {
 
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: Some("Linear observation timed out".into()),
             observed_at: SystemTime::now(),
         });
@@ -1895,6 +1903,8 @@ mod tests {
         let mut app = AppState::test_new();
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: Some("github timed out".into()),
             observed_at: SystemTime::now(),
         });

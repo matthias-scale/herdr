@@ -185,6 +185,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.work), "open work projection view"),
         help_entry(keybind_label(&kb.usage), "open usage view"),
         help_entry(keybind_label(&kb.tickets), "open Linear tickets"),
+        help_entry(keybind_label(&kb.missive), "open Missive conversations"),
         help_entry(keybind_label(&kb.inbox), "open blocked inbox"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),

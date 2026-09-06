@@ -1,0 +1,10 @@
+{
+  "drafts": [
+    {
+      "id": "draft-1",
+      "from_field": {"name": "Ada Example", "address": "ada@example.test"},
+      "created_at": 1788688750,
+      "body": "<p>Thanks for flagging this. Here is the correction.</p>"
+    }
+  ]
+}

@@ -1012,6 +1012,10 @@ impl App {
         self.toggle_work_projection(crate::app::state::WorkProjection::Tickets);
     }
 
+    pub(crate) fn toggle_missive_view(&mut self) {
+        self.toggle_work_projection(crate::app::state::WorkProjection::Missive);
+    }
+
     fn toggle_work_projection(&mut self, projection: crate::app::state::WorkProjection) {
         self.state.clear_usage_view();
         if self
@@ -1206,6 +1210,30 @@ impl App {
             }
             return true;
         }
+        if let Some(choice) = state.missive_start_menu {
+            match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.missive_start_menu = Some(match choice {
+                            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                                crate::app::state::PrCheckoutChoice::NewWorktree
+                            }
+                            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                                crate::app::state::PrCheckoutChoice::CurrentCheckout
+                            }
+                        });
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.open_selected_missive_thread(),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.missive_start_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         if let Some(choice) = state.ticket_transition_menu {
             match key.code {
                 KeyCode::Up if key.modifiers.is_empty() => {
@@ -1299,6 +1327,7 @@ impl App {
                     if let Some(state) = self.state.work_view.as_mut() {
                         state.search.pop();
                         state.selected = None;
+                        state.selected_missive = None;
                     }
                 }
                 KeyCode::Char(character)
@@ -1308,6 +1337,7 @@ impl App {
                     if let Some(state) = self.state.work_view.as_mut() {
                         state.search.push(character);
                         state.selected = None;
+                        state.selected_missive = None;
                     }
                 }
                 _ => {}
@@ -1346,10 +1376,11 @@ impl App {
                 if let Some(state) = self.state.work_view.as_mut() {
                     if state.projection == crate::app::state::WorkProjection::Tickets {
                         state.ticket_sort = state.ticket_sort.next();
-                    } else {
+                    } else if state.projection == crate::app::state::WorkProjection::PullRequests {
                         state.sort = state.sort.next();
                     }
                     state.selected = None;
+                    state.selected_missive = None;
                 }
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
@@ -1360,6 +1391,7 @@ impl App {
                         state.open_only = !state.open_only;
                     }
                     state.selected = None;
+                    state.selected_missive = None;
                 }
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
@@ -1371,6 +1403,8 @@ impl App {
                 if let Some(state) = self.state.work_view.as_mut() {
                     if state.projection == crate::app::state::WorkProjection::Tickets {
                         state.ticket_start_menu = Some(Default::default());
+                    } else if state.projection == crate::app::state::WorkProjection::Missive {
+                        state.missive_start_menu = Some(Default::default());
                     } else {
                         state.checkout_menu = Some(Default::default());
                     }
@@ -1399,6 +1433,7 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('o') if key.modifiers.is_empty() => self.copy_selected_missive_url(),
             KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 self.next_work_index_refresh = std::time::Instant::now();
@@ -1449,6 +1484,15 @@ impl App {
     }
 
     fn move_pr_view_selection(&mut self, delta: i64) {
+        if self
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Missive)
+        {
+            self.move_missive_view_selection(delta);
+            return;
+        }
         let keys = if self
             .state
             .work_view
@@ -1474,6 +1518,137 @@ impl App {
             view.selected = keys.get(next).cloned();
             view.hint = None;
         }
+    }
+
+    fn visible_missive_conversations(&self) -> Vec<crate::work_index::MissiveConversation> {
+        let Some(view) = self.state.work_view.as_ref() else {
+            return Vec::new();
+        };
+        let observed_at = view
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observed_at)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        view.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                crate::ui::work_list_detail::sorted_filtered_conversations(
+                    &snapshot.conversations,
+                    &view.search,
+                    !view.open_only,
+                    observed_at,
+                )
+                .into_iter()
+                .map(|item| item.summary.clone())
+                .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn move_missive_view_selection(&mut self, delta: i64) {
+        let conversations = self.visible_missive_conversations();
+        if conversations.is_empty() {
+            return;
+        }
+        let current = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected_missive.as_deref())
+            .and_then(|selected| {
+                conversations
+                    .iter()
+                    .position(|conversation| conversation.id == selected)
+            })
+            .unwrap_or(0);
+        let next = (current as i64 + delta).clamp(0, conversations.len().saturating_sub(1) as i64)
+            as usize;
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.selected_missive = conversations.get(next).map(|item| item.id.clone());
+            view.hint = None;
+        }
+        self.next_work_index_refresh = std::time::Instant::now();
+    }
+
+    fn selected_missive_conversation(&self) -> Option<crate::work_index::MissiveConversation> {
+        let conversations = self.visible_missive_conversations();
+        let selected = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected_missive.as_deref());
+        selected
+            .and_then(|id| conversations.iter().find(|item| item.id == id))
+            .or_else(|| conversations.first())
+            .cloned()
+    }
+
+    fn copy_selected_missive_url(&mut self) {
+        let Some(conversation) = self.selected_missive_conversation() else {
+            return;
+        };
+        self.state.request_clipboard_write = Some(conversation.app_url.as_bytes().to_vec());
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.hint = Some(conversation.app_url);
+        }
+    }
+
+    fn open_selected_missive_thread(&mut self) {
+        let Some(conversation) = self.selected_missive_conversation() else {
+            return;
+        };
+        let choice = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|state| state.missive_start_menu)
+            .unwrap_or_default();
+        let directory = self
+            .state
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.values())
+                    .any(|pane| {
+                        self.state
+                            .terminals
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(|terminal| {
+                                terminal
+                                    .effective_work_context()
+                                    .missive_urls
+                                    .iter()
+                                    .any(|url| url == &conversation.app_url)
+                            })
+                    })
+            })
+            .map(|workspace| workspace.identity_cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            });
+        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        home.directory = directory.clone();
+        home.ref_directory = directory;
+        home.workspace = match choice {
+            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                crate::app::home::HomeWorkspace::CurrentCheckout
+            }
+            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                crate::app::home::HomeWorkspace::NewWorktree
+            }
+        };
+        home.prompt = format!("{}\n\n{}", conversation.subject, conversation.web_url);
+        home.missive = Some(crate::app::home::HomeMissiveContext {
+            app_url: conversation.app_url,
+            web_url: conversation.web_url,
+            subject: conversation.subject,
+        });
+        self.state.work_view = None;
+        self.state.inbox = None;
+        self.state.home = Some(home);
     }
 
     pub(crate) fn visible_ticket_view_keys(&self) -> Vec<crate::app::state::WorkItemKey> {
@@ -2460,6 +2635,15 @@ impl App {
                 && mouse.row < usage.bottom()
             {
                 self.toggle_usage_view();
+                return;
+            }
+            let missive = self.state.view.sidebar_footer_missive_hit_area;
+            if mouse.column >= missive.x
+                && mouse.column < missive.right()
+                && mouse.row >= missive.y
+                && mouse.row < missive.bottom()
+            {
+                self.toggle_missive_view();
                 return;
             }
 
@@ -3591,6 +3775,8 @@ mod tests {
             true,
             Some(crate::work_index::Snapshot {
                 items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: None,
                 observed_at: std::time::SystemTime::now(),
             }),
@@ -3660,6 +3846,8 @@ mod tests {
             true,
             Some(crate::work_index::Snapshot {
                 items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: None,
                 observed_at: std::time::SystemTime::now(),
             }),
@@ -4724,5 +4912,112 @@ navigate_workspace_down = "ctrl+j"
 
         state.mode = Mode::ConfirmClose;
         assert!(!modal_paste_target_active(&state));
+    }
+
+    fn app_with_missive_view() -> App {
+        let mut app = test_app();
+        let conversation = crate::work_index::MissiveConversation {
+            id: "sample".into(),
+            subject: "Billing question".into(),
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            assignees: Vec::new(),
+            last_activity_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            closed: false,
+            messages: Vec::new(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        };
+        let mut view = crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: Vec::new(),
+                conversations: vec![conversation],
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+            }),
+        );
+        view.projection = crate::app::state::WorkProjection::Missive;
+        app.state.work_view = Some(view);
+        app
+    }
+
+    #[test]
+    fn missive_view_copies_app_url_without_opening_a_browser() {
+        let mut app = app_with_missive_view();
+        assert!(app.handle_work_view_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty(),)));
+        assert_eq!(
+            app.state.request_clipboard_write,
+            Some(b"missive://mail.missiveapp.com/#inbox/conversations/sample".to_vec())
+        );
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.hint.as_deref()),
+            Some("missive://mail.missiveapp.com/#inbox/conversations/sample")
+        );
+    }
+
+    #[test]
+    fn missive_selection_schedules_selected_detail_hydration() {
+        let mut app = app_with_missive_view();
+        let mut second = app
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.conversations.first())
+            .cloned()
+            .expect("first conversation");
+        second.id = "second".into();
+        second.subject = "Second conversation".into();
+        app.state
+            .work_view
+            .as_mut()
+            .and_then(|view| view.snapshot.as_mut())
+            .expect("work snapshot")
+            .conversations
+            .push(second);
+        app.next_work_index_refresh =
+            std::time::Instant::now() + std::time::Duration::from_secs(60);
+
+        app.move_missive_view_selection(1);
+
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.selected_missive.as_deref()),
+            Some("second")
+        );
+        assert!(app.next_work_index_refresh <= std::time::Instant::now());
+    }
+
+    #[test]
+    fn missive_start_thread_opens_home_with_conversation_context() {
+        let mut app = app_with_missive_view();
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert!(app.state.work_view.as_ref().is_some_and(|view| {
+            view.missive_start_menu == Some(crate::app::state::PrCheckoutChoice::CurrentCheckout)
+        }));
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let home = app.state.home.as_ref().expect("home composer");
+        assert_eq!(
+            home.missive
+                .as_ref()
+                .map(|context| context.app_url.as_str()),
+            Some("missive://mail.missiveapp.com/#inbox/conversations/sample")
+        );
+        assert_eq!(
+            home.missive
+                .as_ref()
+                .map(|context| context.web_url.as_str()),
+            Some("https://mail.missiveapp.com/#inbox/conversations/sample")
+        );
+        assert!(home.prompt.contains("Billing question"));
+        assert!(home.prompt.contains("https://mail.missiveapp.com"));
     }
 }

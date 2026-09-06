@@ -12,8 +12,8 @@ use crate::{
         WorkViewState,
     },
     ui::work_list_detail::{
-        comment_header, section_separator, sorted_filtered_prs, sorted_filtered_tickets,
-        TicketItem, WorkItem as _, WorkRow,
+        comment_header, section_separator, sorted_filtered_conversations, sorted_filtered_prs,
+        sorted_filtered_tickets, ConversationItem, TicketItem, WorkItem as _, WorkRow,
     },
     work_projection::{project_review_queue, WorkReviewQueueRow},
 };
@@ -30,10 +30,244 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     match state.projection {
         WorkProjection::PullRequests => render_pull_requests(app, state, sections[0], frame),
         WorkProjection::Tickets => render_tickets(app, state, sections[0], frame),
+        WorkProjection::Missive => render_missive(app, state, sections[0], frame),
         WorkProjection::ReviewQueue => render_review_queue(palette, state, sections[0], frame),
         projection => render_placeholder(palette, projection, sections[0], frame),
     }
     render_footer(palette, state, sections[1], frame);
+}
+
+fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    let palette = &app.palette;
+    let observed_at = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.observed_at)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let items = state.snapshot.as_ref().map(|snapshot| {
+        sorted_filtered_conversations(
+            &snapshot.conversations,
+            &state.search,
+            !state.open_only,
+            observed_at,
+        )
+    });
+    let teammate_count = crate::work_index::missive_assignees(state.snapshot.as_ref()).len();
+    let columns = if area.width >= 72 {
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    };
+    let refresh = if state.refreshing {
+        " · refreshing…"
+    } else {
+        ""
+    };
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Missive{refresh} "))
+        .border_style(Style::default().fg(palette.accent));
+    let left_inner = left.inner(columns[0]);
+    frame.render_widget(left, columns[0]);
+    let cursor = if state.search_focused { "▏" } else { "" };
+    let mut lines = vec![Line::styled(
+        format!(
+            " 🔍 {}{cursor}   ⚲ {}   {teammate_count} teammates",
+            if state.search.is_empty() {
+                "search conversations"
+            } else {
+                &state.search
+            },
+            if state.open_only { "open" } else { "all" }
+        ),
+        Style::default().fg(palette.subtext0),
+    )];
+    let message = if !state.enabled {
+        Some("work index disabled".to_string())
+    } else if state.snapshot.is_none() {
+        Some("work index not yet collected".to_string())
+    } else {
+        state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.unavailable.clone())
+    };
+    if let Some(message) = message {
+        lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
+        frame.render_widget(Paragraph::new(lines), left_inner);
+        return;
+    }
+    let items = items.unwrap_or_default();
+    let selected = state
+        .selected_missive
+        .as_deref()
+        .and_then(|id| items.iter().position(|item| item.key() == id))
+        .unwrap_or(0);
+    let mut current_group = "";
+    let mut selected_line = 0usize;
+    for (index, item) in items.iter().enumerate() {
+        let row = item.row();
+        if row.group != current_group {
+            current_group = row.group;
+            lines.push(Line::styled(
+                format!(" {current_group}"),
+                Style::default()
+                    .fg(palette.subtext0)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if index == selected {
+            selected_line = lines.len();
+        }
+        push_work_row(
+            &mut lines,
+            &row,
+            index == selected,
+            palette,
+            left_inner.width,
+            false,
+        );
+    }
+    if items.is_empty() {
+        lines.push(Line::styled(
+            " no matching conversations",
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    let list_height = usize::from(left_inner.height);
+    let list_scroll = selected_line
+        .saturating_add(1)
+        .saturating_sub(list_height)
+        .min(usize::from(u16::MAX)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((list_scroll, 0)), left_inner);
+
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Conversation ")
+        .border_style(Style::default().fg(palette.accent));
+    let detail_inner = detail_block.inner(columns[1]);
+    frame.render_widget(detail_block, columns[1]);
+    if let Some(item) = items.get(selected) {
+        render_missive_detail(app, state, item, detail_inner, frame);
+    }
+}
+
+fn render_missive_detail(
+    app: &AppState,
+    state: &WorkViewState,
+    item: &ConversationItem<'_>,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let detail = item.detail();
+    let mut lines = vec![
+        Line::styled(
+            format!(" {}   [Start thread ▾] [Open in Missive]", detail.heading),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(" {}", detail.title),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(" {}", detail.byline),
+            Style::default().fg(app.palette.subtext0),
+        ),
+    ];
+    let visible_sections = detail
+        .sections
+        .iter()
+        .filter(|section| !section.entries.is_empty())
+        .collect::<Vec<_>>();
+    for section in &visible_sections {
+        lines.push(Line::styled(
+            format!(" {}  {}", section.label, section.entries.len()),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for entry in &section.entries {
+            lines.push(Line::styled(
+                format!(
+                    "  {} · {}",
+                    entry.author.as_deref().unwrap_or("unknown"),
+                    relative_time(entry.created_at, item.observed_at)
+                ),
+                Style::default().fg(app.palette.subtext0),
+            ));
+            lines.extend(crate::ui::markdown::body_lines(
+                &app.palette,
+                Some(&entry.body),
+                usize::from(area.width.saturating_sub(4)),
+                "    ",
+            ));
+        }
+    }
+    if visible_sections.is_empty() {
+        lines.push(Line::styled(
+            " no conversation entries indexed",
+            Style::default().fg(app.palette.subtext0),
+        ));
+    }
+    if let Some(hint) = state.hint.as_deref() {
+        lines.push(Line::styled(
+            format!(" {hint}"),
+            Style::default().fg(app.palette.accent),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+
+    if let Some(choice) = state.missive_start_menu {
+        render_missive_start_menu(app, frame, area, choice);
+    }
+}
+
+fn relative_time(then: Option<std::time::SystemTime>, now: std::time::SystemTime) -> String {
+    let seconds = then
+        .and_then(|then| now.duration_since(then).ok())
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    if seconds >= 86_400 {
+        format!("{}d ago", seconds / 86_400)
+    } else if seconds >= 3_600 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}m ago", seconds / 60)
+    }
+}
+
+fn render_missive_start_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    choice: crate::app::state::PrCheckoutChoice,
+) {
+    let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
+    let Some(layout) = ticket_menu_layout(area, 12, 2, selected, 24) else {
+        return;
+    };
+    let labels = ["Current checkout", "New worktree"];
+    frame.render_widget(
+        Paragraph::new(
+            labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    Line::styled(
+                        format!("{} {label}", if index == selected { "▸" } else { " " }),
+                        Style::default()
+                            .fg(app.palette.text)
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
 }
 
 fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
@@ -922,9 +1156,12 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
         WorkProjection::Tickets => {
             " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more"
         }
-        WorkProjection::Agents => " ←/→ view PRs tickets [agents]   not yet available",
+        WorkProjection::Missive => {
+            " / search   ↑/↓ move   f open/all   c start thread   o Open in Missive   r refresh"
+        }
+        WorkProjection::Agents => " ←/→ view PRs tickets Missive [agents]   not yet available",
         WorkProjection::ReviewQueue => {
-            " ←/→ view PRs tickets agents [review queue]   ↑/↓ move   f filter repo"
+            " ←/→ view PRs tickets Missive agents [review queue]   ↑/↓ move   f filter repo"
         }
     };
     let text = state
@@ -1036,6 +1273,8 @@ mod tests {
     fn snapshot(items: Vec<WorkItem>) -> Snapshot {
         Snapshot {
             items,
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::UNIX_EPOCH,
         }
@@ -1167,6 +1406,8 @@ mod tests {
             true,
             Some(Snapshot {
                 items: Vec::new(),
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: Some("GitHub observation failed".to_string()),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
@@ -1192,6 +1433,8 @@ mod tests {
             true,
             Some(Snapshot {
                 items: Vec::new(),
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: Some("unavailable".to_string()),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
@@ -1252,7 +1495,7 @@ mod tests {
         assert!(text.contains("In Review"));
         assert!(text.contains("✓"));
         assert!(text.contains("drift 3 PRs awaiting review whose ticket is not In Review"));
-        assert!(text.contains("←/→ view PRs tickets agents [review queue]"));
+        assert!(text.contains("←/→ view PRs tickets Missive agents [review queue]"));
         assert!(text.contains("↑/↓ move"));
         assert!(text.contains("f filter repo"));
     }
@@ -1326,5 +1569,100 @@ mod tests {
             assert!(layout.rect.bottom() <= area.bottom());
         }
         assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 1, 2, 0, 20).is_none());
+    }
+
+    #[test]
+    fn missive_fixture_renders_list_detail_actions_and_footer() {
+        let conversation = crate::work_index::MissiveConversation {
+            id: "sample".into(),
+            subject: "Billing question".into(),
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            assignees: vec![crate::work_index::MissiveUser {
+                id: "ada".into(),
+                name: "Ada".into(),
+                email: None,
+                is_me: true,
+            }],
+            last_activity_at: Some(SystemTime::UNIX_EPOCH),
+            closed: false,
+            messages: vec![crate::work_index::MissiveEntry {
+                id: "message".into(),
+                author: Some("Customer".into()),
+                preview: "invoice preview".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
+            }],
+            notes: vec![crate::work_index::MissiveEntry {
+                id: "note".into(),
+                author: Some("Ada".into()),
+                preview: "internal note".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
+            }],
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        };
+        let mut state = WorkViewState::new(
+            true,
+            Some(Snapshot {
+                items: Vec::new(),
+                conversations: vec![conversation],
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: SystemTime::UNIX_EPOCH,
+            }),
+        );
+        state.projection = WorkProjection::Missive;
+        let text = rendered_app_text_at(
+            &AppState {
+                work_view: Some(state),
+                ..AppState::test_new()
+            },
+            120,
+            40,
+        );
+        assert!(text.contains("Missive"), "{text}");
+        assert!(text.contains("Billing question"), "{text}");
+        assert!(text.contains("Customer · 0m ago"), "{text}");
+        assert!(text.contains("invoice preview"), "{text}");
+        assert!(text.contains("Internal notes  1"), "{text}");
+        assert!(
+            text.contains("[Start thread ▾] [Open in Missive]"),
+            "{text}"
+        );
+        assert!(text.contains("o Open in Missive"), "{text}");
+    }
+
+    #[test]
+    fn missive_start_dropdown_opens_downward_and_clamps() {
+        let area = Rect::new(20, 3, 50, 4);
+        let layout = ticket_menu_layout(area, 12, 2, 1, 24).expect("menu fits below anchor");
+        assert_eq!(layout.rect.y, area.y + 1);
+        assert!(layout.rect.bottom() <= area.bottom());
+        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 12, 2, 0, 24).is_none());
+    }
+
+    #[test]
+    fn missive_view_distinguishes_collecting_failure_and_empty_states() {
+        let mut state = WorkViewState::new(true, None);
+        state.projection = WorkProjection::Missive;
+        let collecting = rendered_text(&state);
+        assert!(
+            collecting.contains("work index not yet collected"),
+            "{collecting}"
+        );
+
+        state.snapshot = Some(Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some("Missive observation timed out".into()),
+            observed_at: SystemTime::UNIX_EPOCH,
+        });
+        let failed = rendered_text(&state);
+        assert!(failed.contains("Missive observation timed out"), "{failed}");
+
+        state.snapshot.as_mut().expect("snapshot").unavailable = None;
+        let empty = rendered_text(&state);
+        assert!(empty.contains("no matching conversations"), "{empty}");
     }
 }

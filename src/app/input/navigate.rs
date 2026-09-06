@@ -578,6 +578,10 @@ impl App {
                 self.toggle_ticket_view();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenMissiveView => {
+                self.toggle_missive_view();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::OpenInbox => {
                 self.state.toggle_inbox();
                 leave_navigate_mode(&mut self.state);
@@ -1914,6 +1918,7 @@ pub(crate) enum NavigateAction {
     OpenWorkView,
     OpenUsageView,
     OpenTicketView,
+    OpenMissiveView,
     Detach,
     OpenNavigator,
 }
@@ -2125,6 +2130,7 @@ fn non_indexed_action_for_key(
         (&kb.work, NavigateAction::OpenWorkView),
         (&kb.usage, NavigateAction::OpenUsageView),
         (&kb.tickets, NavigateAction::OpenTicketView),
+        (&kb.missive, NavigateAction::OpenMissiveView),
         (&kb.inbox, NavigateAction::OpenInbox),
         (&kb.home, NavigateAction::OpenHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -2548,6 +2554,12 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::OpenTicketView => {
             let mut view = crate::app::state::WorkViewState::new(false, None);
             view.projection = crate::app::state::WorkProjection::Tickets;
+            state.work_view = Some(view);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenMissiveView => {
+            let mut view = crate::app::state::WorkViewState::new(false, None);
+            view.projection = crate::app::state::WorkProjection::Missive;
             state.work_view = Some(view);
             leave_navigate_mode(state);
         }
@@ -3594,6 +3606,30 @@ mod tests {
             .work_view
             .as_ref()
             .is_some_and(|view| { view.projection == crate::app::state::WorkProjection::Tickets }));
+    }
+
+    #[test]
+    fn default_missive_keybinding_opens_missive_projection() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::OpenMissiveView)
+        );
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::OpenMissiveView,
+            ActionContext::Prefix,
+        );
+        assert!(state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| { view.projection == crate::app::state::WorkProjection::Missive }));
     }
 
     #[test]

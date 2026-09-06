@@ -581,6 +581,20 @@ branch_prefix = "issue/"
 
 The worktree root shown next to them is `worktrees.directory`.
 
+## Missive
+
+Missive reads use the public API and never write conversation state. `team` and
+`organization` are resource IDs from Missive's Settings > API > Resource IDs
+page. `token_env` names the environment variable Herdr reads when each request
+runs. Do not put the token value in this file.
+
+```toml
+[missive]
+token_env = "MISSIVE_API_TOKEN"
+team = "team-uuid"
+organization = "organization-uuid"
+```
+
 ## Pull request landing
 
 The Land action requires successful checks, a clean merge state, and either an

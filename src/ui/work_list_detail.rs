@@ -8,8 +8,8 @@ use ratatui::{
 use crate::app::state::Palette;
 use crate::ui::text::{display_width, truncate_end};
 use crate::work_index::{
-    PrAudience, PrCheckState, WorkItem as IndexedWorkItem, WorkItemComment,
-    WorkItemDetail as IndexedWorkItemDetail, WorkTicket,
+    MissiveConversation, MissiveEntry, PrAudience, PrCheckState, WorkItem as IndexedWorkItem,
+    WorkItemComment, WorkItemDetail as IndexedWorkItemDetail, WorkTicket,
 };
 
 pub(crate) fn section_separator(
@@ -60,6 +60,14 @@ pub(crate) struct WorkDetail {
     pub(crate) checks: Vec<(String, String)>,
     pub(crate) comments: Vec<WorkItemComment>,
     pub(crate) linked_prs: Vec<LinkedPr>,
+    pub(crate) sections: Vec<WorkDetailSection>,
+    pub(crate) open_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkDetailSection {
+    pub(crate) label: &'static str,
+    pub(crate) entries: Vec<WorkItemComment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,6 +373,8 @@ impl WorkItem for PrItem<'_> {
                 .map(|check| (check.name.clone(), check.state.clone()))
                 .collect(),
             linked_prs: Vec::new(),
+            sections: Vec::new(),
+            open_url: detail.url.clone().or_else(|| self.summary.pr_url.clone()),
             comments: {
                 let mut comments = detail.comments.clone();
                 comments.sort_by_key(|comment| std::cmp::Reverse(comment.created_at));
@@ -403,6 +413,169 @@ pub(crate) struct TicketItem<'a> {
     pub(crate) linked_prs: Vec<&'a IndexedWorkItem>,
     pub(crate) observed_at: SystemTime,
     pub(crate) has_context_pr: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConversationItem<'a> {
+    pub(crate) summary: &'a MissiveConversation,
+    pub(crate) observed_at: SystemTime,
+}
+
+impl ConversationItem<'_> {
+    pub(crate) fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_ascii_lowercase();
+        query.is_empty()
+            || self.summary.subject.to_ascii_lowercase().contains(&query)
+            || self
+                .summary
+                .assignees
+                .iter()
+                .any(|user| user.name.to_ascii_lowercase().contains(&query))
+    }
+}
+
+fn missive_age(then: Option<SystemTime>, now: SystemTime) -> String {
+    then.map_or_else(|| "unknown".into(), |then| age(Some(then), now))
+}
+
+fn missive_comments(entries: &[MissiveEntry]) -> Vec<WorkItemComment> {
+    entries
+        .iter()
+        .map(|entry| WorkItemComment {
+            author: entry.author.clone(),
+            body: entry.preview.clone(),
+            created_at: entry.created_at,
+        })
+        .collect()
+}
+
+impl WorkItem for ConversationItem<'_> {
+    fn key(&self) -> String {
+        self.summary.id.clone()
+    }
+
+    fn row(&self) -> WorkRow {
+        let (group, glyph) = if self.summary.closed {
+            ("Closed", "●")
+        } else if self.summary.assignees.is_empty() {
+            ("Unassigned", "◌")
+        } else if self.summary.assignees.iter().any(|user| user.is_me) {
+            ("Assigned to me", "○")
+        } else {
+            ("Assigned", "○")
+        };
+        WorkRow {
+            group,
+            glyph,
+            title: self.summary.subject.clone(),
+            metadata: if self.summary.assignees.is_empty() {
+                "unassigned".into()
+            } else {
+                self.summary
+                    .assignees
+                    .iter()
+                    .map(|user| user.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            changes: String::new(),
+            age: missive_age(self.summary.last_activity_at, self.observed_at),
+        }
+    }
+
+    fn detail(&self) -> WorkDetail {
+        WorkDetail {
+            heading: "Missive ↗".into(),
+            title: self.summary.subject.clone(),
+            byline: format!(
+                "{} · {}",
+                if self.summary.closed {
+                    "closed"
+                } else {
+                    "open"
+                },
+                if self.summary.assignees.is_empty() {
+                    "unassigned".into()
+                } else {
+                    self.summary
+                        .assignees
+                        .iter()
+                        .map(|user| user.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
+            sections: vec![
+                WorkDetailSection {
+                    label: "Messages",
+                    entries: missive_comments(&self.summary.messages),
+                },
+                WorkDetailSection {
+                    label: "Internal notes",
+                    entries: missive_comments(&self.summary.notes),
+                },
+                WorkDetailSection {
+                    label: "Drafts",
+                    entries: missive_comments(&self.summary.drafts),
+                },
+                WorkDetailSection {
+                    label: "Posts",
+                    entries: missive_comments(&self.summary.posts),
+                },
+            ],
+            open_url: Some(self.summary.app_url.clone()),
+            ..WorkDetail::default()
+        }
+    }
+
+    fn actions(&self) -> Vec<WorkAction> {
+        vec![
+            WorkAction {
+                kind: WorkActionKind::StartThread,
+                label: "Start thread ▾",
+                enabled: true,
+            },
+            WorkAction {
+                kind: WorkActionKind::More,
+                label: "Open in Missive",
+                enabled: true,
+            },
+        ]
+    }
+}
+
+pub(crate) fn sorted_filtered_conversations<'a>(
+    conversations: &'a [MissiveConversation],
+    query: &str,
+    show_closed: bool,
+    observed_at: SystemTime,
+) -> Vec<ConversationItem<'a>> {
+    let mut rows = conversations
+        .iter()
+        .map(|summary| ConversationItem {
+            summary,
+            observed_at,
+        })
+        .filter(|item| (show_closed || !item.summary.closed) && item.matches(query))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        let rank = |item: &ConversationItem<'_>| {
+            if item.summary.closed {
+                2
+            } else if item.summary.assignees.is_empty() {
+                1
+            } else {
+                0
+            }
+        };
+        rank(left).cmp(&rank(right)).then_with(|| {
+            right
+                .summary
+                .last_activity_at
+                .cmp(&left.summary.last_activity_at)
+        })
+    });
+    rows
 }
 
 impl TicketItem<'_> {
@@ -904,6 +1077,104 @@ mod tests {
             panes: Vec::new(),
             source: WorkItemSource::default(),
         }
+    }
+
+    fn conversation(id: &str, closed: bool, assigned: bool) -> MissiveConversation {
+        MissiveConversation {
+            id: id.into(),
+            subject: format!("Conversation {id}"),
+            app_url: format!("https://mail.missiveapp.com/#inbox/conversations/{id}"),
+            web_url: format!("https://mail.missiveapp.com/#inbox/conversations/{id}"),
+            assignees: assigned
+                .then(|| crate::work_index::MissiveUser {
+                    id: "ada".into(),
+                    name: "Ada".into(),
+                    email: None,
+                    is_me: true,
+                })
+                .into_iter()
+                .collect(),
+            last_activity_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+            closed,
+            messages: vec![crate::work_index::MissiveEntry {
+                id: "message".into(),
+                author: Some("Customer".into()),
+                preview: "message preview".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
+            }],
+            notes: vec![crate::work_index::MissiveEntry {
+                id: "note".into(),
+                author: Some("Ada".into()),
+                preview: "internal note".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
+            }],
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn conversation_item_projects_list_detail_and_actions() {
+        let conversation = conversation("open", false, true);
+        let item = ConversationItem {
+            summary: &conversation,
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+        };
+        let row = item.row();
+        assert_eq!(row.group, "Assigned to me");
+        assert_eq!(row.glyph, "○");
+        assert_eq!(row.metadata, "Ada");
+        let detail = item.detail();
+        assert_eq!(detail.heading, "Missive ↗");
+        assert_eq!(detail.sections[0].label, "Messages");
+        assert_eq!(detail.sections[0].entries[0].body, "message preview");
+        assert_eq!(detail.sections[1].label, "Internal notes");
+        assert_eq!(
+            detail.open_url.as_deref(),
+            Some(conversation.app_url.as_str())
+        );
+        assert_eq!(
+            item.actions()
+                .iter()
+                .map(|action| action.label)
+                .collect::<Vec<_>>(),
+            ["Start thread ▾", "Open in Missive"]
+        );
+    }
+
+    #[test]
+    fn conversations_filter_closed_and_group_unassigned_after_assigned() {
+        let mut assigned_to_other = conversation("other", false, true);
+        assigned_to_other.assignees[0].is_me = false;
+        assigned_to_other.last_activity_at = None;
+        let conversations = vec![
+            conversation("unassigned", false, false),
+            conversation("closed", true, true),
+            conversation("assigned", false, true),
+            assigned_to_other,
+        ];
+        let open = sorted_filtered_conversations(
+            &conversations,
+            "conversation",
+            false,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+        );
+        assert_eq!(
+            open.iter().map(|item| item.row().group).collect::<Vec<_>>(),
+            ["Assigned to me", "Assigned", "Unassigned"]
+        );
+        assert_eq!(open[1].row().age, "unknown");
+        assert_eq!(
+            sorted_filtered_conversations(
+                &conversations,
+                "closed",
+                true,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            )[0]
+            .row()
+            .glyph,
+            "●"
+        );
     }
 
     #[test]

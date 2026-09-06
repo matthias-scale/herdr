@@ -746,6 +746,12 @@
           "description": "Open the Linear tickets view over the repo-wide work index."
         },
         {
+          "key": "keys.missive",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+m\"",
+          "description": "Open the read-only Missive conversations view."
+        },
+        {
           "key": "keys.inbox",
           "type": "keybinding",
           "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",
@@ -1435,6 +1441,30 @@
           "type": "list of strings",
           "default": "[]",
           "description": "GitHub repositories to index as owner/repo values."
+        }
+      ]
+    },
+    {
+      "id": "missive",
+      "title": "Missive",
+      "keys": [
+        {
+          "key": "missive.token_env",
+          "type": "string",
+          "default": "\"MISSIVE_API_TOKEN\"",
+          "description": "Environment variable that supplies the Missive API token at request time."
+        },
+        {
+          "key": "missive.team",
+          "type": "string",
+          "default": "unset",
+          "description": "Missive team id used to list team conversations."
+        },
+        {
+          "key": "missive.organization",
+          "type": "string",
+          "default": "unset",
+          "description": "Missive organization id used to resolve teammates and the current user."
         }
       ]
     },

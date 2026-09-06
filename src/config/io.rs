@@ -16,6 +16,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "files",
     "keys",
     "land",
+    "missive",
     "onboarding",
     "remote",
     "session",
@@ -397,6 +398,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.work_index = section,
+    );
+    load_live_section(
+        table,
+        "missive",
+        "Missive config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.missive = section,
     );
 
     Ok(LoadedConfig {
@@ -1014,6 +1023,28 @@ resume_agents_on_restore = true
         .unwrap();
 
         assert!(loaded.config.session.resume_agents_on_restore);
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_applies_missive_resource_ids_without_a_token_value() {
+        let loaded = load_live_config_from_str(
+            r#"
+[missive]
+token_env = "HERDR_TEST_MISSIVE_TOKEN"
+team = "team-id"
+organization = "organization-id"
+"#,
+        )
+        .expect("live Missive config");
+
+        assert_eq!(loaded.config.missive.token_env, "HERDR_TEST_MISSIVE_TOKEN");
+        assert_eq!(loaded.config.missive.team.as_deref(), Some("team-id"));
+        assert_eq!(
+            loaded.config.missive.organization.as_deref(),
+            Some("organization-id")
+        );
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
     }

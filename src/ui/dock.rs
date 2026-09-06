@@ -15,6 +15,7 @@ pub(crate) mod editor;
 pub(crate) mod files;
 mod home;
 pub(crate) mod linear;
+pub(crate) mod missive;
 pub(crate) mod pr;
 
 pub(crate) use chooser::{
@@ -184,6 +185,7 @@ pub(super) fn render_dock(
         Some(DockSurface::Files) => files::render_files(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Pr) => pr::render_pr(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Linear) => linear::render_linear(app, frame, app.view.dock_body_rect),
+        Some(DockSurface::Missive) => missive::render_missive(app, frame, app.view.dock_body_rect),
         Some(DockSurface::Shortcuts) => {
             super::dock_shortcuts::render_shortcuts(app, frame, app.view.dock_body_rect)
         }

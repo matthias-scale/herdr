@@ -5194,6 +5194,32 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_footer_missive_entry_follows_usage_and_opens_at_supported_widths() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let usage = app.state.view.sidebar_footer_usage_hit_area;
+            let hit = app.state.view.sidebar_footer_missive_hit_area;
+            assert_eq!(hit.height, 1, "Missive footer renders at {width} columns");
+            assert_eq!(hit.x, usage.right(), "Missive entry follows usage");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+
+            assert!(app.state.work_view.as_ref().is_some_and(|view| {
+                view.projection == crate::app::state::WorkProjection::Missive
+            }));
+        }
+    }
+
+    #[test]
     fn sidebar_footer_usage_entry_and_every_view_toggle_are_clickable() {
         use crate::app::state::{UsageBreakdown, UsageHitTarget, UsageMetric, UsageRange};
 

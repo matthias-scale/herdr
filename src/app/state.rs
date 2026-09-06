@@ -1534,6 +1534,7 @@ pub enum DockSurface {
     Diff,
     Pr,
     Linear,
+    Missive,
     Agents,
     Editor,
     Shortcuts,
@@ -1543,12 +1544,13 @@ pub enum DockSurface {
 
 impl DockSurface {
     /// Every surface the chooser can open, in menu order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
         Self::Pr,
         Self::Linear,
+        Self::Missive,
         Self::Agents,
         Self::Home,
         Self::Editor,
@@ -1590,6 +1592,7 @@ impl DockSurface {
             Self::Diff => "diff",
             Self::Pr => "pr",
             Self::Linear => "linear",
+            Self::Missive => "missive",
             Self::Agents => "agents",
         }
     }
@@ -1607,6 +1610,7 @@ impl DockSurface {
             Self::Diff => "Diff",
             Self::Pr => "PR",
             Self::Linear => "Linear",
+            Self::Missive => "Missive",
             Self::Agents => "Agents",
         }
     }
@@ -1623,6 +1627,7 @@ impl DockSurface {
             Self::Diff => "vs base",
             Self::Pr => "this branch",
             Self::Linear => "ticket",
+            Self::Missive => "conversation",
             Self::Agents => "subagents",
         }
     }
@@ -1636,6 +1641,7 @@ impl DockSurface {
             Self::Pr => Some('P'),
             Self::Linear => Some('L'),
             Self::Agents => Some('A'),
+            Self::Missive => None,
             _ => None,
         }
     }
@@ -1776,6 +1782,8 @@ pub struct ViewState {
     pub(crate) usage_hit_areas: Vec<UsageHitArea>,
     /// Sidebar-footer entry for the full-screen Linear ticket view.
     pub(crate) sidebar_footer_ticket_hit_area: Rect,
+    /// Sidebar-footer entry for the full-screen Missive conversation view.
+    pub(crate) sidebar_footer_missive_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -3132,6 +3140,7 @@ impl SymphonyDetail {
 pub(crate) enum WorkProjection {
     PullRequests,
     Tickets,
+    Missive,
     Agents,
     ReviewQueue,
 }
@@ -3141,6 +3150,7 @@ impl WorkProjection {
         match self {
             Self::PullRequests => "PRs",
             Self::Tickets => "tickets",
+            Self::Missive => "Missive",
             Self::Agents => "agents",
             Self::ReviewQueue => "review queue",
         }
@@ -3150,7 +3160,8 @@ impl WorkProjection {
         match self {
             Self::PullRequests => Self::ReviewQueue,
             Self::Tickets => Self::PullRequests,
-            Self::Agents => Self::Tickets,
+            Self::Missive => Self::Tickets,
+            Self::Agents => Self::Missive,
             Self::ReviewQueue => Self::Agents,
         }
     }
@@ -3158,7 +3169,8 @@ impl WorkProjection {
     pub(crate) fn rotate_right(self) -> Self {
         match self {
             Self::PullRequests => Self::Tickets,
-            Self::Tickets => Self::Agents,
+            Self::Tickets => Self::Missive,
+            Self::Missive => Self::Agents,
             Self::Agents => Self::ReviewQueue,
             Self::ReviewQueue => Self::PullRequests,
         }
@@ -3240,6 +3252,8 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
     pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
     pub(crate) ticket_more_menu: Option<TicketMoreChoice>,
+    pub(crate) missive_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) selected_missive: Option<String>,
     pub(crate) ticket_comment_draft: Option<String>,
     pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
     pub(crate) refreshing: bool,
@@ -3413,6 +3427,8 @@ impl WorkViewState {
             ticket_start_menu: None,
             ticket_transition_menu: None,
             ticket_more_menu: None,
+            missive_start_menu: None,
+            selected_missive: None,
             ticket_comment_draft: None,
             pending_write: None,
             refreshing: false,
@@ -4174,6 +4190,7 @@ impl AppState {
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
+                sidebar_footer_missive_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -4747,6 +4764,30 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn work_projection_rotation_includes_missive_in_both_directions() {
+        assert_eq!(
+            WorkProjection::Tickets.rotate_right(),
+            WorkProjection::Missive
+        );
+        assert_eq!(
+            WorkProjection::Missive.rotate_right(),
+            WorkProjection::Agents
+        );
+        assert_eq!(
+            WorkProjection::Agents.rotate_left(),
+            WorkProjection::Missive
+        );
+        assert_eq!(
+            WorkProjection::Missive.rotate_left(),
+            WorkProjection::Tickets
+        );
+        assert_eq!(
+            WorkProjection::ReviewQueue.rotate_left(),
+            WorkProjection::Agents
+        );
+    }
 
     #[test]
     fn symphony_refresh_preserves_selection_by_workflow_identity() {

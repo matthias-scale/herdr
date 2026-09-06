@@ -317,6 +317,13 @@ pub(crate) struct HomeTicketContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeMissiveContext {
+    pub(crate) app_url: String,
+    pub(crate) web_url: String,
+    pub(crate) subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeDispatchPlan {
     pub(crate) agent: Agent,
     pub(crate) model: String,
@@ -326,6 +333,7 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) git_ref: Option<HomeRef>,
     pub(crate) pr: Option<HomePrContext>,
     pub(crate) ticket: Option<HomeTicketContext>,
+    pub(crate) missive: Option<HomeMissiveContext>,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
@@ -405,6 +413,8 @@ pub(crate) struct HomeState {
     pub(crate) pr: Option<HomePrContext>,
     /// Linear ticket that opened this composer. TUI-only launch context.
     pub(crate) ticket: Option<HomeTicketContext>,
+    /// Missive conversation that opened this composer. TUI-only launch context.
+    pub(crate) missive: Option<HomeMissiveContext>,
     pub(crate) ref_repo_root: Option<PathBuf>,
     pub(crate) ref_directory: PathBuf,
     workspace_options: Vec<HomeWorkspace>,
@@ -437,6 +447,7 @@ impl Default for HomeState {
             selected_ref: None,
             pr: None,
             ticket: None,
+            missive: None,
             ref_repo_root: None,
             ref_directory: default_directory(),
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
@@ -780,6 +791,7 @@ impl HomeState {
             git_ref: self.selected_ref.clone(),
             pr: self.pr.clone(),
             ticket: self.ticket.clone(),
+            missive: self.missive.clone(),
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -1966,6 +1978,23 @@ mod tests {
         assert_eq!(plan.pr, home.pr);
     }
 
+    #[test]
+    fn dispatch_plan_carries_missive_conversation_context() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "reply to the linked conversation".into();
+        home.missive = Some(HomeMissiveContext {
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            subject: "Billing question".into(),
+        });
+
+        let plan = home
+            .dispatch_plan()
+            .expect("Missive context should dispatch");
+
+        assert_eq!(plan.missive, home.missive);
+    }
+
     /// Characterization: pins `dispatch_plan()` before the T3 card layout moves
     /// the fields around. Layout may change; the plan for the same inputs may
     /// not.
@@ -1992,6 +2021,7 @@ mod tests {
                 git_ref: None,
                 pr: None,
                 ticket: None,
+                missive: None,
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![

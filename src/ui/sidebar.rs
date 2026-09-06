@@ -679,6 +679,19 @@ pub(crate) fn sidebar_footer_usage_hit_area(area: Rect) -> Rect {
     )
 }
 
+pub(crate) fn sidebar_footer_missive_hit_area(area: Rect) -> Rect {
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 12 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(10),
+        area.bottom().saturating_sub(1),
+        3,
+        1,
+    )
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -3095,6 +3108,19 @@ pub(super) fn render_sidebar(
             Style::default().fg(p.overlay0)
         };
         frame.render_widget(Paragraph::new(Span::styled(" ▥ ", style)), usage);
+    }
+    let missive = sidebar_footer_missive_hit_area(area);
+    if missive.width > 0 {
+        let style = if app
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Missive)
+        {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(" ✉ ", style)), missive);
     }
 }
 
@@ -8605,6 +8631,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     vec![work_ticket("OPS-12", "pixel EMQ drop", "jacob", &[])],
                 ),
             ],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: std::time::SystemTime::UNIX_EPOCH,
         });

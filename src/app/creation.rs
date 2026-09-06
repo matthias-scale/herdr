@@ -322,7 +322,12 @@ impl App {
                         self.render_dirty.clone(),
                         Vec::new(),
                     )?;
-                apply_home_work_context(&mut terminal, plan.pr.as_ref(), plan.ticket.as_ref())?;
+                apply_home_work_context(
+                    &mut terminal,
+                    plan.pr.as_ref(),
+                    plan.ticket.as_ref(),
+                    plan.missive.as_ref(),
+                )?;
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
                 self.pending_first_frame_pane = Some(workspace.tabs[0].root_pane);
@@ -363,7 +368,12 @@ impl App {
                     let root_pane = workspace.tabs[tab_idx].root_pane;
                     (tab_idx, terminal, runtime, root_pane)
                 };
-                apply_home_work_context(&mut terminal, plan.pr.as_ref(), plan.ticket.as_ref())?;
+                apply_home_work_context(
+                    &mut terminal,
+                    plan.pr.as_ref(),
+                    plan.ticket.as_ref(),
+                    plan.missive.as_ref(),
+                )?;
                 self.terminal_runtimes.insert(terminal.id.clone(), runtime);
                 self.state.terminals.insert(terminal.id.clone(), terminal);
                 self.pending_first_frame_pane = Some(root_pane);
@@ -747,8 +757,9 @@ fn apply_home_work_context(
     terminal: &mut crate::terminal::TerminalState,
     pr: Option<&crate::app::home::HomePrContext>,
     ticket: Option<&crate::app::home::HomeTicketContext>,
+    missive: Option<&crate::app::home::HomeMissiveContext>,
 ) -> std::io::Result<()> {
-    if pr.is_none() && ticket.is_none() {
+    if pr.is_none() && ticket.is_none() && missive.is_none() {
         return Ok(());
     }
     terminal
@@ -756,6 +767,7 @@ fn apply_home_work_context(
             repo: pr.map(|pr| pr.repo.clone()),
             pr_urls: pr.map(|pr| vec![pr.url.clone()]),
             ticket_ids: ticket.map(|ticket| vec![ticket.identifier.clone()]),
+            missive_urls: missive.map(|conversation| vec![conversation.web_url.clone()]),
             ..Default::default()
         })
         .map(|_| ())
@@ -935,6 +947,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_home_composer_applies_missive_url_to_spawned_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut plan = fixed_home_dispatch_plan(crate::app::home::HomeTarget::NewSpace);
+        plan.missive = Some(crate::app::home::HomeMissiveContext {
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            subject: "Billing question".into(),
+        });
+
+        app.dispatch_home_composer(plan)
+            .expect("Missive dispatch should create a pane");
+
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.workspaces[0]
+            .terminal_id(pane)
+            .and_then(|terminal_id| app.state.terminals.get(terminal_id))
+            .expect("spawned pane terminal");
+        assert_eq!(
+            terminal.effective_work_context().missive_urls,
+            ["https://mail.missiveapp.com/#inbox/conversations/sample"]
+        );
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
     async fn home_dispatch_preserves_adversarial_identity_invariants() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -955,6 +1001,7 @@ mod tests {
             git_ref: None,
             pr: None,
             ticket: None,
+            missive: None,
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],

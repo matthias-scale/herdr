@@ -359,11 +359,35 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub missive: MissiveConfig,
     pub usage: UsageConfig,
     pub land: LandConfig,
     pub source_control: SourceControlConfig,
     pub files: FilesConfig,
     pub actions: Vec<ActionConfig>,
+}
+
+/// Read-only Missive API settings.
+///
+/// `team` and `organization` are UUIDs copied from Missive's Settings > API >
+/// Resource IDs page. `token_env` names an environment variable; the token
+/// itself is deliberately absent from this serializable configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct MissiveConfig {
+    pub token_env: String,
+    pub team: Option<String>,
+    pub organization: Option<String>,
+}
+
+impl Default for MissiveConfig {
+    fn default() -> Self {
+        Self {
+            token_env: "MISSIVE_API_TOKEN".into(),
+            team: None,
+            organization: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -731,6 +755,8 @@ pub struct KeysConfig {
     pub usage: BindingConfig,
     /// Open the Linear Tickets view. Default: "prefix+ctrl+t"
     pub tickets: BindingConfig,
+    /// Open the read-only Missive conversation view. Default: "prefix+ctrl+m"
+    pub missive: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
@@ -906,6 +932,7 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<BindingConfig>,
     tickets: Option<BindingConfig>,
+    missive: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
     home: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1012,6 +1039,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(work);
         apply_field!(usage);
         apply_field!(tickets);
+        apply_field!(missive);
         apply_field!(inbox);
         apply_field!(home);
         apply_field!(toggle_status_detail);
@@ -1141,6 +1169,7 @@ impl KeysConfig {
         copy_effective_action_field!(work, keybinds.work);
         copy_effective_action_field!(usage, keybinds.usage);
         copy_effective_action_field!(tickets, keybinds.tickets);
+        copy_effective_action_field!(missive, keybinds.missive);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
         copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
@@ -1575,6 +1604,7 @@ impl Default for KeysConfig {
             work: BindingConfig::one("prefix+ctrl+w"),
             usage: BindingConfig::one("prefix+ctrl+y"),
             tickets: BindingConfig::one("prefix+ctrl+t"),
+            missive: BindingConfig::one("prefix+ctrl+m"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),
@@ -2486,6 +2516,22 @@ scrollback_lines = 12345
         assert_eq!(Config::default().land.approval_label, "approved");
         let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
         assert_eq!(config.land.approval_label, "ship-it");
+    }
+
+    #[test]
+    fn missive_config_names_token_environment_and_resource_ids() {
+        let defaults = Config::default();
+        assert_eq!(defaults.missive.token_env, "MISSIVE_API_TOKEN");
+        assert_eq!(defaults.missive.team, None);
+        assert_eq!(defaults.missive.organization, None);
+
+        let config: Config = toml::from_str(
+            "[missive]\ntoken_env = 'HERDR_TEST_MISSIVE'\nteam = 'team-id'\norganization = 'org-id'\n",
+        )
+        .unwrap();
+        assert_eq!(config.missive.token_env, "HERDR_TEST_MISSIVE");
+        assert_eq!(config.missive.team.as_deref(), Some("team-id"));
+        assert_eq!(config.missive.organization.as_deref(), Some("org-id"));
     }
 
     #[test]
