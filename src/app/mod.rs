@@ -660,8 +660,13 @@ impl App {
         let update_install_command = crate::update::update_install_command().to_string();
         let startup_product_announcement =
             crate::product_announcements::load_unseen_for_current_version();
+        // Cold-start snapshot comes from the host state dir; unit tests must not
+        // observe whatever work index the developer machine has persisted.
+        #[cfg(not(test))]
         let work_index_snapshot =
             crate::work_index::load_snapshot(&crate::work_index::work_index_snapshot_path());
+        #[cfg(test)]
+        let work_index_snapshot: Option<crate::work_index::Snapshot> = None;
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
