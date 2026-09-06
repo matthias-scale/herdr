@@ -137,7 +137,8 @@ impl App {
             AppEvent::WorkIndexRefreshed {
                 generation,
                 snapshot,
-            } => self.handle_work_index_refreshed(generation, snapshot),
+                session,
+            } => self.handle_work_index_refreshed(generation, snapshot, session),
             AppEvent::UsageScanFinished { generation, result } => {
                 self.handle_usage_scan_finished(generation, result)
             }
@@ -354,9 +355,10 @@ impl App {
         if let AppEvent::WorkIndexRefreshed {
             generation,
             snapshot,
+            session,
         } = ev
         {
-            self.handle_work_index_refreshed(generation, snapshot);
+            self.handle_work_index_refreshed(generation, snapshot, session);
             return None;
         }
 

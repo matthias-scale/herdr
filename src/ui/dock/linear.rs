@@ -180,6 +180,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             author: None,
+            assignees: Vec::new(),
             labels: Vec::new(),
             check_state: PrCheckState::Passing,
             audience: PrAudience::Other,

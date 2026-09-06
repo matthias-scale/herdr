@@ -2556,6 +2556,9 @@ pub struct AppState {
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Provider viewers and assignee directories resolved by the work-index
+    /// runtime once for this app session.
+    pub(crate) work_index_session: crate::work_index::WorkIndexSession,
     /// Server-global on-demand detail facts, keyed by stable work identity.
     /// Client-local selection decides which entry is rendered, but never owns
     /// or duplicates the fetched data.
@@ -3909,6 +3912,7 @@ impl AppState {
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: None,
+            work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
