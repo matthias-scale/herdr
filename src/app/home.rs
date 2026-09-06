@@ -717,6 +717,19 @@ impl HomeState {
         self.dispatch_error = None;
     }
 
+    /// The flags a dispatch would pass to the selected agent right now, for
+    /// the settings Providers rows.
+    pub(crate) fn launch_flags(&self) -> Option<Vec<String>> {
+        let catalog = self.catalog.provider(self.agent)?;
+        agent_launch_flags(
+            self.agent,
+            catalog,
+            &self.model,
+            self.effort.as_deref().unwrap_or(AUTO_EFFORT),
+            self.context_window.as_deref(),
+        )
+    }
+
     pub(crate) fn dispatch_plan(&self) -> Result<HomeDispatchPlan, String> {
         let prompt = self.prompt.trim();
         if prompt.is_empty() {
@@ -742,39 +755,16 @@ impl HomeState {
         }
 
         let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
-        match self.agent {
-            Agent::Claude => {
-                let large_context = self.context_window.as_deref() == Some(LARGE_CONTEXT_WINDOW);
-                let context_form = catalog.claude_context_form.as_ref();
-                let model_arg = if large_context
-                    && !matches!(context_form, Some(ClaudeContextWindowForm::Flag(_)))
-                {
-                    format!("{}[1m]", self.model)
-                } else {
-                    self.model.clone()
-                };
-                if self.model != DEFAULT_MODEL {
-                    argv.extend(["--model".into(), model_arg]);
-                }
-                if large_context {
-                    if let Some(ClaudeContextWindowForm::Flag(flag)) = context_form {
-                        argv.extend([flag.clone(), "1m".into()]);
-                    }
-                }
-                if effort != AUTO_EFFORT {
-                    argv.extend(["--effort".into(), effort.into()]);
-                }
-            }
-            Agent::Codex => {
-                if self.model != DEFAULT_MODEL {
-                    argv.extend(["--model".into(), self.model.clone()]);
-                }
-                if effort != AUTO_EFFORT {
-                    argv.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
-                }
-            }
-            _ => return Err("that agent cannot be dispatched from home".into()),
-        }
+        let Some(flags) = agent_launch_flags(
+            self.agent,
+            catalog,
+            &self.model,
+            effort,
+            self.context_window.as_deref(),
+        ) else {
+            return Err("that agent cannot be dispatched from home".into());
+        };
+        argv.extend(flags);
         argv.push(prompt.into());
 
         let directory = match &self.workspace {
@@ -795,6 +785,56 @@ impl HomeState {
             argv,
         })
     }
+}
+
+/// The flags Herdr passes to an agent after its executable, for the given
+/// model, effort and context window.
+///
+/// The dispatch path and the settings Providers section read the same builder,
+/// so the flags a row advertises are the flags a launch actually uses.
+/// `None` means Herdr cannot launch that agent.
+pub(crate) fn agent_launch_flags(
+    agent: Agent,
+    catalog: &crate::app::home_catalog::HomeProviderCatalog,
+    model: &str,
+    effort: &str,
+    context_window: Option<&str>,
+) -> Option<Vec<String>> {
+    let mut flags: Vec<String> = Vec::new();
+    match agent {
+        Agent::Claude => {
+            let large_context = context_window == Some(LARGE_CONTEXT_WINDOW);
+            let context_form = catalog.claude_context_form.as_ref();
+            let model_arg = if large_context
+                && !matches!(context_form, Some(ClaudeContextWindowForm::Flag(_)))
+            {
+                format!("{model}[1m]")
+            } else {
+                model.to_string()
+            };
+            if model != DEFAULT_MODEL {
+                flags.extend(["--model".into(), model_arg]);
+            }
+            if large_context {
+                if let Some(ClaudeContextWindowForm::Flag(flag)) = context_form {
+                    flags.extend([flag.clone(), "1m".into()]);
+                }
+            }
+            if effort != AUTO_EFFORT {
+                flags.extend(["--effort".into(), effort.into()]);
+            }
+        }
+        Agent::Codex => {
+            if model != DEFAULT_MODEL {
+                flags.extend(["--model".into(), model.to_string()]);
+            }
+            if effort != AUTO_EFFORT {
+                flags.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
+            }
+        }
+        _ => return None,
+    }
+    Some(flags)
 }
 
 /// Fleet-wide counts for the header line.

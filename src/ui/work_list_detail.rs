@@ -659,7 +659,9 @@ pub(crate) fn description_without_checklist(description: Option<&str>) -> Option
     (!body.is_empty()).then(|| body.to_string())
 }
 
-pub(crate) fn ticket_worktree_branch(identifier: &str, title: &str) -> String {
+/// The branch Herdr derives from a ticket. `prefix` is
+/// `source_control.branch_prefix`; an empty prefix leaves the bare slug.
+pub(crate) fn ticket_worktree_branch(prefix: &str, identifier: &str, title: &str) -> String {
     let mut slug = title
         .chars()
         .map(|character| {
@@ -673,7 +675,7 @@ pub(crate) fn ticket_worktree_branch(identifier: &str, title: &str) -> String {
     while slug.contains("--") {
         slug = slug.replace("--", "-");
     }
-    let prefix = format!("issue/{}-", identifier.to_ascii_lowercase());
+    let prefix = format!("{prefix}{}-", identifier.to_ascii_lowercase());
     let available = 40usize.saturating_sub(prefix.chars().count());
     slug = slug.trim_matches('-').chars().take(available).collect();
     slug = slug.trim_end_matches('-').to_string();
@@ -1131,6 +1133,7 @@ mod tests {
             .is_some_and(|action| action.enabled));
 
         let branch = ticket_worktree_branch(
+            crate::config::DEFAULT_BRANCH_PREFIX,
             "SCA-3165",
             "Image edit simple v3 reference addendum with a very long suffix",
         );

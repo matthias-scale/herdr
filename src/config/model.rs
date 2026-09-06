@@ -361,6 +361,7 @@ pub struct Config {
     pub work_index: WorkIndexConfig,
     pub usage: UsageConfig,
     pub land: LandConfig,
+    pub source_control: SourceControlConfig,
     pub files: FilesConfig,
     pub actions: Vec<ActionConfig>,
 }
@@ -483,6 +484,29 @@ impl Default for LandConfig {
     fn default() -> Self {
         Self {
             approval_label: DEFAULT_LAND_APPROVAL_LABEL.into(),
+        }
+    }
+}
+
+/// Prefix Herdr puts in front of a derived worktree branch name.
+pub const DEFAULT_BRANCH_PREFIX: &str = "issue/";
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SourceControlConfig {
+    /// Model name exported to the Commit action as
+    /// `HERDR_COMMIT_MESSAGE_MODEL`, so a `prepare-commit-msg` hook can draft
+    /// the message with it. Empty leaves `git commit` exactly as it was.
+    pub commit_message_model: String,
+    /// Prefix for branch names Herdr derives from a ticket.
+    pub branch_prefix: String,
+}
+
+impl Default for SourceControlConfig {
+    fn default() -> Self {
+        Self {
+            commit_message_model: String::new(),
+            branch_prefix: DEFAULT_BRANCH_PREFIX.into(),
         }
     }
 }
@@ -2441,6 +2465,20 @@ scrollback_lines = 12345
         assert_eq!(Config::default().files.icons, FilesIconConfig::Badges);
         let config: Config = toml::from_str("[files]\nicons = \"nerd\"\n").unwrap();
         assert_eq!(config.files.icons, FilesIconConfig::Nerd);
+    }
+
+    #[test]
+    fn source_control_keys_default_to_todays_behaviour_and_parse() {
+        let defaults = Config::default().source_control;
+        assert_eq!(defaults.commit_message_model, "");
+        assert_eq!(defaults.branch_prefix, "issue/");
+
+        let config: Config = toml::from_str(
+            "[source_control]\ncommit_message_model = \"claude-opus-5\"\nbranch_prefix = \"feat/\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.source_control.commit_message_model, "claude-opus-5");
+        assert_eq!(config.source_control.branch_prefix, "feat/");
     }
 
     #[test]
