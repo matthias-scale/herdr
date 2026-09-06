@@ -2494,7 +2494,7 @@ impl crate::app::App {
                 );
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkIndexRefreshed {
                     generation,
-                    snapshot,
+                    snapshot: Box::new(snapshot),
                     session,
                 });
             });
