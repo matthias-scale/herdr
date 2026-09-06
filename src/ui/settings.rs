@@ -38,8 +38,10 @@ pub(crate) fn settings_popup_height(_app: &AppState) -> u16 {
     SETTINGS_POPUP_BASE_HEIGHT
 }
 
-/// The three areas the settings body is split into.
+/// The areas the settings body is split into. The nav column carries its own
+/// filter line, so the section list starts one row lower than the column.
 pub(crate) struct SettingsAreas {
+    pub(crate) search: Rect,
     pub(crate) nav: Rect,
     pub(crate) content: Rect,
 }
@@ -48,20 +50,29 @@ pub(crate) struct SettingsAreas {
 pub(crate) fn settings_areas(inner: Rect) -> SettingsAreas {
     let stack = modal_stack_areas(inner, 2, 2, 0, 1);
     let nav_width = SETTINGS_NAV_WIDTH.min(stack.content.width.saturating_sub(10));
-    let [nav, _gap, content] = Layout::horizontal([
+    let [column, _gap, content] = Layout::horizontal([
         Constraint::Length(nav_width),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
     .areas(stack.content);
-    SettingsAreas { nav, content }
+    let [search, nav] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(column);
+    SettingsAreas {
+        search,
+        nav,
+        content,
+    }
 }
 
 /// The first visible nav row, so the active section is always on screen even
-/// when the section list is taller than the popup.
+/// when the filtered section list is taller than the popup.
 pub(crate) fn settings_nav_scroll(app: &AppState, nav: Rect) -> usize {
     let rows = nav.height as usize;
-    let selected = app.settings.section.index();
+    let sections = crate::app::state::settings_sections_matching(&app.settings.search);
+    let selected = sections
+        .iter()
+        .position(|section| *section == app.settings.section)
+        .unwrap_or(0);
     if rows == 0 || selected < rows {
         0
     } else {
@@ -468,6 +479,7 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
     );
 
     let areas = settings_areas(inner);
+    render_settings_search(app, frame, areas.search);
     render_settings_nav(app, frame, areas.nav);
 
     let content_area = areas.content;
@@ -581,10 +593,38 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
     }
 }
 
+/// The filter line above the section list.
+fn render_settings_search(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let query = &app.settings.search;
+    let (text, style) = if app.settings.search_active {
+        (
+            format!("🔍 {query}▏"),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        )
+    } else if query.is_empty() {
+        (
+            "🔍 search           /".to_string(),
+            Style::default().fg(p.overlay1),
+        )
+    } else {
+        (format!("🔍 {query}"), Style::default().fg(p.subtext0))
+    };
+    frame.render_widget(Paragraph::new(Span::styled(text, style)), area);
+}
+
 fn render_settings_nav(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let scroll = settings_nav_scroll(app, area);
-    let lines = SettingsSection::ALL
+    let sections = crate::app::state::settings_sections_matching(&app.settings.search);
+    if sections.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(" no match", Style::default().fg(p.overlay1))),
+            area,
+        );
+        return;
+    }
+    let lines = sections
         .iter()
         .skip(scroll)
         .take(area.height as usize)
@@ -860,6 +900,49 @@ mod tests {
             settings_nav_scroll(&app, nav),
             SettingsSection::About.index() + 1 - 4
         );
+    }
+
+    #[test]
+    fn the_nav_keeps_two_columns_and_a_filter_line_at_80_and_120_columns() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            let screen = Rect::new(0, 0, width, height);
+            let popup =
+                centered_popup_rect(screen, SETTINGS_POPUP_WIDTH, SETTINGS_POPUP_BASE_HEIGHT)
+                    .expect("settings popup fits");
+            let inner = Rect::new(
+                popup.x + 1,
+                popup.y + 1,
+                popup.width.saturating_sub(2),
+                popup.height.saturating_sub(2),
+            );
+            let areas = settings_areas(inner);
+            assert_eq!(areas.search.height, 1);
+            assert_eq!(areas.search.x, areas.nav.x);
+            assert_eq!(areas.search.width, areas.nav.width);
+            assert_eq!(areas.nav.y, areas.search.y + 1);
+            assert!(areas.nav.width > 0, "nav column at {width}x{height}");
+            assert!(
+                areas.content.width > 0,
+                "content column at {width}x{height}"
+            );
+            assert!(areas.nav.x + areas.nav.width < areas.content.x);
+            assert!(areas.content.x + areas.content.width <= inner.x + inner.width);
+        }
+    }
+
+    #[test]
+    fn the_nav_scroll_follows_the_filtered_section_list() {
+        let mut app = AppState::test_new();
+        let nav = Rect::new(0, 0, 20, 4);
+        app.settings.section = SettingsSection::About;
+        assert_eq!(
+            settings_nav_scroll(&app, nav),
+            SettingsSection::About.index() + 1 - 4
+        );
+        // Once the filter leaves a short list, the same section is on screen
+        // without any scrolling.
+        app.settings.search = "about".into();
+        assert_eq!(settings_nav_scroll(&app, nav), 0);
     }
 
     #[test]

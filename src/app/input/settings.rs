@@ -201,6 +201,61 @@ fn select_section(state: &mut AppState, section: SettingsSection) {
     }
 }
 
+/// The next/previous section in the filtered nav column. With no filter this
+/// is exactly `SettingsSection::next`/`prev`.
+fn adjacent_section(state: &AppState, delta: isize) -> SettingsSection {
+    let sections = crate::app::state::settings_sections_matching(&state.settings.search);
+    if sections.is_empty() {
+        return state.settings.section;
+    }
+    let current = sections
+        .iter()
+        .position(|section| *section == state.settings.section)
+        .unwrap_or(0);
+    let len = sections.len();
+    let next = if delta < 0 {
+        (current + len - 1) % len
+    } else {
+        (current + 1) % len
+    };
+    sections[next]
+}
+
+/// Typing in the filter line. Returns true when the key was consumed.
+fn update_settings_search(state: &mut AppState, key: KeyEvent) -> bool {
+    if !state.settings.search_active {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char(character)
+            if key.modifiers.is_empty()
+                || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+        {
+            state.settings.search.push(character);
+        }
+        KeyCode::Backspace => {
+            state.settings.search.pop();
+        }
+        KeyCode::Enter | KeyCode::Down | KeyCode::Up | KeyCode::Tab | KeyCode::BackTab => {
+            state.settings.search_active = false;
+            return key.code == KeyCode::Enter;
+        }
+        KeyCode::Esc => {
+            state.settings.search.clear();
+            state.settings.search_active = false;
+            return true;
+        }
+        _ => return false,
+    }
+    // The filtered list may no longer contain the active section; land on the
+    // first match so the body always matches the visible nav.
+    let sections = crate::app::state::settings_sections_matching(&state.settings.search);
+    if !sections.is_empty() && !sections.contains(&state.settings.section) {
+        select_section(state, sections[0]);
+    }
+    true
+}
+
 fn move_selection(state: &mut AppState, delta: isize) {
     let count = settings_section_item_count(state, state.settings.section);
     if count == 0 {
@@ -268,13 +323,20 @@ fn delete_archive_selection(state: &mut AppState) -> Option<SettingsAction> {
 }
 
 pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    if update_settings_search(state, key) {
+        return None;
+    }
     match key.code {
+        KeyCode::Char('/') => {
+            state.settings.search_active = true;
+            return None;
+        }
         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-            select_section(state, state.settings.section.next());
+            select_section(state, adjacent_section(state, 1));
             return None;
         }
         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-            select_section(state, state.settings.section.prev());
+            select_section(state, adjacent_section(state, -1));
             return None;
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -308,6 +370,10 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
     match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
         Some(super::modal::ModalAction::Apply) => apply_settings(state),
         Some(super::modal::ModalAction::Close) => {
+            if !state.settings.search.is_empty() {
+                state.settings.search.clear();
+                return None;
+            }
             cancel_settings(state);
             None
         }
@@ -323,6 +389,8 @@ pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
     state.integration_install_messages.clear();
     state.settings.original_palette = Some(state.palette.clone());
     state.settings.original_theme = Some(state.theme_name.clone());
+    state.settings.search.clear();
+    state.settings.search_active = false;
     select_section(state, section);
     state.mode = Mode::Settings;
 }
@@ -354,7 +422,18 @@ impl AppState {
             return None;
         }
         let index = crate::ui::settings_nav_scroll(self, nav) + (row - nav.y) as usize;
-        SettingsSection::ALL.get(index).copied()
+        crate::app::state::settings_sections_matching(&self.settings.search)
+            .get(index)
+            .copied()
+    }
+
+    /// A click on the filter line focuses it rather than closing the screen.
+    fn settings_search_hit(&self, col: u16, row: u16) -> bool {
+        let search = crate::ui::settings_areas(self.settings_inner_rect()).search;
+        col >= search.x
+            && col < search.x + search.width
+            && row >= search.y
+            && row < search.y + search.height
     }
 
     pub(crate) fn settings_content_rect(&self) -> Rect {
@@ -425,6 +504,10 @@ impl AppState {
     pub(super) fn handle_settings_mouse(&mut self, mouse: MouseEvent) -> Option<SettingsAction> {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.settings_search_hit(mouse.column, mouse.row) {
+                    self.settings.search_active = true;
+                    return None;
+                }
                 if let Some(section) = self.settings_tab_at(mouse.column, mouse.row) {
                     select_section(self, section);
                     return None;
@@ -472,6 +555,87 @@ mod tests {
 
     use super::super::{app_for_mouse_test, mouse, state_with_workspaces};
     use super::*;
+
+    fn press(state: &mut AppState, code: KeyCode) -> Option<SettingsAction> {
+        update_settings_state(state, KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    fn type_search(state: &mut AppState, text: &str) {
+        for character in text.chars() {
+            press(state, KeyCode::Char(character));
+        }
+    }
+
+    #[test]
+    fn the_section_filter_narrows_the_nav_and_esc_clears_it_before_closing() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        assert_eq!(state.settings.section, SettingsSection::General);
+
+        press(&mut state, KeyCode::Char('/'));
+        assert!(state.settings.search_active);
+        type_search(&mut state, "arch");
+        assert_eq!(state.settings.search, "arch");
+        assert_eq!(
+            crate::app::state::settings_sections_matching(&state.settings.search),
+            vec![SettingsSection::Archive]
+        );
+        // The body follows the filter instead of showing a hidden section.
+        assert_eq!(state.settings.section, SettingsSection::Archive);
+
+        // Esc leaves the filter line but keeps the query and the screen.
+        press(&mut state, KeyCode::Esc);
+        assert!(!state.settings.search_active);
+        assert!(state.settings.search.is_empty());
+        assert_eq!(state.mode, Mode::Settings);
+
+        // With no query left, Esc closes.
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn an_esc_with_a_query_but_an_unfocused_filter_clears_before_closing() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        state.settings.search = "keys".into();
+
+        press(&mut state, KeyCode::Esc);
+        assert!(state.settings.search.is_empty());
+        assert_eq!(state.mode, Mode::Settings);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn section_cycling_stays_inside_the_filtered_list() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        state.settings.search = "so".into();
+        let visible = crate::app::state::settings_sections_matching(&state.settings.search);
+        assert_eq!(
+            visible,
+            vec![SettingsSection::Sound, SettingsSection::SourceControl]
+        );
+
+        select_section(&mut state, SettingsSection::Sound);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.settings.section, SettingsSection::SourceControl);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.settings.section, SettingsSection::Sound);
+        press(&mut state, KeyCode::BackTab);
+        assert_eq!(state.settings.section, SettingsSection::SourceControl);
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_leaves_the_section_alone() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        press(&mut state, KeyCode::Char('/'));
+        type_search(&mut state, "zzz");
+        assert!(crate::app::state::settings_sections_matching(&state.settings.search).is_empty());
+        assert_eq!(state.settings.section, SettingsSection::General);
+    }
 
     #[test]
     fn desktop_clamped_settings_hit_geometry_includes_status_row() {

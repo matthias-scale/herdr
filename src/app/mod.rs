@@ -1026,6 +1026,8 @@ impl App {
                 original_palette: None,
                 original_theme: None,
                 archive_delete_armed: false,
+                search: String::new(),
+                search_active: false,
             },
             tool_probes: crate::app::probes::ToolProbeState::Idle,
             integration_recommendations: crate::integration::integration_recommendations(),
