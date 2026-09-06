@@ -34,12 +34,31 @@ pub(crate) struct GitActionPaneState {
     phase: GitActionPanePhase,
 }
 
-pub(crate) fn wrapped_command(action: GitAction) -> String {
+pub(crate) fn wrapped_command(action: GitAction, commit_message_model: &str) -> String {
     let command = action.argv().join(" ");
-    format!(
-        r#"sh -c '{}; status=$?; printf "\n__t3_exit=%s\n" "$status"'"#,
-        command
-    )
+    // The Commit action is the one place a message model is meaningful. It is
+    // exported rather than spliced into the command line, so a
+    // `prepare-commit-msg` hook can use it and an unset model leaves the
+    // command byte for byte what it was.
+    let prefix = match (action, sanitized_model(commit_message_model)) {
+        (GitAction::Commit, Some(model)) => format!("HERDR_COMMIT_MESSAGE_MODEL={model} "),
+        _ => String::new(),
+    };
+    format!(r#"sh -c '{prefix}{command}; status=$?; printf "\n__t3_exit=%s\n" "$status"'"#)
+}
+
+/// A model name only reaches the shell when it is a bare token, so the export
+/// can never carry quoting or a command substitution into `sh -c`.
+fn sanitized_model(model: &str) -> Option<&str> {
+    let model = model.trim();
+    if model.is_empty()
+        || !model.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+    {
+        return None;
+    }
+    Some(model)
 }
 
 pub(crate) fn wrapped_user_command(command: &str) -> String {
@@ -176,7 +195,7 @@ impl App {
 
     fn spawn_git_action_pane(&mut self, action: GitAction) -> bool {
         self.spawn_bottom_action_pane(
-            wrapped_command(action),
+            wrapped_command(action, &self.state.commit_message_model),
             BottomActionCompletion::Git(action),
             None,
         )
@@ -462,8 +481,13 @@ mod tests {
             GitAction::CreatePr.argv(),
             &["gh", "pr", "create", "--fill"]
         );
-        assert!(wrapped_command(GitAction::Commit).contains("git commit; status=$?"));
-        assert!(!wrapped_command(GitAction::Commit).contains(" -m "));
+        assert!(wrapped_command(GitAction::Commit, "").contains("git commit; status=$?"));
+        assert!(!wrapped_command(GitAction::Commit, "").contains(" -m "));
+        assert!(wrapped_command(GitAction::Commit, "claude-opus-5")
+            .contains("HERDR_COMMIT_MESSAGE_MODEL=claude-opus-5 git commit"));
+        // Pull is untouched, and an unusable model name is ignored.
+        assert!(!wrapped_command(GitAction::Pull, "claude-opus-5").contains("HERDR_COMMIT"));
+        assert!(!wrapped_command(GitAction::Commit, "a; rm -rf /").contains("HERDR_COMMIT"));
     }
 
     #[test]

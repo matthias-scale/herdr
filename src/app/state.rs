@@ -2569,6 +2569,12 @@ pub struct AppState {
     pub(crate) work_index_enabled: bool,
     /// Client-local approval label used by the PR landing gate.
     pub(crate) land_approval_label: String,
+    /// `source_control.branch_prefix`: the prefix Herdr puts in front of a
+    /// branch name derived from a ticket.
+    pub(crate) branch_prefix: String,
+    /// `source_control.commit_message_model`: exported to the Commit action so
+    /// a hook can draft the message. Empty leaves `git commit` unchanged.
+    pub(crate) commit_message_model: String,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
@@ -3907,6 +3913,8 @@ impl AppState {
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
             land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
+            branch_prefix: crate::config::DEFAULT_BRANCH_PREFIX.into(),
+            commit_message_model: String::new(),
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),

@@ -35,6 +35,7 @@ mod session;
 pub(crate) mod settings_archive;
 pub(crate) mod settings_general;
 pub(crate) mod settings_keybindings;
+pub(crate) mod settings_providers;
 mod settled;
 pub mod state;
 mod terminal_targets;
@@ -946,6 +947,8 @@ impl App {
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
             land_approval_label: config.land.approval_label.clone(),
+            branch_prefix: config.source_control.branch_prefix.clone(),
+            commit_message_model: config.source_control.commit_message_model.clone(),
             work_index_linear_team_configured: config
                 .work_index
                 .linear_team
@@ -2239,6 +2242,8 @@ impl App {
 
         if !invalid_section("land") {
             self.state.land_approval_label = config.land.approval_label.clone();
+            self.state.branch_prefix = config.source_control.branch_prefix.clone();
+            self.state.commit_message_model = config.source_control.commit_message_model.clone();
         }
 
         if !invalid_section("work_index") {

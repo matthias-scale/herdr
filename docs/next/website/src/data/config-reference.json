@@ -1409,6 +1409,24 @@
       ]
     },
     {
+      "id": "source_control",
+      "title": "Source control",
+      "keys": [
+        {
+          "key": "source_control.commit_message_model",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Model exported to the Commit action as HERDR_COMMIT_MESSAGE_MODEL so a prepare-commit-msg hook can draft the message. Empty runs `git commit` unchanged."
+        },
+        {
+          "key": "source_control.branch_prefix",
+          "type": "string",
+          "default": "\"issue/\"",
+          "description": "Prefix for branch names Herdr derives from a ticket."
+        }
+      ]
+    },
+    {
       "id": "land",
       "title": "Pull request landing",
       "keys": [

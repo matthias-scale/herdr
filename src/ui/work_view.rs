@@ -784,6 +784,7 @@ fn render_ticket_start_menu(
         return;
     };
     let branch = crate::ui::work_list_detail::ticket_worktree_branch(
+        &app.branch_prefix,
         &item.summary.identifier,
         item.summary.title.as_deref().unwrap_or_default(),
     );

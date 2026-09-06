@@ -261,28 +261,34 @@ fn render_probe_section(
         return;
     }
 
-    let lines = app
-        .tool_probes_for(kind)
-        .into_iter()
-        .map(|probe| {
-            let marker_style = match probe.outcome {
-                crate::app::probes::ToolProbeOutcome::Ready => Style::default().fg(p.green),
-                crate::app::probes::ToolProbeOutcome::NeedsAttention => {
-                    Style::default().fg(p.yellow)
-                }
-                crate::app::probes::ToolProbeOutcome::Missing => Style::default().fg(p.overlay0),
-                crate::app::probes::ToolProbeOutcome::TimedOut => Style::default().fg(p.red),
-            };
-            Line::from(vec![
-                Span::styled(format!(" {} ", probe.outcome.marker()), marker_style),
-                Span::styled(
-                    format!("{:<10}", probe.label),
-                    Style::default().fg(p.subtext0),
+    let mut lines = Vec::new();
+    for probe in app.tool_probes_for(kind) {
+        let marker_style = match probe.outcome {
+            crate::app::probes::ToolProbeOutcome::Ready => Style::default().fg(p.green),
+            crate::app::probes::ToolProbeOutcome::NeedsAttention => Style::default().fg(p.yellow),
+            crate::app::probes::ToolProbeOutcome::Missing => Style::default().fg(p.overlay0),
+            crate::app::probes::ToolProbeOutcome::TimedOut => Style::default().fg(p.red),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", probe.outcome.marker()), marker_style),
+            Span::styled(
+                format!("{:<10}", probe.label),
+                Style::default().fg(p.subtext0),
+            ),
+            Span::styled(probe.detail.clone(), Style::default().fg(p.overlay1)),
+        ]));
+        // Version alone does not say how Herdr starts the agent; the flag line
+        // does, and it comes from the dispatch argv builder.
+        if kind == crate::app::probes::ToolProbeKind::Provider {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "   {}",
+                    crate::app::settings_providers::provider_flags_label(app, probe.label)
                 ),
-                Span::styled(probe.detail.clone(), Style::default().fg(p.overlay1)),
-            ])
-        })
-        .collect::<Vec<_>>();
+                Style::default().fg(p.overlay0),
+            )));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), body);
 }
 
@@ -295,9 +301,32 @@ fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect)
         heading,
     );
 
-    let worktree_root = app.worktree_directory.display().to_string();
+    let commit_message_model = if app.commit_message_model.trim().is_empty() {
+        "unset (git commit as-is)".to_string()
+    } else {
+        app.commit_message_model.clone()
+    };
+    let branch_prefix = if app.branch_prefix.is_empty() {
+        "none".to_string()
+    } else {
+        app.branch_prefix.clone()
+    };
     let rows = [
-        ("worktree root", worktree_root, "worktrees.directory"),
+        (
+            "commit message model",
+            commit_message_model,
+            "source_control.commit_message_model",
+        ),
+        (
+            "default branch prefix",
+            branch_prefix,
+            "source_control.branch_prefix",
+        ),
+        (
+            "worktree root",
+            app.worktree_directory.display().to_string(),
+            "worktrees.directory",
+        ),
         (
             "landing approval label",
             app.land_approval_label.clone(),
@@ -531,7 +560,7 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
             content_area,
             crate::app::probes::ToolProbeKind::Provider,
             "providers",
-            "agent CLIs found on PATH",
+            "agent CLIs found on PATH, with the flags herdr launches them with",
         ),
         SettingsSection::Integrations => render_settings_integrations(app, frame, content_area),
         SettingsSection::SourceControl => render_settings_source_control(app, frame, content_area),

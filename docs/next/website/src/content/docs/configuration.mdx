@@ -562,6 +562,25 @@ font includes Nerd Font glyphs, opt in to file icons:
 icons = "nerd"
 ```
 
+## Source control
+
+Settings → Source control shows these keys. Both defaults keep Herdr's previous
+behaviour:
+
+```toml
+[source_control]
+# Model exported to the Commit action as HERDR_COMMIT_MESSAGE_MODEL, so a
+# prepare-commit-msg hook can draft the message with it. Empty, the default,
+# runs `git commit` unchanged. Only bare model tokens are exported.
+commit_message_model = ""
+
+# Prefix Herdr puts in front of a branch name derived from a ticket, for
+# example issue/sca-3165-image-edit. Default: "issue/".
+branch_prefix = "issue/"
+```
+
+The worktree root shown next to them is `worktrees.directory`.
+
 ## Pull request landing
 
 The Land action requires successful checks, a clean merge state, and either an
