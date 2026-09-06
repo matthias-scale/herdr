@@ -1754,6 +1754,7 @@ mod tests {
             let text = rendered_text_at(&missive_state(1), width, 24);
             assert!(text.contains("⚲ open"), "width {width}: {text}");
             assert!(text.contains("r refresh"), "width {width}: {text}");
+            assert!(!text.contains("teammates"), "width {width}: {text}");
         }
     }
 
