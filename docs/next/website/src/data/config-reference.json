@@ -698,6 +698,12 @@
           "description": "Open the local Claude Code and Codex usage dashboard."
         },
         {
+          "key": "keys.tickets",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+t\"",
+          "description": "Open the Linear tickets view over the repo-wide work index."
+        },
+        {
           "key": "keys.inbox",
           "type": "keybinding",
           "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",

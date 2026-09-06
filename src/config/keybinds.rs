@@ -378,6 +378,7 @@ pub struct Keybinds {
     pub symphony: ActionKeybinds,
     pub work: ActionKeybinds,
     pub usage: ActionKeybinds,
+    pub tickets: ActionKeybinds,
     pub inbox: ActionKeybinds,
     pub home: ActionKeybinds,
     pub toggle_status_detail: ActionKeybinds,
@@ -570,6 +571,7 @@ impl Config {
             symphony: empty_action!(),
             work: empty_action!(),
             usage: empty_action!(),
+            tickets: empty_action!(),
             inbox: empty_action!(),
             home: empty_action!(),
             toggle_status_detail: empty_action!(),
@@ -749,6 +751,7 @@ impl Config {
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.work, work, source);
             apply_action!(keybinds.usage, usage, source);
+            apply_action!(keybinds.tickets, tickets, source);
             apply_action!(keybinds.inbox, inbox, source);
             apply_action!(keybinds.home, home, source);
             apply_action!(keybinds.toggle_status_detail, toggle_status_detail, source);

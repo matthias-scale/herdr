@@ -562,6 +562,10 @@ impl App {
                 self.toggle_usage_view();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::OpenTicketView => {
+                self.toggle_ticket_view();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::OpenInbox => {
                 self.state.toggle_inbox();
                 leave_navigate_mode(&mut self.state);
@@ -1876,6 +1880,7 @@ pub(crate) enum NavigateAction {
     OpenSymphony,
     OpenWorkView,
     OpenUsageView,
+    OpenTicketView,
     Detach,
     OpenNavigator,
 }
@@ -2086,6 +2091,7 @@ fn non_indexed_action_for_key(
         (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.work, NavigateAction::OpenWorkView),
         (&kb.usage, NavigateAction::OpenUsageView),
+        (&kb.tickets, NavigateAction::OpenTicketView),
         (&kb.inbox, NavigateAction::OpenInbox),
         (&kb.home, NavigateAction::OpenHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -2503,7 +2509,13 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenWorkView => {
-            state.toggle_work_view(false, None);
+            state.work_view = Some(crate::app::state::WorkViewState::new(false, None));
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenTicketView => {
+            let mut view = crate::app::state::WorkViewState::new(false, None);
+            view.projection = crate::app::state::WorkProjection::Tickets;
+            state.work_view = Some(view);
             leave_navigate_mode(state);
         }
         NavigateAction::OpenUsageView => {
@@ -3525,6 +3537,30 @@ mod tests {
             ),
             Some(NavigateAction::ReloadConfig)
         );
+    }
+
+    #[test]
+    fn default_ticket_keybinding_opens_ticket_projection() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::OpenTicketView)
+        );
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::OpenTicketView,
+            ActionContext::Prefix,
+        );
+        assert!(state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| { view.projection == crate::app::state::WorkProjection::Tickets }));
     }
 
     #[test]

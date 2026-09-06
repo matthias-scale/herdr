@@ -683,6 +683,8 @@ pub struct KeysConfig {
     pub work: BindingConfig,
     /// Open the historical provider usage view. Default: "prefix+ctrl+y"
     pub usage: BindingConfig,
+    /// Open the Linear Tickets view. Default: "prefix+ctrl+t"
+    pub tickets: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
@@ -857,6 +859,7 @@ pub(crate) struct KeysConfigOverlay {
     work: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<BindingConfig>,
+    tickets: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
     home: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -962,6 +965,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(symphony);
         apply_field!(work);
         apply_field!(usage);
+        apply_field!(tickets);
         apply_field!(inbox);
         apply_field!(home);
         apply_field!(toggle_status_detail);
@@ -1090,6 +1094,7 @@ impl KeysConfig {
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(work, keybinds.work);
         copy_effective_action_field!(usage, keybinds.usage);
+        copy_effective_action_field!(tickets, keybinds.tickets);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
         copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
@@ -1483,6 +1488,7 @@ impl Default for KeysConfig {
             symphony: BindingConfig::one("prefix+shift+s"),
             work: BindingConfig::one("prefix+ctrl+w"),
             usage: BindingConfig::one("prefix+ctrl+y"),
+            tickets: BindingConfig::one("prefix+ctrl+t"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),

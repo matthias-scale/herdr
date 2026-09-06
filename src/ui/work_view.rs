@@ -7,8 +7,13 @@ use ratatui::{
 };
 
 use crate::{
-    app::state::{AppState, Palette, PrDetailTab, WorkProjection, WorkViewState},
-    ui::work_list_detail::{sorted_filtered_prs, WorkItem as _, WorkRow},
+    app::state::{
+        AppState, Palette, PrDetailTab, TicketMoreChoice, TicketTransitionChoice, WorkProjection,
+        WorkViewState,
+    },
+    ui::work_list_detail::{
+        sorted_filtered_prs, sorted_filtered_tickets, TicketItem, WorkItem as _, WorkRow,
+    },
     work_projection::{project_review_queue, WorkReviewQueueRow},
 };
 
@@ -23,10 +28,129 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
     match state.projection {
         WorkProjection::PullRequests => render_pull_requests(app, state, sections[0], frame),
+        WorkProjection::Tickets => render_tickets(app, state, sections[0], frame),
         WorkProjection::ReviewQueue => render_review_queue(palette, state, sections[0], frame),
         projection => render_placeholder(palette, projection, sections[0], frame),
     }
     render_footer(palette, state, sections[1], frame);
+}
+
+fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    let palette = &app.palette;
+    let observed_at = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.observed_at)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let has_context_pr = super::dock::pr::focused_pr_key(app).is_some();
+    let items = state.snapshot.as_ref().map(|snapshot| {
+        sorted_filtered_tickets(
+            &snapshot.items,
+            &app.work_item_detail_cache,
+            &state.search,
+            state.ticket_sort,
+            state.ticket_open_only,
+            observed_at,
+            has_context_pr,
+        )
+    });
+    let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {
+        " · refreshing…"
+    } else {
+        ""
+    };
+    let columns = if area.width >= 72 {
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    };
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Tickets{refresh} "))
+        .border_style(Style::default().fg(palette.accent));
+    let left_inner = left.inner(columns[0]);
+    frame.render_widget(left, columns[0]);
+    let filter = if state.ticket_open_only {
+        "open"
+    } else {
+        "all"
+    };
+    let cursor = if state.search_focused { "▏" } else { "" };
+    let mut lines = vec![Line::styled(
+        format!(
+            " 🔍 {}{cursor}   ⇅ {}   ⚲ {filter}",
+            if state.search.is_empty() {
+                "search or label:bug"
+            } else {
+                &state.search
+            },
+            state.ticket_sort.label()
+        ),
+        Style::default().fg(palette.subtext0),
+    )];
+    let message = if !state.enabled {
+        Some("work index disabled".to_string())
+    } else if state.snapshot.is_none() {
+        Some("work index not yet collected".to_string())
+    } else {
+        state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.unavailable.clone())
+    };
+    if let Some(message) = message {
+        lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
+        frame.render_widget(Paragraph::new(lines), left_inner);
+        return;
+    }
+    let items = items.unwrap_or_default();
+    let selected = state
+        .selected
+        .as_ref()
+        .and_then(|key| {
+            key.ticket_id
+                .as_deref()
+                .and_then(|ticket| items.iter().position(|item| item.key() == ticket))
+        })
+        .unwrap_or(0);
+    let mut current_group = "";
+    for (index, item) in items.iter().enumerate() {
+        let row = item.row();
+        if row.group != current_group {
+            current_group = row.group;
+            lines.push(Line::styled(
+                format!(" {current_group}"),
+                Style::default()
+                    .fg(palette.subtext0)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        push_work_row(
+            &mut lines,
+            &row,
+            index == selected,
+            palette,
+            left_inner.width,
+            false,
+        );
+    }
+    if items.is_empty() {
+        lines.push(Line::styled(
+            " no matching tickets",
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), left_inner);
+
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Ticket ")
+        .border_style(Style::default().fg(palette.accent));
+    let detail_inner = detail_block.inner(columns[1]);
+    frame.render_widget(detail_block, columns[1]);
+    if let Some(item) = items.get(selected) {
+        render_ticket_detail(app, state, item, detail_inner, frame);
+    }
 }
 
 fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
@@ -198,12 +322,13 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        push_pr_row(
+        push_work_row(
             &mut lines,
             &row,
             index == selected,
             palette,
             left_inner.width,
+            true,
         );
     }
     if items.is_empty() {
@@ -225,12 +350,13 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
     }
 }
 
-fn push_pr_row(
+fn push_work_row(
     lines: &mut Vec<Line<'static>>,
     row: &WorkRow,
     selected: bool,
     palette: &Palette,
     width: u16,
+    metadata_on_second_line: bool,
 ) {
     let style = if selected {
         Style::default()
@@ -240,20 +366,163 @@ fn push_pr_row(
     } else {
         Style::default().fg(palette.text)
     };
-    let available = usize::from(width).saturating_sub(row.age.chars().count() + 6);
+    let suffix = if metadata_on_second_line {
+        row.age.clone()
+    } else {
+        format!("{}  {}", row.changes, row.age)
+    };
+    let prefix = if metadata_on_second_line {
+        String::new()
+    } else {
+        format!("{} ", row.metadata)
+    };
+    let available =
+        usize::from(width).saturating_sub(prefix.chars().count() + suffix.chars().count() + 5);
     lines.push(Line::styled(
         format!(
-            " {} {}  {:>3}",
+            " {} {}{}  {}",
             row.glyph,
+            prefix,
             fit_cell(&row.title, available),
-            row.age
+            suffix
         ),
         style,
     ));
+    if metadata_on_second_line {
+        lines.push(Line::styled(
+            format!("   {}  {}", row.metadata, row.changes),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+}
+
+fn render_ticket_detail(
+    app: &AppState,
+    state: &WorkViewState,
+    item: &TicketItem<'_>,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let palette = &app.palette;
+    let detail = item.detail();
+    let link_enabled = item.actions().iter().any(|action| {
+        action.kind == crate::ui::work_list_detail::WorkActionKind::LinkPr && action.enabled
+    });
+    let link_style = if link_enabled {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::DIM)
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            ratatui::text::Span::styled(
+                format!(" {}   [Start thread ▾] [Transition ▾] ", detail.heading),
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ratatui::text::Span::styled("[Link PR] ", link_style),
+            ratatui::text::Span::styled("⋯", Style::default().fg(palette.accent)),
+        ]),
+        Line::styled(
+            format!(" {}", detail.title),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(" {}", detail.byline),
+            Style::default().fg(palette.subtext0),
+        ),
+        Line::styled(
+            format!(" Linked PRs  {}", detail.linked_prs.len()),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    for pr in &detail.linked_prs {
+        let check = match pr.check_state {
+            crate::work_index::PrCheckState::Passing => "✓",
+            crate::work_index::PrCheckState::Failing => "✗",
+            crate::work_index::PrCheckState::Pending => "◌",
+            crate::work_index::PrCheckState::Unknown => "—",
+        };
+        lines.push(Line::styled(
+            format!("  ⑂ #{} {}  {check}", pr.number, pr.title),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
     lines.push(Line::styled(
-        format!("   {}  {}", row.metadata, row.changes),
-        Style::default().fg(palette.subtext0),
+        " Description",
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
     ));
+    lines.extend(crate::ui::markdown::body_lines(
+        palette,
+        crate::ui::work_list_detail::description_without_checklist(detail.description.as_deref())
+            .as_deref(),
+        usize::from(area.width.saturating_sub(2)),
+        " ",
+    ));
+    if !detail.checks.is_empty() {
+        lines.push(Line::styled(
+            " Acceptance criteria",
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for (text, state) in &detail.checks {
+            lines.push(Line::styled(
+                format!("  {} {text}", if state == "done" { "✓" } else { "✗" }),
+                Style::default().fg(palette.subtext0),
+            ));
+        }
+    }
+    lines.push(Line::styled(
+        format!(" Comments  {}  newest first", detail.comments.len()),
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    ));
+    for comment in &detail.comments {
+        lines.push(Line::styled(
+            format!("  {}", comment.author.as_deref().unwrap_or("unknown")),
+            Style::default().fg(palette.subtext0),
+        ));
+        lines.extend(crate::ui::markdown::body_lines(
+            palette,
+            Some(&comment.body),
+            usize::from(area.width.saturating_sub(4)),
+            "    ",
+        ));
+    }
+    if let Some(draft) = state.ticket_comment_draft.as_deref() {
+        lines.push(Line::styled(
+            format!(" Comment: {draft}▏  Enter to stage · Esc cancel"),
+            Style::default().fg(palette.yellow),
+        ));
+    }
+    if let Some(write) = state.pending_write.as_ref() {
+        lines.push(Line::styled(
+            format!(" Confirm {}? [y/N]", write.describe()),
+            Style::default()
+                .fg(palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+
+    if let Some(choice) = state.ticket_start_menu {
+        render_ticket_start_menu(app, frame, area, item, choice);
+    } else if let Some(choice) = state.ticket_transition_menu {
+        render_ticket_transition_menu(app, frame, area, item, choice);
+    } else if let Some(choice) = state.ticket_more_menu {
+        render_ticket_more_menu(app, frame, area, choice);
+    }
 }
 
 fn render_pr_detail(
@@ -478,6 +747,151 @@ fn checkout_menu_layout(
     )
 }
 
+fn ticket_menu_layout(
+    area: Rect,
+    anchor_x: u16,
+    item_count: usize,
+    selected: usize,
+    width: u16,
+) -> Option<crate::ui::dropdown::DropdownLayout> {
+    crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor: Rect::new(
+                area.x.saturating_add(anchor_x).min(area.right()),
+                area.y,
+                width.min(area.width),
+                1,
+            ),
+            item_count,
+            selected,
+            has_filter: false,
+            max_rows: item_count,
+            min_width: width,
+        },
+        area,
+    )
+}
+
+fn render_ticket_start_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    item: &TicketItem<'_>,
+    choice: crate::app::state::PrCheckoutChoice,
+) {
+    let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
+    let Some(layout) = ticket_menu_layout(area, 12, 2, selected, 42) else {
+        return;
+    };
+    let branch = crate::ui::work_list_detail::ticket_worktree_branch(
+        &item.summary.identifier,
+        item.summary.title.as_deref().unwrap_or_default(),
+    );
+    let options = [
+        (
+            crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            "Current checkout".to_string(),
+        ),
+        (
+            crate::app::state::PrCheckoutChoice::NewWorktree,
+            format!("New worktree {branch}"),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(
+            options
+                .into_iter()
+                .map(|(option, label)| {
+                    Line::styled(
+                        format!("{} {label}", if option == choice { "▸" } else { " " }),
+                        Style::default()
+                            .fg(app.palette.text)
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
+fn render_ticket_transition_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    item: &TicketItem<'_>,
+    choice: TicketTransitionChoice,
+) {
+    let selected = TicketTransitionChoice::ALL
+        .iter()
+        .position(|option| *option == choice)
+        .unwrap_or(0);
+    let Some(layout) = ticket_menu_layout(area, 29, 4, selected, 20) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(
+            TicketTransitionChoice::ALL
+                .into_iter()
+                .map(|option| {
+                    let enabled = item.transition_enabled(option.label());
+                    Line::styled(
+                        format!(
+                            "{} {}{}",
+                            if option == choice { "▸" } else { " " },
+                            option.label(),
+                            if enabled { "" } else { " · current" }
+                        ),
+                        Style::default()
+                            .fg(if enabled {
+                                app.palette.text
+                            } else {
+                                app.palette.overlay0
+                            })
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
+fn render_ticket_more_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    choice: TicketMoreChoice,
+) {
+    let selected = TicketMoreChoice::ALL
+        .iter()
+        .position(|option| *option == choice)
+        .unwrap_or(0);
+    let Some(layout) = ticket_menu_layout(area, 54, 3, selected, 20) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(
+            TicketMoreChoice::ALL
+                .into_iter()
+                .map(|option| {
+                    Line::styled(
+                        format!(
+                            "{} {}",
+                            if option == choice { "▸" } else { " " },
+                            option.label()
+                        ),
+                        Style::default()
+                            .fg(app.palette.text)
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
 fn render_placeholder(
     palette: &Palette,
     projection: WorkProjection,
@@ -502,7 +916,9 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
         WorkProjection::PullRequests => {
             " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   c checkout   l Land   x fix"
         }
-        WorkProjection::Tickets => " ←/→ view PRs [tickets] agents   not yet available",
+        WorkProjection::Tickets => {
+            " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more"
+        }
         WorkProjection::Agents => " ←/→ view PRs tickets [agents]   not yet available",
         WorkProjection::ReviewQueue => {
             " ←/→ view PRs tickets agents [review queue]   ↑/↓ move   f filter repo"
@@ -621,6 +1037,50 @@ mod tests {
         }
     }
 
+    fn ticket(identifier: &str, group: crate::work_index::TicketGroup) -> WorkItem {
+        WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: None,
+            pr_url: None,
+            pr_title: None,
+            pr_state: None,
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 0,
+            deletions: 0,
+            author: None,
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Unknown,
+            audience: crate::work_index::PrAudience::Unclassified,
+            ticket_ids: vec![identifier.into()],
+            ticket_title: Some("ticket title".into()),
+            ticket_state: Some("In Progress".into()),
+            ticket_details: vec![crate::work_index::WorkTicket {
+                identifier: identifier.into(),
+                title: Some("ticket title".into()),
+                description: Some("- [x] done\n- [ ] left".into()),
+                state: Some("In Progress".into()),
+                assignee: Some("matthias".into()),
+                priority: Some(2),
+                cycle: Some("cycle 34".into()),
+                group,
+                created_at: None,
+                updated_at: None,
+                branch: None,
+                labels: vec!["bug".into()],
+                url: Some(format!("https://linear.app/acme/issue/{identifier}")),
+                parent: None,
+                relations: Vec::new(),
+            }],
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: WorkItemSource::default(),
+        }
+    }
+
     fn rendered_text(state: &WorkViewState) -> String {
         let mut app = AppState::test_new();
         app.work_view = Some(state.clone());
@@ -701,7 +1161,7 @@ mod tests {
 
         let mut placeholder = WorkViewState::new(true, Some(snapshot(Vec::new())));
         placeholder.projection = WorkProjection::Tickets;
-        assert!(rendered_text(&placeholder).contains("tickets not yet available"));
+        assert!(rendered_text(&placeholder).contains("no matching tickets"));
     }
 
     #[test]
@@ -813,5 +1273,42 @@ mod tests {
             crate::app::state::PrCheckoutChoice::CurrentCheckout,
         )
         .is_none());
+    }
+
+    #[test]
+    fn ticket_fixture_renders_list_detail_and_refresh_state() {
+        let mut state = WorkViewState::new(
+            true,
+            Some(snapshot(vec![
+                ticket("SCA-3165", crate::work_index::TicketGroup::Assigned),
+                ticket("SCA-3180", crate::work_index::TicketGroup::Triage),
+            ])),
+        );
+        state.projection = WorkProjection::Tickets;
+        state.refreshing = true;
+        let text = rendered_text(&state);
+        assert!(text.contains("Tickets · refreshing…"), "{text}");
+        assert!(text.contains("Assigned to me"), "{text}");
+        assert!(text.contains("Triage"), "{text}");
+        assert!(text.contains("SCA-3165"), "{text}");
+        assert!(
+            text.contains("In Progress · P2 · matthias · cycle 34"),
+            "{text}"
+        );
+        assert!(text.contains("Acceptance criteria"), "{text}");
+        assert!(text.contains("[Start thread ▾]"), "{text}");
+        assert!(text.contains("[Transition ▾]"), "{text}");
+    }
+
+    #[test]
+    fn ticket_dropdowns_open_downward_and_clamp() {
+        let area = Rect::new(10, 4, 60, 8);
+        for (anchor_x, count, selected, width) in [(12, 2, 1, 42), (29, 4, 3, 20), (54, 3, 2, 20)] {
+            let layout = ticket_menu_layout(area, anchor_x, count, selected, width)
+                .expect("ticket menu fits below header");
+            assert_eq!(layout.rect.y, area.y + 1);
+            assert!(layout.rect.bottom() <= area.bottom());
+        }
+        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 1, 2, 0, 20).is_none());
     }
 }

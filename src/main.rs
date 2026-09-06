@@ -256,6 +256,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # symphony = "prefix+shift+s"
 # work = "prefix+ctrl+w"         # work projection view: PRs / tickets / agents / review
 # usage = "prefix+ctrl+y"        # historical Claude Code and Codex usage
+# tickets = "prefix+ctrl+t"      # Linear tickets view
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

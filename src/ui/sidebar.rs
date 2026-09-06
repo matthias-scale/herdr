@@ -652,13 +652,26 @@ pub(crate) fn sidebar_footer_work_hit_area(area: Rect) -> Rect {
     )
 }
 
-pub(crate) fn sidebar_footer_usage_hit_area(area: Rect) -> Rect {
+pub(crate) fn sidebar_footer_ticket_hit_area(area: Rect) -> Rect {
     let content_width = area.width.saturating_sub(1);
     if content_width < 6 || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
         area.x.saturating_add(4),
+        area.bottom().saturating_sub(1),
+        3,
+        1,
+    )
+}
+
+pub(crate) fn sidebar_footer_usage_hit_area(area: Rect) -> Rect {
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 9 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(7),
         area.bottom().saturating_sub(1),
         3,
         1,
@@ -2917,6 +2930,19 @@ pub(super) fn render_sidebar(
             Style::default().fg(p.overlay0)
         };
         frame.render_widget(Paragraph::new(Span::styled(" ⑂ ", style)), work);
+    }
+    let tickets = sidebar_footer_ticket_hit_area(area);
+    if tickets.width > 0 {
+        let style = if app
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Tickets)
+        {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(" ◎ ", style)), tickets);
     }
     let usage = sidebar_footer_usage_hit_area(area);
     if usage.width > 0 {
@@ -8282,6 +8308,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             description: None,
             state: Some("In Progress".into()),
             assignee: Some(assignee.into()),
+            priority: None,
+            cycle: None,
+            group: crate::work_index::TicketGroup::Assigned,
             created_at: None,
             updated_at: None,
             branch: None,
