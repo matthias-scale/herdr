@@ -228,6 +228,14 @@ impl App {
         });
     }
 
+    /// Start the probes a settings section asked for while it was entered.
+    pub(crate) fn start_requested_tool_probes(&mut self) {
+        if !std::mem::take(&mut self.state.request_tool_probes) {
+            return;
+        }
+        self.start_tool_probes_if_needed();
+    }
+
     pub(crate) fn handle_tool_probes_finished(&mut self, probes: Vec<ToolProbe>) -> bool {
         self.state.tool_probes = ToolProbeState::Ready(probes);
         true

@@ -53,12 +53,7 @@ impl App {
         {
             self.refresh_integration_recommendations();
         }
-        if matches!(
-            self.state.settings.section,
-            SettingsSection::Providers | SettingsSection::Integrations
-        ) {
-            self.start_tool_probes_if_needed();
-        }
+        self.start_requested_tool_probes();
     }
 }
 
@@ -191,10 +186,19 @@ fn default_selected_index(state: &AppState, section: SettingsSection) -> usize {
     }
 }
 
+/// The one way a settings section is entered, from the keyboard, the mouse, or
+/// `open_settings_at`. Sections backed by CLI probes request them here so no
+/// entry path can reach them unprobed.
 fn select_section(state: &mut AppState, section: SettingsSection) {
     state.settings.section = section;
     state.settings.list.selected = default_selected_index(state, section);
     state.settings.archive_delete_armed = false;
+    if matches!(
+        section,
+        SettingsSection::Providers | SettingsSection::Integrations
+    ) {
+        state.request_tool_probes = true;
+    }
 }
 
 fn move_selection(state: &mut AppState, delta: isize) {
@@ -647,6 +651,77 @@ mod tests {
             true,
         )];
         assert!(state.integration_updates_available());
+    }
+
+    /// The nav-row coordinate for `section`, or `None` when it is scrolled out.
+    fn nav_row_for(state: &AppState, section: SettingsSection) -> Option<(u16, u16)> {
+        let nav = crate::ui::settings_areas(state.settings_inner_rect()).nav;
+        let scroll = crate::ui::settings_nav_scroll(state, nav);
+        let index = SettingsSection::ALL.iter().position(|s| *s == section)?;
+        let offset = index.checked_sub(scroll)?;
+        if offset >= nav.height as usize {
+            return None;
+        }
+        Some((nav.x, nav.y + offset as u16))
+    }
+
+    #[test]
+    fn clicking_the_providers_nav_row_starts_the_tool_probes() {
+        let mut app = app_for_mouse_test();
+        open_settings_at(&mut app.state, SettingsSection::General);
+        // Opening on an unprobed section leaves nothing requested.
+        assert!(!app.state.request_tool_probes);
+
+        let (col, row) =
+            nav_row_for(&app.state, SettingsSection::Providers).expect("providers nav row");
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert_eq!(app.state.settings.section, SettingsSection::Providers);
+        assert!(
+            app.state.tool_probes_pending(),
+            "the probes are pending until the worker answers"
+        );
+        assert!(
+            matches!(
+                app.state.tool_probes,
+                crate::app::probes::ToolProbeState::Running
+            ),
+            "the mouse path starts the probes: {:?}",
+            app.state.tool_probes
+        );
+        assert!(
+            !app.state.request_tool_probes,
+            "the request is drained once it is served"
+        );
+    }
+
+    #[test]
+    fn entering_a_probed_section_requests_the_probes_from_every_path() {
+        let mut state = app_for_mouse_test().state;
+
+        open_settings_at(&mut state, SettingsSection::Providers);
+        assert!(state.request_tool_probes, "open_settings_at requests");
+
+        state.request_tool_probes = false;
+        open_settings_at(&mut state, SettingsSection::General);
+        assert!(!state.request_tool_probes, "an unprobed section does not");
+
+        // Keyboard: tab through to Integrations.
+        while state.settings.section != SettingsSection::Integrations {
+            update_settings_state(
+                &mut state,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            );
+        }
+        assert!(state.request_tool_probes, "the keyboard path requests");
+
+        state.request_tool_probes = false;
+        open_settings_at(&mut state, SettingsSection::General);
+        let (col, row) =
+            nav_row_for(&state, SettingsSection::Providers).expect("providers nav row");
+        state.handle_settings_mouse(mouse_down(col, row));
+        assert_eq!(state.settings.section, SettingsSection::Providers);
+        assert!(state.request_tool_probes, "the mouse path requests");
     }
 
     #[test]
