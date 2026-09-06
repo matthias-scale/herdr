@@ -2284,6 +2284,10 @@ pub struct AppState {
         std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
     /// Opening the ref picker asks the runtime layer to refresh this repository.
     pub(crate) request_home_ref_refresh: Option<std::path::PathBuf>,
+    /// A settings section that needs the tool probes was entered.
+    /// Drained by `App::start_requested_tool_probes`, which owns the
+    /// thread the pure state layer cannot spawn.
+    pub(crate) request_tool_probes: bool,
     /// Unsent text typed by a human in each pane. Home replies must not touch a
     /// pane while this draft exists because the terminal owns that edit buffer.
     pub(crate) pending_human_drafts: std::collections::HashMap<PaneId, String>,
@@ -3650,6 +3654,7 @@ impl AppState {
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
+            request_tool_probes: false,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),

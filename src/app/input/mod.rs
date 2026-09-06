@@ -143,6 +143,14 @@ impl App {
         &mut self,
         key: TerminalKey,
     ) -> Option<super::TerminalInputTarget> {
+        let target = self.handle_key_inner(key).await;
+        // Every keyboard path that can enter a probed settings section runs
+        // through here, so the probes start once from one place.
+        self.start_requested_tool_probes();
+        target
+    }
+
+    async fn handle_key_inner(&mut self, key: TerminalKey) -> Option<super::TerminalInputTarget> {
         if self.state.popup_pane.is_some() {
             return self.handle_terminal_key(key).await;
         }
@@ -2665,6 +2673,7 @@ impl App {
         {
             self.refresh_integration_recommendations();
         }
+        self.start_requested_tool_probes();
         if self.state.agent_panel_sort != previous_agent_panel_sort {
             self.save_agent_panel_sort(self.state.agent_panel_sort);
         }

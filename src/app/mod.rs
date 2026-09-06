@@ -723,6 +723,7 @@ impl App {
             },
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
+            request_tool_probes: false,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,

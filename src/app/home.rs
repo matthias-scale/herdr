@@ -2328,10 +2328,7 @@ mod tests {
         app.add_project_start_dir = "   ".to_string();
         assert_eq!(app.home_browse_start_directory(), directory);
 
-        app.add_project_start_dir = directory
-            .join("does-not-exist")
-            .display()
-            .to_string();
+        app.add_project_start_dir = directory.join("does-not-exist").display().to_string();
         assert_eq!(app.home_browse_start_directory(), directory);
 
         // A file is not a directory the picker can open.
