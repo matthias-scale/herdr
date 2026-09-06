@@ -192,13 +192,17 @@ settle_and_assert() {
 }
 
 workspaces_json=$(run_herdr workspace list)
-mapfile -t sample_workspace_ids < <(
+# mapfile needs bash 4; macOS ships bash 3.2, so read the ids line by line.
+sample_workspace_ids=()
+while IFS= read -r workspace_id; do
+    [[ -n $workspace_id ]] && sample_workspace_ids+=("$workspace_id")
+done < <(
     jq -r '.result.workspaces[] | select(.label == "t3-sample") | .workspace_id' \
         <<<"$workspaces_json"
 )
 
 if [[ $reset == true ]]; then
-    for workspace_id in "${sample_workspace_ids[@]}"; do
+    for workspace_id in ${sample_workspace_ids[@]+"${sample_workspace_ids[@]}"}; do
         run_herdr workspace close "$workspace_id" >/dev/null
     done
 elif [[ ${#sample_workspace_ids[@]} -gt 0 ]]; then
