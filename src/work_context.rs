@@ -1567,6 +1567,47 @@ mod tests {
     }
 
     #[test]
+    fn missive_urls_merge_across_tiers_and_never_persist_as_manual() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_hook_turn(PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/hook".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        state
+            .replace_git_observation(PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/git".into()],
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.effective().missive_urls,
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/hook",
+                "https://mail.missiveapp.com/#inbox/conversations/git",
+            ]
+        );
+
+        // T3 made Missive links an explicit manual field. Keep the parent test
+        // name while asserting the new tier contract instead of its old premise.
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                clear_fields: vec![PaneWorkContextField::MissiveUrls],
+                ..Default::default()
+            })
+            .expect("clear Missive URLs");
+        assert_eq!(
+            state.effective().missive_urls,
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/hook",
+                "https://mail.missiveapp.com/#inbox/conversations/git",
+            ]
+        );
+    }
+
+    #[test]
     fn manual_missive_patch_normalizes_and_clears() {
         let mut state = PaneWorkContextState::default();
         state

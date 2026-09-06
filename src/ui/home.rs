@@ -2181,6 +2181,26 @@ mod tests {
     }
 
     #[test]
+    fn home_tab_order_includes_each_agents_supported_effort_options() {
+        let mut home = HomeState::default();
+        home.focus = Some(HomeFocus::Model);
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Effort));
+
+        home.set_model("claude-fable-5-1");
+        home.focus = Some(HomeFocus::Effort);
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Context));
+
+        home.set_agent(crate::detect::Agent::Codex);
+        home.focus = Some(HomeFocus::Model);
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Effort));
+        home.move_focus(false);
+        assert_eq!(home.focus, Some(HomeFocus::Directory));
+    }
+
+    #[test]
     fn narrow_composer_collapses_chip_gaps_and_keeps_click_targets_in_bounds() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());

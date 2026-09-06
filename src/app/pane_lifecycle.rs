@@ -7,7 +7,6 @@ use serde::Serialize;
 
 use super::{App, AppState};
 use crate::api::schema::PaneTarget;
-use crate::detect::AgentState;
 use crate::layout::PaneId;
 
 const REAP_LOG_FILE_NAME: &str = "reap-log.jsonl";
@@ -206,7 +205,20 @@ impl App {
 
 fn pane_is_done(pane: &crate::pane::PaneState, terminal: &crate::terminal::TerminalState) -> bool {
     let (state, seen) = terminal.sidebar_projection(pane.seen);
-    state == AgentState::Idle && !seen && !terminal.supervisor_stale
+    if seen || terminal.supervisor_stale {
+        return false;
+    }
+    // Idle is not enough to close a pane. A latched gate, a live sub-agent or a
+    // shell still running below the agent all mean the pane has something left
+    // in it, and an unanswered gate is precisely what keeps a pane idle and
+    // unread for hours. Share the sidebar's definition so the pane the sidebar
+    // paints as blocking can never be reaped underneath it.
+    crate::terminal::state::session_is_quiet(
+        state,
+        !terminal.closing_gates.is_empty() || terminal.usage_limited,
+        terminal.active_subagents,
+        terminal.holds_shell,
+    )
 }
 
 fn strict_deadline(done_since: Instant, threshold: Duration) -> Option<Instant> {
@@ -280,6 +292,7 @@ fn unix_timestamp_seconds() -> u64 {
 mod tests {
     use super::*;
     use crate::detect::Agent;
+    use crate::detect::AgentState;
     use crate::workspace::{Workspace, WorktreeSpaceMembership};
 
     fn lifecycle_state(state: AgentState, seen: bool, done_since: Instant) -> (AppState, PaneId) {
@@ -298,6 +311,54 @@ mod tests {
         pane.done_since = Some(done_since);
         app.reap_done_after = Duration::from_secs(4 * 60 * 60);
         (app, pane_id)
+    }
+
+    #[test]
+    fn never_reaps_a_pane_that_still_has_live_work() {
+        for label in ["subagents", "shell", "usage"] {
+            let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+            let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            match label {
+                "subagents" => terminal.active_subagents = Some(3),
+                "shell" => terminal.holds_shell = true,
+                _ => terminal.usage_limited = true,
+            }
+            let due = app.due_done_pane_ids(Instant::now());
+            assert!(due.is_empty(), "{label}: still-live pane reaped: {due:?}");
+        }
+    }
+
+    #[test]
+    fn never_reaps_a_pane_holding_an_unanswered_gate() {
+        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Gate".into(),
+            text: "Choose the release path".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert!(
+            crate::terminal::state::counts_as_blocked(AgentState::Idle, true, false),
+            "an idle pane with an open gate is blocking in the sidebar"
+        );
+        let due = app.due_done_pane_ids(Instant::now());
+        assert!(
+            due.is_empty(),
+            "a pane waiting on a human gate must not be reaped: {due:?}"
+        );
     }
 
     #[test]

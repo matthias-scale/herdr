@@ -105,6 +105,15 @@ fn render_editor_message(app: &AppState, frame: &mut Frame, area: Rect, message:
     );
 }
 
+impl AppState {
+    /// Selecting Editor after its process exits is an explicit retry request.
+    pub(crate) fn retry_dock_editor(&mut self) {
+        if let Some(agent_pane_id) = focused_agent_pane_id(self) {
+            self.dock_editor_errors.remove(&agent_pane_id);
+        }
+    }
+}
+
 impl App {
     /// Sessions are keyed by the agent pane they follow, so a closed agent leaves
     /// its editor behind with nothing left to reach it: no focus can select the
@@ -128,39 +137,6 @@ impl App {
                 .dock_editor_requested_paths
                 .remove(&agent_pane_id);
         }
-    }
-
-    /// Opens the focused repository's scratchpad in the dock's `$EDITOR`. The
-    /// existing session is torn down first: it was started on a directory and
-    /// cannot be redirected at a file after the fact.
-    pub(crate) fn open_scratchpad_in_editor(&mut self) {
-        let Some(root) = crate::scratchpad::focused_repo_root(&self.state) else {
-            self.show_work_link_notice("no repository for this pane");
-            return;
-        };
-        let Some(agent_pane_id) = focused_agent_pane_id(&self.state) else {
-            self.show_work_link_notice("focus an agent first");
-            return;
-        };
-        let path = crate::scratchpad::scratchpad_path(&root);
-        if let Err(error) = crate::scratchpad::ensure_scratchpad_file(&path) {
-            tracing::warn!(path = %path.display(), %error, "could not create scratchpad");
-            self.show_work_link_notice("could not create the scratchpad");
-            return;
-        }
-        if let Some(session) = self.state.dock_editor_sessions.remove(&agent_pane_id) {
-            if let Some(runtime) = self.terminal_runtimes.remove(&session.terminal_id) {
-                runtime.shutdown();
-            }
-        }
-        self.state.dock_editor_errors.remove(&agent_pane_id);
-        self.state
-            .dock_editor_requested_paths
-            .insert(agent_pane_id, path);
-        self.state.dock_collapsed = false;
-        self.state.dock_tab = Some(DockSurface::Editor);
-        self.state.dock_editor_focused = true;
-        self.ensure_dock_editor();
     }
 
     pub(crate) fn ensure_dock_editor(&mut self) {
@@ -235,6 +211,22 @@ impl App {
             agent_pane_id,
             last_error.unwrap_or_else(|| "no editor command found".to_string()),
         );
+    }
+
+    /// Dock editors do not live in workspace tabs, so handoff exports them
+    /// beside the normal pane inventory and records which agent they follow.
+    #[cfg(unix)]
+    pub(crate) fn dock_editor_handoff_terminals(
+        &self,
+    ) -> Vec<(crate::terminal::TerminalId, PaneId, PaneId)> {
+        self.state
+            .dock_editor_sessions
+            .iter()
+            .filter(|(_, session)| self.terminal_runtimes.get(&session.terminal_id).is_some())
+            .map(|(agent_pane_id, session)| {
+                (session.terminal_id.clone(), *agent_pane_id, session.pane_id)
+            })
+            .collect()
     }
 
     pub(crate) fn resize_dock_editor(&self) {
@@ -388,6 +380,70 @@ mod tests {
 
         assert!(app.state.dock_editor_sessions.is_empty());
         assert!(app.terminal_runtimes.get(&editor_terminal_id).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn dock_editors_are_listed_for_handoff_even_though_no_tab_holds_them() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("editor")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let agent_pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let editor_pane_id = PaneId::alloc();
+        let editor_terminal_id = TerminalId::alloc();
+        app.state.dock_editor_sessions.insert(
+            agent_pane_id,
+            DockEditorSession {
+                pane_id: editor_pane_id,
+                terminal_id: editor_terminal_id.clone(),
+            },
+        );
+        app.terminal_runtimes.insert(
+            editor_terminal_id.clone(),
+            TerminalRuntime::test_with_screen_bytes(10, 2, b"EDITOR"),
+        );
+
+        assert!(app.find_pane(editor_pane_id).is_none());
+        assert_eq!(
+            app.dock_editor_handoff_terminals(),
+            vec![(editor_terminal_id, agent_pane_id, editor_pane_id)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dock_editor_without_a_runtime_is_left_out_of_the_handoff() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("editor")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let agent_pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.state.dock_editor_sessions.insert(
+            agent_pane_id,
+            DockEditorSession {
+                pane_id: PaneId::alloc(),
+                terminal_id: TerminalId::alloc(),
+            },
+        );
+
+        assert!(app.dock_editor_handoff_terminals().is_empty());
     }
 
     #[test]

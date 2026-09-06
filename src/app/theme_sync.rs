@@ -96,6 +96,17 @@ impl App {
             &self.state.theme_runtime,
             self.state.host_terminal_appearance,
         );
+        let mismatch = theme_appearance_mismatch(
+            &theme_name,
+            palette.appearance(),
+            self.state.host_terminal_appearance,
+        );
+        if self.state.theme_appearance_mismatch != mismatch {
+            if let Some(message) = &mismatch {
+                tracing::warn!(theme = %theme_name, "{message}");
+            }
+            self.state.theme_appearance_mismatch = mismatch;
+        }
         if self.state.theme_name == theme_name && self.state.palette == palette {
             return false;
         }
@@ -120,4 +131,33 @@ impl App {
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
+}
+
+/// Name the case where the active palette was built for one appearance and the
+/// host terminal reports the other.
+///
+/// This is the failure that hides a UI: light foregrounds on a dark terminal
+/// (or the reverse) stay technically rendered and practically invisible. It is
+/// cheap to detect — both sides are already known — and expensive to notice by
+/// eye, so say it out loud instead of leaving it to a screenshot.
+pub(super) fn theme_appearance_mismatch(
+    theme_name: &str,
+    palette: Option<crate::terminal_theme::HostAppearance>,
+    host: Option<crate::terminal_theme::HostAppearance>,
+) -> Option<String> {
+    let (palette, host) = (palette?, host?);
+    if palette == host {
+        return None;
+    }
+    let describe = |appearance: crate::terminal_theme::HostAppearance| match appearance {
+        crate::terminal_theme::HostAppearance::Dark => "dark",
+        crate::terminal_theme::HostAppearance::Light => "light",
+    };
+    Some(format!(
+        "theme \"{theme_name}\" is {} but the terminal reports a {} background; \
+         set [theme] auto_switch = true or pin the {} sibling",
+        describe(palette),
+        describe(host),
+        describe(host),
+    ))
 }

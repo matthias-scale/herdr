@@ -440,6 +440,39 @@ pub(crate) fn latest_session_name(transcript: &str, session_id: &str) -> Option<
     latest
 }
 
+/// Codex records the name it gave a thread as a `thread_name` entry in the
+/// session index, and appends a fresh entry every time it renames. The last
+/// entry for the reported thread is therefore the current name.
+pub(crate) fn latest_codex_thread_name(index: &str, thread_id: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ThreadNameRecord {
+        id: Option<String>,
+        thread_name: Option<String>,
+    }
+
+    let mut latest = None;
+    for line in index.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<ThreadNameRecord>(line) else {
+            continue;
+        };
+        // The index is global across every Codex thread on the machine, so the
+        // reported thread is the only one that may rename this pane.
+        if record.id.as_deref().map(str::trim) != Some(thread_id) {
+            continue;
+        }
+        if let Some(name) = record.thread_name.as_deref().map(sanitize_session_name) {
+            if !name.is_empty() {
+                latest = Some(name);
+            }
+        }
+    }
+    latest
+}
+
 fn sanitize_session_name(name: &str) -> String {
     let sanitized = sanitize_prompt(name);
     let mut collapsed = String::new();
@@ -455,29 +488,29 @@ fn sanitize_session_name(name: &str) -> String {
     collapsed
 }
 
-/// Build the rename report for a hook payload and the session transcript it
-/// points at. Unlike the turn-title path this accepts every hook event: Claude
-/// names and renames a session outside prompt submission, so binding renames to
-/// `UserPromptSubmit` is exactly what made the label go stale.
+/// Build the rename report for a hook payload and the name source it points at
+/// -- Claude's session transcript, or Codex's session index. Unlike the
+/// turn-title path this accepts every hook event: both agents name and rename a
+/// session outside prompt submission, so binding renames to `UserPromptSubmit`
+/// is exactly what made the label go stale.
 pub(crate) fn request_from_session_name(
     provider: WorkTitleProvider,
     pane_id: Option<&str>,
     input: &str,
-    transcript: &str,
+    name_source: &str,
     seq: u64,
 ) -> Option<PaneReportMetadataParams> {
-    // Only Claude publishes a session name today.
-    if provider != WorkTitleProvider::Claude {
-        return None;
-    }
     let pane_id = pane_id.map(str::trim).filter(|value| !value.is_empty())?;
     let input: TurnStartHookInput = serde_json::from_str(input).ok()?;
     input.hook_event_name.as_deref()?;
-    // A native subagent shares the parent pane and must never rename it.
-    if input
-        .agent_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+    // A native subagent shares the parent pane and must never rename it. Claude
+    // reports subagent identity explicitly; a Codex subagent runs as its own
+    // thread, so its id simply never matches the one the pane is bound to.
+    if provider == WorkTitleProvider::Claude
+        && input
+            .agent_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
     {
         return None;
     }
@@ -485,7 +518,10 @@ pub(crate) fn request_from_session_name(
         .session_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())?;
-    let session_name = latest_session_name(transcript, &session_id)?;
+    let session_name = match provider {
+        WorkTitleProvider::Claude => latest_session_name(name_source, &session_id),
+        WorkTitleProvider::Codex => latest_codex_thread_name(name_source, &session_id),
+    }?;
 
     Some(PaneReportMetadataParams {
         pane_id: pane_id.to_string(),
@@ -867,7 +903,7 @@ mod tests {
         .is_none());
 
         let ok = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
-        // Codex has no session-name channel.
+        // Codex reads its own index, never a Claude transcript.
         assert!(request_from_session_name(
             WorkTitleProvider::Codex,
             Some("w1:pA"),
@@ -900,5 +936,91 @@ mod tests {
             transcript_path_from_hook_input(r#"{"hook_event_name":"Stop"}"#),
             None
         );
+    }
+
+    #[test]
+    fn latest_codex_thread_name_takes_the_most_recent_rename() {
+        let index = concat!(
+            r#"{"id":"t1","thread_name":"help me to reduce disk storage on th","updated_at":"2026-09-05T10:00:37Z"}"#,
+            "\n",
+            r#"{"id":"t1","thread_name":"Reduce machine disk usage","updated_at":"2026-09-05T10:00:43Z"}"#,
+            "\n",
+        );
+        assert_eq!(
+            latest_codex_thread_name(index, "t1").as_deref(),
+            Some("Reduce machine disk usage")
+        );
+    }
+
+    #[test]
+    fn latest_codex_thread_name_ignores_other_threads_and_blank_names() {
+        let index = concat!(
+            r#"{"id":"t1","thread_name":"Mine"}"#,
+            "\n",
+            r#"{"id":"t2","thread_name":"Someone else"}"#,
+            "\n",
+            r#"{"id":"t1","thread_name":"   "}"#,
+            "\n",
+            "not json at all",
+            "\n",
+        );
+        assert_eq!(
+            latest_codex_thread_name(index, "t1").as_deref(),
+            Some("Mine")
+        );
+        assert_eq!(latest_codex_thread_name("", "t1"), None);
+    }
+
+    #[test]
+    fn latest_codex_thread_name_caps_and_normalizes_whitespace() {
+        let long = "word ".repeat(40);
+        let index = format!(r#"{{"id":"t1","thread_name":"{long}"}}"#);
+        let name = latest_codex_thread_name(&index, "t1").expect("thread name");
+        assert!(name.chars().count() <= SESSION_NAME_MAX_CHARS, "{name:?}");
+        assert!(!name.contains("  "), "{name:?}");
+    }
+
+    #[test]
+    fn codex_session_name_request_is_guarded_and_carries_only_the_name() {
+        let input =
+            r#"{"hook_event_name":"Stop","session_id":"01a07102-f2ad-7660-9d01-7d33518b5dc4"}"#;
+        let index = r#"{"id":"01a07102-f2ad-7660-9d01-7d33518b5dc4","thread_name":"Reduce machine disk usage"}"#;
+        let request =
+            request_from_session_name(WorkTitleProvider::Codex, Some("w1:pA"), input, index, 9)
+                .expect("session name request");
+        assert_eq!(request.source, SESSION_NAME_SOURCE);
+        assert_eq!(request.agent.as_deref(), Some("codex"));
+        assert_eq!(request.applies_to_source.as_deref(), Some("herdr:codex"));
+        assert_eq!(
+            request.agent_session_id.as_deref(),
+            Some("01a07102-f2ad-7660-9d01-7d33518b5dc4")
+        );
+        assert_eq!(request.title, None);
+        let context = request.work_context.expect("work context");
+        assert_eq!(
+            context.session_name.as_deref(),
+            Some("Reduce machine disk usage")
+        );
+        assert_eq!(context.work_title, None);
+        assert!(context.ticket_ids.is_empty());
+    }
+
+    #[test]
+    fn codex_session_name_needs_a_pane_and_a_named_thread() {
+        let input = r#"{"hook_event_name":"Stop","session_id":"t1"}"#;
+        let index = r#"{"id":"t1","thread_name":"Named"}"#;
+        // No pane, no report.
+        assert!(
+            request_from_session_name(WorkTitleProvider::Codex, None, input, index, 9).is_none()
+        );
+        // A thread Codex has not named yet produces no report.
+        assert!(request_from_session_name(
+            WorkTitleProvider::Codex,
+            Some("w1:pA"),
+            input,
+            r#"{"id":"other","thread_name":"Named"}"#,
+            9
+        )
+        .is_none());
     }
 }

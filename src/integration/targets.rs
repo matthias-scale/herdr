@@ -193,6 +193,17 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         10,
         None,
     )?;
+    // Codex names a thread shortly after the turn starts, so the name is
+    // republished at turn start and at turn end rather than once.
+    for event in ["UserPromptSubmit", "Stop"] {
+        ensure_command_hook(
+            hooks,
+            event,
+            hook_command(&hook_path, Some("session-name")),
+            10,
+            None,
+        )?;
+    }
     remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
@@ -594,6 +605,9 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
                 remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
             updated_hooks |=
                 remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("title"))?;
+            updated_hooks |=
+                remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("session-name"))?;
+            updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("session-name"))?;
             updated_hooks |=
                 remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
             updated_hooks |=

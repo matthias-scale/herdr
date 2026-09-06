@@ -488,7 +488,10 @@
             {
               "properties": {
                 "label": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "tab_id": {
                   "type": "string"
@@ -504,8 +507,7 @@
               "required": [
                 "type",
                 "tab_id",
-                "workspace_id",
-                "label"
+                "workspace_id"
               ],
               "type": "object"
             },
@@ -4994,15 +4996,18 @@
         "TabRenameParams": {
           "properties": {
             "label": {
-              "type": "string"
+              "description": "Absent clears the manual name so the tab falls back to its derived label.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_id": {
               "type": "string"
             }
           },
           "required": [
-            "tab_id",
-            "label"
+            "tab_id"
           ],
           "type": "object"
         },
@@ -7893,7 +7898,10 @@
             {
               "properties": {
                 "label": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "tab_id": {
                   "type": "string"
@@ -7909,8 +7917,7 @@
               "required": [
                 "type",
                 "tab_id",
-                "workspace_id",
-                "label"
+                "workspace_id"
               ],
               "type": "object"
             },

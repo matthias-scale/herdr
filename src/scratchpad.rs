@@ -211,9 +211,103 @@ impl crate::app::App {
     }
 }
 
+pub(crate) fn editor_argv_candidates(path: Option<&std::path::Path>) -> Vec<Vec<String>> {
+    let mut candidates = Vec::new();
+    if let Ok(editor) = std::env::var("EDITOR") {
+        if let Some(argv) = parse_editor_command(&editor) {
+            candidates.push(argv);
+        }
+    }
+    candidates.push(vec!["nvim".to_string()]);
+    #[cfg(windows)]
+    candidates.push(vec!["notepad.exe".to_string()]);
+    #[cfg(not(windows))]
+    candidates.push(vec!["vi".to_string()]);
+    if let Some(path) = path {
+        let argument = path.to_string_lossy().into_owned();
+        for candidate in candidates.iter_mut() {
+            candidate.push(argument.clone());
+        }
+    }
+    candidates
+}
+
+fn parse_editor_command(command: &str) -> Option<Vec<String>> {
+    let mut argv = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in command.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+        } else if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !word.is_empty() {
+                argv.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(ch);
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if !word.is_empty() {
+        argv.push(word);
+    }
+    (!argv.is_empty()).then_some(argv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_requested_file_is_appended_to_every_editor_candidate() {
+        let path = std::path::Path::new("/repo/.herdr/scratchpad.md");
+        let with_path = editor_argv_candidates(Some(path));
+        let without_path = editor_argv_candidates(None);
+
+        assert_eq!(with_path.len(), without_path.len());
+        assert!(
+            with_path
+                .iter()
+                .all(|argv| argv.last().map(String::as_str) == Some(path.to_str().unwrap())),
+            "candidates: {with_path:?}"
+        );
+        assert!(
+            without_path
+                .iter()
+                .all(|argv| argv.last().map(String::as_str) != Some(path.to_str().unwrap())),
+            "candidates: {without_path:?}"
+        );
+    }
+
+    #[test]
+    fn editor_command_parser_preserves_quoted_arguments() {
+        assert_eq!(
+            parse_editor_command("nvim --cmd \"set title\""),
+            Some(vec![
+                "nvim".to_string(),
+                "--cmd".to_string(),
+                "set title".to_string()
+            ])
+        );
+    }
 
     /// The repository has no `tempfile` dependency; unique temp roots follow the
     /// same convention the UI tests use.

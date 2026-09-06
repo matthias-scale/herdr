@@ -1845,9 +1845,16 @@ fn append_recently_done_rows(
 
 fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) -> bool {
     entry.has_agent
-        && entry.state == AgentState::Idle
         && !entry.seen
         && !entry.stale
+        // Share the lifecycle definition of a stopped session. Hiding a row the
+        // sidebar would otherwise paint red is how a question stops being asked.
+        && crate::terminal::state::session_is_quiet(
+            entry.state,
+            entry_has_gate(entry) || entry.usage_limited,
+            entry.active_subagents,
+            entry.holds_shell,
+        )
         && entry.done_since.is_some_and(|done_since| {
             app.view_observed_at.saturating_duration_since(done_since) > app.hide_done_after
         })
@@ -2591,6 +2598,25 @@ pub(crate) fn collapsed_sidebar_scroll_for_target(
     current_scroll
 }
 
+/// Paint the sidebar's own background before any row renders.
+///
+/// Without this the sidebar — the widest themed surface in the UI — keeps
+/// whatever background the terminal has, so a palette that disagrees with the
+/// terminal draws its foregrounds onto a background it never chose. Painting
+/// here bounds a mismatched theme to looking wrong instead of unreadable.
+fn fill_sidebar_background(frame: &mut Frame, area: Rect, p: &Palette) {
+    let bg = p.sidebar_background();
+    if bg == Color::Reset {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            buf[(x, y)].set_style(Style::default().bg(bg));
+        }
+    }
+}
+
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -2599,6 +2625,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
     let p = &app.palette;
+    fill_sidebar_background(frame, area, p);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {
@@ -2849,6 +2876,7 @@ pub(super) fn render_sidebar(
     area: Rect,
 ) {
     let p = &app.palette;
+    fill_sidebar_background(frame, area, p);
     let is_navigating = matches!(app.mode, Mode::Navigate);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
@@ -6334,13 +6362,15 @@ row_gap = 1
         assert_eq!(workspace_style.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(workspace_style.bg, Some(ratatui::style::Color::Reset));
+        // Sidebar rows sit on the palette's own background, never the
+        // terminal's: a row must stay readable under a mismatched theme.
+        assert_eq!(workspace_style.bg, Some(app.palette.sidebar_background()));
 
         let title_x = find_symbol_x(buffer, tab_row, 59, "F");
         let title_style = buffer[(title_x, tab_row)].style();
         assert_eq!(title_style.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(title_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(title_style.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(title_style.bg, Some(app.palette.sidebar_background()));
     }
 
     #[test]
@@ -7156,14 +7186,14 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(active.fg, Some(Color::Rgb(37, 38, 44)));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
-        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(active.bg, Some(app.palette.sidebar_background()));
 
         let inactive = buffer[(find_symbol_x(buffer, second_row, 25, "t"), second_row)].style();
         assert_eq!(inactive.fg, Some(app.palette.subtext0));
         assert!(!inactive
             .add_modifier
             .intersects(Modifier::BOLD | Modifier::DIM));
-        assert_eq!(inactive.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(inactive.bg, Some(app.palette.sidebar_background()));
     }
 
     #[test]
@@ -7678,6 +7708,46 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal.state = *state;
         }
         app
+    }
+
+    #[test]
+    fn a_pane_with_an_unanswered_gate_is_never_hidden_as_done() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.hide_done_after = std::time::Duration::from_secs(30 * 60);
+        app.terminals.get_mut(&terminal_id).unwrap().closing_gates =
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Choose the release path".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }];
+
+        app.view_observed_at =
+            done_since + app.hide_done_after + std::time::Duration::from_secs(60);
+        let rows = sidebar_rows(&app);
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader { title, .. } if *title == RECENTLY_DONE_SECTION_TITLE
+            )),
+            "a pane waiting on a human must not be filed under Recently done"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(row, SidebarRow::Tab { .. })),
+            "and it must stay visible as a row"
+        );
     }
 
     #[test]

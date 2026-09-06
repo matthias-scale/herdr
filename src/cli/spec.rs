@@ -322,7 +322,8 @@ fn tab_command() -> Command {
         .subcommand(id_command("focus", "tab_id", "Focus a tab"))
         .subcommand(
             Command::new("rename")
-                .about("Rename a tab")
+                .about("Rename a tab, or clear its name to restore the derived label")
+                .override_usage("herdr tab rename <TAB_ID> <LABEL>|--clear")
                 .arg(required("tab_id", "TAB_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
         )

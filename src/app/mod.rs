@@ -464,11 +464,17 @@ fn resolve_effective_theme(
     appearance: Option<crate::terminal_theme::HostAppearance>,
 ) -> (state::Palette, String) {
     let (name, fallback) = if runtime.auto_switch {
-        match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
-            crate::terminal_theme::HostAppearance::Dark => (&runtime.dark_name, "catppuccin"),
-            crate::terminal_theme::HostAppearance::Light => {
+        match appearance {
+            Some(crate::terminal_theme::HostAppearance::Dark) => (&runtime.dark_name, "catppuccin"),
+            Some(crate::terminal_theme::HostAppearance::Light) => {
                 (&runtime.light_name, "catppuccin-latte")
             }
+            // No OSC 11 answer has arrived yet. Guessing an appearance is how
+            // auto_switch earned its reputation: a wrong guess paints one
+            // appearance's foregrounds over the other's background, and the
+            // result is unreadable rather than merely off-brand. Hold the
+            // configured palette until the attached client reports for real.
+            None => (&runtime.manual_name, "catppuccin"),
         }
     } else {
         (&runtime.manual_name, "catppuccin")
@@ -980,6 +986,7 @@ impl App {
             theme_runtime,
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
+            theme_appearance_mismatch: None,
             settings: state::SettingsState {
                 section: state::SettingsSection::Theme,
                 list: state::SelectionListState::new(0),
@@ -1191,8 +1198,20 @@ impl App {
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
         >,
+        dock_editors: &[crate::server::handoff::DockEditorHandoff],
     ) -> io::Result<Self> {
         let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
+        let editor_imports: Vec<(
+            crate::server::handoff::DockEditorHandoff,
+            crate::handoff_runtime::ImportedHandoffRuntime,
+        )> = dock_editors
+            .iter()
+            .filter_map(|editor| {
+                imports
+                    .remove(&editor.editor_pane_id)
+                    .map(|import| (editor.clone(), import))
+            })
+            .collect();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1249,9 +1268,69 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        app.restore_handoff_dock_editors(config, editor_imports);
         app.sync_agent_metadata_deadline();
         app.sync_agent_activity_refresh_deadline(now);
         Ok(app)
+    }
+
+    #[cfg(unix)]
+    fn restore_handoff_dock_editors(
+        &mut self,
+        config: &Config,
+        editor_imports: Vec<(
+            crate::server::handoff::DockEditorHandoff,
+            crate::handoff_runtime::ImportedHandoffRuntime,
+        )>,
+    ) {
+        for (editor, import) in editor_imports {
+            let agent_pane_id = self
+                .state
+                .pane_id_aliases
+                .get(&editor.agent_pane_id)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(editor.agent_pane_id));
+            if self.find_pane(agent_pane_id).is_none() {
+                tracing::warn!(
+                    agent_pane = agent_pane_id.raw(),
+                    "dropping imported dock editor whose agent pane did not restore"
+                );
+                continue;
+            }
+            let editor_pane_id = crate::layout::PaneId::alloc();
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            let import = crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: import.master_fd,
+                state: import.state.with_pane_id(editor_pane_id),
+            };
+            match crate::terminal::TerminalRuntime::from_handoff_fd(
+                import,
+                config.advanced.scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+                self.state.host_terminal_appearance,
+                self.event_tx.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            ) {
+                Ok(runtime) => {
+                    self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+                    self.state.dock_editor_sessions.insert(
+                        agent_pane_id,
+                        state::DockEditorSession {
+                            pane_id: editor_pane_id,
+                            terminal_id,
+                        },
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to import a dock editor runtime");
+                    self.state.dock_editor_errors.insert(
+                        agent_pane_id,
+                        "editor did not survive the update".to_string(),
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -2145,6 +2224,13 @@ impl App {
             }
         }
 
+        // The mismatch is a warning about the terminal in front of the config,
+        // not a defect in the config itself: report it without demoting a valid
+        // reload to `Partial` or claiming the config diagnostic banner.
+        if let Some(mismatch) = &self.state.theme_appearance_mismatch {
+            diagnostics.push(mismatch.clone());
+        }
+
         crate::config::ConfigReloadReport {
             status,
             diagnostics,
@@ -2560,6 +2646,120 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[cfg(unix)]
+    fn imported_editor_runtime(
+        pane_id: crate::layout::PaneId,
+    ) -> (
+        crate::terminal::TerminalRuntime,
+        crate::handoff_runtime::ImportedHandoffRuntime,
+    ) {
+        let (events, _events_rx) = tokio::sync::mpsc::channel(16);
+        let runtime = TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("spawn editor pane");
+        runtime
+            .pause_handoff_reader(std::time::Duration::from_secs(2))
+            .expect("quiesce the pty actor");
+        let master_fd = runtime.duplicate_handoff_fd().expect("duplicate pty fd");
+        let state = runtime.handoff_runtime_state(pane_id.raw());
+        (
+            runtime,
+            crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state },
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_imported_dock_editor_reattaches_to_its_renamed_agent_pane() {
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("editor")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let agent_pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let exported_agent_pane_id = agent_pane_id.raw() + 1_000;
+        app.state
+            .pane_id_aliases
+            .insert(exported_agent_pane_id, agent_pane_id);
+        let exported_editor_pane_id = crate::layout::PaneId::alloc();
+        let (source, import) = imported_editor_runtime(exported_editor_pane_id);
+        let child_pid = source.child_pid().expect("editor child pid");
+
+        app.restore_handoff_dock_editors(
+            &Config::default(),
+            vec![(
+                crate::server::handoff::DockEditorHandoff {
+                    agent_pane_id: exported_agent_pane_id,
+                    editor_pane_id: exported_editor_pane_id.raw(),
+                },
+                import,
+            )],
+        );
+
+        let session = app
+            .state
+            .dock_editor_sessions
+            .get(&agent_pane_id)
+            .expect("editor reattached to its agent pane")
+            .clone();
+        assert!(app.terminal_runtimes.get(&session.terminal_id).is_some());
+        assert_ne!(session.pane_id, exported_editor_pane_id);
+        assert_eq!(unsafe { libc::kill(child_pid as i32, 0) }, 0);
+        drop(source);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_imported_dock_editor_is_dropped_when_its_agent_pane_is_gone() {
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let exported_editor_pane_id = crate::layout::PaneId::alloc();
+        let (source, import) = imported_editor_runtime(exported_editor_pane_id);
+
+        app.restore_handoff_dock_editors(
+            &Config::default(),
+            vec![(
+                crate::server::handoff::DockEditorHandoff {
+                    agent_pane_id: 4_242,
+                    editor_pane_id: exported_editor_pane_id.raw(),
+                },
+                import,
+            )],
+        );
+
+        assert!(app.state.dock_editor_sessions.is_empty());
+        drop(source);
+    }
 
     fn raw_key(
         code: KeyCode,
@@ -3659,6 +3859,82 @@ mod tests {
         assert!(!app.state.theme_runtime.auto_switch);
         assert_eq!(app.state.theme_name, "tokyo-night");
         assert_eq!(app.state.palette, state::Palette::tokyo_night());
+    }
+
+    /// The regression this pins: with auto_switch on and no OSC 11 answer yet,
+    /// herdr assumed a dark terminal. Guessing wrong paints one appearance's
+    /// foregrounds onto the other's background — the unreadable case — and it
+    /// is what pushed every host onto a hand-pinned palette. Hold the
+    /// configured theme until the client actually reports.
+    #[test]
+    fn theme_auto_switch_holds_the_configured_theme_until_the_host_reports() {
+        let mut config = Config::default();
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        config.theme.auto_switch = true;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.host_terminal_appearance, None);
+        assert_eq!(app.state.theme_name, "github-light-high-contrast");
+        assert_eq!(
+            app.state.palette,
+            state::Palette::github_light_high_contrast()
+        );
+
+        assert!(app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true));
+        assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+    }
+
+    /// A pinned palette that contradicts the terminal is legal but nearly
+    /// always a mistake, and it is invisible precisely because it hides the UI.
+    /// Name it where the operator already looks: the config-reload report.
+    #[test]
+    fn a_palette_that_contradicts_the_terminal_is_reported() {
+        let mut config = Config::default();
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.theme_appearance_mismatch, None);
+
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true);
+        let mismatch = app
+            .state
+            .theme_appearance_mismatch
+            .clone()
+            .expect("light palette in front of a dark terminal is a mismatch");
+        assert!(
+            mismatch.contains("github-light-high-contrast"),
+            "{mismatch}"
+        );
+        assert!(mismatch.contains("dark background"), "{mismatch}");
+
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Light, true);
+        assert_eq!(app.state.theme_appearance_mismatch, None);
+    }
+
+    /// The mismatch describes the terminal in front of the config, not a fault
+    /// in the config: it must reach the reload report without demoting a valid
+    /// reload to `Partial` or taking over the config diagnostic banner.
+    #[test]
+    fn a_reported_mismatch_does_not_demote_a_valid_config_reload() {
+        let mut config = Config::default();
+        config.theme.name = Some("github-light-high-contrast".to_string());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.set_host_terminal_appearance(crate::terminal_theme::HostAppearance::Dark, true);
+
+        let report = app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(
+            report.diagnostics[0].contains("github-light-high-contrast"),
+            "{:?}",
+            report.diagnostics
+        );
+        assert_eq!(app.state.config_diagnostic, None);
     }
 
     #[test]

@@ -215,7 +215,6 @@ pub(crate) fn dock_editor_cursor_state(
         shape: cursor.shape,
     })
 }
-
 /// A prepared client render message plus any baseline state needed after send.
 pub(crate) enum PreparedRender {
     Semantic {

@@ -507,7 +507,7 @@ pub enum EventData {
     TabRenamed {
         tab_id: String,
         workspace_id: String,
-        label: String,
+        label: Option<String>,
     },
     TabMoved {
         tab_id: String,

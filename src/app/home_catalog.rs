@@ -513,6 +513,28 @@ mod tests {
     }
 
     #[test]
+    fn claude_effort_options_follow_the_selected_model() {
+        const HELP: &str = "  --effort <level>  Effort level\n                    (low, medium, high, xhigh, max)\n";
+        let claude = claude_catalog(Some(HELP));
+
+        assert_eq!(
+            claude.model(DEFAULT_MODEL).expect("Default").efforts,
+            [AUTO_EFFORT, "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            claude
+                .model("claude-haiku-4-5-20251001")
+                .expect("Haiku")
+                .efforts,
+            [AUTO_EFFORT, "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            claude.model("claude-fable-5-1").expect("Fable").efforts,
+            [AUTO_EFFORT, "low", "medium", "high", "xhigh", "max"]
+        );
+    }
+
+    #[test]
     fn claude_catalog_has_exact_names_ids_efforts_and_context_support() {
         const HELP: &str = "  --effort <level>  Effort level\n                    (low, medium, high, xhigh, max)\n";
         let claude = claude_catalog(Some(HELP));

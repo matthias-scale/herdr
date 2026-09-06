@@ -36,6 +36,68 @@ pub(super) fn panel_contrast_fg(p: &Palette) -> Color {
     }
 }
 
+/// WCAG 2.1 relative luminance. `None` for colors herdr cannot measure —
+/// `Reset` and the 16 named colors, whose value belongs to the terminal.
+pub(super) fn relative_luminance(color: Color) -> Option<f64> {
+    let crate::terminal_theme::RgbColor { r, g, b } = crate::app::state::color_rgb(color)?;
+    let channel = |value: u8| {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
+}
+
+/// WCAG 2.1 contrast ratio, 1.0 (identical) to 21.0 (black on white).
+pub(super) fn contrast_ratio(a: Color, b: Color) -> Option<f64> {
+    let (a, b) = (relative_luminance(a)?, relative_luminance(b)?);
+    let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+    Some((hi + 0.05) / (lo + 0.05))
+}
+
+/// Foreground for text painted on `bg`, preferring the palette's own colors.
+///
+/// The selected tab is the element a glance has to find, so its label cannot
+/// inherit whichever palette color happens to sit closest to the accent it is
+/// drawn on. Take the first candidate that clears the WCAG text bar, else the
+/// highest-contrast candidate, and fall back to plain black or white when the
+/// palette offers nothing measurable.
+pub(super) fn readable_fg_on(bg: Color, candidates: &[Color]) -> Color {
+    const TEXT_CONTRAST: f64 = 4.5;
+    let fallback = candidates.first().copied().unwrap_or(Color::Reset);
+    let Some(bg_luminance) = relative_luminance(bg) else {
+        return fallback;
+    };
+
+    let mut best: Option<(f64, Color)> = None;
+    for candidate in candidates {
+        let Some(ratio) = contrast_ratio(*candidate, bg) else {
+            continue;
+        };
+        if ratio >= TEXT_CONTRAST {
+            return *candidate;
+        }
+        if best.is_none_or(|(previous, _)| ratio > previous) {
+            best = Some((ratio, *candidate));
+        }
+    }
+
+    let monochrome = if bg_luminance > 0.18 {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Rgb(255, 255, 255)
+    };
+    match (best, contrast_ratio(monochrome, bg)) {
+        (Some((ratio, candidate)), Some(mono_ratio)) if ratio >= mono_ratio => candidate,
+        (_, Some(_)) => monochrome,
+        (Some((_, candidate)), None) => candidate,
+        (None, None) => fallback,
+    }
+}
+
 pub(crate) fn centered_popup_rect(area: Rect, popup_w: u16, popup_h: u16) -> Option<Rect> {
     let popup_w = popup_w.min(area.width.saturating_sub(4));
     let popup_h = popup_h.min(area.height.saturating_sub(2));
@@ -275,4 +337,42 @@ pub(super) fn centered_button_row(
             rect
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::Palette;
+
+    /// The failure this guards: a palette whose accent is a named or indexed
+    /// color used to skip contrast selection entirely and take the first
+    /// candidate, which is how the `terminal` theme drew its selected tab in
+    /// dark gray on blue.
+    #[test]
+    fn readable_fg_measures_named_and_indexed_backgrounds() {
+        let terminal = Palette::terminal();
+        let chosen = readable_fg_on(
+            terminal.accent,
+            &[panel_contrast_fg(&terminal), terminal.text],
+        );
+        let ratio = contrast_ratio(chosen, terminal.accent).expect("named colors are measurable");
+        assert!(
+            ratio >= 4.5,
+            "{chosen:?} on {:?} is {ratio:.2}:1",
+            terminal.accent
+        );
+
+        let indexed = readable_fg_on(Color::Indexed(226), &[Color::White, Color::Black]);
+        assert_eq!(indexed, Color::Black, "dark text belongs on bright yellow");
+    }
+
+    /// With nothing measurable to sit on, the first candidate is all herdr can
+    /// honestly offer — it must not invent a color the theme never chose.
+    #[test]
+    fn readable_fg_keeps_the_first_candidate_when_the_background_is_unknowable() {
+        assert_eq!(
+            readable_fg_on(Color::Reset, &[Color::Rgb(1, 2, 3), Color::White]),
+            Color::Rgb(1, 2, 3)
+        );
+    }
 }

@@ -2158,6 +2158,7 @@ impl App {
         self.state.dock_editor_focused = false;
         self.state.dock_home_focused = false;
         self.state.dock_diff_focused = false;
+        self.state.dock_files_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }

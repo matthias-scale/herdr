@@ -273,9 +273,10 @@ was given for and does not carry to the next version.
 
 ### Identifying the active fork
 
-`fork/pr-base` on `matthias-scale/herdr` is the only base for fork work. It is the
-repository default branch. `fork/focused-sidebar-pr-base` is subsumed by it (zero
-commits ahead) and is kept for history, not for branching.
+`main` on `matthias-scale/herdr` is the only base for fork work. It is the
+repository default branch. It was renamed from `fork/pr-base` on 2026-09-05; that
+name no longer exists. `master` (`286d4a84`) and `fork/focused-sidebar-pr-base`
+are strict ancestors kept for history, not for branching.
 
 The fork left upstream at `73d92004` (2026-07-29), which is *before* upstream
 `v0.8.0`. It therefore contains no upstream 0.8.x release and never will until a

@@ -3,7 +3,8 @@
 ## Unreleased
 
 ### Added
-- `theme.custom.sidebar_bg` can now give the desktop sidebar its own background without changing built-in theme defaults.
+- A theme whose palette contradicts the appearance the terminal reports is now named in the `herdr server reload-config` diagnostics and the log, instead of being left to be noticed by eye.
+- `theme.custom.sidebar_bg` can now give the desktop sidebar its own background without changing built-in theme defaults. Leaving it unset follows the theme's `panel_bg`; setting it to `reset` still hands the sidebar back to the terminal.
 - Settings and `ui.status_indicators = "symbols"` can now use distinct static shapes for blocked, working, done, idle, and unknown agent states. (#2260)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 - Desktop sessions now have a theme-derived native status row for Git branch, device name, CPU, and memory. Disable it with `ui.status_bar.enabled = false`. (#2, #13)
@@ -14,11 +15,12 @@
 - The sidebar now includes a read-only Symphony workflow dashboard. (#52, MAT-138)
 - Agent supervision now tracks turn-end closing blocks, gates and decisions, declared waits, stale deadlines, and child-process activity across sidebar and API views. (#39, #41, #44, #45, #48, #53-#57, #59-#62, #64-#66)
 - Claude and Codex plan exhaustion now appears as a distinct `usage` gate and clears when the agent screen resumes. (#67)
-- The dock now has a Note tab showing the focused repository's `.herdr/scratchpad.md` read-only, refreshed as the file changes, with its ticket, pull request, preview, and Missive links as clickable rows. `ctrl+alt+e` opens that file in the dock editor.
+- The dock now has a Note tab showing the focused repository's `.herdr/scratchpad.md` read-only, refreshed as the file changes, with its ticket, pull request, preview, and Missive links as clickable rows. `ctrl+alt+e` opens that file in a terminal pane.
 - `prefix+shift+i` opens an inbox of blocked agents: the longest-waiting one with its terminal inline, a count of how many remain, and Tab to defer. Keys typed there reach that agent without moving focus. An empty queue says nothing is blocked.
 - The top status row now carries clickable `inbox`, `note`, and `dock` buttons on its left, where it was previously blank. The inbox button shows the blocked count. Prefix-free shortcuts `ctrl+alt+i`, `ctrl+alt+n`, and `ctrl+alt+d` reach the same three surfaces, and `ctrl+alt+n` shows the scratchpad without opening an editor.
 
 ### Changed
+- The dock Editor tab has been removed. `ctrl+alt+e` now opens the focused repository's scratchpad in `$EDITOR` beside the focused pane, with normal terminal input and pane controls.
 - Repository worktrees now flatten into one Space row with direct tab/window children. Space rows show disclosure, title, and window count on one line without a branch subtitle; nonzero Codex-reported background terminals render as `N >_` after the window title, clear when Codex exits, and do not change lifecycle state or ordering. Expanded Space groups keep one compact blank row between them by default, selected Space and tab titles use stronger foreground emphasis on light themes, and working status uses the blue activity accent across sidebar, navigator, and mobile views without changing warning or machine-status colors.
 - The sidebar now presents Blocked, Prio, Agents/Pinned, and Spaces as stable collapsible sections. Every tab renders once under its owning Space, including agentless and multi-pane tabs, while the worklists provide direct attention views. (#12, #16-#18, #28, #36, #40, #43, #46, #49, #50, #56, #58, #60, #66)
 - User prompt hooks for Claude Code and Codex recalculate a sanitized, session-guarded title through the pane-owning Herdr binary without an additional model call. (#28)
@@ -28,6 +30,10 @@
 - `prefix+b` now jumps to the next blocked tab across all Spaces and wraps at the end. Toggle the sidebar with `prefix+shift+b`.
 
 ### Fixed
+- The desktop sidebar now paints the theme's own background instead of inheriting the terminal's, so a palette that disagrees with the terminal appearance looks wrong instead of turning the sidebar unreadable. `theme.custom.sidebar_bg` still overrides it, and the `terminal` theme still follows the terminal.
+- `theme.auto_switch` no longer assumes a dark terminal before the host answers the OSC 11 appearance query; it holds the configured theme until a real answer arrives, then switches.
+- The selected tab now picks its label color by measured contrast against the accent, so no palette can render it near-invisibly. Named and indexed colors are measured through the xterm defaults instead of being treated as unknowable, so the `terminal` theme is covered too.
+- Nord's muted UI text moved off Nord's comment color, which rendered sidebar secondary text at 1.69:1 against the panel background.
 - Session topology and optional pane history now persist as one crash-safe generation; failed background saves retry without losing dirty state, and unverifiable history is dropped instead of being attached to a reused pane identity. (#20)
 - Git metadata refresh is bounded so slow repository probes cannot stall the interface. (#21)
 - Agent state no longer sticks after closing-block flushes, blocker retirement, declared-wait expiry, or torn transcripts, and nested child work keeps active panes in `working`. (#42, #54, #55, #57, #59-#62, #64-#66)

@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::text::{display_width, display_width_u16, truncate_end};
-use super::widgets::panel_contrast_fg;
+use super::widgets::{panel_contrast_fg, readable_fg_on};
 use crate::app::AppState;
 
 /// The pin lives in the leading pad column every tab cell already renders, so
@@ -548,7 +548,7 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
         };
         let style = if !in_git_repo {
             Style::default()
-                .fg(p.overlay0)
+                .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
                 .bg(p.surface0)
                 .add_modifier(Modifier::DIM)
         } else if open {
@@ -557,7 +557,9 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(p.overlay1).bg(p.surface0)
+            Style::default()
+                .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
+                .bg(p.surface0)
         };
         frame.render_widget(Paragraph::new(label).style(style), menu_rect);
     }
@@ -716,7 +718,9 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
         let active = idx == ws.active_tab;
         let style = if active {
-            let base = Style::default().fg(panel_contrast_fg(p)).bg(p.accent);
+            let base = Style::default()
+                .fg(readable_fg_on(p.accent, &[panel_contrast_fg(p), p.text]))
+                .bg(p.accent);
             if tab.is_auto_named() {
                 base
             } else {
@@ -1325,7 +1329,13 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let button_style = buffer[(1, 0)].style();
-        assert_eq!(button_style.fg, Some(app.palette.overlay0));
+        assert_eq!(
+            button_style.fg,
+            Some(readable_fg_on(
+                app.palette.surface0,
+                &[app.palette.overlay1, app.palette.text]
+            ))
+        );
         assert!(button_style.add_modifier.contains(Modifier::DIM));
         let row = buffer_row_text(buffer, Rect::new(0, 1, 34, 1), 1);
         assert!(row.contains(GIT_MENU_UNAVAILABLE), "menu row: {row:?}");
