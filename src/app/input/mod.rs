@@ -1431,6 +1431,10 @@ impl App {
                     view.open_only,
                     observed_at,
                     &self.state.land_approval_label,
+                    Some((
+                        &self.state.sidebar_work_filter,
+                        &self.state.work_index_session,
+                    )),
                 )
                 .into_iter()
                 .map(|item| crate::app::state::WorkItemKey {
@@ -1493,6 +1497,10 @@ impl App {
                     view.ticket_open_only,
                     observed_at,
                     has_context_pr,
+                    Some((
+                        &self.state.sidebar_work_filter,
+                        &self.state.work_index_session,
+                    )),
                 )
                 .into_iter()
                 .map(|item| crate::app::state::WorkItemKey {

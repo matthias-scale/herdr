@@ -3214,7 +3214,7 @@ impl HeadlessServer {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
                     client.sidebar_presentation.group_mode = group_mode;
-                    client.sidebar_presentation.group_menu_selected = group_mode.index();
+                    client.sidebar_presentation.group_menu_selected = group_mode.view_index();
                     client.sidebar_presentation.work_filter =
                         crate::client::presentation::load_sidebar_work_filter();
                 }

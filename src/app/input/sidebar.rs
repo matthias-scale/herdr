@@ -89,7 +89,7 @@ impl AppState {
     }
 
     pub(crate) fn open_sidebar_group_menu(&mut self) {
-        self.sidebar_group_menu_selected = self.sidebar_group_mode.index();
+        self.sidebar_group_menu_selected = self.sidebar_group_mode.view_index();
         self.sidebar_group_menu_open = true;
     }
 
@@ -120,13 +120,43 @@ impl AppState {
             return;
         };
         let mut filter = self.sidebar_work_filter.clone();
+        let mut keep_open = false;
         match option {
-            crate::ui::SidebarFilterOption::AllTeams => filter.team = None,
-            crate::ui::SidebarFilterOption::Team(team) => filter.team = Some(team),
-            crate::ui::SidebarFilterOption::AllAssignees => filter.assignee = None,
-            crate::ui::SidebarFilterOption::Assignee(assignee) => filter.assignee = Some(assignee),
+            crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
+            crate::ui::SidebarFilterOption::LinearAssignee(assignee) => {
+                filter.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::LinearStatus(status, selected) => {
+                if selected {
+                    filter.linear_statuses.remove(&status);
+                } else {
+                    filter.linear_statuses.insert(status);
+                }
+                keep_open = true;
+            }
+            crate::ui::SidebarFilterOption::GithubAssignee(assignee) => {
+                filter.github.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::GithubDrafts(shown) => {
+                filter.github.show_drafts = !shown;
+                keep_open = true;
+            }
+            crate::ui::SidebarFilterOption::GithubState(state) => {
+                filter.github.state = state;
+            }
+            crate::ui::SidebarFilterOption::MissiveAssignee(assignee) => {
+                filter.missive.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::MissiveClosed(shown) => {
+                filter.missive.show_closed = !shown;
+                keep_open = true;
+            }
         }
         self.set_sidebar_work_filter(filter);
+        if keep_open {
+            self.sidebar_filter_menu_open = true;
+            self.sidebar_filter_menu_selected = index;
+        }
     }
 
     pub(crate) fn handle_sidebar_filter_menu_key(&mut self, key: KeyEvent) -> bool {
@@ -186,13 +216,13 @@ impl AppState {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.sidebar_group_menu_selected =
                     self.sidebar_group_menu_selected.saturating_add(1).min(
-                        crate::app::state::SidebarGroupMode::ALL
+                        crate::app::state::SidebarGroupMode::VIEWS
                             .len()
                             .saturating_sub(1),
                     );
             }
             KeyCode::Enter => {
-                if let Some(mode) = crate::app::state::SidebarGroupMode::ALL
+                if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
                     .get(self.sidebar_group_menu_selected)
                     .copied()
                 {
@@ -1031,7 +1061,7 @@ mod tests {
         ));
         assert_eq!(
             app.state.sidebar_group_mode,
-            crate::app::state::SidebarGroupMode::RepoPr
+            crate::app::state::SidebarGroupMode::LinearTeam
         );
         assert!(!app.state.sidebar_group_menu_open);
     }

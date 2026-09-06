@@ -51,7 +51,12 @@ pub(crate) fn save_dock_width(width: u16) {
 pub(crate) fn load_sidebar_group_mode() -> crate::app::state::SidebarGroupMode {
     let path = presentation_path();
     match load_from_path(&path) {
-        Ok(state) => state.sidebar_group_mode.unwrap_or_default(),
+        Ok(state) => match state.sidebar_group_mode.unwrap_or_default() {
+            crate::app::state::SidebarGroupMode::RepoWorktree => {
+                crate::app::state::SidebarGroupMode::Repo
+            }
+            mode => mode,
+        },
         Err(err) => {
             warn!(path = %path.display(), err = %err, "failed to load client presentation state");
             crate::app::state::SidebarGroupMode::default()
@@ -183,14 +188,24 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_work_filter_round_trips_with_the_group_mode() {
+    fn per_view_sidebar_filters_round_trip_with_the_group_mode() {
         let path = temp_path();
+        let mut filters = crate::app::state::SidebarWorkFilter {
+            team: Some("ENG".into()),
+            assignee: None,
+            ..Default::default()
+        };
+        filters
+            .linear_statuses
+            .remove(&crate::app::state::LinearStatusFilter::Done);
+        filters.github.assignee = Some("grace".into());
+        filters.github.show_drafts = true;
+        filters.github.state = crate::app::state::GithubStateFilter::Merged;
+        filters.missive.assignee = None;
+        filters.missive.show_closed = true;
         update_path(&path, |state| {
             state.sidebar_group_mode = Some(crate::app::state::SidebarGroupMode::LinearTeam);
-            state.sidebar_work_filter = Some(crate::app::state::SidebarWorkFilter {
-                team: Some("SCA".into()),
-                assignee: Some("matthias".into()),
-            });
+            state.sidebar_work_filter = Some(filters.clone());
         })
         .expect("save sidebar work filter");
         let state = load_from_path(&path).expect("load client presentation state");
@@ -198,13 +213,7 @@ mod tests {
             state.sidebar_group_mode,
             Some(crate::app::state::SidebarGroupMode::LinearTeam)
         );
-        assert_eq!(
-            state.sidebar_work_filter,
-            Some(crate::app::state::SidebarWorkFilter {
-                team: Some("SCA".into()),
-                assignee: Some("matthias".into()),
-            })
-        );
+        assert_eq!(state.sidebar_work_filter, Some(filters));
         // A filter that narrows nothing round trips as the default, not as a
         // missing key that would resurrect an older narrowing.
         update_path(&path, |state| {
@@ -218,6 +227,25 @@ mod tests {
             Some(crate::app::state::SidebarWorkFilter::default())
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_linear_filter_gains_per_view_defaults() {
+        let state: ClientPresentationFile =
+            serde_json::from_str(r#"{"sidebar_work_filter":{"team":"OPS","assignee":"Ada"}}"#)
+                .expect("legacy presentation state");
+        let filters = state.sidebar_work_filter.expect("sidebar filters");
+
+        assert_eq!(filters.team.as_deref(), Some("OPS"));
+        assert_eq!(filters.assignee.as_deref(), Some("Ada"));
+        assert_eq!(
+            filters.github,
+            crate::app::state::GithubSidebarFilter::default()
+        );
+        assert_eq!(
+            filters.missive,
+            crate::app::state::MissiveSidebarFilter::default()
+        );
     }
 
     #[test]
