@@ -77,6 +77,39 @@ impl App {
         true
     }
 
+    /// Persist one settings-screen edit and reload, so the change is live in
+    /// the same frame the operator made it.
+    pub(super) fn save_config_edit(&mut self, edit: crate::app::settings_general::ConfigEdit) {
+        use crate::app::settings_general::ConfigEdit;
+
+        let saved = match edit {
+            ConfigEdit::Bool {
+                section,
+                key,
+                value,
+            } => self.update_config_file(key, |content| {
+                crate::config::upsert_section_bool(content, section, key, value)
+            }),
+            ConfigEdit::Integer {
+                section,
+                key,
+                value,
+            } => self.update_config_file(key, |content| {
+                crate::config::upsert_section_value(content, section, key, &value.to_string())
+            }),
+            ConfigEdit::Text {
+                section,
+                key,
+                value,
+            } => self.update_config_file(key, |content| {
+                crate::config::upsert_section_value(content, section, key, &format!("\"{value}\""))
+            }),
+        };
+        if saved {
+            self.apply_config_from_disk(false);
+        }
+    }
+
     pub(super) fn mark_onboarding_complete(&mut self) {
         self.update_config_file("onboarding setting", |content| {
             crate::config::upsert_top_level_bool(content, "onboarding", false)

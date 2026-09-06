@@ -1790,33 +1790,84 @@ pub enum AgentPanelSort {
 /// Which section of the settings panel is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
+    General,
     Theme,
     Indicators,
     Sound,
     Toast,
     PaneLabels,
+    Keybindings,
+    Providers,
     Integrations,
+    SourceControl,
+    Archive,
+    About,
 }
 
 impl SettingsSection {
     pub const ALL: &[Self] = &[
+        Self::General,
         Self::Theme,
         Self::Indicators,
         Self::Sound,
         Self::Toast,
         Self::PaneLabels,
+        Self::Keybindings,
+        Self::Providers,
         Self::Integrations,
+        Self::SourceControl,
+        Self::Archive,
+        Self::About,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::General => "general",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
+            Self::Keybindings => "keybindings",
+            Self::Providers => "providers",
             Self::Integrations => "integrations",
+            Self::SourceControl => "source control",
+            Self::Archive => "archive",
+            Self::About => "about",
         }
+    }
+
+    /// The glyph in front of the nav row, mirroring the design's icon column.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::General => "⚙",
+            Self::Theme => "◐",
+            Self::Indicators => "●",
+            Self::Sound => "♪",
+            Self::Toast => "▣",
+            Self::PaneLabels => "▭",
+            Self::Keybindings => "⌨",
+            Self::Providers => "⚛",
+            Self::Integrations => "⊞",
+            Self::SourceControl => "⑂",
+            Self::Archive => "▤",
+            Self::About => "ⓘ",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|section| *section == self)
+            .unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -1915,6 +1966,9 @@ pub struct SettingsState {
     pub original_palette: Option<Palette>,
     /// The theme name before opening settings.
     pub original_theme: Option<String>,
+    /// The archive row's delete has been pressed once and waits for the
+    /// confirming second press. Only armed while `ui.confirm_close` is on.
+    pub archive_delete_armed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3902,6 +3956,7 @@ impl AppState {
                 list: SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
+                archive_delete_armed: false,
             },
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),

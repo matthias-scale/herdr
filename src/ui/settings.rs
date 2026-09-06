@@ -1,8 +1,17 @@
+//! The settings screen: a fixed section list on the left, the selected
+//! section's content on the right.
+//!
+//! The screen grew out of a tab strip, so section switching is still
+//! `tab`/`left`/`right` and the list keeps the same open, apply and close
+//! affordances. Only the section index moved from a horizontal strip to a
+//! vertical column, which is what made room for sections that are lists rather
+//! than single choices.
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -11,27 +20,427 @@ use super::widgets::{
     render_action_button, render_modal_choice_list, render_panel_shell, ActionButtonSpec,
 };
 use crate::{
-    app::{state::Palette, AppState},
+    app::{
+        settings_general::GeneralRow,
+        state::{AppState, Palette, SettingsSection},
+    },
     config::{StatusIndicatorStyle, ToastDelivery},
 };
 
-pub(crate) const SETTINGS_POPUP_WIDTH: u16 = 76;
-pub(crate) const SETTINGS_POPUP_BASE_HEIGHT: u16 = 22;
+/// Requested width. `centered_popup_rect` clamps it, so an 80-column terminal
+/// gets a narrower screen rather than a clipped one.
+pub(crate) const SETTINGS_POPUP_WIDTH: u16 = 96;
+pub(crate) const SETTINGS_POPUP_BASE_HEIGHT: u16 = 26;
+/// Width of the section column, including its one-column gutter.
+const SETTINGS_NAV_WIDTH: u16 = 20;
 
-pub(crate) fn settings_popup_height(app: &AppState) -> u16 {
-    if app.settings.section != crate::app::state::SettingsSection::Integrations {
-        return SETTINGS_POPUP_BASE_HEIGHT;
-    }
-    let list_rows = app.integration_recommendations.len().max(1) as u16;
-    let footer_rows = integrations_footer_height(app, SETTINGS_POPUP_WIDTH - 2);
-    // borders 2 + header 3 + stack gaps 2 + modal footer 2
-    // + section title 1 + description 2 + spacers 2
-    (14 + list_rows + footer_rows).max(SETTINGS_POPUP_BASE_HEIGHT)
+pub(crate) fn settings_popup_height(_app: &AppState) -> u16 {
+    SETTINGS_POPUP_BASE_HEIGHT
 }
 
-pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
-    use crate::app::state::SettingsSection;
+/// The three areas the settings body is split into.
+pub(crate) struct SettingsAreas {
+    pub(crate) nav: Rect,
+    pub(crate) content: Rect,
+}
 
+/// Pure layout, shared by the renderer and every hit test.
+pub(crate) fn settings_areas(inner: Rect) -> SettingsAreas {
+    let stack = modal_stack_areas(inner, 2, 2, 0, 1);
+    let nav_width = SETTINGS_NAV_WIDTH.min(stack.content.width.saturating_sub(10));
+    let [nav, _gap, content] = Layout::horizontal([
+        Constraint::Length(nav_width),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(stack.content);
+    SettingsAreas { nav, content }
+}
+
+/// The first visible nav row, so the active section is always on screen even
+/// when the section list is taller than the popup.
+pub(crate) fn settings_nav_scroll(app: &AppState, nav: Rect) -> usize {
+    let rows = nav.height as usize;
+    let selected = app.settings.section.index();
+    if rows == 0 || selected < rows {
+        0
+    } else {
+        selected + 1 - rows
+    }
+}
+
+// ---------------------------------------------------------------------------
+// General
+// ---------------------------------------------------------------------------
+
+/// The y offset of each General row inside the content column's list area.
+/// Rows with an explanatory second line are two lines tall.
+pub(crate) fn general_row_offsets() -> Vec<(u16, u16)> {
+    let mut offsets = Vec::new();
+    let mut y = 0;
+    for row in GeneralRow::ALL {
+        let height = if row.hint().is_some() { 2 } else { 1 };
+        offsets.push((y, height));
+        y += height;
+    }
+    offsets
+}
+
+fn render_settings_general(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [title, list] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new("general").style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
+        title,
+    );
+
+    let width = list.width as usize;
+    let mut lines = Vec::new();
+    for (index, row) in GeneralRow::ALL.iter().enumerate() {
+        let selected = index == app.settings.list.selected;
+        let value = format!("[{}]", row.value(app));
+        let label = row.label();
+        let pad = width
+            .saturating_sub(label.chars().count() + value.chars().count() + 2)
+            .max(1);
+        let label_style = if selected {
+            Style::default()
+                .fg(p.text)
+                .bg(p.surface0)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+        let value_style = if row.is_editable() {
+            Style::default().fg(p.accent)
+        } else {
+            Style::default().fg(p.overlay1)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} {label}", if selected { "▸" } else { " " }), label_style),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(value, value_style),
+        ]));
+        if let Some(hint) = row.hint() {
+            lines.push(Line::from(Span::styled(
+                format!("   {hint}"),
+                Style::default().fg(p.overlay1),
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), list);
+}
+
+// ---------------------------------------------------------------------------
+// Keybindings
+// ---------------------------------------------------------------------------
+
+/// One row of the keybindings table. Headings are not selectable targets, they
+/// are only there so the table reads the way the help overlay does.
+pub(crate) struct KeybindingRow {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) heading: bool,
+}
+
+/// The action-to-key table, including user-defined command bindings, from the
+/// same source the keybind help overlay reads.
+pub(crate) fn settings_keybinding_rows(app: &AppState) -> Vec<KeybindingRow> {
+    let mut rows = Vec::new();
+    for (group, entries) in super::keybind_help::keybind_help_groups(app) {
+        rows.push(KeybindingRow {
+            key: String::new(),
+            label: group.to_string(),
+            heading: true,
+        });
+        for (key, label) in entries {
+            rows.push(KeybindingRow {
+                key,
+                label: label.into_owned(),
+                heading: false,
+            });
+        }
+    }
+    rows
+}
+
+fn render_settings_keybindings(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [title, list] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "keybindings",
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   edit them under [keys] in the config file",
+                Style::default().fg(p.overlay1),
+            ),
+        ])),
+        title,
+    );
+
+    let rows = settings_keybinding_rows(app);
+    let key_width = rows
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(8);
+    let visible = list.height as usize;
+    let scroll = app
+        .settings
+        .list
+        .selected
+        .saturating_sub(visible.saturating_sub(1));
+
+    let lines = rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(index, row)| {
+            if row.heading {
+                return Line::from(Span::styled(
+                    format!(" {}", row.label),
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ));
+            }
+            let selected = index == app.settings.list.selected;
+            let base = if selected {
+                Style::default().fg(p.text).bg(p.surface0)
+            } else {
+                Style::default().fg(p.subtext0)
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!(" {:<width$} ", row.key, width = key_width),
+                    base.fg(p.mauve).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(row.label.clone(), base),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), list);
+}
+
+// ---------------------------------------------------------------------------
+// Providers, integrations, source control, about, archive
+// ---------------------------------------------------------------------------
+
+fn render_probe_section(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    kind: crate::app::probes::ToolProbeKind,
+    title: &str,
+    description: &str,
+) {
+    let p = &app.palette;
+    let [heading, body] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                description,
+                Style::default().fg(p.overlay1),
+            )),
+        ]),
+        heading,
+    );
+
+    if app.tool_probes_pending() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " checking…",
+                Style::default().fg(p.overlay1),
+            )),
+            body,
+        );
+        return;
+    }
+
+    let lines = app
+        .tool_probes_for(kind)
+        .into_iter()
+        .map(|probe| {
+            let marker_style = match probe.outcome {
+                crate::app::probes::ToolProbeOutcome::Ready => Style::default().fg(p.green),
+                crate::app::probes::ToolProbeOutcome::NeedsAttention => {
+                    Style::default().fg(p.yellow)
+                }
+                crate::app::probes::ToolProbeOutcome::Missing => Style::default().fg(p.overlay0),
+                crate::app::probes::ToolProbeOutcome::TimedOut => Style::default().fg(p.red),
+            };
+            Line::from(vec![
+                Span::styled(format!(" {} ", probe.outcome.marker()), marker_style),
+                Span::styled(
+                    format!("{:<10}", probe.label),
+                    Style::default().fg(p.subtext0),
+                ),
+                Span::styled(probe.detail.clone(), Style::default().fg(p.overlay1)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [heading, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new("source control")
+            .style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
+        heading,
+    );
+
+    let worktree_root = app.worktree_directory.display().to_string();
+    let rows = [
+        ("worktree root", worktree_root, "worktrees.directory"),
+        (
+            "landing approval label",
+            app.land_approval_label.clone(),
+            "land.approval_label",
+        ),
+    ];
+    let width = body.width as usize;
+    let lines = rows
+        .iter()
+        .map(|(label, value, key)| {
+            let value = format!("[{value}]");
+            let pad = width
+                .saturating_sub(label.chars().count() + value.chars().count() + 2)
+                .max(1);
+            vec![
+                Line::from(vec![
+                    Span::styled(format!(" {label}"), Style::default().fg(p.subtext0)),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(value, Style::default().fg(p.overlay1)),
+                ]),
+                Line::from(Span::styled(
+                    format!("   {key}"),
+                    Style::default().fg(p.overlay0),
+                )),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn render_settings_about(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [heading, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new("about").style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
+        heading,
+    );
+
+    let version = match crate::build_info::build_id() {
+        Some(build_id) => format!("{} ({build_id})", crate::build_info::BASE_VERSION),
+        None => crate::build_info::BASE_VERSION.to_string(),
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" Version", Style::default().fg(p.subtext0)),
+            Span::raw("  "),
+            Span::styled(version, Style::default().fg(p.text)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Update track", Style::default().fg(p.subtext0)),
+            Span::raw("  "),
+            Span::styled("fork-only", Style::default().fg(p.accent)),
+        ]),
+        Line::from(Span::styled(
+            "   this build never updates itself; install fork builds by hand",
+            Style::default().fg(p.overlay1),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn render_settings_archive(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let [heading, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "archive",
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   enter restores · d deletes",
+                Style::default().fg(p.overlay1),
+            ),
+        ])),
+        heading,
+    );
+
+    let entries = app.archive_entries();
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " no settled threads",
+                Style::default().fg(p.overlay1),
+            )),
+            body,
+        );
+        return;
+    }
+
+    let visible = body.height as usize;
+    let scroll = app
+        .settings
+        .list
+        .selected
+        .saturating_sub(visible.saturating_sub(1));
+    let lines = entries
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(index, entry)| {
+            let selected = index == app.settings.list.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(p.text)
+                    .bg(p.surface0)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(p.subtext0)
+            };
+            let suffix = if selected && app.settings.archive_delete_armed {
+                "  press d again to delete"
+            } else {
+                ""
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{} {:<14}", if selected { "▸" } else { " " }, entry.workspace),
+                    style,
+                ),
+                Span::styled(entry.title.clone(), style),
+                Span::styled(suffix, Style::default().fg(p.red)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+// ---------------------------------------------------------------------------
+// Shell
+// ---------------------------------------------------------------------------
+
+pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let Some(popup) = centered_popup_rect(area, SETTINGS_POPUP_WIDTH, settings_popup_height(app))
     else {
@@ -43,18 +452,13 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
     let Some(inner) = render_panel_shell(frame, popup, p.accent, p.panel_bg) else {
         return;
     };
-    if inner.height < 4 || inner.width < 10 {
+    if inner.height < 6 || inner.width < 20 {
         return;
     }
 
-    let stack = modal_stack_areas(inner, 3, 2, 0, 1);
-    let header_rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas::<3>(stack.header);
-
+    let stack = modal_stack_areas(inner, 2, 2, 0, 1);
+    let header_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas::<2>(stack.header);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " settings",
@@ -62,109 +466,82 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
         )])),
         header_rows[0],
     );
-
-    let tab_labels = SettingsSection::ALL.iter().map(|section| {
-        if app.settings_section_has_badge(*section) {
-            Line::from(vec![
-                Span::styled(
-                    "● ",
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(section.label()),
-            ])
-        } else {
-            Line::from(section.label())
-        }
-    });
-    let tabs = Tabs::new(tab_labels)
-        .select(
-            SettingsSection::ALL
-                .iter()
-                .position(|section| *section == app.settings.section)
-                .unwrap_or(0),
-        )
-        .style(Style::default().fg(p.overlay1))
-        .highlight_style(
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(" ")
-        .padding(" ", " ");
-    frame.render_widget(tabs, header_rows[1]);
-
     let sep = "─".repeat(inner.width as usize);
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, Style::default().fg(p.surface0))),
-        header_rows[2],
+        header_rows[1],
     );
 
-    let content_area = stack.content;
+    let areas = settings_areas(inner);
+    render_settings_nav(app, frame, areas.nav);
 
+    let content_area = areas.content;
     match app.settings.section {
-        SettingsSection::Theme => {
-            render_settings_theme(app, frame, content_area);
+        SettingsSection::General => render_settings_general(app, frame, content_area),
+        SettingsSection::Theme => render_settings_theme(app, frame, content_area),
+        SettingsSection::Indicators => render_modal_choice_list(
+            frame,
+            content_area,
+            "agent status indicators",
+            "choose color dots or distinct symbols for each state",
+            &[
+                ("color dots  ● ● ● ○ ·", StatusIndicatorStyle::Dots),
+                ("distinct symbols  × ◐ ✓ ○ ·", StatusIndicatorStyle::Symbols),
+            ],
+            app.status_indicators,
+            app.settings.list.selected,
+            p,
+            1,
+        ),
+        SettingsSection::Sound => render_settings_toggle(
+            frame,
+            content_area,
+            p,
+            "sound alerts",
+            "play sounds when agents change state in background",
+            app.sound_enabled(),
+            app.settings.list.selected,
+        ),
+        SettingsSection::Toast => render_modal_choice_list(
+            frame,
+            content_area,
+            "notification popups",
+            "choose where background popup notifications should appear",
+            &[
+                ("off", ToastDelivery::Off),
+                ("inside herdr", ToastDelivery::Herdr),
+                ("via terminal", ToastDelivery::Terminal),
+                ("via system", ToastDelivery::System),
+            ],
+            app.toast_delivery(),
+            app.settings.list.selected,
+            p,
+            2,
+        ),
+        SettingsSection::PaneLabels => render_settings_toggle(
+            frame,
+            content_area,
+            p,
+            "agent border labels",
+            "show detected agent names in split pane borders",
+            app.agent_border_labels_enabled(),
+            app.settings.list.selected,
+        ),
+        SettingsSection::Keybindings => render_settings_keybindings(app, frame, content_area),
+        SettingsSection::Providers => render_probe_section(
+            app,
+            frame,
+            content_area,
+            crate::app::probes::ToolProbeKind::Provider,
+            "providers",
+            "agent CLIs found on PATH",
+        ),
+        SettingsSection::Integrations => render_settings_integrations(app, frame, content_area),
+        SettingsSection::SourceControl => {
+            render_settings_source_control(app, frame, content_area)
         }
-        SettingsSection::Indicators => {
-            render_modal_choice_list(
-                frame,
-                content_area,
-                "agent status indicators",
-                "choose color dots or distinct symbols for each state",
-                &[
-                    ("color dots  ● ● ● ○ ·", StatusIndicatorStyle::Dots),
-                    ("distinct symbols  × ◐ ✓ ○ ·", StatusIndicatorStyle::Symbols),
-                ],
-                app.status_indicators,
-                app.settings.list.selected,
-                p,
-                1,
-            );
-        }
-        SettingsSection::Sound => {
-            render_settings_toggle(
-                frame,
-                content_area,
-                p,
-                "sound alerts",
-                "play sounds when agents change state in background",
-                app.sound_enabled(),
-                app.settings.list.selected,
-            );
-        }
-        SettingsSection::Toast => {
-            render_modal_choice_list(
-                frame,
-                content_area,
-                "notification popups",
-                "choose where background popup notifications should appear",
-                &[
-                    ("off", ToastDelivery::Off),
-                    ("inside herdr", ToastDelivery::Herdr),
-                    ("via terminal", ToastDelivery::Terminal),
-                    ("via system", ToastDelivery::System),
-                ],
-                app.toast_delivery(),
-                app.settings.list.selected,
-                p,
-                2,
-            );
-        }
-        SettingsSection::PaneLabels => {
-            render_settings_toggle(
-                frame,
-                content_area,
-                p,
-                "agent border labels",
-                "show detected agent names in split pane borders",
-                app.agent_border_labels_enabled(),
-                app.settings.list.selected,
-            );
-        }
-        SettingsSection::Integrations => {
-            render_settings_integrations(app, frame, content_area);
-        }
+        SettingsSection::Archive => render_settings_archive(app, frame, content_area),
+        SettingsSection::About => render_settings_about(app, frame, content_area),
     }
 
     if let Some(footer_area) = stack.footer {
@@ -202,25 +579,65 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
                 Span::styled(" ↑↓", Style::default().fg(p.overlay0)),
                 Span::styled(" select  ", Style::default().fg(p.overlay1)),
                 Span::styled("tab", Style::default().fg(p.overlay0)),
-                Span::styled(" section", Style::default().fg(p.overlay1)),
+                Span::styled(" section  ", Style::default().fg(p.overlay1)),
+                Span::styled("↵", Style::default().fg(p.overlay0)),
+                Span::styled(" change", Style::default().fg(p.overlay1)),
             ])),
             footer_rows[0],
         );
     }
 }
 
-pub(crate) fn settings_primary_button_label(
-    section: crate::app::state::SettingsSection,
-) -> &'static str {
+fn render_settings_nav(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let scroll = settings_nav_scroll(app, area);
+    let lines = SettingsSection::ALL
+        .iter()
+        .skip(scroll)
+        .take(area.height as usize)
+        .map(|section| {
+            let active = *section == app.settings.section;
+            let style = if active {
+                Style::default()
+                    .fg(panel_contrast_fg(p))
+                    .bg(p.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(p.subtext0)
+            };
+            let badge = if app.settings_section_has_badge(*section) {
+                "●"
+            } else {
+                " "
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{} {} {:<width$}",
+                        if active { "▸" } else { " " },
+                        section.glyph(),
+                        section.label(),
+                        width = area.width.saturating_sub(6) as usize
+                    ),
+                    style,
+                ),
+                Span::styled(badge, Style::default().fg(p.accent)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+pub(crate) fn settings_primary_button_label(section: SettingsSection) -> &'static str {
     match section {
-        crate::app::state::SettingsSection::Integrations => "install",
+        SettingsSection::Integrations => "install",
         _ => "apply",
     }
 }
 
 pub(crate) fn settings_show_primary_action(app: &AppState) -> bool {
     match app.settings.section {
-        crate::app::state::SettingsSection::Integrations => app
+        SettingsSection::Integrations => app
             .integration_recommendations
             .iter()
             .any(crate::integration::IntegrationRecommendation::needs_install),
@@ -230,7 +647,7 @@ pub(crate) fn settings_show_primary_action(app: &AppState) -> bool {
 
 pub(crate) fn settings_button_rects(
     inner: Rect,
-    section: crate::app::state::SettingsSection,
+    section: SettingsSection,
     show_primary: bool,
 ) -> (Option<Rect>, Rect) {
     if !show_primary {
@@ -297,25 +714,17 @@ fn integrations_footer_paragraph(app: &AppState) -> Paragraph<'static> {
     Paragraph::new(footer_lines).wrap(ratatui::widgets::Wrap { trim: false })
 }
 
-fn integrations_footer_height(app: &AppState, width: u16) -> u16 {
-    (integrations_footer_paragraph(app).line_count(width) as u16).min(6)
-}
-
 fn render_settings_integrations(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-
-    let footer = integrations_footer_paragraph(app);
-    let footer_height = integrations_footer_height(app, area.width);
 
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
-        Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(footer_height),
+        Constraint::Length(5),
+        Constraint::Length(2),
     ])
-    .areas::<6>(area);
+    .areas::<5>(area);
 
     frame.render_widget(
         Paragraph::new("agent integrations")
@@ -366,8 +775,16 @@ fn render_settings_integrations(app: &AppState, frame: &mut Frame, area: Rect) {
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines), rows[3]);
-    frame.render_widget(footer, rows[5]);
+    frame.render_widget(Paragraph::new(lines), rows[2]);
+    render_probe_section(
+        app,
+        frame,
+        rows[3],
+        crate::app::probes::ToolProbeKind::Integration,
+        "service auth",
+        "github and linear, checked once per session",
+    );
+    frame.render_widget(integrations_footer_paragraph(app), rows[4]);
 }
 
 fn render_settings_theme(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -421,4 +838,42 @@ fn render_settings_toggle(
         p,
         1,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_nav_column_and_content_column_never_overlap() {
+        for (width, height) in [(76u16, 22u16), (92, 24)] {
+            let inner = Rect::new(1, 1, width, height);
+            let areas = settings_areas(inner);
+            assert!(areas.nav.width > 0);
+            assert!(areas.content.width > 0);
+            assert!(areas.nav.x + areas.nav.width < areas.content.x);
+            assert!(areas.content.x + areas.content.width <= inner.x + inner.width);
+        }
+    }
+
+    #[test]
+    fn the_nav_scrolls_to_keep_the_active_section_visible() {
+        let mut app = AppState::test_new();
+        let nav = Rect::new(0, 0, 20, 4);
+        app.settings.section = SettingsSection::General;
+        assert_eq!(settings_nav_scroll(&app, nav), 0);
+        app.settings.section = SettingsSection::About;
+        assert_eq!(
+            settings_nav_scroll(&app, nav),
+            SettingsSection::About.index() + 1 - 4
+        );
+    }
+
+    #[test]
+    fn general_row_offsets_give_the_hinted_row_two_lines() {
+        let offsets = general_row_offsets();
+        assert_eq!(offsets.len(), GeneralRow::ALL.len());
+        assert_eq!(offsets[0], (0, 2));
+        assert_eq!(offsets[1], (2, 1));
+    }
 }
