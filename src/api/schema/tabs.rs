@@ -29,7 +29,9 @@ pub struct TabListParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabRenameParams {
     pub tab_id: String,
-    pub label: String,
+    /// Absent clears the manual name so the tab falls back to its derived label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]

@@ -163,7 +163,10 @@ impl App {
         else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_user_custom_name(params.label.clone());
+        match params.label.clone() {
+            Some(label) => tab.set_user_custom_name(label),
+            None => tab.clear_custom_name(),
+        }
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         if self.state.active == Some(ws_idx) {
             // Reflow the tab bar so the new label width takes effect immediately.
@@ -661,7 +664,7 @@ mod tests {
             "req".into(),
             TabRenameParams {
                 tab_id,
-                label: "a much longer custom tab label".into(),
+                label: Some("a much longer custom tab label".into()),
             },
         );
 
@@ -671,6 +674,41 @@ mod tests {
             "tab bar should reflow to the new label width immediately: \
              before={width_before}, after={width_after}"
         );
+    }
+
+    #[test]
+    fn api_tab_rename_clear_restores_the_derived_label() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let workspace = Workspace::test_new("tabs");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id: tab_id.clone(),
+                label: Some("pinned by hand".into()),
+            },
+        );
+        assert!(!app.state.workspaces[0].tabs[0].is_auto_named());
+
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: None,
+            },
+        );
+
+        // A user name outranks every derived source, so clearing it is the only
+        // way a renamed tab can follow its agent's session name again.
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert!(tab.is_auto_named());
+        assert_eq!(tab.name_origin, crate::workspace::TabNameOrigin::Structural);
     }
 
     #[test]
