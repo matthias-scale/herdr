@@ -1810,6 +1810,8 @@ impl crate::app::App {
             if let Some(index) = keys.iter().position(|key| key == selection) {
                 let selection = keys.remove(index);
                 keys.insert(0, selection);
+            } else {
+                keys.insert(0, selection.clone());
             }
         }
         keys.truncate(WORK_ITEM_DETAIL_CACHE_CAPACITY);
@@ -2577,6 +2579,31 @@ esac
                 .len(),
             WORK_ITEM_DETAIL_CACHE_CAPACITY
         );
+    }
+
+    #[test]
+    fn selected_ticket_outside_dock_projection_still_refreshes_detail() {
+        let mut app = test_app_with_work_index();
+        app.work_index_linearis_program_override = Some(Path::new("/usr/bin/false").to_path_buf());
+        let key = crate::app::state::WorkItemKey {
+            repo: String::new(),
+            pr_number: None,
+            pr_url: None,
+            ticket_id: Some("SCA-3165".into()),
+        };
+
+        app.start_work_item_detail_refresh_if_due(
+            Instant::now(),
+            crate::app::state::DockHomeSection::Tickets,
+            Some(key.clone()),
+            true,
+        );
+
+        let refresh = app
+            .work_item_detail_refresh_in_flight
+            .as_ref()
+            .expect("selected ticket detail batch");
+        assert_eq!(refresh.keys, [key]);
     }
 
     #[test]
