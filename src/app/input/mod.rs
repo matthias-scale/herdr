@@ -167,6 +167,9 @@ impl App {
         {
             return None;
         }
+        if self.handle_sidebar_object_menu_key(key_event) {
+            return None;
+        }
         if self.state.handle_sidebar_group_menu_key(key_event) {
             return None;
         }
@@ -346,24 +349,14 @@ impl App {
             return false;
         }
 
-        let navigate = &self.state.keybinds.navigate;
         let event = key.as_key_event();
 
         // A staged write owns the keyboard until it is confirmed or dropped, so
         // nothing can leave herdr as a side effect of ordinary navigation.
-        if self.state.dock_pending_write.is_some() {
-            match event.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') if event.modifiers.is_empty() => {
-                    self.run_pending_dock_write();
-                }
-                KeyCode::Esc => {
-                    self.state.dock_pending_write = None;
-                    self.state.dock_write_notice = Some("cancelled".to_string());
-                }
-                _ => {}
-            }
+        if self.handle_pending_dock_write_key(event) {
             return true;
         }
+        let navigate = &self.state.keybinds.navigate;
 
         // While a comment is being typed the keys belong to the draft, not to
         // the action shortcuts.
@@ -612,6 +605,25 @@ impl App {
             }
             Err(message) => self.state.dock_write_notice = Some(message),
         }
+    }
+
+    /// Shared confirmation gate for every work-item write staged from the dock
+    /// or sidebar. The staging control can never execute its own write.
+    fn handle_pending_dock_write_key(&mut self, event: KeyEvent) -> bool {
+        if self.state.dock_pending_write.is_none() {
+            return false;
+        }
+        match event.code {
+            KeyCode::Char('y' | 'Y') if event.modifiers.is_empty() => {
+                self.run_pending_dock_write();
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') if event.modifiers.is_empty() => {
+                self.state.dock_pending_write = None;
+                self.state.dock_write_notice = Some("cancelled".to_string());
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Dock home is attach-local presentation layered over a focused pane, so
@@ -2289,15 +2301,7 @@ impl App {
         if !event.modifiers.is_empty() {
             return false;
         }
-        if self.state.dock_pending_write.is_some() {
-            match event.code {
-                KeyCode::Char('y' | 'Y') => self.run_pending_dock_write(),
-                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
-                    self.state.dock_pending_write = None;
-                    self.state.dock_write_notice = Some("cancelled".to_string());
-                }
-                _ => {}
-            }
+        if self.handle_pending_dock_write_key(event) {
             return true;
         }
         if self.state.dock_pr_pending_land.is_some() {
@@ -2955,6 +2959,9 @@ impl App {
             }
             if let Some(action) = action {
                 match action {
+                    MouseAction::SidebarObjectMenu { index } => {
+                        self.apply_sidebar_object_menu_action(index)
+                    }
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }

@@ -1115,6 +1115,9 @@ pub(crate) enum SidebarRow {
     },
     NestedHeader {
         key: String,
+        /// Canonical provider object key for the trailing action menu.
+        /// Unlike `key`, this never includes workspace or settled prefixes.
+        action_key: Option<String>,
         title: String,
         count: usize,
         collapsed: bool,
@@ -1267,8 +1270,10 @@ fn compact_sidebar_rows_inner(
                 && (app.sidebar_group_mode == SidebarGroupMode::LinearTeam || !group.unlinked)
         }) {
             let collapsed = section_is_collapsed(app, &group.key);
+            let action_key = (!group.unlinked).then(|| group.key.clone());
             rows.push(SidebarRow::NestedHeader {
                 key: group.key,
+                action_key,
                 title: group.title,
                 count: group.entries.len(),
                 collapsed,
@@ -1294,6 +1299,7 @@ fn compact_sidebar_rows_inner(
                 let collapsed = section_is_collapsed(app, &group.key);
                 rows.push(SidebarRow::NestedHeader {
                     key: group.key,
+                    action_key: None,
                     title: group.title,
                     count: group.entries.len(),
                     collapsed,
@@ -1351,10 +1357,14 @@ fn compact_sidebar_rows_inner(
             continue;
         }
         for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
+            let action_key = (app.sidebar_group_mode == SidebarGroupMode::RepoPr
+                && !group.unlinked)
+                .then(|| format!("github:{}", group.key));
             let collapse_key = format!("{}:{}", ws_idx, group.key);
             let collapsed = section_is_collapsed(app, &collapse_key);
             rows.push(SidebarRow::NestedHeader {
                 key: collapse_key,
+                action_key,
                 title: group.title,
                 count: group.entries.len(),
                 collapsed,
@@ -1399,8 +1409,10 @@ fn append_settled_rows(
     ) {
         for group in sidebar_work_groups(app, &entries, app.sidebar_group_mode) {
             let collapsed = section_is_collapsed(app, &group.key);
+            let action_key = (!group.unlinked).then(|| group.key.clone());
             rows.push(SidebarRow::NestedHeader {
                 key: group.key,
+                action_key,
                 title: group.title,
                 count: group.entries.len(),
                 collapsed,
@@ -1452,10 +1464,14 @@ fn append_settled_rows(
             continue;
         }
         for group in sidebar_tab_groups(app, &member_entries, app.sidebar_group_mode) {
+            let action_key = (app.sidebar_group_mode == SidebarGroupMode::RepoPr
+                && !group.unlinked)
+                .then(|| format!("github:{}", group.key));
             let collapse_key = format!("settled:{ws_idx}:{}", group.key);
             let collapsed = section_is_collapsed(app, &collapse_key);
             rows.push(SidebarRow::NestedHeader {
                 key: collapse_key,
+                action_key,
                 title: group.title,
                 count: group.entries.len(),
                 collapsed,
@@ -2146,6 +2162,42 @@ fn work_item_prompt(item: &crate::work_index::WorkItem, link: &str) -> String {
     format!("{heading}\n{link}")
 }
 
+fn github_activation(
+    app: &AppState,
+    item: &crate::work_index::WorkItem,
+    url: &str,
+) -> Option<SidebarWorkGroupActivation> {
+    let number = item.pr_number?;
+    let prompt = work_item_prompt(item, url);
+    Some(SidebarWorkGroupActivation {
+        prompt: prompt.clone(),
+        spawn_prompt: prompt,
+        object_link: url.to_string(),
+        directory: repo_directory(app, &item.repo),
+        git_ref: item
+            .branch
+            .as_ref()
+            .map(|branch| crate::app::home_refs::HomeRef {
+                name: branch.clone(),
+                oid: String::new(),
+                tag: None,
+            }),
+        pr: Some(crate::app::home::HomePrContext {
+            url: url.to_string(),
+            number,
+            repo: item.repo.clone(),
+        }),
+        ticket: None,
+        work_context_patch: crate::work_context::PaneWorkContextPatch {
+            pr_urls: Some(vec![url.to_string()]),
+            repo: Some(item.repo.clone()),
+            branch: item.branch.clone(),
+            work_title: item.pr_title.clone(),
+            ..Default::default()
+        },
+    })
+}
+
 /// Provider objects with no pane binding, newest creation first. The work
 /// index owns the objects; this function only projects them into one client's
 /// current sidebar view.
@@ -2205,7 +2257,6 @@ pub(crate) fn sidebar_unassigned_objects(
                     .as_deref()
                     .map(|title| format!("#{number} {title}"))
                     .unwrap_or_else(|| format!("#{number}"));
-                let prompt = work_item_prompt(item, url);
                 Some(SidebarUnassignedObject {
                     key: format!("github:{url}"),
                     title,
@@ -2214,32 +2265,7 @@ pub(crate) fn sidebar_unassigned_objects(
                         item.pr_state.as_deref(),
                         item.draft,
                     )),
-                    activation: SidebarWorkGroupActivation {
-                        prompt: prompt.clone(),
-                        spawn_prompt: prompt,
-                        object_link: url.clone(),
-                        directory: repo_directory(app, &item.repo),
-                        git_ref: item.branch.as_ref().map(|branch| {
-                            crate::app::home_refs::HomeRef {
-                                name: branch.clone(),
-                                oid: String::new(),
-                                tag: None,
-                            }
-                        }),
-                        pr: Some(crate::app::home::HomePrContext {
-                            url: url.clone(),
-                            number,
-                            repo: item.repo.clone(),
-                        }),
-                        ticket: None,
-                        work_context_patch: crate::work_context::PaneWorkContextPatch {
-                            pr_urls: Some(vec![url.clone()]),
-                            repo: Some(item.repo.clone()),
-                            branch: item.branch.clone(),
-                            work_title: item.pr_title.clone(),
-                            ..Default::default()
-                        },
-                    },
+                    activation: github_activation(app, item, url)?,
                 })
             })
             .collect(),
@@ -2359,8 +2385,13 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
         objects.len().min(UNASSIGNED_INITIAL_ROWS)
     };
     for object in objects.iter().take(shown) {
+        let action_key = (object.key.starts_with("linear:")
+            || object.key.starts_with("github:")
+            || object.key.starts_with("missive:"))
+        .then(|| object.key.clone());
         rows.push(SidebarRow::NestedHeader {
             key: object.key.clone(),
+            action_key,
             title: object.title.clone(),
             count: 0,
             collapsed: false,
@@ -2373,6 +2404,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
     if remaining > 0 {
         rows.push(SidebarRow::NestedHeader {
             key: sidebar_show_more_key(app.sidebar_group_mode),
+            action_key: None,
             title: format!("show {remaining} more…"),
             count: 0,
             collapsed: false,
@@ -2403,6 +2435,7 @@ fn append_missive_no_pane_rows(
     for object in objects.iter().take(shown) {
         rows.push(SidebarRow::NestedHeader {
             key: object.key.clone(),
+            action_key: Some(object.key.clone()),
             title: object.title.clone(),
             count: 0,
             collapsed: false,
@@ -2415,6 +2448,7 @@ fn append_missive_no_pane_rows(
     if remaining > 0 {
         rows.push(SidebarRow::NestedHeader {
             key: sidebar_show_more_key(SidebarGroupMode::Missive),
+            action_key: None,
             title: format!("show {remaining} more…"),
             count: 0,
             collapsed: false,
@@ -3139,6 +3173,7 @@ pub(crate) struct SectionHeaderArea {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NestedHeaderArea {
     key: String,
+    action_key: Option<String>,
     title: String,
     count: usize,
     collapsed: bool,
@@ -3166,6 +3201,7 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
         }
         if let SidebarRow::NestedHeader {
             key,
+            action_key,
             title,
             count,
             collapsed,
@@ -3176,6 +3212,7 @@ fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<Nested
         {
             out.push(NestedHeaderArea {
                 key: key.clone(),
+                action_key: action_key.clone(),
                 title: title.clone(),
                 count: *count,
                 collapsed: *collapsed,
@@ -3198,6 +3235,28 @@ pub(crate) fn sidebar_nested_header_at(app: &AppState, row: u16) -> Option<Strin
         .find(|header| row >= header.rect.y && row < header.rect.bottom())
         .filter(|header| !header.dim)
         .map(|header| header.key)
+}
+
+/// Canonical provider object on a nested-header row, independent of its
+/// collapse key. Linked and unassigned rows share this identity.
+pub(crate) fn sidebar_object_at(app: &AppState, row: u16) -> Option<String> {
+    compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|header| row >= header.rect.y && row < header.rect.bottom())
+        .and_then(|header| header.action_key)
+}
+
+/// The trailing ellipsis cell of a Linear, GitHub, or Missive object row.
+pub(crate) fn sidebar_object_action_at(app: &AppState, col: u16, row: u16) -> Option<String> {
+    compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|header| {
+            header.action_key.is_some()
+                && row >= header.rect.y
+                && row < header.rect.bottom()
+                && col == header.rect.right().saturating_sub(1)
+        })
+        .and_then(|header| header.action_key)
 }
 
 /// The dim work-item header at this row, if any. Dim headers do not collapse;
@@ -3228,8 +3287,8 @@ pub(crate) fn sidebar_unassigned_spawn_at(app: &AppState, col: u16, row: u16) ->
             header.spawn
                 && row >= header.rect.y
                 && row < header.rect.bottom()
-                && col >= header.rect.right().saturating_sub(2)
-                && col < header.rect.right()
+                && col >= header.rect.right().saturating_sub(4)
+                && col < header.rect.right().saturating_sub(2)
         })
         .map(|header| header.key)
 }
@@ -3239,6 +3298,15 @@ pub(crate) fn sidebar_work_group_activation(
     app: &AppState,
     key: &str,
 ) -> Option<SidebarWorkGroupActivation> {
+    if let Some(url) = key.strip_prefix("github:") {
+        let item = app
+            .work_index_snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| item.pr_url.as_deref() == Some(url))?;
+        return github_activation(app, item, url);
+    }
     let entries = sidebar_thread_entries(app);
     sidebar_unassigned_objects(app, &entries, app.sidebar_group_mode)
         .into_iter()
@@ -3250,6 +3318,103 @@ pub(crate) fn sidebar_work_group_activation(
                 .find(|group| group.key == key)
                 .and_then(|group| group.activation)
         })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarObjectMenuItem {
+    ClosePullRequest,
+    MarkPullRequestDraft,
+    MarkPullRequestReady,
+    CheckOut,
+    TicketTransitions,
+    TransitionTicket(crate::app::state::TicketTransitionChoice),
+    StartThread,
+    CopyMissiveUrl,
+}
+
+impl SidebarObjectMenuItem {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClosePullRequest => "Close",
+            Self::MarkPullRequestDraft => "Mark draft",
+            Self::MarkPullRequestReady => "Mark ready",
+            Self::CheckOut => "Check out",
+            Self::TicketTransitions => "Transition ▸",
+            Self::TransitionTicket(choice) => choice.label(),
+            Self::StartThread => "Start thread",
+            Self::CopyMissiveUrl => "Open in Missive",
+        }
+    }
+}
+
+pub(crate) fn sidebar_object_menu_items(app: &AppState) -> Vec<SidebarObjectMenuItem> {
+    use crate::app::state::SidebarObjectMenuPage;
+    let Some(menu) = app.sidebar_object_menu.as_ref() else {
+        return Vec::new();
+    };
+    if menu.page == SidebarObjectMenuPage::Confirmation {
+        return Vec::new();
+    }
+    if menu.page == SidebarObjectMenuPage::TicketTransitions {
+        return crate::app::state::TicketTransitionChoice::ALL
+            .into_iter()
+            .map(SidebarObjectMenuItem::TransitionTicket)
+            .collect();
+    }
+    if menu.target.starts_with("github:") {
+        vec![
+            SidebarObjectMenuItem::ClosePullRequest,
+            SidebarObjectMenuItem::MarkPullRequestDraft,
+            SidebarObjectMenuItem::MarkPullRequestReady,
+            SidebarObjectMenuItem::CheckOut,
+        ]
+    } else if menu.target.starts_with("linear:") {
+        vec![
+            SidebarObjectMenuItem::TicketTransitions,
+            SidebarObjectMenuItem::StartThread,
+        ]
+    } else if menu.target.starts_with("missive:") {
+        vec![
+            SidebarObjectMenuItem::CopyMissiveUrl,
+            SidebarObjectMenuItem::StartThread,
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn sidebar_pull_request_target(app: &AppState) -> Option<(String, u64)> {
+    let target = app
+        .sidebar_object_menu
+        .as_ref()?
+        .target
+        .strip_prefix("github:")?;
+    let item = app
+        .work_index_snapshot
+        .as_ref()?
+        .items
+        .iter()
+        .find(|item| item.pr_url.as_deref() == Some(target))?;
+    Some((item.repo.clone(), item.pr_number?))
+}
+
+pub(crate) fn sidebar_ticket_target(app: &AppState) -> Option<String> {
+    app.sidebar_object_menu
+        .as_ref()?
+        .target
+        .strip_prefix("linear:")
+        .map(str::to_string)
+}
+
+pub(crate) fn sidebar_missive_copy_url(app: &AppState) -> Option<String> {
+    let target = app
+        .sidebar_object_menu
+        .as_ref()?
+        .target
+        .strip_prefix("missive:")?;
+    indexed_missive_conversation(app, target)
+        .map(|conversation| conversation.app_url.clone())
+        .or_else(|| Some(target.to_string()))
 }
 
 pub(crate) fn compute_sidebar_section_header_areas(
@@ -4058,6 +4223,7 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
         .as_deref()
         .map(display_width)
         .unwrap_or_default();
+    let action_width = usize::from(header.action_key.is_some()) * 2;
     let spawn_width = usize::from(header.spawn) * 2;
     let prefix = if header.dim { "   " } else { "  ▸ " };
     // The status glyph sits before the id, so it costs the title its width.
@@ -4069,6 +4235,7 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
             .saturating_sub(display_width(prefix))
             .saturating_sub(glyph_width)
             .saturating_sub(count_width)
+            .saturating_sub(action_width)
             .saturating_sub(spawn_width),
     );
     // A dim header carries no live state colour: nothing is running under it.
@@ -4116,7 +4283,16 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
             Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
         ));
     }
-    let selected = header.dim && app.sidebar_selected_work_group.as_deref() == Some(&header.key);
+    if header.action_key.is_some() {
+        spans.push(Span::styled(
+            " …",
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let selected = header
+        .action_key
+        .as_deref()
+        .is_some_and(|key| app.sidebar_selected_work_group.as_deref() == Some(key));
     let paragraph = if selected {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(p.surface1))
     } else {
@@ -4491,6 +4667,123 @@ pub(crate) fn sidebar_filter_menu_layout(
     )
 }
 
+pub(crate) fn sidebar_object_menu_anchor_rect(app: &AppState) -> Option<Rect> {
+    let menu = app.sidebar_object_menu.as_ref()?;
+    let headers = compute_sidebar_nested_header_areas(app, app.view.sidebar_rect);
+    headers
+        .iter()
+        .find(|header| {
+            header.action_key.as_ref() == Some(&menu.target)
+                && menu.anchor_row == Some(header.rect.y)
+        })
+        .or_else(|| {
+            headers
+                .iter()
+                .find(|header| header.action_key.as_ref() == Some(&menu.target))
+        })
+        .map(|header| Rect::new(header.rect.right().saturating_sub(1), header.rect.y, 1, 1))
+}
+
+pub(crate) fn sidebar_object_menu_labels(app: &AppState) -> Vec<String> {
+    if app
+        .sidebar_object_menu
+        .as_ref()
+        .is_some_and(|menu| menu.page == crate::app::state::SidebarObjectMenuPage::Confirmation)
+    {
+        return app
+            .dock_pending_write
+            .as_ref()
+            .map(|write| vec![format!("Confirm {}? [y/N]", write.describe())])
+            .unwrap_or_default();
+    }
+    sidebar_object_menu_items(app)
+        .into_iter()
+        .map(|item| item.label().to_string())
+        .collect()
+}
+
+pub(crate) fn sidebar_object_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let anchor = sidebar_object_menu_anchor_rect(app)?;
+    let labels = sidebar_object_menu_labels(app);
+    let width = labels
+        .iter()
+        .map(|label| display_width(label).saturating_add(2))
+        .max()
+        .unwrap_or(1);
+    let width = u16::try_from(width).unwrap_or(u16::MAX);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor,
+            item_count: labels.len(),
+            selected: app
+                .sidebar_object_menu
+                .as_ref()
+                .map_or(0, |menu| menu.selected),
+            has_filter: false,
+            max_rows: labels.len(),
+            min_width: width,
+        },
+        area,
+    )
+}
+
+pub(crate) fn sidebar_object_menu_item_at(
+    app: &AppState,
+    area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let layout = sidebar_object_menu_layout(app, area)?;
+    super::dropdown::hit_test(&layout, col, row)
+}
+
+pub(super) fn render_sidebar_object_menu(app: &AppState, frame: &mut Frame) {
+    let Some(menu) = app.sidebar_object_menu.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_object_menu_layout(app, frame.area()) else {
+        if let Some(anchor) = sidebar_object_menu_anchor_rect(app) {
+            frame.render_widget(
+                Paragraph::new("!").style(Style::default().fg(app.palette.red)),
+                anchor,
+            );
+        }
+        return;
+    };
+    let labels = sidebar_object_menu_labels(app);
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    let lines = labels
+        .iter()
+        .enumerate()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
+        .map(|(index, label)| {
+            let selected = index == menu.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg)
+            };
+            Line::from(Span::styled(
+                format!("{} {label}", if selected { "▸" } else { " " }),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
+        layout.list_rect,
+    );
+}
+
 pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
     "↺ Resume thread",
     "✎ New thread in same repo",
@@ -4707,7 +5000,7 @@ fn render_sidebar_toggle(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         api::schema::{
@@ -9781,6 +10074,100 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
     }
 
+    fn open_object_menu(app: &mut AppState, target: &str) {
+        app.sidebar_object_menu = Some(crate::app::state::SidebarObjectMenuState {
+            target: target.into(),
+            anchor_row: None,
+            page: crate::app::state::SidebarObjectMenuPage::Actions,
+            selected: 0,
+        });
+    }
+
+    #[test]
+    fn sidebar_object_menu_contents_match_each_provider() {
+        let mut app = sidebar_work_item_fixture();
+        for (target, expected) in [
+            (
+                "github:https://github.com/scalable-so/herdr/pull/159",
+                vec!["Close", "Mark draft", "Mark ready", "Check out"],
+            ),
+            ("linear:SCA-3102", vec!["Transition ▸", "Start thread"]),
+            (
+                &format!("missive:{CONVERSATION_A}"),
+                vec!["Open in Missive", "Start thread"],
+            ),
+        ] {
+            open_object_menu(&mut app, target);
+            assert_eq!(
+                sidebar_object_menu_labels(&app),
+                expected,
+                "menu for {target}"
+            );
+        }
+
+        open_object_menu(&mut app, "linear:SCA-3102");
+        app.sidebar_object_menu.as_mut().expect("ticket menu").page =
+            crate::app::state::SidebarObjectMenuPage::TicketTransitions;
+        assert_eq!(
+            sidebar_object_menu_labels(&app),
+            ["Todo", "In Progress", "In Review", "Done"]
+        );
+    }
+
+    #[test]
+    fn sidebar_object_menu_opens_downward_and_clamps() {
+        let mut app = sidebar_work_item_fixture();
+        app.work_index_snapshot
+            .as_mut()
+            .and_then(|snapshot| snapshot.items.first_mut())
+            .expect("pull request fixture")
+            .source
+            .github = true;
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.sidebar_work_filter.github.assignee = None;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+        let target = "github:https://github.com/scalable-so/herdr/pull/159";
+        open_object_menu(&mut app, target);
+        let anchor = sidebar_object_menu_anchor_rect(&app).expect("action anchor");
+        let area = Rect::new(0, 0, 80, anchor.bottom().saturating_add(2));
+        let layout = sidebar_object_menu_layout(&app, area).expect("clamped dropdown");
+        assert_eq!(layout.rect.y, anchor.bottom());
+        assert_eq!(layout.visible_rows, 2);
+        assert!(layout.rect.y >= anchor.bottom());
+        assert!(layout.rect.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn unassigned_row_keeps_separate_spawn_and_action_hit_areas() {
+        let mut app = sidebar_work_item_fixture();
+        app.work_index_snapshot
+            .as_mut()
+            .and_then(|snapshot| snapshot.items.first_mut())
+            .expect("pull request fixture")
+            .source
+            .github = true;
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.sidebar_work_filter.github.assignee = None;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+        let header = compute_sidebar_nested_header_areas(&app, app.view.sidebar_rect)
+            .into_iter()
+            .find(|header| header.spawn)
+            .expect("unassigned pull request row");
+        let target = header.action_key.clone().expect("action target");
+        assert_eq!(
+            sidebar_unassigned_spawn_at(&app, header.rect.right().saturating_sub(3), header.rect.y),
+            Some(target.clone())
+        );
+        assert_eq!(
+            sidebar_object_action_at(&app, header.rect.right().saturating_sub(1), header.rect.y),
+            Some(target)
+        );
+        assert_eq!(
+            sidebar_unassigned_spawn_at(&app, header.rect.right().saturating_sub(1), header.rect.y),
+            None
+        );
+    }
+
     #[test]
     fn the_linear_header_names_the_team_and_the_filter() {
         let mut app = sidebar_work_item_fixture();
@@ -10082,7 +10469,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("unassigned ticket row");
 
         let key =
-            sidebar_unassigned_spawn_at(&app, header.rect.right().saturating_sub(1), header.rect.y)
+            sidebar_unassigned_spawn_at(&app, header.rect.right().saturating_sub(3), header.rect.y)
                 .expect("trailing plus target");
         let plan = app
             .sidebar_unassigned_dispatch_plan(&key)
@@ -12040,9 +12427,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let header = headers
             .iter()
-            .find(|(line, _)| line.contains("aaa111 · fix p"))
+            .find(|(line, _)| line.contains("aaa111 · fix"))
             .unwrap_or_else(|| panic!("conversation header in {headers:?}"));
-        assert!(header.0.contains("○ aaa111 · fix p"), "{:?}", header.0);
+        assert!(header.0.contains("○ aaa111 · fix"), "{:?}", header.0);
         assert_eq!(header.1, Some(expected));
         // Nothing caches conversation state on this base, so no header may
         // claim a closed or unassigned conversation.
@@ -12116,13 +12503,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let headers = rendered_nested_headers(&mut app, 120, 40);
         let closed = headers
             .iter()
-            .find(|(line, _)| line.contains("aaa111 · Refu"))
+            .find(|(line, _)| line.contains("aaa111 · Ref"))
             .unwrap_or_else(|| panic!("indexed closed conversation header in {headers:?}"));
         assert!(closed.0.contains("● aaa111"), "{:?}", closed.0);
         assert_eq!(closed.1, Some(app.palette.work_status_done()));
         let open = headers
             .iter()
-            .find(|(line, _)| line.contains("bbb222 · Needs"))
+            .find(|(line, _)| line.contains("bbb222 · Nee"))
             .expect("indexed open conversation header");
         assert!(open.0.contains("○ bbb222"), "{:?}", open.0);
         assert_eq!(open.1, Some(app.palette.work_status_open()));
@@ -12140,7 +12527,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .find(|(line, _)| line.contains("OPS-3"))
             .unwrap_or_else(|| panic!("ticket header in {headers:?}"));
         assert!(header.0.starts_with("   ◐ OPS-3 · pixel"), "{:?}", header.0);
-        assert!(header.0.ends_with("… +"), "{:?}", header.0);
+        assert!(header.0.ends_with("… + …"), "{:?}", header.0);
         assert!(
             crate::ui::text::display_width(&header.0) <= 26,
             "{:?}",

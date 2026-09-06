@@ -87,6 +87,10 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
+#[cfg(test)]
+pub(crate) use self::sidebar::sidebar_object_menu_layout as sidebar_object_menu_layout_for_test;
+#[cfg(test)]
+pub(crate) use self::sidebar::tests::sidebar_work_item_fixture;
 pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
@@ -94,7 +98,7 @@ pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
-    render_sidebar_group_menu, render_sidebar_settled_menu,
+    render_sidebar_group_menu, render_sidebar_object_menu, render_sidebar_settled_menu,
 };
 #[cfg(test)]
 #[cfg(test)]
@@ -133,14 +137,17 @@ pub(crate) use self::{
         relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
         sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
         sidebar_group_mode_anchor_rect, sidebar_header_new_space_rect,
-        sidebar_header_overflow_rect, sidebar_nested_header_at, sidebar_row_index_for_workspace,
+        sidebar_header_overflow_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
+        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
+        sidebar_object_menu_items, sidebar_pull_request_target, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
         sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
-        sidebar_thread_entries, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
-        workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect_for_app,
+        sidebar_thread_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarFilterOption, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        AgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
+        WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -1131,6 +1138,7 @@ fn render_with_runtime_registry_inner(
     render_sidebar_group_menu(app, frame);
     render_sidebar_filter_menu(app, frame);
     render_sidebar_settled_menu(app, frame);
+    render_sidebar_object_menu(app, frame);
 }
 
 fn render_navigation_chrome(

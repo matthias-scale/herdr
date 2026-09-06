@@ -1310,10 +1310,30 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
     pub(crate) selected_work_group: Option<String>,
+    pub(crate) object_menu: Option<SidebarObjectMenuState>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
+}
+
+/// Attach-local state for the action menu anchored to a sidebar work object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarObjectMenuState {
+    pub(crate) target: String,
+    /// Exact clicked row when mouse-opened. Keyboard-opened menus resolve the
+    /// first visible row for the selected object.
+    pub(crate) anchor_row: Option<u16>,
+    pub(crate) page: SidebarObjectMenuPage,
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SidebarObjectMenuPage {
+    #[default]
+    Actions,
+    TicketTransitions,
+    Confirmation,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -2843,6 +2863,9 @@ pub struct AppState {
     /// Dim work-item header the operator selected with the mouse. Enter on it
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
+    /// Downward action menu for a Linear, GitHub, or Missive sidebar object.
+    /// This is client-local presentation; writes remain in `dock_pending_write`.
+    pub(crate) sidebar_object_menu: Option<SidebarObjectMenuState>,
     /// Views whose Unassigned section has expanded past its ten newest rows.
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
@@ -3606,6 +3629,7 @@ impl AppState {
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
         self.sidebar_selected_work_group = None;
+        self.sidebar_object_menu = None;
         self.sidebar_selected_settled = None;
         self.sidebar_settled_menu_target = None;
         self.sidebar_settled_menu_delete_armed = false;
@@ -3632,6 +3656,7 @@ impl AppState {
         self.sidebar_work_filter = filter.clone();
         self.sidebar_work_filter_persistence_request = Some(filter);
         self.sidebar_selected_work_group = None;
+        self.sidebar_object_menu = None;
         self.workspace_scroll = 0;
         self.mark_sidebar_projection_changed();
     }
@@ -3686,6 +3711,7 @@ impl AppState {
             &mut self.sidebar_selected_work_group,
             &mut other.selected_work_group,
         );
+        std::mem::swap(&mut self.sidebar_object_menu, &mut other.object_menu);
         std::mem::swap(
             &mut self.sidebar_unassigned_expanded_views,
             &mut other.unassigned_expanded_views,
@@ -4239,6 +4265,7 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_object_menu: None,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,

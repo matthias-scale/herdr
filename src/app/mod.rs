@@ -711,6 +711,7 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_object_menu: None,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,

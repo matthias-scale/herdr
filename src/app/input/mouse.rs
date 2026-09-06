@@ -34,6 +34,9 @@ fn dock_body_contains(app: &AppState, column: u16, row: u16) -> bool {
 }
 
 pub(super) enum MouseAction {
+    SidebarObjectMenu {
+        index: usize,
+    },
     SettledMenu {
         index: usize,
     },
@@ -296,6 +299,48 @@ impl AppState {
         let group_anchor_hit = group_menu_enabled
             && !filter_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_object_menu.is_some() {
+            if let Some(index) = crate::ui::sidebar_object_menu_item_at(
+                self,
+                self.screen_rect(),
+                mouse.column,
+                mouse.row,
+            ) {
+                if let Some(menu) = self.sidebar_object_menu.as_mut() {
+                    menu.selected = index;
+                }
+            }
+            return None;
+        }
+        if self.sidebar_object_menu.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = crate::ui::sidebar_object_menu_item_at(
+                    self,
+                    self.screen_rect(),
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    return Some(MouseAction::SidebarObjectMenu { index });
+                }
+                if self.sidebar_object_menu.as_ref().is_some_and(|menu| {
+                    menu.page == crate::app::state::SidebarObjectMenuPage::Confirmation
+                }) {
+                    self.dock_pending_write = None;
+                }
+                self.sidebar_object_menu = None;
+            }
+            return None;
+        }
+        if group_menu_enabled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(target) = crate::ui::sidebar_object_action_at(self, mouse.column, mouse.row)
+            {
+                self.open_sidebar_object_menu(target);
+                if let Some(menu) = self.sidebar_object_menu.as_mut() {
+                    menu.anchor_row = Some(mouse.row);
+                }
+                return None;
+            }
+        }
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
         {
             if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
@@ -1092,6 +1137,8 @@ impl AppState {
                         return None;
                     }
                     if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
+                        self.sidebar_selected_work_group =
+                            crate::ui::sidebar_object_at(self, mouse.row);
                         self.toggle_sidebar_group(&key);
                         return None;
                     }
