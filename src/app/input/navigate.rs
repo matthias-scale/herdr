@@ -294,6 +294,8 @@ impl App {
                 if let Some((ws_idx, pane_id)) = next_review_agent_target(&self.state) {
                     self.focus_pane_internal_via_api(ws_idx, pane_id);
                     self.state.dock_home_focused = false;
+                    self.state.dock_diff_focused = false;
+                    self.state.dock_files_focused = false;
                 }
                 leave_navigate_mode(&mut self.state);
             }
@@ -455,6 +457,10 @@ impl App {
                 self.state.sidebar_collapsed = !self.state.sidebar_collapsed;
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::CycleSidebarGroupMode => {
+                self.state.cycle_sidebar_group_mode();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::ToggleStatusDetail => {
                 self.state.status_bar_expanded = !self.state.status_bar_expanded;
                 leave_navigate_mode(&mut self.state);
@@ -466,31 +472,34 @@ impl App {
                 // row never expands, with nothing on screen saying why.
                 if self.state.dock_collapsed {
                     self.state.dock_home_focused = false;
+                    self.state.dock_editor_focused = false;
+                    self.state.dock_diff_focused = false;
+                    self.state.dock_files_focused = false;
                 } else {
                     sync_dock_tab_focus(&mut self.state);
                 }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::PreviousDockTab => {
-                if let (crate::app::DockTab::Home, Some(previous)) = (
+                if let (Some(crate::app::DockSurface::Home), Some(previous)) = (
                     self.state.dock_tab,
                     previous_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(previous);
-                } else {
-                    self.state.dock_tab = self.state.dock_tab.previous();
+                } else if let Some(previous) = self.state.adjacent_dock_surface(false) {
+                    self.state.dock_tab = Some(previous);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::NextDockTab => {
-                if let (crate::app::DockTab::Home, Some(next)) = (
+                if let (Some(crate::app::DockSurface::Home), Some(next)) = (
                     self.state.dock_tab,
                     next_home_section(self.state.dock_home_section),
                 ) {
                     self.state.set_dock_home_section(next);
-                } else {
-                    self.state.dock_tab = self.state.dock_tab.next();
+                } else if let Some(next) = self.state.adjacent_dock_surface(true) {
+                    self.state.dock_tab = Some(next);
                 }
                 sync_dock_tab_focus(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -931,6 +940,28 @@ impl App {
                 work_context: None,
             },
         );
+    }
+
+    /// Drain a tab-row pane-toggle click. A sibling pane in that direction is
+    /// closed, otherwise the focused pane splits that way. Both branches go
+    /// through the same runtime calls as the split and close keybindings.
+    pub(crate) fn apply_pane_toggle_request(&mut self) -> bool {
+        let Some(direction) = self.state.request_pane_toggle.take() else {
+            return false;
+        };
+        match self.state.pane_toggle_sibling(direction) {
+            Some(pane_id) => {
+                if let Some(public_id) = self
+                    .state
+                    .active
+                    .and_then(|ws_idx| self.public_pane_id(ws_idx, pane_id))
+                {
+                    self.runtime_pane_close("tui.pane.close", public_id);
+                }
+            }
+            None => self.split_focused_pane_via_api(direction.split()),
+        }
+        true
     }
 
     pub(crate) fn close_focused_pane_via_api_requires_confirmation(&mut self) -> bool {
@@ -1814,6 +1845,7 @@ pub(crate) enum NavigateAction {
     TogglePinTab,
     EnterResizeMode,
     ToggleSidebar,
+    CycleSidebarGroupMode,
     ToggleStatusDetail,
     ToggleDock,
     PreviousDockTab,
@@ -1902,7 +1934,14 @@ fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::P
 }
 
 fn sync_dock_tab_focus(state: &mut AppState) {
-    state.dock_home_focused = state.dock_tab == crate::app::DockTab::Home;
+    state.dock_home_focused = state.dock_tab == Some(crate::app::DockSurface::Home);
+    state.dock_editor_focused = state.dock_tab == Some(crate::app::DockSurface::Editor);
+    state.dock_diff_focused = state.dock_tab == Some(crate::app::DockSurface::Diff);
+    state.dock_files_focused = state.dock_tab == Some(crate::app::DockSurface::Files);
+    state.dock_chooser_focused = state.dock_tab.is_none();
+    if state.dock_editor_focused {
+        state.retry_dock_editor();
+    }
 }
 
 fn indexed_navigation_action(
@@ -2028,6 +2067,10 @@ fn non_indexed_action_for_key(
         (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (
+            &kb.sidebar_cycle_group_mode,
+            NavigateAction::CycleSidebarGroupMode,
+        ),
         (&kb.toggle_status_detail, NavigateAction::ToggleStatusDetail),
         (&kb.toggle_dock, NavigateAction::ToggleDock),
         (&kb.previous_dock_tab, NavigateAction::PreviousDockTab),
@@ -2207,6 +2250,8 @@ pub(super) fn execute_navigate_action_in_context(
             if let Some((ws_idx, pane_id)) = next_review_agent_target(state) {
                 state.focus_pane_in_workspace(ws_idx, pane_id);
                 state.dock_home_focused = false;
+                state.dock_diff_focused = false;
+                state.dock_files_focused = false;
             }
             leave_navigate_mode(state);
         }
@@ -2359,6 +2404,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.sidebar_collapsed = !state.sidebar_collapsed;
             leave_navigate_mode(state);
         }
+        NavigateAction::CycleSidebarGroupMode => {
+            state.cycle_sidebar_group_mode();
+            leave_navigate_mode(state);
+        }
         NavigateAction::ToggleStatusDetail => {
             state.status_bar_expanded = !state.status_bar_expanded;
             leave_navigate_mode(state);
@@ -2368,30 +2417,33 @@ pub(super) fn execute_navigate_action_in_context(
             // Headless mirror of the interactive arm above.
             if state.dock_collapsed {
                 state.dock_home_focused = false;
+                state.dock_editor_focused = false;
+                state.dock_diff_focused = false;
+                state.dock_files_focused = false;
             } else {
                 sync_dock_tab_focus(state);
             }
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousDockTab => {
-            if let (crate::app::DockTab::Home, Some(previous)) = (
+            if let (Some(crate::app::DockSurface::Home), Some(previous)) = (
                 state.dock_tab,
                 previous_home_section(state.dock_home_section),
             ) {
                 state.set_dock_home_section(previous);
-            } else {
-                state.dock_tab = state.dock_tab.previous();
+            } else if let Some(previous) = state.adjacent_dock_surface(false) {
+                state.dock_tab = Some(previous);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
         }
         NavigateAction::NextDockTab => {
-            if let (crate::app::DockTab::Home, Some(next)) =
+            if let (Some(crate::app::DockSurface::Home), Some(next)) =
                 (state.dock_tab, next_home_section(state.dock_home_section))
             {
                 state.set_dock_home_section(next);
-            } else {
-                state.dock_tab = state.dock_tab.next();
+            } else if let Some(next) = state.adjacent_dock_surface(true) {
+                state.dock_tab = Some(next);
             }
             sync_dock_tab_focus(state);
             leave_navigate_mode(state);
@@ -2692,7 +2744,7 @@ mod tests {
         env.set("EDITOR", format!("/bin/sh '{}'", editor.display()));
         let mut app = app_with_test_workspaces(&["scratchpad"]);
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
         let workspace = &mut app.state.workspaces[0];
         workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -2772,13 +2824,13 @@ mod tests {
     fn edit_scratchpad_without_a_repository_preserves_dock_home_focus() {
         let mut app = app_with_test_workspaces(&["outside-repository"]);
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
 
         app.execute_tui_navigate_action(NavigateAction::EditScratchpad, ActionContext::Prefix);
 
         assert!(app.state.dock_home_focused);
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(app.overlay_panes.is_empty());
     }
 
@@ -2945,6 +2997,30 @@ mod tests {
                 BindingDispatch::Prefix,
             ),
             Some(NavigateAction::ToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn sidebar_cycle_group_mode_binding_dispatches_and_cycles() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.sidebar_cycle_group_mode = crate::config::ActionKeybinds::prefix("g");
+
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::CycleSidebarGroupMode)
+        );
+        execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
+        assert_eq!(
+            state.sidebar_group_mode,
+            crate::app::state::SidebarGroupMode::RepoPr
+        );
+        assert_eq!(
+            state.take_sidebar_group_mode_persistence_request(),
+            Some(crate::app::state::SidebarGroupMode::RepoPr)
         );
     }
 
@@ -3239,6 +3315,42 @@ mod tests {
     }
 
     #[test]
+    fn selecting_the_editor_surface_retries_after_the_editor_exited() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.mode = Mode::Prefix;
+        let agent_pane_id = state.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = state.workspaces[0]
+            .terminal_id(agent_pane_id)
+            .expect("agent terminal")
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        state
+            .dock_editor_errors
+            .insert(agent_pane_id, "editor exited".to_string());
+
+        for _ in 0..8 {
+            if state.dock_tab == Some(crate::app::DockSurface::Editor) {
+                break;
+            }
+            execute_navigate_action_in_context(
+                &mut state,
+                &mut terminal_runtimes,
+                NavigateAction::NextDockTab,
+                ActionContext::Prefix,
+            );
+        }
+
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Editor));
+        assert!(state.dock_editor_focused);
+        assert!(!state.dock_editor_errors.contains_key(&agent_pane_id));
+    }
+
+    #[test]
     fn dock_key_actions_cycle_tabs_and_toggle_the_dock() {
         let mut state = app_with_test_workspaces(&["one"]).state;
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
@@ -3254,7 +3366,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::Tickets
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(state.dock_home_focused);
 
         execute_navigate_action_in_context(
@@ -3267,7 +3379,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::XPolls
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
 
         execute_navigate_action_in_context(
             &mut state,
@@ -3275,7 +3387,8 @@ mod tests {
             NavigateAction::NextDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Editor));
+        assert!(state.dock_editor_focused);
         assert!(!state.dock_home_focused);
 
         execute_navigate_action_in_context(
@@ -3284,7 +3397,7 @@ mod tests {
             NavigateAction::PreviousDockTab,
             ActionContext::Prefix,
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
         assert_eq!(
             state.dock_home_section,
             crate::app::state::DockHomeSection::XPolls
@@ -3301,7 +3414,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::Tickets
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
 
         execute_navigate_action_in_context(
             &mut state,
@@ -3313,7 +3426,7 @@ mod tests {
             state.dock_home_section,
             crate::app::state::DockHomeSection::Prs
         );
-        assert_eq!(state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(state.dock_tab, Some(crate::app::DockSurface::Home));
 
         state.dock_collapsed = true;
         state.session_dirty = false;

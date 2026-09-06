@@ -525,6 +525,8 @@ fn pane_command() -> Command {
                 .args(current_pane_args()),
         )
         .subcommand(id_command("get", "pane_id", "Show a pane"))
+        .subcommand(id_command("settle", "pane_id", "Settle a pane"))
+        .subcommand(id_command("unsettle", "pane_id", "Unsettle a pane"))
         .subcommand(
             Command::new("layout")
                 .about("Show pane layout information")
@@ -595,6 +597,7 @@ fn pane_command() -> Command {
                         .arg(required("pane_id", "PANE_ID"))
                         .arg(repeatable_option("ticket", "ID"))
                         .arg(repeatable_option("pr", "URL"))
+                        .arg(repeatable_option("missive-url", "URL"))
                         .arg(option("branch", "BRANCH"))
                         .arg(option("repo", "OWNER/REPO"))
                         .arg(option("title", "TITLE"))
@@ -1305,6 +1308,18 @@ mod tests {
                 "--active-owner",
             ])
             .is_ok());
+    }
+
+    #[test]
+    fn pane_settle_and_unsettle_require_a_pane_id() {
+        for command in ["settle", "unsettle"] {
+            assert!(super::command()
+                .try_get_matches_from(["herdr", "pane", command, "1-9"])
+                .is_ok());
+            assert!(super::command()
+                .try_get_matches_from(["herdr", "pane", command])
+                .is_err());
+        }
     }
 
     #[test]

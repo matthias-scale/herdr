@@ -538,6 +538,21 @@ fn event_envelope_round_trips() {
             },
         },
         EventEnvelope {
+            event: EventKind::PaneSettled,
+            data: EventData::PaneSettled {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+                settled_at: 1_725_000_000,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::PaneUnsettled,
+            data: EventData::PaneUnsettled {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+            },
+        },
+        EventEnvelope {
             event: EventKind::WorkspaceMoved,
             data: EventData::WorkspaceMoved {
                 workspace_id: "w_1".into(),
@@ -597,6 +612,21 @@ fn event_envelope_round_trips() {
         let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, event);
     }
+}
+
+#[test]
+fn settlement_subscriptions_use_dot_event_names() {
+    let request = Request {
+        id: "sub_settlement".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![Subscription::PaneSettled {}, Subscription::PaneUnsettled {}],
+        }),
+    };
+    let json = serde_json::to_string(&request).expect("settlement subscription JSON");
+    assert!(json.contains("\"type\":\"pane.settled\""));
+    assert!(json.contains("\"type\":\"pane.unsettled\""));
+    assert_eq!(EventKind::PaneSettled.dot_name(), "pane.settled");
+    assert_eq!(EventKind::PaneUnsettled.dot_name(), "pane.unsettled");
 }
 
 #[test]
@@ -810,6 +840,7 @@ fn worktree_request_and_response_round_trip() {
                 workspace_id: "w_1".into(),
                 tab_id: "w_1:1".into(),
                 focused: true,
+                settled_at: None,
                 work_context: Default::default(),
                 cwd: Some("/worktrees/herdr/worktree-api".into()),
                 foreground_cwd: None,
@@ -1283,6 +1314,7 @@ fn create_response_round_trips_with_root_pane() {
                 workspace_id: "w_1".into(),
                 tab_id: "w_1:2".into(),
                 focused: false,
+                settled_at: None,
                 work_context: Default::default(),
                 cwd: Some("/tmp/review".into()),
                 foreground_cwd: None,

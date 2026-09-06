@@ -34,6 +34,9 @@ fn dock_body_contains(app: &AppState, column: u16, row: u16) -> bool {
 }
 
 pub(super) enum MouseAction {
+    SettledMenu {
+        index: usize,
+    },
     NewWorkspace,
     Settings(SettingsAction),
     FocusWorkspace {
@@ -144,8 +147,20 @@ impl AppState {
                             self.jump_to_selected_home_agent(&queue);
                         }
                         HomeHitTarget::PickerOption(index) => {
+                            if self.home_browse_active() {
+                                // A row under the path input is a child to
+                                // descend into, not a directory to dispatch in.
+                                self.home_browse_select(index);
+                                return None;
+                            }
                             if let Some(home) = self.home.as_mut() {
-                                home.picker_selected = index;
+                                if home.picker == Some(crate::app::home::HomePicker::Directory) {
+                                    home.directory_filter.selected = index;
+                                } else if home.picker == Some(crate::app::home::HomePicker::Ref) {
+                                    home.ref_filter.selected = index;
+                                } else {
+                                    home.picker_selected = index;
+                                }
                             }
                             self.home_accept_picker();
                         }
@@ -164,7 +179,10 @@ impl AppState {
                                 HomeHitTarget::Agent => crate::app::home::HomePicker::Agent,
                                 HomeHitTarget::Model => crate::app::home::HomePicker::Model,
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
+                                HomeHitTarget::Context => crate::app::home::HomePicker::Context,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
+                                HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,
+                                HomeHitTarget::Ref => crate::app::home::HomePicker::Ref,
                                 HomeHitTarget::Target => crate::app::home::HomePicker::Target,
                                 HomeHitTarget::QueueRow(_)
                                 | HomeHitTarget::NewTask
@@ -199,6 +217,85 @@ impl AppState {
 
         if self.mode == Mode::Settings {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
+        }
+
+        let group_menu_enabled = self.view.layout != ViewLayout::Mobile
+            && !self.sidebar_collapsed
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize);
+        let group_anchor = self.sidebar_group_mode_anchor_rect();
+        let filter_anchor = self.sidebar_filter_anchor_rect();
+        let filter_anchor_hit =
+            group_menu_enabled && self.point_in_rect(filter_anchor, mouse.column, mouse.row);
+        // The filter chip sits inside the mode anchor, so it claims the click
+        // first; the rest of the header still opens the mode dropdown.
+        let group_anchor_hit = group_menu_enabled
+            && !filter_anchor_hit
+            && self.point_in_rect(group_anchor, mouse.column, mouse.row);
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
+        {
+            if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                self.sidebar_settled_menu_selected = index;
+            }
+            return None;
+        }
+        if self.sidebar_settled_menu_target.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                    return Some(MouseAction::SettledMenu { index });
+                }
+                self.sidebar_settled_menu_target = None;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_filter_menu_open {
+            if let Some(index) = self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
+                self.sidebar_filter_menu_selected = index;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && filter_anchor_hit {
+            if self.sidebar_filter_menu_open {
+                self.sidebar_filter_menu_open = false;
+            } else {
+                self.open_sidebar_filter_menu();
+            }
+            return None;
+        }
+        if self.sidebar_filter_menu_open {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                match self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
+                    Some(index) => self.select_sidebar_filter_option(index),
+                    None => self.sidebar_filter_menu_open = false,
+                }
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_group_menu_open {
+            if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                self.sidebar_group_menu_selected = index;
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && group_anchor_hit {
+            if self.sidebar_group_menu_open {
+                self.sidebar_group_menu_open = false;
+            } else {
+                self.open_sidebar_group_menu();
+            }
+            return None;
+        }
+        if self.sidebar_group_menu_open {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                    if let Some(mode) = crate::app::state::SidebarGroupMode::ALL.get(index).copied()
+                    {
+                        self.set_sidebar_group_mode(mode);
+                    }
+                } else {
+                    self.sidebar_group_menu_open = false;
+                }
+            }
+            return None;
         }
 
         let launcher_enabled = self.view.layout != ViewLayout::Mobile
@@ -243,6 +340,50 @@ impl AppState {
                 } else {
                     leave_modal(self);
                 }
+            }
+            return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.on_git_menu_button(mouse.column, mouse.row)
+        {
+            if self.mode == Mode::GitMenu {
+                self.mode = Mode::Terminal;
+            } else if matches!(self.mode, Mode::Terminal | Mode::Navigate) {
+                self.git_menu = MenuListState::new(0);
+                self.mode = Mode::GitMenu;
+            }
+            return None;
+        }
+
+        if self.mode == Mode::GitMenu {
+            let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(self);
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    let hovered = self
+                        .git_menu_row_at(mouse.column, mouse.row)
+                        .filter(|index| {
+                            in_git_repo && *index < crate::app::state::GitAction::ALL.len()
+                        });
+                    self.git_menu.hover(hovered);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if in_git_repo {
+                        if let Some(index) = self.git_menu_row_at(mouse.column, mouse.row) {
+                            if let Some(action) =
+                                crate::app::state::GitAction::ALL.get(index).copied()
+                            {
+                                self.request_git_action = Some(action);
+                                self.mode = Mode::Terminal;
+                            }
+                        } else {
+                            self.mode = Mode::Terminal;
+                        }
+                    } else if self.git_menu_row_at(mouse.column, mouse.row).is_none() {
+                        self.mode = Mode::Terminal;
+                    }
+                }
+                _ => {}
             }
             return None;
         }
@@ -511,14 +652,77 @@ impl AppState {
                 }
                 if self.on_dock_toggle(mouse.column, mouse.row) {
                     self.dock_collapsed = !self.dock_collapsed;
-                    self.dock_home_focused =
-                        !self.dock_collapsed && self.dock_tab == crate::app::DockTab::Home;
+                    self.dock_home_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Home);
+                    self.dock_diff_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Diff);
+                    self.dock_files_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Files);
                     self.mark_session_dirty();
                     return None;
                 }
+                // The open chooser owns every click while it is up: a row
+                // selects, anything else dismisses it before the click can
+                // reach the strip underneath.
+                if self.dock_surface_menu.is_some() {
+                    if let Some(surface) = self.dock_surface_menu_at(mouse.column, mouse.row) {
+                        if self.activate_dock_surface(surface) {
+                            self.dock_surface_menu = None;
+                        }
+                        return None;
+                    }
+                    self.dock_surface_menu = None;
+                    if self.on_dock_plus(mouse.column, mouse.row) {
+                        return None;
+                    }
+                }
+                if self.on_dock_maximize(mouse.column, mouse.row) {
+                    self.toggle_dock_maximized();
+                    self.mark_session_dirty();
+                    return None;
+                }
+                if self.on_dock_tab_close(mouse.column, mouse.row) {
+                    if let Some(surface) = self.dock_tab {
+                        self.close_dock_surface(surface);
+                        self.dock_editor_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Editor);
+                        self.dock_home_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Home);
+                        self.dock_diff_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Diff);
+                        self.dock_files_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Files);
+                    }
+                    return None;
+                }
+                if self.on_dock_plus(mouse.column, mouse.row) {
+                    self.toggle_dock_surface_menu();
+                    return None;
+                }
+                if let Some(surface) = self.dock_surface_card_at(mouse.column, mouse.row) {
+                    self.activate_dock_surface(surface);
+                    return None;
+                }
                 if let Some(tab) = self.dock_tab_at(mouse.column, mouse.row) {
-                    self.dock_tab = tab;
-                    self.dock_home_focused = tab == crate::app::DockTab::Home;
+                    self.open_dock_surface(tab);
+                    self.dock_editor_focused = tab == crate::app::DockSurface::Editor;
+                    self.dock_home_focused = tab == crate::app::DockSurface::Home;
+                    self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
+                    self.dock_files_focused = tab == crate::app::DockSurface::Files;
+                    return None;
+                }
+                if self.on_dock_diff_whitespace_toggle(mouse.column, mouse.row) {
+                    self.toggle_dock_diff_whitespace();
+                    self.dock_diff_focused = true;
+                    return None;
+                }
+                if let Some(index) = self.dock_diff_file_at(mouse.column, mouse.row) {
+                    self.dock_diff_selected = index;
+                    self.dock_diff_focused = true;
+                    self.toggle_selected_dock_diff_file();
+                    return None;
+                }
+                if self.click_dock_file_row(mouse.column, mouse.row) {
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -582,6 +786,13 @@ impl AppState {
                     return None;
                 }
                 if in_dock {
+                    self.dock_editor_focused =
+                        self.dock_tab == Some(crate::app::DockSurface::Editor);
+                    self.dock_diff_focused = self.dock_tab == Some(crate::app::DockSurface::Diff);
+                    self.dock_files_focused = self.dock_tab == Some(crate::app::DockSurface::Files);
+                    // Clicking an empty dock hands it the keyboard so the card
+                    // shortcuts work without a tab to focus first.
+                    self.dock_chooser_focused = self.dock_tab.is_none();
                     return None;
                 }
 
@@ -642,6 +853,11 @@ impl AppState {
                     return None;
                 }
 
+                if let Some(direction) = self.pane_toggle_at(mouse.column, mouse.row) {
+                    self.request_pane_toggle = Some(direction);
+                    self.mode = Mode::Terminal;
+                    return None;
+                }
                 if self.on_tab_scroll_left_button(mouse.column, mouse.row) {
                     self.scroll_tabs_left();
                     return None;
@@ -678,6 +894,7 @@ impl AppState {
                 }
 
                 if in_sidebar {
+                    self.sidebar_selected_settled = None;
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
                         self.sidebar_collapsed = !self.sidebar_collapsed;
                         return None;
@@ -745,12 +962,27 @@ impl AppState {
                         self.toggle_sidebar_group(title);
                         return None;
                     }
+                    if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
+                        self.toggle_sidebar_group(&key);
+                        return None;
+                    }
+                    if let Some(key) = crate::ui::sidebar_dim_header_at(self, mouse.row) {
+                        self.sidebar_selected_work_group = Some(key);
+                        return None;
+                    }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,
                             start_col: mouse.column,
                             start_row: mouse.row,
                         });
+                        return None;
+                    }
+
+                    if let Some(target) = self.sidebar_settled_target_at(mouse.row) {
+                        self.sidebar_selected_work_group = None;
+                        self.sidebar_selected_settled = Some(target);
+                        self.mode = Mode::Navigate;
                         return None;
                     }
 
@@ -1507,6 +1739,29 @@ impl AppState {
             && col < area.x + area.width
     }
 
+    pub(super) fn on_git_menu_button(&self, col: u16, row: u16) -> bool {
+        let area = self.view.git_menu_button_hit_area;
+        area.width > 0
+            && row >= area.y
+            && row < area.bottom()
+            && col >= area.x
+            && col < area.right()
+    }
+
+    pub(super) fn git_menu_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.view
+            .git_menu_row_hit_areas
+            .iter()
+            .position(|area| {
+                area.width > 0
+                    && row >= area.y
+                    && row < area.bottom()
+                    && col >= area.x
+                    && col < area.right()
+            })
+            .map(|offset| self.view.git_menu_first_visible + offset)
+    }
+
     pub(super) fn on_tab_scroll_left_button(&self, col: u16, row: u16) -> bool {
         let area = self.view.tab_scroll_left_hit_area;
         area.width > 0
@@ -1583,6 +1838,32 @@ impl AppState {
         }
 
         Some(last_idx + 1)
+    }
+
+    pub(super) fn pane_toggle_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::PaneToggleDirection> {
+        [
+            (
+                self.view.pane_toggle_below_hit_area,
+                crate::app::state::PaneToggleDirection::Below,
+            ),
+            (
+                self.view.pane_toggle_right_hit_area,
+                crate::app::state::PaneToggleDirection::Right,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(area, direction)| {
+            (area.width > 0
+                && row >= area.y
+                && row < area.y + area.height
+                && col >= area.x
+                && col < area.x + area.width)
+                .then_some(direction)
+        })
     }
 
     pub(super) fn on_new_tab_button(&self, col: u16, row: u16) -> bool {
@@ -2235,11 +2516,15 @@ mod tests {
         app.state.selected = 0;
         app.state.reconcile_sidebar_presentation();
         let cards = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect);
+        let target = cards
+            .iter()
+            .find(|card| card.ws_idx == 1)
+            .expect("linked workspace tab row");
         // The overview shows no work-link marker, so the compact row focuses the tab directly.
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            cards[1].rect.x + 5,
-            cards[1].rect.y,
+            target.rect.x + 5,
+            target.rect.y,
         ));
 
         assert_eq!(app.state.active, Some(1));
@@ -2275,7 +2560,7 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = true;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.view.dock_rect = Rect::new(79, 0, 1, 20);
         app.state.view.dock_handle_rect = app.state.view.dock_rect;
         let focused_before = app
@@ -2309,14 +2594,14 @@ mod tests {
             Rect::new(93, 0, 6, 1),
         ];
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 88, 0));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 94, 0));
 
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Shortcuts));
         assert!(!app.state.dock_home_focused);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 82, 0));
 
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Home);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Home));
         assert!(app.state.dock_home_focused);
     }
 
@@ -2342,7 +2627,7 @@ mod tests {
             })
             .expect("work context");
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Context;
+        app.state.dock_tab = Some(crate::app::DockSurface::Context);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let link = app
             .state
@@ -2374,9 +2659,11 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
-        let shortcuts_index = crate::app::DockTab::ALL
+        let shortcuts_index = app
+            .state
+            .dock_open_surfaces
             .iter()
-            .position(|tab| *tab == crate::app::DockTab::Shortcuts)
+            .position(|tab| *tab == crate::app::DockSurface::Shortcuts)
             .expect("Shortcuts tab");
         let shortcuts = app.state.view.dock_tab_hit_areas[shortcuts_index];
 
@@ -2387,7 +2674,7 @@ mod tests {
         ));
 
         assert!(!app.state.dock_collapsed);
-        assert_eq!(app.state.dock_tab, crate::app::DockTab::Shortcuts);
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Shortcuts));
     }
 
     #[test]
@@ -2418,7 +2705,7 @@ mod tests {
             })
             .expect("work context");
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let tab = app.state.view.dock_home_tab_hit_areas[0];
         let expected_key = app.state.dock_home_projection().rows[0].key.clone();
@@ -2475,7 +2762,7 @@ mod tests {
             })
             .expect("work context");
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let tab = app.state.view.dock_home_tab_hit_areas[0];
         let expected_key = app.state.dock_home_projection().rows[0].key.clone();
@@ -2544,7 +2831,7 @@ mod tests {
             review_terminal_ids.push(terminal_id);
         }
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let stale_first_tab = app.state.view.dock_home_tab_hit_areas[0];
         let second_key = app.state.dock_home_projection().rows[1].key.clone();
@@ -4778,6 +5065,31 @@ mod tests {
         assert_eq!(app.state.workspaces.len(), 1);
     }
 
+    #[test]
+    fn sidebar_footer_work_entry_opens_pull_requests_at_supported_widths() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let hit = app.state.view.sidebar_footer_work_hit_area;
+            assert_eq!(hit.height, 1, "footer must render at {width} columns");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+
+            assert!(
+                app.state.work_view.is_some(),
+                "footer click at {width} columns"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn desktop_new_workspace_creates_immediately_by_default() {
         let mut app = app_for_mouse_test();
@@ -5009,5 +5321,165 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    #[test]
+    fn tab_row_pane_toggle_requests_a_split_when_no_sibling_exists() {
+        for direction in [
+            crate::app::state::PaneToggleDirection::Below,
+            crate::app::state::PaneToggleDirection::Right,
+        ] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.ensure_test_terminals();
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let area = match direction {
+                crate::app::state::PaneToggleDirection::Below => {
+                    app.state.view.pane_toggle_below_hit_area
+                }
+                crate::app::state::PaneToggleDirection::Right => {
+                    app.state.view.pane_toggle_right_hit_area
+                }
+            };
+            assert!(area.width > 0, "{direction:?} button should be visible");
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 1,
+                area.y,
+            ));
+
+            assert_eq!(app.state.request_pane_toggle, Some(direction));
+            // No sibling on that side, so the toggle resolves to a split.
+            assert_eq!(app.state.pane_toggle_sibling(direction), None);
+        }
+    }
+
+    #[test]
+    fn git_menu_button_and_selectable_rows_queue_actions_but_status_does_not() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let focused_pane = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(focused_pane)
+            .expect("terminal")
+            .clone();
+        let cwd = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal state")
+            .cwd
+            .clone();
+        app.state
+            .git_root_for_cwd
+            .insert(cwd.clone(), Some(cwd.clone()));
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let button = app.state.view.git_menu_button_hit_area;
+        assert_eq!(button.width, 10);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert_eq!(app.state.mode, Mode::GitMenu);
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let commit = app.state.view.git_menu_row_hit_areas[1];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            commit.x + 1,
+            commit.y,
+        ));
+        assert_eq!(
+            app.state.request_git_action,
+            Some(crate::app::state::GitAction::Commit)
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        app.state.request_git_action = None;
+        app.state.status_git_cwd = app.state.status_focused_cwd.clone();
+        app.state.status_git_ahead_behind = Some((0, 1));
+        app.state.mode = Mode::GitMenu;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let status = app.state.view.git_menu_row_hit_areas[4];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            status.x + 1,
+            status.y,
+        ));
+        assert_eq!(app.state.request_git_action, None);
+        assert_eq!(app.state.mode, Mode::GitMenu);
+
+        app.state.git_root_for_cwd.insert(cwd, None);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        assert_eq!(app.state.view.git_menu_row_hit_areas.len(), 1);
+        let info = app.state.view.git_menu_row_hit_areas[0];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.x + 1,
+            info.y,
+        ));
+        assert_eq!(app.state.request_git_action, None);
+        assert_eq!(app.state.mode, Mode::GitMenu);
+    }
+
+    #[test]
+    fn tab_row_pane_toggle_closes_the_pane_already_in_that_direction() {
+        for (direction, split) in [
+            (
+                crate::app::state::PaneToggleDirection::Below,
+                ratatui::layout::Direction::Vertical,
+            ),
+            (
+                crate::app::state::PaneToggleDirection::Right,
+                ratatui::layout::Direction::Horizontal,
+            ),
+        ] {
+            let mut app = app_for_mouse_test();
+            let mut ws = Workspace::test_new("one");
+            let sibling = ws.test_split(split);
+            let root = ws.tabs[0].root_pane;
+            ws.tabs[0].layout.focus_pane(root);
+            app.state.workspaces = vec![ws];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.ensure_test_terminals();
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let area = match direction {
+                crate::app::state::PaneToggleDirection::Below => {
+                    app.state.view.pane_toggle_below_hit_area
+                }
+                crate::app::state::PaneToggleDirection::Right => {
+                    app.state.view.pane_toggle_right_hit_area
+                }
+            };
+            assert_eq!(app.state.pane_toggle_sibling(direction), Some(sibling));
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                area.x + 1,
+                area.y,
+            ));
+            assert_eq!(app.state.request_pane_toggle, Some(direction));
+            assert!(app.apply_pane_toggle_request());
+
+            let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
+            assert_eq!(panes, vec![root], "{direction:?} should close {sibling:?}");
+            assert!(app.state.request_pane_toggle.is_none());
+        }
     }
 }

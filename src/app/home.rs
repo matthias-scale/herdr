@@ -10,15 +10,19 @@
 //! here is the cursor plus the draft dispatch settings, which cannot be
 //! re-derived.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
-use crate::{app::inbox::BlockedAgent, detect::Agent};
+use crate::{app::inbox::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilterState};
 
-use super::home_catalog::{HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_MODEL};
+use super::home_catalog::{
+    ClaudeContextWindowForm, HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_MODEL, LARGE_CONTEXT_WINDOW,
+};
+use super::home_refs::HomeRef;
 
-pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 9;
+pub(crate) const HOME_COMPOSER_MIN_HEIGHT: u16 = 11;
 pub(crate) const HOME_LENS_MIN_HEIGHT: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,34 +32,47 @@ pub(crate) enum HomeFocus {
     Agent,
     Model,
     Effort,
+    Context,
     Directory,
+    Workspace,
+    Ref,
     Target,
 }
 
 impl HomeFocus {
-    pub(crate) fn next(self, effort_visible: bool) -> Self {
+    pub(crate) fn next(self, effort_visible: bool, context_visible: bool) -> Self {
         match self {
             Self::Reply => Self::Prompt,
             Self::Prompt => Self::Agent,
             Self::Agent => Self::Model,
             Self::Model if effort_visible => Self::Effort,
+            Self::Model if context_visible => Self::Context,
             Self::Model => Self::Directory,
+            Self::Effort if context_visible => Self::Context,
             Self::Effort => Self::Directory,
-            Self::Directory => Self::Target,
+            Self::Context => Self::Directory,
+            Self::Directory => Self::Workspace,
+            Self::Workspace => Self::Ref,
+            Self::Ref => Self::Target,
             Self::Target => Self::Prompt,
         }
     }
 
-    pub(crate) fn previous(self, effort_visible: bool) -> Self {
+    pub(crate) fn previous(self, effort_visible: bool, context_visible: bool) -> Self {
         match self {
             Self::Reply => Self::Target,
             Self::Prompt => Self::Target,
             Self::Agent => Self::Prompt,
             Self::Model => Self::Agent,
             Self::Effort => Self::Model,
+            Self::Context if effort_visible => Self::Effort,
+            Self::Context => Self::Model,
+            Self::Directory if context_visible => Self::Context,
             Self::Directory if effort_visible => Self::Effort,
             Self::Directory => Self::Model,
-            Self::Target => Self::Directory,
+            Self::Workspace => Self::Directory,
+            Self::Ref => Self::Workspace,
+            Self::Target => Self::Ref,
         }
     }
 }
@@ -65,7 +82,10 @@ pub(crate) enum HomePicker {
     Agent,
     Model,
     Effort,
+    Context,
     Directory,
+    Workspace,
+    Ref,
     Target,
 }
 
@@ -77,7 +97,10 @@ impl HomePicker {
             HomeFocus::Agent => Some(Self::Agent),
             HomeFocus::Model => Some(Self::Model),
             HomeFocus::Effort => Some(Self::Effort),
+            HomeFocus::Context => Some(Self::Context),
             HomeFocus::Directory => Some(Self::Directory),
+            HomeFocus::Workspace => Some(Self::Workspace),
+            HomeFocus::Ref => Some(Self::Ref),
             HomeFocus::Target => Some(Self::Target),
         }
     }
@@ -90,18 +113,254 @@ pub(crate) enum HomeTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HomeWorkspace {
+    CurrentCheckout,
+    NewWorktree,
+    PreviousWorktree(PathBuf),
+}
+
+impl HomeWorkspace {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::CurrentCheckout => "⌂ Current checkout".into(),
+            Self::NewWorktree => "⎇ New worktree".into(),
+            Self::PreviousWorktree(path) => {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                format!("↺ Previous worktree ({name})")
+            }
+        }
+    }
+}
+
+/// The last row of the directory picker: type a path instead of picking one.
+pub(crate) const BROWSE_OPTION_LABEL: &str = "Browse…";
+
+/// Shown under the card when the typed path is not a directory.
+pub(crate) const NO_SUCH_DIRECTORY: &str = "no such directory";
+
+/// The directory picker lists what has been used, what the repository already
+/// checked out, and one way to name anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HomeDirectoryOption {
+    Recent(PathBuf),
+    Worktree(PathBuf),
+    Browse,
+}
+
+impl HomeDirectoryOption {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Recent(path) => directory_label(path),
+            Self::Worktree(path) => format!("⎇ {}", directory_label(path)),
+            Self::Browse => BROWSE_OPTION_LABEL.to_string(),
+        }
+    }
+
+    pub(crate) fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Recent(path) | Self::Worktree(path) => Some(path),
+            Self::Browse => None,
+        }
+    }
+}
+
+/// The `Browse…` path input that takes over the picker's filter line.
+///
+/// The children are stored rather than read on demand: the picker is drawn
+/// every frame and the render path must not touch the filesystem.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HomeBrowse {
+    pub(crate) input: String,
+    pub(crate) children: Vec<String>,
+    pub(crate) error: Option<String>,
+}
+
+/// A long directory would fill the screen with rows nobody reads; the input
+/// narrows it faster than scrolling does.
+const BROWSE_MAX_CHILDREN: usize = 100;
+
+impl HomeBrowse {
+    /// Start on the directory the composer already names, one separator in so
+    /// its children are the first thing the list offers.
+    pub(crate) fn starting_at(directory: &Path) -> Self {
+        let mut input = directory.display().to_string();
+        if !input.ends_with(std::path::MAIN_SEPARATOR) {
+            input.push(std::path::MAIN_SEPARATOR);
+        }
+        let mut browse = Self {
+            input,
+            children: Vec::new(),
+            error: None,
+        };
+        browse.refresh();
+        browse
+    }
+
+    pub(crate) fn refresh(&mut self) {
+        self.children = browse_children(&self.input);
+        self.error = None;
+    }
+
+    pub(crate) fn push(&mut self, character: char) {
+        self.input.push(character);
+        self.refresh();
+    }
+
+    pub(crate) fn pop(&mut self) {
+        self.input.pop();
+        self.refresh();
+    }
+
+    /// `Tab`: take the next path component as far as the filesystem agrees.
+    pub(crate) fn complete(&mut self) {
+        if let Some(completed) = browse_completion(&self.input, &self.children) {
+            self.input = completed;
+            self.refresh();
+        }
+    }
+
+    /// Click a listed child: adopt it and keep browsing below it.
+    pub(crate) fn select_child(&mut self, index: usize) {
+        let Some(child) = self.children.get(index).cloned() else {
+            return;
+        };
+        let (parent, _) = browse_split(&self.input);
+        let mut input = parent.join(child).display().to_string();
+        input.push(std::path::MAIN_SEPARATOR);
+        self.input = input;
+        self.refresh();
+    }
+
+    pub(crate) fn path(&self) -> PathBuf {
+        PathBuf::from(self.input.trim())
+    }
+}
+
+/// `(directory to list, prefix the next component must start with)`.
+///
+/// Split on the typed text rather than on `Path`: a trailing `.` is a prefix
+/// being typed here, and `Path` would resolve it away as the current directory.
+fn browse_split(input: &str) -> (PathBuf, String) {
+    match input.rfind(std::path::MAIN_SEPARATOR) {
+        Some(index) => (
+            PathBuf::from(&input[..=index]),
+            input[index + 1..].to_string(),
+        ),
+        None => (PathBuf::new(), input.to_string()),
+    }
+}
+
+/// Child directories of the typed prefix.
+///
+/// Hidden directories appear only once the typed component asks for one, so
+/// browsing a home directory is not a wall of dotfiles.
+pub(crate) fn browse_children(input: &str) -> Vec<String> {
+    let (parent, fragment) = browse_split(input);
+    let parent = if parent.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        parent
+    };
+    let Ok(entries) = std::fs::read_dir(&parent) else {
+        return Vec::new();
+    };
+    let mut names = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&fragment))
+        .filter(|name| fragment.starts_with('.') || !name.starts_with('.'))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.truncate(BROWSE_MAX_CHILDREN);
+    names
+}
+
+/// The typed path extended by as much of the next component as every match
+/// shares, plus a separator when only one directory can follow.
+fn browse_completion(input: &str, children: &[String]) -> Option<String> {
+    let (parent, _) = browse_split(input);
+    let first = children.first()?;
+    let common = children.iter().skip(1).fold(first.clone(), |common, name| {
+        common
+            .chars()
+            .zip(name.chars())
+            .take_while(|(left, right)| left == right)
+            .map(|(left, _)| left)
+            .collect()
+    });
+    if common.is_empty() {
+        return None;
+    }
+    let mut completed = parent.join(&common).display().to_string();
+    if children.len() == 1 {
+        completed.push(std::path::MAIN_SEPARATOR);
+    }
+    (completed != input).then_some(completed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomePrContext {
+    pub(crate) url: String,
+    pub(crate) number: u64,
+    pub(crate) repo: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeDispatchPlan {
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     pub(crate) directory: PathBuf,
+    pub(crate) workspace: HomeWorkspace,
+    pub(crate) git_ref: Option<HomeRef>,
+    pub(crate) pr: Option<HomePrContext>,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
 }
 
+/// Shown when no pane in the selected directory has reported a branch yet.
+pub(crate) const UNKNOWN_REF_LABEL: &str = "current branch";
+
+/// Last path component, or the whole path when there is none (`/`).
+fn directory_basename(directory: &Path) -> String {
+    directory
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| directory.display().to_string())
+}
+
+/// The directory's own name, except for a home directory: its basename is the
+/// account name, which reads as the machine rather than as the place.
+fn directory_display_name(directory: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if home.as_deref() == Some(directory) {
+        return "~".to_string();
+    }
+    directory_basename(directory)
+}
+
 fn default_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+pub(crate) fn directory_label(path: &Path) -> String {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return path.display().to_string();
+    };
+    path.strip_prefix(&home)
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", relative.display())
+            }
+        })
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 pub(crate) fn dispatchable_agents() -> &'static [Agent] {
@@ -120,10 +379,27 @@ pub(crate) struct HomeState {
     pub(crate) agent: Agent,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
+    pub(crate) context_window: Option<String>,
     pub(crate) directory: PathBuf,
+    pub(crate) workspace: HomeWorkspace,
     pub(crate) target: HomeTarget,
     pub(crate) picker: Option<HomePicker>,
     pub(crate) picker_selected: usize,
+    pub(crate) directory_filter: DropdownFilterState,
+    /// Set while the directory picker's filter line is a path input.
+    pub(crate) browse: Option<HomeBrowse>,
+    /// Linked worktrees of the selected directory's repository, refreshed when
+    /// the picker opens so the render path stays off `git`.
+    pub(crate) worktree_options: Vec<PathBuf>,
+    pub(crate) ref_filter: DropdownFilterState,
+    pub(crate) selected_ref: Option<HomeRef>,
+    /// Pull request that opened this composer. TUI-only launch context.
+    pub(crate) pr: Option<HomePrContext>,
+    pub(crate) ref_repo_root: Option<PathBuf>,
+    pub(crate) ref_directory: PathBuf,
+    workspace_options: Vec<HomeWorkspace>,
+    pub(crate) pending_dispatch: Option<HomeDispatchPlan>,
+    pub(crate) dispatch_error: Option<String>,
 }
 
 impl Default for HomeState {
@@ -138,15 +414,44 @@ impl Default for HomeState {
             agent: Agent::Claude,
             model: DEFAULT_MODEL.into(),
             effort: Some(AUTO_EFFORT.into()),
+            context_window: None,
             directory: default_directory(),
+            workspace: HomeWorkspace::CurrentCheckout,
             target: HomeTarget::NewSpace,
             picker: None,
             picker_selected: 0,
+            directory_filter: DropdownFilterState::default(),
+            browse: None,
+            worktree_options: Vec::new(),
+            ref_filter: DropdownFilterState::default(),
+            selected_ref: None,
+            pr: None,
+            ref_repo_root: None,
+            ref_directory: default_directory(),
+            workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
+            pending_dispatch: None,
+            dispatch_error: None,
         }
     }
 }
 
 impl HomeState {
+    #[cfg(test)]
+    pub(crate) fn test_with_prompt(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_focus(focus: HomeFocus) -> Self {
+        Self {
+            focus: Some(focus),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn with_catalog(catalog: HomeCatalog) -> Self {
         Self {
             catalog,
@@ -174,11 +479,13 @@ impl HomeState {
             if !selected_effort_exists {
                 self.effort = self.effort_options().first().cloned();
             }
+            self.reconcile_context_window();
         }
 
         let picker_len = match self.picker {
             Some(HomePicker::Model) => Some(self.model_options().len()),
             Some(HomePicker::Effort) => Some(self.effort_options().len()),
+            Some(HomePicker::Context) => Some(self.context_options().len()),
             _ => None,
         };
         if let Some(picker_len) = picker_len {
@@ -204,6 +511,22 @@ impl HomeState {
             .and_then(|provider| provider.model(&self.model))
             .map(|model| model.efforts.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn model_display_name(&self) -> &str {
+        self.catalog
+            .provider(self.agent)
+            .and_then(|provider| provider.model(&self.model))
+            .map(|model| model.display_name.as_str())
+            .unwrap_or(&self.model)
+    }
+
+    pub(crate) fn context_options(&self) -> &'static [&'static str] {
+        if self.context_visible() {
+            &[DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
+        } else {
+            &[]
+        }
     }
 
     /// The row the cursor is on, or nothing when the queue is empty.
@@ -264,16 +587,23 @@ impl HomeState {
         self.effort.is_some()
     }
 
+    pub(crate) fn context_visible(&self) -> bool {
+        self.context_window.is_some()
+    }
+
     pub(crate) fn move_focus(&mut self, backwards: bool) {
         let current = self.focus.unwrap_or(HomeFocus::Prompt);
         self.focus = Some(if backwards {
-            current.previous(self.effort_visible())
+            current.previous(self.effort_visible(), self.context_visible())
         } else {
-            current.next(self.effort_visible())
+            current.next(self.effort_visible(), self.context_visible())
         });
     }
 
     pub(crate) fn close_composer_or_home(&mut self) -> bool {
+        if self.pending_dispatch.is_some() {
+            return false;
+        }
         if self.picker.take().is_some() {
             return false;
         }
@@ -298,6 +628,7 @@ impl HomeState {
             .and_then(|catalog| catalog.model(&self.model))
             .and_then(|model| model.efforts.first())
             .cloned();
+        self.reconcile_context_window();
     }
 
     pub(crate) fn set_model(&mut self, model: impl Into<String>) {
@@ -319,10 +650,31 @@ impl HomeState {
         {
             self.effort = efforts.first().cloned();
         }
+        self.reconcile_context_window();
+    }
+
+    fn reconcile_context_window(&mut self) {
+        let supports_large_context = self.agent == Agent::Claude
+            && self
+                .catalog
+                .provider(self.agent)
+                .and_then(|provider| provider.model(&self.model))
+                .is_some_and(|model| model.supports_large_context);
+        if supports_large_context {
+            let selected_is_valid = self.context_window.as_deref().is_some_and(|context| {
+                matches!(context, DEFAULT_CONTEXT_WINDOW | LARGE_CONTEXT_WINDOW)
+            });
+            if !selected_is_valid {
+                self.context_window = Some(DEFAULT_CONTEXT_WINDOW.into());
+            }
+        } else {
+            self.context_window = None;
+        }
     }
 
     pub(crate) fn append_prompt(&mut self, character: char) {
         self.prompt.push(character);
+        self.dispatch_error = None;
     }
 
     pub(crate) fn append_reply(&mut self, character: char) {
@@ -337,6 +689,7 @@ impl HomeState {
 
     pub(crate) fn backspace_prompt(&mut self) {
         self.prompt.pop();
+        self.dispatch_error = None;
     }
 
     pub(crate) fn dispatch_plan(&self) -> Result<HomeDispatchPlan, String> {
@@ -354,12 +707,34 @@ impl HomeState {
         if !model.efforts.iter().any(|known| known == effort) {
             return Err("select an effort supported by that model".into());
         }
+        if self.context_window.is_some() && !model.supports_large_context {
+            return Err("select a context window supported by that model".into());
+        }
+        if self.context_window.as_deref().is_some_and(|context| {
+            !matches!(context, DEFAULT_CONTEXT_WINDOW | LARGE_CONTEXT_WINDOW)
+        }) {
+            return Err("select a supported context window".into());
+        }
 
         let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
         match self.agent {
             Agent::Claude => {
+                let large_context = self.context_window.as_deref() == Some(LARGE_CONTEXT_WINDOW);
+                let context_form = catalog.claude_context_form.as_ref();
+                let model_arg = if large_context
+                    && !matches!(context_form, Some(ClaudeContextWindowForm::Flag(_)))
+                {
+                    format!("{}[1m]", self.model)
+                } else {
+                    self.model.clone()
+                };
                 if self.model != DEFAULT_MODEL {
-                    argv.extend(["--model".into(), self.model.clone()]);
+                    argv.extend(["--model".into(), model_arg]);
+                }
+                if large_context {
+                    if let Some(ClaudeContextWindowForm::Flag(flag)) = context_form {
+                        argv.extend([flag.clone(), "1m".into()]);
+                    }
                 }
                 if effort != AUTO_EFFORT {
                     argv.extend(["--effort".into(), effort.into()]);
@@ -377,11 +752,18 @@ impl HomeState {
         }
         argv.push(prompt.into());
 
+        let directory = match &self.workspace {
+            HomeWorkspace::PreviousWorktree(path) => path.clone(),
+            HomeWorkspace::CurrentCheckout | HomeWorkspace::NewWorktree => self.directory.clone(),
+        };
         Ok(HomeDispatchPlan {
             agent: self.agent,
             model: self.model.clone(),
             effort: self.effort.clone(),
-            directory: self.directory.clone(),
+            directory,
+            workspace: self.workspace.clone(),
+            git_ref: self.selected_ref.clone(),
+            pr: self.pr.clone(),
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
@@ -398,6 +780,19 @@ pub(crate) struct HomeCounts {
     pub blocked: usize,
     pub agents: usize,
     pub spaces: usize,
+}
+
+pub(crate) fn home_workspace_options_from_entries(
+    entries: &[crate::app::state::WorktreeOpenEntry],
+) -> Vec<HomeWorkspace> {
+    let mut options = vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree];
+    options.extend(
+        entries
+            .iter()
+            .filter(|entry| entry.is_linked_worktree)
+            .map(|entry| HomeWorkspace::PreviousWorktree(entry.path.clone())),
+    );
+    options
 }
 
 impl crate::app::state::AppState {
@@ -480,6 +875,11 @@ impl crate::app::state::AppState {
                 Some(HomeState::with_catalog(self.home_catalog.clone()))
             }
         };
+        if self.home.is_some() {
+            // Resolve the directory's repository once, here: the headline names
+            // it on every frame and the render path must not run `git`.
+            self.reset_home_ref_context(false);
+        }
     }
 
     /// Open home as the launch screen, if the config wants it.
@@ -492,7 +892,50 @@ impl crate::app::state::AppState {
         if config.ui.show_home_on_start {
             self.home = Some(HomeState::with_catalog(self.home_catalog.clone()));
             self.inbox = None;
+            self.reset_home_ref_context(false);
         }
+    }
+
+    /// Start a thread for a work item that has no pane yet: home opens with the
+    /// item as the prompt, in the checkout the item is linked to when one is
+    /// known and on the last used directory otherwise.
+    pub(crate) fn open_home_composer_for_work_group(&mut self, key: &str) -> bool {
+        let Some(activation) = crate::ui::sidebar_work_group_activation(self, key) else {
+            return false;
+        };
+        let mut home = self
+            .home
+            .take()
+            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+        home.prompt = activation.prompt;
+        home.focus = Some(HomeFocus::Prompt);
+        home.picker = None;
+        if let Some(directory) = activation.directory {
+            home.directory = directory;
+        }
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
+        true
+    }
+
+    pub(crate) fn open_home_composer_in_directory(
+        &mut self,
+        directory: PathBuf,
+        workspace: HomeWorkspace,
+    ) {
+        let mut home = self
+            .home
+            .take()
+            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+        home.prompt.clear();
+        home.directory = directory;
+        home.workspace = workspace;
+        home.focus = Some(HomeFocus::Prompt);
+        home.picker = None;
+        self.inbox = None;
+        self.home = Some(home);
+        self.reset_home_ref_context(false);
     }
 
     pub(crate) fn clear_home(&mut self) {
@@ -540,6 +983,218 @@ impl crate::app::state::AppState {
         options
     }
 
+    /// The rows the directory picker shows, in the order it shows them:
+    /// what has been used, then the repository's linked worktrees, then the
+    /// one row that can name a directory neither list has.
+    pub(crate) fn home_directory_picker_options(&self) -> Vec<HomeDirectoryOption> {
+        let mut options = self
+            .home_directory_options()
+            .into_iter()
+            .map(HomeDirectoryOption::Recent)
+            .collect::<Vec<_>>();
+        if let Some(home) = self.home.as_ref() {
+            for path in &home.worktree_options {
+                if options
+                    .iter()
+                    .any(|option| option.path() == Some(path.as_path()))
+                {
+                    continue;
+                }
+                options.push(HomeDirectoryOption::Worktree(path.clone()));
+            }
+        }
+        options.push(HomeDirectoryOption::Browse);
+        options
+    }
+
+    fn refresh_home_worktree_options(&mut self) {
+        let directory = self.home_directory();
+        let paths = super::worktrees::worktree_repo_root(&directory)
+            .and_then(|repo_root| {
+                super::worktrees::worktree_entries_for_repo(&repo_root, |_| None).ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.is_linked_worktree)
+            .map(|entry| entry.path)
+            .collect();
+        if let Some(home) = self.home.as_mut() {
+            home.worktree_options = paths;
+        }
+    }
+
+    /// Every pane work context observed for a workspace rooted at `directory`.
+    ///
+    /// Home names a directory, not a pane, so the repo and branch it shows are
+    /// whatever the panes already working there have observed. Nothing is
+    /// derived here: an unlinked directory simply yields nothing.
+    fn work_contexts_for_directory<'a>(
+        &'a self,
+        directory: &'a Path,
+    ) -> impl Iterator<Item = &'a crate::work_context::PaneWorkContext> + 'a {
+        self.workspaces
+            .iter()
+            .filter(move |workspace| workspace.identity_cwd == directory)
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .map(|terminal| terminal.effective_work_context())
+    }
+
+    fn home_directory(&self) -> PathBuf {
+        self.home
+            .as_ref()
+            .map(|home| home.directory.clone())
+            .unwrap_or_else(default_directory)
+    }
+
+    /// What the headline calls the place this thread will start in.
+    ///
+    /// The declared repo outranks the path because a worktree directory is
+    /// named after the task, not the project. A linked worktree is named after
+    /// the task twice over: its own root is the task directory, so the
+    /// repository is the one the git common directory belongs to.
+    pub(crate) fn home_headline_name(&self) -> String {
+        let directory = self.home_directory();
+        // The strongest name a pane already declared for this directory.
+        if let Some(repo) = self
+            .work_contexts_for_directory(&directory)
+            .find_map(|context| context.repo.as_deref())
+        {
+            let name = repo
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(repo);
+            return name.to_string();
+        }
+        // The repository the ref picker resolved for this very directory. It
+        // comes from the git common directory, so a linked worktree resolves to
+        // the main checkout rather than to its own task-named root. Resolved
+        // off the render path when the directory was set; never re-run here.
+        let common_root = {
+            let canonical = crate::worktree::canonical_or_original(&directory);
+            self.home
+                .as_ref()
+                .filter(|home| home.ref_directory == canonical)
+                .and_then(|home| home.ref_repo_root.clone())
+        };
+        // The checkout root the pane cache resolved, which for a linked
+        // worktree is the worktree itself. Weakest of the three, but still a
+        // project name where a home directory's own basename names the account.
+        let repo_root =
+            common_root.or_else(|| self.git_root_for_cwd.get(&directory).cloned().flatten());
+        match repo_root {
+            Some(repo_root) => directory_basename(&repo_root),
+            None => directory_display_name(&directory),
+        }
+    }
+
+    pub(crate) fn home_ref_options(&self) -> Vec<HomeRef> {
+        let Some(home) = self.home.as_ref() else {
+            return Vec::new();
+        };
+        let Some(repo_root) = home.ref_repo_root.as_ref() else {
+            return Vec::new();
+        };
+        self.home_ref_cache
+            .get(repo_root)
+            .map(|entry| entry.rows_for_directory(&home.ref_directory))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn home_ref_label(&self) -> String {
+        let Some(home) = self.home.as_ref() else {
+            return UNKNOWN_REF_LABEL.to_string();
+        };
+        if let Some(selected) = home.selected_ref.as_ref() {
+            return selected.name.clone();
+        }
+        if let Some(current) = self
+            .home_ref_options()
+            .into_iter()
+            .find(HomeRef::is_current)
+        {
+            return current.name;
+        }
+        self.work_contexts_for_directory(&home.directory)
+            .find_map(|context| context.branch.clone())
+            .unwrap_or_else(|| UNKNOWN_REF_LABEL.to_string())
+    }
+
+    fn reset_home_ref_context(&mut self, request_refresh: bool) {
+        let directory = crate::worktree::canonical_or_original(&self.home_directory());
+        let repo_root = super::worktrees::worktree_repo_root(&directory)
+            .map(|root| crate::worktree::canonical_or_original(&root));
+        if let Some(home) = self.home.as_mut() {
+            let context_changed =
+                home.ref_directory != directory || home.ref_repo_root != repo_root;
+            home.ref_directory = directory;
+            home.ref_repo_root = repo_root.clone();
+            if context_changed {
+                home.selected_ref = None;
+            }
+            home.ref_filter.set_query("");
+            home.dispatch_error = None;
+        }
+        if request_refresh {
+            self.request_home_ref_refresh = repo_root.clone();
+        }
+        if let Some(repo_root) = repo_root.as_deref() {
+            self.sync_home_ref_selection(repo_root);
+        }
+    }
+
+    pub(crate) fn sync_home_ref_selection(&mut self, repo_root: &Path) {
+        let relevant = self
+            .home
+            .as_ref()
+            .is_some_and(|home| home.ref_repo_root.as_deref() == Some(repo_root));
+        if !relevant {
+            return;
+        }
+        let rows = self.home_ref_options();
+        let selected_name = self
+            .home
+            .as_ref()
+            .and_then(|home| home.selected_ref.as_ref())
+            .map(|selected| selected.name.as_str());
+        let selected = selected_name
+            .and_then(|name| rows.iter().find(|row| row.name == name).cloned())
+            .or_else(|| rows.iter().find(|row| row.is_current()).cloned());
+        if let Some(home) = self.home.as_mut() {
+            home.selected_ref = selected;
+            let matches = home
+                .ref_filter
+                .matches(&rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>())
+                .len();
+            home.ref_filter.selected = home.ref_filter.selected.min(matches.saturating_sub(1));
+        }
+    }
+
+    pub(crate) fn home_workspace_options(&self) -> Vec<HomeWorkspace> {
+        self.home
+            .as_ref()
+            .map(|home| home.workspace_options.clone())
+            .unwrap_or_default()
+    }
+
+    fn refresh_home_workspace_options(&mut self) {
+        let directory = self.home_directory();
+        let entries = super::worktrees::worktree_repo_root(&directory)
+            .and_then(|repo_root| {
+                super::worktrees::worktree_entries_for_repo(&repo_root, |_| None).ok()
+            })
+            .unwrap_or_default();
+        let options = home_workspace_options_from_entries(&entries);
+        if let Some(home) = self.home.as_mut() {
+            home.workspace_options = options;
+            if !home.workspace_options.contains(&home.workspace) {
+                home.workspace = HomeWorkspace::CurrentCheckout;
+            }
+        }
+    }
+
     pub(crate) fn home_target_options(&self) -> Vec<HomeTarget> {
         let mut options = vec![HomeTarget::NewSpace];
         options.extend(
@@ -563,14 +1218,81 @@ impl crate::app::state::AppState {
                 .as_ref()
                 .map(|home| home.effort_options().len())
                 .unwrap_or(0),
-            HomePicker::Directory => self.home_directory_options().len(),
+            HomePicker::Context => self
+                .home
+                .as_ref()
+                .map(|home| home.context_options().len())
+                .unwrap_or(0),
+            HomePicker::Directory => match self.home_browse() {
+                Some(browse) => browse.children.len(),
+                None => self.home_directory_match_indices().len(),
+            },
+            HomePicker::Workspace => self.home_workspace_options().len(),
+            HomePicker::Ref => self.home_ref_match_indices().len(),
             HomePicker::Target => self.home_target_options().len(),
         }
     }
 
+    fn home_directory_match_indices(&self) -> Vec<usize> {
+        let labels = self
+            .home_directory_picker_options()
+            .iter()
+            .map(HomeDirectoryOption::label)
+            .collect::<Vec<_>>();
+        self.home
+            .as_ref()
+            .map(|home| {
+                home.directory_filter
+                    .matches(&labels)
+                    .into_iter()
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn home_ref_match_indices(&self) -> Vec<usize> {
+        let names = self
+            .home_ref_options()
+            .iter()
+            .map(|git_ref| git_ref.name.clone())
+            .collect::<Vec<_>>();
+        self.home
+            .as_ref()
+            .map(|home| {
+                home.ref_filter
+                    .matches(&names)
+                    .into_iter()
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn home_open_picker(&mut self, picker: HomePicker) {
+        if picker == HomePicker::Workspace {
+            self.refresh_home_workspace_options();
+        }
+        if picker == HomePicker::Ref {
+            self.reset_home_ref_context(true);
+        }
+        if picker == HomePicker::Directory {
+            self.refresh_home_worktree_options();
+            if let Some(home) = self.home.as_mut() {
+                home.browse = None;
+            }
+        }
+        if matches!(picker, HomePicker::Directory | HomePicker::Ref) {
+            if let Some(home) = self.home.as_mut() {
+                if picker == HomePicker::Directory {
+                    home.directory_filter.set_query("");
+                } else {
+                    home.ref_filter.set_query("");
+                }
+            }
+        }
         let length = self.home_picker_len(picker);
-        if length == 0 {
+        if length == 0 && picker != HomePicker::Ref {
             return;
         }
         let current = self
@@ -589,10 +1311,24 @@ impl crate::app::state::AppState {
                         .iter()
                         .position(|option| *option == effort)
                 }),
+                HomePicker::Context => home.context_window.as_deref().and_then(|context| {
+                    home.context_options()
+                        .iter()
+                        .position(|option| *option == context)
+                }),
                 HomePicker::Directory => self
-                    .home_directory_options()
+                    .home_directory_picker_options()
                     .iter()
-                    .position(|directory| directory == &home.directory),
+                    .position(|option| option.path() == Some(home.directory.as_path())),
+                HomePicker::Workspace => self
+                    .home_workspace_options()
+                    .iter()
+                    .position(|workspace| workspace == &home.workspace),
+                HomePicker::Ref => home.selected_ref.as_ref().and_then(|selected| {
+                    self.home_ref_options()
+                        .iter()
+                        .position(|git_ref| git_ref.name == selected.name)
+                }),
                 HomePicker::Target => self
                     .home_target_options()
                     .iter()
@@ -601,35 +1337,166 @@ impl crate::app::state::AppState {
             .unwrap_or(0);
         if let Some(home) = self.home.as_mut() {
             home.picker = Some(picker);
-            home.picker_selected = current.min(length - 1);
+            if picker == HomePicker::Directory {
+                home.directory_filter.selected = current.min(length - 1);
+            } else if picker == HomePicker::Ref {
+                home.ref_filter.selected = current.min(length.saturating_sub(1));
+            } else {
+                home.picker_selected = current.min(length - 1);
+            }
         }
     }
 
     pub(crate) fn home_move_picker(&mut self, delta: i32) {
-        let Some((picker, selected)) = self
-            .home
-            .as_ref()
-            .and_then(|home| home.picker.map(|picker| (picker, home.picker_selected)))
-        else {
+        let Some(picker) = self.home.as_ref().and_then(|home| home.picker) else {
             return;
         };
         let length = self.home_picker_len(picker);
-        if length == 0 {
-            return;
-        }
-        let selected = (selected as i32 + delta).clamp(0, length as i32 - 1) as usize;
         if let Some(home) = self.home.as_mut() {
-            home.picker_selected = selected;
+            if picker == HomePicker::Directory {
+                home.directory_filter.move_selection(delta, length);
+            } else if picker == HomePicker::Ref {
+                home.ref_filter.move_selection(delta, length);
+            } else if length > 0 {
+                let selected =
+                    (home.picker_selected as i32 + delta).clamp(0, length as i32 - 1) as usize;
+                home.picker_selected = selected;
+            }
         }
     }
 
-    pub(crate) fn home_accept_picker(&mut self) {
-        let Some((picker, selected)) = self
-            .home
-            .as_ref()
-            .and_then(|home| home.picker.map(|picker| (picker, home.picker_selected)))
-        else {
+    pub(crate) fn home_push_picker_filter(&mut self, character: char) {
+        if let Some(browse) = self.home_browse_mut() {
+            browse.push(character);
             return;
+        }
+        if let Some(home) = self
+            .home
+            .as_mut()
+            .filter(|home| matches!(home.picker, Some(HomePicker::Directory | HomePicker::Ref)))
+        {
+            match home.picker {
+                Some(HomePicker::Directory) => home.directory_filter.push(character),
+                Some(HomePicker::Ref) => home.ref_filter.push(character),
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn home_pop_picker_filter(&mut self) {
+        if let Some(browse) = self.home_browse_mut() {
+            browse.pop();
+            return;
+        }
+        if let Some(home) = self
+            .home
+            .as_mut()
+            .filter(|home| matches!(home.picker, Some(HomePicker::Directory | HomePicker::Ref)))
+        {
+            match home.picker {
+                Some(HomePicker::Directory) => home.directory_filter.pop(),
+                Some(HomePicker::Ref) => home.ref_filter.pop(),
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn home_browse(&self) -> Option<&HomeBrowse> {
+        self.home
+            .as_ref()
+            .filter(|home| home.picker == Some(HomePicker::Directory))
+            .and_then(|home| home.browse.as_ref())
+    }
+
+    fn home_browse_mut(&mut self) -> Option<&mut HomeBrowse> {
+        self.home
+            .as_mut()
+            .filter(|home| home.picker == Some(HomePicker::Directory))
+            .and_then(|home| home.browse.as_mut())
+    }
+
+    pub(crate) fn home_browse_active(&self) -> bool {
+        self.home_browse().is_some()
+    }
+
+    /// `Tab` in the path input: extend it by what the filesystem agrees on.
+    pub(crate) fn home_browse_complete(&mut self) {
+        if let Some(browse) = self.home_browse_mut() {
+            browse.complete();
+        }
+    }
+
+    /// Clicking a listed child descends into it instead of dispatching.
+    pub(crate) fn home_browse_select(&mut self, index: usize) {
+        if let Some(browse) = self.home_browse_mut() {
+            browse.select_child(index);
+        }
+    }
+
+    /// `Esc` in the path input returns to the option list.
+    pub(crate) fn home_browse_cancel(&mut self) {
+        if let Some(home) = self.home.as_mut() {
+            home.browse = None;
+            home.directory_filter.set_query("");
+        }
+    }
+
+    /// `Enter` in the path input. A path that is not a directory is refused
+    /// with a reason and leaves the composer exactly as it was.
+    pub(crate) fn home_browse_accept(&mut self) {
+        let Some(path) = self.home_browse().map(HomeBrowse::path) else {
+            return;
+        };
+        if !path.is_dir() {
+            if let Some(browse) = self.home_browse_mut() {
+                browse.error = Some(NO_SUCH_DIRECTORY.to_string());
+            }
+            return;
+        }
+        self.home_set_directory(crate::worktree::canonical_or_original(&path));
+        if let Some(home) = self.home.as_mut() {
+            home.picker = None;
+        }
+    }
+
+    fn home_set_directory(&mut self, directory: PathBuf) {
+        if let Some(home) = self.home.as_mut() {
+            home.directory = directory;
+            home.browse = None;
+            home.directory_filter.set_query("");
+        }
+        self.refresh_home_workspace_options();
+        self.reset_home_ref_context(false);
+    }
+
+    pub(crate) fn home_accept_picker(&mut self) {
+        let Some((picker, selected)) = self.home.as_ref().and_then(|home| {
+            home.picker.map(|picker| {
+                let selected = match picker {
+                    HomePicker::Directory => home.directory_filter.selected,
+                    HomePicker::Ref => home.ref_filter.selected,
+                    _ => home.picker_selected,
+                };
+                (picker, selected)
+            })
+        }) else {
+            return;
+        };
+        let selected = match picker {
+            HomePicker::Directory => {
+                let Some(selected) = self.home_directory_match_indices().get(selected).copied()
+                else {
+                    return;
+                };
+                selected
+            }
+            HomePicker::Ref => {
+                let Some(selected) = self.home_ref_match_indices().get(selected).copied() else {
+                    return;
+                };
+                selected
+            }
+            _ => selected,
         };
         match picker {
             HomePicker::Agent => {
@@ -661,10 +1528,47 @@ impl crate::app::state::AppState {
                     home.effort = effort;
                 }
             }
+            HomePicker::Context => {
+                let context = self
+                    .home
+                    .as_ref()
+                    .and_then(|home| home.context_options().get(selected))
+                    .map(|context| (*context).to_string());
+                if let Some(home) = self.home.as_mut() {
+                    home.context_window = context;
+                }
+            }
             HomePicker::Directory => {
-                if let Some(directory) = self.home_directory_options().get(selected).cloned() {
+                match self.home_directory_picker_options().get(selected).cloned() {
+                    Some(HomeDirectoryOption::Recent(directory))
+                    | Some(HomeDirectoryOption::Worktree(directory)) => {
+                        self.home_set_directory(directory);
+                    }
+                    Some(HomeDirectoryOption::Browse) => {
+                        // Browsing replaces the filter line rather than closing
+                        // the picker, so the card stays open on the path input.
+                        let directory = self.home_directory();
+                        if let Some(home) = self.home.as_mut() {
+                            home.browse = Some(HomeBrowse::starting_at(&directory));
+                        }
+                        return;
+                    }
+                    None => return,
+                }
+            }
+            HomePicker::Workspace => {
+                if let Some(workspace) = self.home_workspace_options().get(selected).cloned() {
                     if let Some(home) = self.home.as_mut() {
-                        home.directory = directory;
+                        home.workspace = workspace;
+                        home.dispatch_error = None;
+                    }
+                }
+            }
+            HomePicker::Ref => {
+                if let Some(git_ref) = self.home_ref_options().get(selected).cloned() {
+                    if let Some(home) = self.home.as_mut() {
+                        home.selected_ref = Some(git_ref);
+                        home.dispatch_error = None;
                     }
                 }
             }
@@ -876,7 +1780,13 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["default", "fable", "opus", "sonnet", "haiku"]
+            [
+                "default",
+                "claude-fable-5-1",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "claude-haiku-4-5-20251001",
+            ]
         );
         home.set_agent(Agent::Codex);
         home.set_model("gpt-5.6-sol");
@@ -947,19 +1857,189 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_plan_carries_pull_request_context() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "review the requested changes".into();
+        home.pr = Some(HomePrContext {
+            url: "https://github.com/owner/repo/pull/42".into(),
+            number: 42,
+            repo: "owner/repo".into(),
+        });
+
+        let plan = home.dispatch_plan().expect("PR context should dispatch");
+
+        assert_eq!(plan.pr, home.pr);
+    }
+
+    /// Characterization: pins `dispatch_plan()` before the T3 card layout moves
+    /// the fields around. Layout may change; the plan for the same inputs may
+    /// not.
+    #[test]
+    fn dispatch_plan_is_frozen_for_a_fixed_set_of_inputs() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "  cap the retry loop\nand log it  ".into();
+        home.set_agent(Agent::Codex);
+        home.set_model("gpt-5.6-sol");
+        home.effort = Some("ultra".into());
+        home.directory = PathBuf::from("/tmp/frozen-plan");
+        home.target = HomeTarget::Existing("space-7".into());
+
+        let plan = home.dispatch_plan().expect("frozen inputs dispatch");
+
+        assert_eq!(
+            plan,
+            HomeDispatchPlan {
+                agent: Agent::Codex,
+                model: "gpt-5.6-sol".into(),
+                effort: Some("ultra".into()),
+                directory: PathBuf::from("/tmp/frozen-plan"),
+                workspace: HomeWorkspace::CurrentCheckout,
+                git_ref: None,
+                pr: None,
+                target: HomeTarget::Existing("space-7".into()),
+                prompt: "cap the retry loop\nand log it".into(),
+                argv: vec![
+                    "codex".into(),
+                    "--model".into(),
+                    "gpt-5.6-sol".into(),
+                    "-c".into(),
+                    "model_reasoning_effort=ultra".into(),
+                    "cap the retry loop\nand log it".into(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_options_keep_fixed_choices_first_then_linked_worktrees() {
+        let entries = vec![
+            crate::app::state::WorktreeOpenEntry {
+                path: PathBuf::from("/repo/root"),
+                branch: Some("main".into()),
+                is_linked_worktree: false,
+                already_open_ws_idx: None,
+            },
+            crate::app::state::WorktreeOpenEntry {
+                path: PathBuf::from("/worktrees/alpha"),
+                branch: Some("alpha".into()),
+                is_linked_worktree: true,
+                already_open_ws_idx: Some(1),
+            },
+            crate::app::state::WorktreeOpenEntry {
+                path: PathBuf::from("/worktrees/beta"),
+                branch: Some("beta".into()),
+                is_linked_worktree: true,
+                already_open_ws_idx: None,
+            },
+        ];
+
+        assert_eq!(
+            home_workspace_options_from_entries(&entries),
+            vec![
+                HomeWorkspace::CurrentCheckout,
+                HomeWorkspace::NewWorktree,
+                HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/alpha")),
+                HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/beta")),
+            ]
+        );
+    }
+
+    #[test]
+    fn opening_ref_picker_uses_cached_repo_rows_and_requests_refresh() {
+        let directory = crate::worktree::canonical_or_original(
+            &std::env::current_dir().expect("test current directory"),
+        );
+        let repo_root = super::super::worktrees::worktree_repo_root(&directory)
+            .map(|root| crate::worktree::canonical_or_original(&root))
+            .expect("tests run inside the Herdr repository");
+        let mut app = crate::app::state::AppState::test_new();
+        let home = HomeState {
+            directory: directory.clone(),
+            ..HomeState::default()
+        };
+        app.home = Some(home);
+        app.home_ref_cache.insert(
+            repo_root.clone(),
+            super::super::home_refs::parse_ref_cache(
+                "refs/heads/cached/topic\t1234567\t1\n",
+                &format!(
+                    "worktree {}\nHEAD 1234567890\nbranch refs/heads/cached/topic\n\n",
+                    directory.display()
+                ),
+                "cached/topic\n",
+            ),
+        );
+
+        app.home_open_picker(HomePicker::Ref);
+
+        assert_eq!(
+            app.home_ref_options()
+                .iter()
+                .map(|git_ref| git_ref.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cached/topic"]
+        );
+        assert_eq!(
+            app.home.as_ref().and_then(|home| home.picker),
+            Some(HomePicker::Ref)
+        );
+        assert_eq!(app.request_home_ref_refresh, Some(repo_root));
+    }
+
+    #[test]
+    fn dispatch_plan_applies_each_workspace_variant() {
+        let mut home = HomeState {
+            prompt: "run the checks".into(),
+            directory: PathBuf::from("/repo/root"),
+            workspace: HomeWorkspace::CurrentCheckout,
+            ..Default::default()
+        };
+        let current = home.dispatch_plan().expect("current checkout plan");
+        assert_eq!(current.directory, PathBuf::from("/repo/root"));
+        assert_eq!(current.workspace, HomeWorkspace::CurrentCheckout);
+
+        home.workspace = HomeWorkspace::NewWorktree;
+        let new_worktree = home.dispatch_plan().expect("new worktree plan");
+        assert_eq!(new_worktree.directory, PathBuf::from("/repo/root"));
+        assert_eq!(new_worktree.workspace, HomeWorkspace::NewWorktree);
+
+        home.workspace = HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/old"));
+        let previous = home.dispatch_plan().expect("previous worktree plan");
+        assert_eq!(previous.directory, PathBuf::from("/worktrees/old"));
+        assert_eq!(
+            previous.workspace,
+            HomeWorkspace::PreviousWorktree(PathBuf::from("/worktrees/old"))
+        );
+    }
+
+    #[test]
+    fn pending_worktree_creation_keeps_home_open() {
+        let mut home = HomeState {
+            prompt: "wait for the worktree".into(),
+            workspace: HomeWorkspace::NewWorktree,
+            ..Default::default()
+        };
+        home.pending_dispatch = Some(home.dispatch_plan().expect("pending plan"));
+
+        assert!(!home.close_composer_or_home());
+        assert_eq!(home.focus, Some(HomeFocus::Prompt));
+        assert!(home.pending_dispatch.is_some());
+    }
+
+    #[test]
     fn launch_argv_uses_exact_provider_flags_for_explicit_choices() {
         let mut home = home_with_codex_catalog();
         home.prompt = "implement the retry cap".into();
-        home.set_model("fable");
-        home.effort = Some("max".into());
+        home.set_model("claude-fable-5-1");
+        home.effort = Some("high".into());
         assert_eq!(
             home.dispatch_plan().expect("Claude plan").argv,
             vec![
                 "claude",
                 "--model",
-                "fable",
+                "claude-fable-5-1",
                 "--effort",
-                "max",
+                "high",
                 "implement the retry cap",
             ]
         );
@@ -978,5 +2058,417 @@ mod tests {
                 "implement the retry cap",
             ]
         );
+    }
+
+    #[test]
+    fn context_window_is_visible_only_for_supported_claude_models() {
+        let mut home = HomeState::default();
+        assert!(!home.context_visible());
+
+        home.set_model("claude-fable-5-1");
+        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
+        assert_eq!(
+            home.context_options(),
+            [DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
+        );
+
+        home.set_model("claude-haiku-4-5-20251001");
+        assert!(!home.context_visible());
+        home.set_agent(Agent::Codex);
+        assert!(!home.context_visible());
+    }
+
+    #[test]
+    fn one_million_context_uses_the_fallback_model_alias() {
+        let mut home = HomeState::test_with_prompt("use the larger window");
+        home.set_model("claude-opus-5");
+        home.context_window = Some(LARGE_CONTEXT_WINDOW.into());
+
+        assert_eq!(
+            home.dispatch_plan().expect("Claude plan").argv,
+            [
+                "claude",
+                "--model",
+                "claude-opus-5[1m]",
+                "use the larger window",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_million_context_uses_a_documented_cli_flag() {
+        let claude = super::super::home_catalog::parse_claude_help(
+            "--effort <level> (low, medium, high)\n--context-window <size> (200k, 1m)\n",
+        );
+        let mut home = HomeState::with_catalog(HomeCatalog::with_claude(claude));
+        home.prompt = "use the larger window".into();
+        home.set_model("claude-sonnet-5");
+        home.context_window = Some(LARGE_CONTEXT_WINDOW.into());
+
+        assert_eq!(
+            home.dispatch_plan().expect("Claude plan").argv,
+            [
+                "claude",
+                "--model",
+                "claude-sonnet-5",
+                "--context-window",
+                "1m",
+                "use the larger window",
+            ]
+        );
+    }
+
+    /// A directory tree the browse input can be driven against.
+    fn browse_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-home-browse-{}-{name}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or_default()
+        ));
+        for child in ["alpha", "alpine", "beta", ".hidden"] {
+            std::fs::create_dir_all(root.join(child)).expect("fixture directory");
+        }
+        std::fs::write(root.join("alpha.txt"), b"not a directory").expect("fixture file");
+        root
+    }
+
+    fn app_with_home(directory: &Path) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        app.home = Some(HomeState {
+            directory: directory.to_path_buf(),
+            ..HomeState::default()
+        });
+        app
+    }
+
+    #[test]
+    fn the_focus_cycle_visits_the_headline_directory_between_the_chips_and_the_workspace() {
+        let mut home = HomeState {
+            context_window: Some(DEFAULT_CONTEXT_WINDOW.into()),
+            focus: Some(HomeFocus::Prompt),
+            ..HomeState::default()
+        };
+
+        let mut order = Vec::new();
+        for _ in 0..8 {
+            home.move_focus(false);
+            order.push(home.focus.expect("focus"));
+        }
+
+        assert_eq!(
+            order,
+            vec![
+                HomeFocus::Agent,
+                HomeFocus::Model,
+                HomeFocus::Effort,
+                HomeFocus::Context,
+                HomeFocus::Directory,
+                HomeFocus::Workspace,
+                HomeFocus::Ref,
+                HomeFocus::Target,
+            ]
+        );
+
+        // And the same stations backwards.
+        let mut backwards = Vec::new();
+        for _ in 0..8 {
+            home.move_focus(true);
+            backwards.push(home.focus.expect("focus"));
+        }
+        backwards.reverse();
+        assert_eq!(backwards[1..], order[..order.len() - 1]);
+    }
+
+    #[test]
+    fn the_directory_picker_lists_recents_then_worktrees_then_browse() {
+        let mut app = app_with_home(Path::new("/tmp/t3-f2-current"));
+        app.home.as_mut().expect("home").worktree_options = vec![
+            PathBuf::from("/tmp/t3-f2-current"),
+            PathBuf::from("/tmp/t3-f2-linked"),
+        ];
+
+        let options = app.home_directory_picker_options();
+
+        assert_eq!(
+            options.first(),
+            Some(&HomeDirectoryOption::Recent(PathBuf::from(
+                "/tmp/t3-f2-current"
+            ))),
+            "the selected directory leads the recents"
+        );
+        assert_eq!(
+            options.last(),
+            Some(&HomeDirectoryOption::Browse),
+            "browse is always the last option"
+        );
+        let worktrees = options
+            .iter()
+            .filter(|option| matches!(option, HomeDirectoryOption::Worktree(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            worktrees,
+            vec![&HomeDirectoryOption::Worktree(PathBuf::from(
+                "/tmp/t3-f2-linked"
+            ))],
+            "a worktree already listed as a recent is not repeated"
+        );
+        let first_worktree = options
+            .iter()
+            .position(|option| matches!(option, HomeDirectoryOption::Worktree(_)))
+            .expect("a linked worktree");
+        let last_recent = options
+            .iter()
+            .rposition(|option| matches!(option, HomeDirectoryOption::Recent(_)))
+            .expect("a recent directory");
+        assert!(
+            last_recent < first_worktree,
+            "recents come first: {options:?}"
+        );
+        assert_eq!(
+            options.last().map(HomeDirectoryOption::label),
+            Some(BROWSE_OPTION_LABEL.to_string())
+        );
+    }
+
+    #[test]
+    fn choosing_browse_opens_the_path_input_instead_of_closing_the_picker() {
+        let directory = browse_fixture("open");
+        let mut app = app_with_home(&directory);
+        app.home_open_picker(HomePicker::Directory);
+        let browse_index = app
+            .home_directory_picker_options()
+            .iter()
+            .position(|option| *option == HomeDirectoryOption::Browse)
+            .expect("browse option");
+        app.home.as_mut().expect("home").directory_filter.selected = browse_index;
+
+        app.home_accept_picker();
+
+        let home = app.home.as_ref().expect("home");
+        assert_eq!(home.picker, Some(HomePicker::Directory));
+        let browse = home.browse.as_ref().expect("path input");
+        assert!(
+            browse.input.starts_with(&directory.display().to_string()),
+            "the input starts on the current directory: {:?}",
+            browse.input
+        );
+        assert_eq!(browse.children, vec!["alpha", "alpine", "beta"]);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn tab_completes_the_next_path_component_from_the_filesystem() {
+        let directory = browse_fixture("complete");
+        let mut app = app_with_home(&directory);
+        app.home_open_picker(HomePicker::Directory);
+        if let Some(home) = app.home.as_mut() {
+            home.browse = Some(HomeBrowse::starting_at(&directory));
+        }
+
+        // Two directories share the prefix, so completion stops where they part.
+        app.home_push_picker_filter('a');
+        app.home_push_picker_filter('l');
+        app.home_browse_complete();
+        assert_eq!(
+            app.home_browse().map(|browse| browse.input.clone()),
+            Some(directory.join("alp").display().to_string())
+        );
+
+        // One more character leaves a single match, which completes whole.
+        app.home_push_picker_filter('h');
+        app.home_browse_complete();
+        assert_eq!(
+            app.home_browse().map(|browse| browse.input.clone()),
+            Some(format!(
+                "{}{}",
+                directory.join("alpha").display(),
+                std::path::MAIN_SEPARATOR
+            ))
+        );
+        assert!(
+            app.home_browse()
+                .is_some_and(|browse| browse.children.is_empty()),
+            "the completed directory has no children of its own"
+        );
+
+        // Files never complete, and hidden directories only once asked for.
+        app.home_pop_picker_filter();
+        while app
+            .home_browse()
+            .is_some_and(|browse| browse.input != directory.join("").display().to_string())
+        {
+            app.home_pop_picker_filter();
+        }
+        assert!(app
+            .home_browse()
+            .is_some_and(|browse| !browse.children.contains(&"alpha.txt".to_string())));
+        app.home_push_picker_filter('.');
+        assert_eq!(
+            app.home_browse().map(|browse| browse.children.clone()),
+            Some(vec![".hidden".to_string()])
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn enter_on_a_path_that_is_not_a_directory_is_refused_and_keeps_the_composer_open() {
+        let directory = browse_fixture("refused");
+        let mut app = app_with_home(&directory);
+        app.home_open_picker(HomePicker::Directory);
+        if let Some(home) = app.home.as_mut() {
+            home.browse = Some(HomeBrowse::starting_at(&directory));
+        }
+        for character in "nowhere".chars() {
+            app.home_push_picker_filter(character);
+        }
+
+        app.home_browse_accept();
+
+        let home = app.home.as_ref().expect("home");
+        assert_eq!(home.directory, directory, "the directory is unchanged");
+        assert_eq!(home.picker, Some(HomePicker::Directory));
+        assert_eq!(
+            home.browse
+                .as_ref()
+                .and_then(|browse| browse.error.as_deref()),
+            Some(NO_SUCH_DIRECTORY)
+        );
+        assert!(home.focus.is_some(), "the composer stays open");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn enter_on_an_existing_path_sets_the_directory_and_the_headline_name() {
+        let directory = browse_fixture("accepted");
+        let mut app = app_with_home(&directory);
+        app.home_open_picker(HomePicker::Directory);
+        if let Some(home) = app.home.as_mut() {
+            home.browse = Some(HomeBrowse::starting_at(&directory));
+        }
+        for character in "alpha".chars() {
+            app.home_push_picker_filter(character);
+        }
+
+        app.home_browse_accept();
+
+        let home = app.home.as_ref().expect("home");
+        assert_eq!(
+            home.directory,
+            crate::worktree::canonical_or_original(&directory.join("alpha"))
+        );
+        assert!(home.picker.is_none(), "accepting closes the picker");
+        assert!(home.browse.is_none());
+        assert_eq!(app.home_headline_name(), "alpha");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_headline_names_the_repository_root_the_cache_resolved() {
+        let mut app = app_with_home(Path::new("/tmp/t3-f2-worktree"));
+        app.git_root_for_cwd.insert(
+            PathBuf::from("/tmp/t3-f2-worktree"),
+            Some(PathBuf::from("/tmp/checkouts/herdr")),
+        );
+
+        assert_eq!(app.home_headline_name(), "herdr");
+    }
+
+    /// A `git worktree add` checkout whose root is the task directory, next to
+    /// the main checkout it belongs to.
+    fn linked_worktree_fixture() -> Option<(PathBuf, PathBuf, PathBuf)> {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-home-linked-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or_default()
+        ));
+        let checkout = root.join("herdr");
+        let linked = root.join("t3-f2");
+        std::fs::create_dir_all(&checkout).expect("fixture directory");
+        let git = |cwd: &Path, args: &[&str]| -> bool {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        };
+        let prepared = git(&checkout, &["init", "--initial-branch", "main"])
+            && git(&checkout, &["config", "user.email", "fixture@example.com"])
+            && git(&checkout, &["config", "user.name", "fixture"])
+            && git(&checkout, &["commit", "--allow-empty", "-m", "root"])
+            && git(
+                &checkout,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "task",
+                    linked.to_str().unwrap_or_default(),
+                ],
+            );
+        if !prepared {
+            let _ = std::fs::remove_dir_all(&root);
+            return None;
+        }
+        Some((root, checkout, linked))
+    }
+
+    #[test]
+    fn the_headline_names_the_repository_for_a_linked_worktree() {
+        let Some((root, checkout, linked)) = linked_worktree_fixture() else {
+            return;
+        };
+
+        let mut app = app_with_home(&checkout);
+        app.home_set_directory(crate::worktree::canonical_or_original(&checkout));
+        assert_eq!(app.home_headline_name(), "herdr", "the main checkout");
+
+        // What a pane working in the linked worktree caches: its own checkout
+        // root, which is named after the task and not after the repository.
+        let linked = crate::worktree::canonical_or_original(&linked);
+        app.git_root_for_cwd
+            .insert(linked.clone(), Some(linked.clone()));
+        app.home_set_directory(linked.clone());
+        assert_eq!(
+            directory_basename(&linked),
+            "t3-f2",
+            "the fixture worktree is task-named"
+        );
+        assert_eq!(
+            app.home_headline_name(),
+            "herdr",
+            "a linked worktree is named after its repository, not its task"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_headline_never_reads_as_the_machine_for_a_home_directory() {
+        let Some(home_directory) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let app = app_with_home(&home_directory);
+
+        let name = app.home_headline_name();
+
+        assert_ne!(
+            Some(name.as_str()),
+            home_directory.file_name().and_then(|name| name.to_str()),
+            "the account name is not a place name"
+        );
+        assert_eq!(name, "~");
     }
 }

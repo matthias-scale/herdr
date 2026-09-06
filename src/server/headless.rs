@@ -114,6 +114,36 @@ fn notification_show_response_shown(response: &str) -> bool {
     )
 }
 
+fn work_item_detail_request(
+    client: &ClientConnection,
+) -> Option<(
+    crate::app::state::DockHomeSection,
+    Option<crate::app::state::WorkItemKey>,
+    bool,
+)> {
+    if !client.is_full_app_client() {
+        return None;
+    }
+    if let Some(view) = client.work_view.as_ref() {
+        return Some((
+            crate::app::state::DockHomeSection::Prs,
+            view.selected.clone(),
+            true,
+        ));
+    }
+    let presentation = &client.dock_presentation;
+    let selection = match presentation.home_section {
+        crate::app::state::DockHomeSection::Prs => presentation.home_selection.clone(),
+        crate::app::state::DockHomeSection::Tickets => presentation.home_ticket_selection.clone(),
+        crate::app::state::DockHomeSection::XPolls => presentation.home_poll_selection.clone(),
+    };
+    Some((
+        presentation.home_section,
+        selection,
+        !presentation.collapsed && presentation.tab == Some(crate::app::DockSurface::Home),
+    ))
+}
+
 fn alt_screen_restore_error_response(id: String) -> String {
     serde_json::to_string(&api::schema::ErrorResponse {
         id,
@@ -893,6 +923,16 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_new_workspace");
         }
 
+        if self.app.apply_pane_toggle_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_pane_toggle");
+        }
+
+        if self.app.apply_git_action_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_git_action");
+        }
+
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
@@ -1194,7 +1234,10 @@ impl HeadlessServer {
                 }
             }
         }
-        if pane_by_terminal.len() > crate::server::handoff::MAX_FDS_PER_HANDOFF {
+        let editor_terminals = self.app.dock_editor_handoff_terminals();
+        if pane_by_terminal.len() + editor_terminals.len()
+            > crate::server::handoff::MAX_FDS_PER_HANDOFF
+        {
             let _ = std::fs::remove_file(&socket_path);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1210,7 +1253,11 @@ impl HeadlessServer {
         let _ = reject_pending_client_connections(&self.client_listener);
 
         let mut paused_terminal_ids = Vec::new();
-        for terminal_id in pane_by_terminal.keys() {
+        for terminal_id in pane_by_terminal.keys().chain(
+            editor_terminals
+                .iter()
+                .map(|(terminal_id, _, _)| terminal_id),
+        ) {
             if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
                 if let Err(err) = runtime.pause_handoff_reader(Duration::from_secs(2)) {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
@@ -1261,6 +1308,21 @@ impl HeadlessServer {
             handoff_entries.push((terminal_id.clone(), handoff_runtime));
         }
 
+        let mut dock_editors = Vec::new();
+        for (terminal_id, agent_pane_id, editor_pane_id) in &editor_terminals {
+            let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) else {
+                continue;
+            };
+            handoff_entries.push((
+                terminal_id.clone(),
+                runtime.handoff_runtime_state(editor_pane_id.raw()),
+            ));
+            dock_editors.push(crate::server::handoff::DockEditorHandoff {
+                agent_pane_id: agent_pane_id.raw(),
+                editor_pane_id: editor_pane_id.raw(),
+            });
+        }
+
         let panes = handoff_entries
             .iter()
             .map(|(_, runtime)| runtime.clone())
@@ -1268,6 +1330,7 @@ impl HeadlessServer {
         let manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
+            dock_editors,
             params.expected_protocol,
             params.expected_version,
         );
@@ -2984,6 +3047,16 @@ impl HeadlessServer {
         if let Some(width) = self.app.state.take_dock_width_persistence_request() {
             self.send_to_client(client_id, ServerMessage::DockWidth { width });
         }
+        if let Some(mode) = self.app.state.take_sidebar_group_mode_persistence_request() {
+            crate::client::presentation::save_sidebar_group_mode(mode);
+        }
+        if let Some(filter) = self
+            .app
+            .state
+            .take_sidebar_work_filter_persistence_request()
+        {
+            crate::client::presentation::save_sidebar_work_filter(filter);
+        }
 
         if self.app.state.detach_requested {
             self.app.state.detach_requested = false;
@@ -3066,6 +3139,13 @@ impl HeadlessServer {
                         Some(writer),
                     ),
                 );
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    let group_mode = crate::client::presentation::load_sidebar_group_mode();
+                    client.sidebar_presentation.group_mode = group_mode;
+                    client.sidebar_presentation.group_menu_selected = group_mode.index();
+                    client.sidebar_presentation.work_filter =
+                        crate::client::presentation::load_sidebar_work_filter();
+                }
                 if !direct_attach_requested {
                     self.foreground_client_id = Some(client_id);
                 }
@@ -4433,7 +4513,13 @@ impl HeadlessServer {
                             &self.app.render_notify,
                             &self.app.render_dirty,
                         );
+                    self.app.record_pending_first_frame();
+                    // The editor PTY is a shared runtime resource. Its size follows the
+                    // foreground client's layout, while every app client still renders its
+                    // own dock geometry above.
                     if is_foreground {
+                        self.app.ensure_dock_editor();
+                        self.app.resize_dock_editor();
                         self.app.ensure_scratchpad();
                     }
                     if let Some(deadline) = self
@@ -4838,11 +4924,26 @@ impl HeadlessServer {
         }
 
         changed |= self.app.clear_due_selection_highlight(now);
+        changed |= self.app.process_git_action_panes(now);
+        changed |= self.app.refresh_pane_settlement_at(now);
 
         if self.has_app_client() {
             // Work-context links matter only while a TUI is attached and viewing panes.
             self.app.start_git_work_context_refresh_if_due(now);
+            self.app.dock_files_refresh_demand = self
+                .foreground_client_id
+                .and_then(|client_id| self.clients.get(&client_id))
+                .is_some_and(|client| {
+                    !client.dock_presentation.collapsed
+                        && client.dock_presentation.tab == Some(crate::app::DockSurface::Files)
+                });
+            if self.app.dock_files_refresh_demand {
+                self.app.start_dock_files_refresh();
+            }
             self.app.start_git_status_refresh_if_due(now);
+            changed |= self.start_foreground_dock_diff_refresh_if_needed();
+        } else {
+            self.app.dock_files_refresh_demand = false;
         }
         // Without a TUI, only idle agents need foreground-child promotion. Keeping the
         // target set narrow avoids recurring process-tree scans for ordinary API panes.
@@ -4861,25 +4962,7 @@ impl HeadlessServer {
         let detail_request = self
             .foreground_client_id
             .and_then(|client_id| self.clients.get(&client_id))
-            .filter(|client| client.is_full_app_client())
-            .map(|client| {
-                let presentation = &client.dock_presentation;
-                (
-                    presentation.home_section,
-                    match presentation.home_section {
-                        crate::app::state::DockHomeSection::Prs => {
-                            presentation.home_selection.clone()
-                        }
-                        crate::app::state::DockHomeSection::Tickets => {
-                            presentation.home_ticket_selection.clone()
-                        }
-                        crate::app::state::DockHomeSection::XPolls => {
-                            presentation.home_poll_selection.clone()
-                        }
-                    },
-                    !presentation.collapsed && presentation.tab == crate::app::DockTab::Home,
-                )
-            });
+            .and_then(work_item_detail_request);
         let (section, selection, detail_visible) =
             detail_request.unwrap_or((crate::app::state::DockHomeSection::Prs, None, false));
         self.app
@@ -4925,6 +5008,25 @@ impl HeadlessServer {
             changed |= self
                 .app
                 .start_pending_agent_resumes(self.app.pending_agent_resume_due(now));
+        }
+        changed
+    }
+
+    fn start_foreground_dock_diff_refresh_if_needed(&mut self) -> bool {
+        let Some(client_id) = self.foreground_client_id else {
+            return false;
+        };
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        let mut presentation = std::mem::take(&mut client.dock_presentation);
+        let before = presentation.clone();
+        self.app.state.swap_dock_presentation(&mut presentation);
+        self.app.start_dock_diff_refresh_if_needed();
+        self.app.state.swap_dock_presentation(&mut presentation);
+        let changed = presentation != before;
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.dock_presentation = presentation;
         }
         changed
     }
@@ -5283,6 +5385,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
 
+    let dock_editors = std::mem::take(&mut received.manifest.dock_editors);
     let mut imports = HashMap::new();
     for (pane, fd) in received.manifest.panes.drain(..).zip(received.fds) {
         let pane_id = pane.pane_id;
@@ -5308,6 +5411,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             event_hub.clone(),
             &received.manifest.snapshot,
             &mut imports,
+            &dock_editors,
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
@@ -5506,6 +5610,33 @@ mod tests {
             server_event_rx,
             server_event_tx,
         }
+    }
+
+    #[test]
+    fn full_screen_work_view_requests_pr_details_without_open_dock() {
+        let mut client = ClientConnection::new(
+            (120, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            ticket_id: None,
+        };
+        let mut view = crate::app::state::WorkViewState::new(true, None);
+        view.selected = Some(key.clone());
+        client.work_view = Some(view);
+
+        assert_eq!(
+            work_item_detail_request(&client),
+            Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
+        );
     }
 
     #[tokio::test]
@@ -5851,6 +5982,203 @@ mod tests {
         server.resize_shared_runtime_to_effective_size();
 
         (server, client_rx, pane_id)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_attach_resize_does_not_resize_dock_editor_runtime() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let agent_terminal_id = workspace
+            .terminal_id(pane_id)
+            .expect("agent terminal id")
+            .clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&agent_terminal_id)
+            .expect("agent terminal state")
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+            );
+        server.app.state.dock_collapsed = false;
+        server.app.state.dock_tab = Some(crate::app::DockSurface::Editor);
+
+        let editor_terminal_id = crate::terminal::TerminalId::alloc();
+        server.app.state.dock_editor_sessions.insert(
+            pane_id,
+            crate::app::state::DockEditorSession {
+                pane_id: crate::layout::PaneId::alloc(),
+                terminal_id: editor_terminal_id.clone(),
+            },
+        );
+        server.app.terminal_runtimes.insert(
+            editor_terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 2, b"EDITOR"),
+        );
+        let before = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .current_size();
+
+        let (client_tx, _control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id: agent_terminal_id.to_string(),
+                },
+                None,
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                false,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.resize_shared_runtime_to_effective_size();
+
+        let after = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .current_size();
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_app_background_client_does_not_resize_shared_dock_editor_runtime() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let agent_terminal_id = workspace
+            .terminal_id(pane_id)
+            .expect("agent terminal id")
+            .clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&agent_terminal_id)
+            .expect("agent terminal state")
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+            );
+
+        let editor_terminal_id = crate::terminal::TerminalId::alloc();
+        server.app.state.dock_editor_sessions.insert(
+            pane_id,
+            crate::app::state::DockEditorSession {
+                pane_id: crate::layout::PaneId::alloc(),
+                terminal_id: editor_terminal_id.clone(),
+            },
+        );
+        server.app.terminal_runtimes.insert(
+            editor_terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 2, b"EDITOR"),
+        );
+        let before = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .current_size();
+        let before_resize_count = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .test_resize_count();
+
+        let mut render_receivers = Vec::new();
+        for (client_id, terminal_size, dock_width, editor_focused) in [
+            (1_u64, (100, 30), 24_u16, true),
+            (2_u64, (160, 45), 48_u16, true),
+        ] {
+            let (client_tx, _control_rx, render_rx) = test_client_writer();
+            render_receivers.push(render_rx);
+            let mut client = ClientConnection::new(
+                terminal_size,
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                client_id,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            );
+            client.dock_presentation = crate::app::state::DockPresentationState {
+                width: dock_width,
+                collapsed: false,
+                tab: Some(crate::app::DockSurface::Editor),
+                open_surfaces: crate::app::DockSurface::DEFAULT_OPEN.to_vec(),
+                maximized: false,
+                surface_menu: None,
+                chooser_focused: false,
+                scroll: 0,
+                editor_focused,
+                diff_focused: false,
+                diff_ignore_whitespace: false,
+                diff_selected: 0,
+                diff_collapsed: std::collections::HashSet::new(),
+                diff_request: None,
+                diff_active_key: None,
+                files_focused: false,
+                files_selection: None,
+                files_filter: String::new(),
+                files_collapsed: std::collections::HashSet::new(),
+                home_selection: None,
+                home_ticket_selection: None,
+                home_poll_selection: None,
+                home_section: crate::app::state::DockHomeSection::Prs,
+                home_detail_tab: crate::app::state::DockHomeDetailTab::Overview,
+                home_focused: false,
+                home_followed_pane: None,
+            };
+            server.clients.insert(client_id, client);
+        }
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.render_and_stream();
+
+        let after = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .current_size();
+        let after_resize_count = server
+            .app
+            .terminal_runtimes
+            .get(&editor_terminal_id)
+            .expect("editor runtime")
+            .test_resize_count();
+        assert_eq!(
+            after_resize_count,
+            before_resize_count + 1,
+            "background client resized shared editor PTY: before_size={before:?}, after_size={after:?}, before_resize_count={before_resize_count}, after_resize_count={after_resize_count}"
+        );
+        drop(render_receivers);
+        shutdown_test_runtimes(&mut server);
     }
 
     fn hidden_pty_visibility_test_server(
@@ -7188,6 +7516,7 @@ next_tab = ""
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(!changed);
@@ -7217,6 +7546,7 @@ next_tab = ""
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(changed);
@@ -9147,7 +9477,7 @@ next_tab = ""
 
         let mut client = test_app_client(Some(true), 1);
         client.dock_presentation.collapsed = false;
-        client.dock_presentation.tab = crate::app::DockTab::Home;
+        client.dock_presentation.tab = Some(crate::app::DockSurface::Home);
         client.dock_presentation.home_focused = true;
         client.dock_presentation.home_selection = Some(first_key);
         server.clients.insert(1, client);

@@ -1190,6 +1190,8 @@ pub struct PaneRuntime {
     terminal: Arc<PaneTerminal>,
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
+    #[cfg(test)]
+    resize_count: Cell<usize>,
     child_pid: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
@@ -2164,6 +2166,8 @@ impl PaneRuntime {
             terminal,
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
+            #[cfg(test)]
+            resize_count: Cell::new(0),
             child_pid,
             reported_cwd,
             child_wait_completed: None,
@@ -2221,6 +2225,13 @@ impl PaneRuntime {
 
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
+        tracing::info!(
+            event = "pane.pty_spawn.complete",
+            subsystem = "pane",
+            outcome = "ok",
+            pane_id = pane_id.raw(),
+            "pty spawn returned"
+        );
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
@@ -2264,11 +2275,16 @@ impl PaneRuntime {
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
+            let first_output = Arc::new(AtomicBool::new(false));
+            let first_output_for_read = first_output.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                if !bytes.is_empty() && !first_output_for_read.swap(true, Ordering::AcqRel) {
+                    crate::logging::pane_first_output(pane_id.raw(), bytes.len());
+                }
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
@@ -2764,6 +2780,8 @@ impl PaneRuntime {
             terminal,
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
+            #[cfg(test)]
+            resize_count: Cell::new(0),
             child_pid,
             reported_cwd,
             child_wait_completed: Some(child_wait_completed),
@@ -2870,6 +2888,11 @@ impl PaneRuntime {
         (rows, cols)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_resize_count(&self) -> usize {
+        self.resize_count.get()
+    }
+
     /// Resize if the dimensions actually changed.
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         let rows = rows.max(2);
@@ -2878,6 +2901,9 @@ impl PaneRuntime {
         if self.current_size.get() == size {
             return;
         }
+        #[cfg(test)]
+        self.resize_count
+            .set(self.resize_count.get().saturating_add(1));
         self.current_size.set(size);
         let terminal_responses = self
             .terminal
@@ -3379,6 +3405,7 @@ impl PaneRuntime {
                     resize_tx,
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
+                resize_count: Cell::new(0),
                 child_pid: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
@@ -4118,6 +4145,7 @@ mod tests {
                 resize_tx,
             },
             current_size: Cell::new((80, 24, 0, 0)),
+            resize_count: Cell::new(0),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
@@ -4152,6 +4180,7 @@ mod tests {
                 resize_tx,
             },
             current_size: Cell::new((80, 24, 0, 0)),
+            resize_count: Cell::new(0),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,

@@ -367,6 +367,7 @@ pub struct Keybinds {
     pub toggle_pin_tab: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub sidebar_cycle_group_mode: ActionKeybinds,
     pub toggle_blocked_filter: ActionKeybinds,
     pub toggle_dock: ActionKeybinds,
     pub previous_dock_tab: ActionKeybinds,
@@ -557,6 +558,7 @@ impl Config {
             toggle_pin_tab: empty_action!(),
             resize_mode: empty_action!(),
             toggle_sidebar: empty_action!(),
+            sidebar_cycle_group_mode: empty_action!(),
             toggle_blocked_filter: empty_action!(),
             toggle_dock: empty_action!(),
             previous_dock_tab: empty_action!(),
@@ -726,6 +728,11 @@ impl Config {
             apply_action!(keybinds.toggle_pin_tab, toggle_pin_tab, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
+            apply_action!(
+                keybinds.sidebar_cycle_group_mode,
+                sidebar_cycle_group_mode,
+                source
+            );
             apply_action!(
                 keybinds.toggle_blocked_filter,
                 toggle_blocked_filter,

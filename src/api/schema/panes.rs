@@ -596,6 +596,9 @@ pub struct PaneInfo {
     pub workspace_id: String,
     pub tab_id: String,
     pub focused: bool,
+    /// Unix seconds when the server moved this pane out of active work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
     #[serde(default)]
     pub work_context: crate::work_context::PaneWorkContext,
     #[serde(default, skip_serializing_if = "Option::is_none")]

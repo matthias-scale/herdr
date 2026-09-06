@@ -64,6 +64,12 @@ pub(crate) struct PopupPaneState {
     pub height: Option<crate::popup_size::PopupSize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockEditorSession {
+    pub pane_id: PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -809,6 +815,93 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
+/// Team / assignee narrowing for the work-item grouping modes. TUI-only
+/// presentation state: it selects which of the projection's tickets the
+/// sidebar shows and never reaches the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SidebarWorkFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) team: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) assignee: Option<String>,
+}
+
+impl SidebarWorkFilter {
+    /// Header chip: what the current narrowing is, in the operator's words.
+    pub(crate) fn label(&self) -> String {
+        match (self.team.as_deref(), self.assignee.as_deref()) {
+            (_, Some(assignee)) => format!("assigned to {assignee}"),
+            (_, None) => "all assignees".into(),
+        }
+    }
+
+    pub(crate) fn team_label(&self) -> String {
+        self.team.clone().unwrap_or_else(|| "all teams".into())
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SidebarGroupMode {
+    #[default]
+    Repo,
+    RepoPr,
+    RepoWorktree,
+    LinearTeam,
+    Missive,
+}
+
+impl SidebarGroupMode {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Repo,
+        Self::RepoPr,
+        Self::RepoWorktree,
+        Self::LinearTeam,
+        Self::Missive,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Repo => "Repo",
+            Self::RepoPr => "Repo / PR",
+            Self::RepoWorktree => "Repo / worktree",
+            Self::LinearTeam => "Linear team",
+            Self::Missive => "Missive threads",
+        }
+    }
+
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Self::Repo => "⊞",
+            Self::RepoPr => "⑂",
+            Self::RepoWorktree => "⎇",
+            Self::LinearTeam => "◎",
+            Self::Missive => "✉",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    pub(crate) fn index(self) -> usize {
+        Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0)
+    }
+
+    pub(crate) fn collapse_namespace(self) -> &'static str {
+        match self {
+            Self::Repo => "repo",
+            Self::RepoPr => "repo_pr",
+            Self::RepoWorktree => "repo_worktree",
+            Self::LinearTeam => "linear_team",
+            Self::Missive => "missive",
+        }
+    }
+}
+
 /// Attach-local sidebar state. The headless server swaps one instance into
 /// `AppState` while routing input or rendering for that client; the monolithic
 /// app keeps its own instance directly.
@@ -825,6 +918,16 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) mobile_switcher_scroll: usize,
     /// Global projection revision last reconciled into this attach.
     pub(crate) projection_revision: u64,
+    pub(crate) group_mode: SidebarGroupMode,
+    pub(crate) group_menu_open: bool,
+    pub(crate) group_menu_selected: usize,
+    pub(crate) work_filter: SidebarWorkFilter,
+    pub(crate) filter_menu_open: bool,
+    pub(crate) filter_menu_selected: usize,
+    pub(crate) selected_work_group: Option<String>,
+    pub(crate) selected_settled: Option<PaneFocusTarget>,
+    pub(crate) settled_menu_target: Option<PaneFocusTarget>,
+    pub(crate) settled_menu_selected: usize,
 }
 
 /// Attach-local dock presentation. The headless server swaps one instance into
@@ -833,8 +936,24 @@ pub(crate) struct SidebarPresentationState {
 pub(crate) struct DockPresentationState {
     pub(crate) width: u16,
     pub(crate) collapsed: bool,
-    pub(crate) tab: DockTab,
+    /// Active surface. `None` while the dock is a chooser with nothing open.
+    pub(crate) tab: Option<DockSurface>,
+    pub(crate) open_surfaces: Vec<DockSurface>,
+    pub(crate) maximized: bool,
+    pub(crate) surface_menu: Option<DockSurfaceMenu>,
+    pub(crate) chooser_focused: bool,
     pub(crate) scroll: u16,
+    pub(crate) editor_focused: bool,
+    pub(crate) diff_focused: bool,
+    pub(crate) diff_ignore_whitespace: bool,
+    pub(crate) diff_selected: usize,
+    pub(crate) diff_collapsed: std::collections::HashSet<String>,
+    pub(crate) diff_request: Option<super::diff::DiffRefreshRequest>,
+    pub(crate) diff_active_key: Option<DiffCacheKey>,
+    pub(crate) files_focused: bool,
+    pub(crate) files_selection: Option<std::path::PathBuf>,
+    pub(crate) files_filter: String,
+    pub(crate) files_collapsed: std::collections::HashSet<std::path::PathBuf>,
     /// Selection inside the home tab. Stored as a work-item key, never an
     /// index, so it survives snapshot refreshes and list reordering.
     pub(crate) home_selection: Option<WorkItemKey>,
@@ -854,8 +973,23 @@ impl Default for DockPresentationState {
         Self {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
-            tab: DockTab::Home,
+            tab: Some(DockSurface::Home),
+            open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            maximized: false,
+            surface_menu: None,
+            chooser_focused: false,
             scroll: 0,
+            editor_focused: false,
+            diff_focused: false,
+            diff_ignore_whitespace: false,
+            diff_selected: 0,
+            diff_collapsed: std::collections::HashSet::new(),
+            diff_request: None,
+            diff_active_key: None,
+            files_focused: false,
+            files_selection: None,
+            files_filter: String::new(),
+            files_collapsed: std::collections::HashSet::new(),
             home_selection: None,
             home_ticket_selection: None,
             home_poll_selection: None,
@@ -1019,34 +1153,176 @@ pub enum ViewLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DockTab {
+pub enum DockSurface {
     Home,
+    Terminal,
+    Files,
+    Diff,
+    Pr,
+    Linear,
+    Agents,
+    Editor,
     Shortcuts,
     Context,
     Scratchpad,
 }
 
-impl DockTab {
-    pub const ALL: [Self; 4] = [Self::Home, Self::Shortcuts, Self::Context, Self::Scratchpad];
+impl DockSurface {
+    /// Every surface the chooser can open, in menu order.
+    pub const ALL: [Self; 11] = [
+        Self::Terminal,
+        Self::Files,
+        Self::Diff,
+        Self::Pr,
+        Self::Linear,
+        Self::Agents,
+        Self::Home,
+        Self::Editor,
+        Self::Shortcuts,
+        Self::Context,
+        Self::Scratchpad,
+    ];
+
+    /// The card grid of the empty dock, each with its single-key shortcut.
+    pub const CARDS: [Self; 6] = [
+        Self::Terminal,
+        Self::Files,
+        Self::Diff,
+        Self::Pr,
+        Self::Linear,
+        Self::Agents,
+    ];
+
+    /// Surfaces a dock opens with. Keeping the pre-chooser tab strip as the
+    /// default set makes the rename behaviour-neutral: the same five tabs are
+    /// there, in the same order, until the user closes one.
+    pub const DEFAULT_OPEN: [Self; 5] = [
+        Self::Home,
+        Self::Editor,
+        Self::Shortcuts,
+        Self::Context,
+        Self::Scratchpad,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "home",
+            Self::Editor => "edit",
             Self::Shortcuts => "keys",
             Self::Context => "ctx",
             Self::Scratchpad => "note",
+            Self::Terminal => "term",
+            Self::Files => "files",
+            Self::Diff => "diff",
+            Self::Pr => "pr",
+            Self::Linear => "linear",
+            Self::Agents => "agents",
         }
     }
 
-    pub fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+    /// Title used by the chooser card grid and the `+` menu.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Editor => "Editor",
+            Self::Shortcuts => "Shortcuts",
+            Self::Context => "Context",
+            Self::Scratchpad => "Scratchpad",
+            Self::Terminal => "Terminal",
+            Self::Files => "Files",
+            Self::Diff => "Diff",
+            Self::Pr => "PR",
+            Self::Linear => "Linear",
+            Self::Agents => "Agents",
+        }
     }
 
-    pub fn previous(self) -> Self {
-        let index = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
-        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Home => "work index",
+            Self::Editor => "edit files",
+            Self::Shortcuts => "keybinds",
+            Self::Context => "pane facts",
+            Self::Scratchpad => "notes",
+            Self::Terminal => "shell here",
+            Self::Files => "browse",
+            Self::Diff => "vs base",
+            Self::Pr => "this branch",
+            Self::Linear => "ticket",
+            Self::Agents => "subagents",
+        }
     }
+
+    /// Single-key shortcut of the empty-dock card grid.
+    pub fn shortcut(self) -> Option<char> {
+        match self {
+            Self::Terminal => Some('T'),
+            Self::Files => Some('F'),
+            Self::Diff => Some('D'),
+            Self::Pr => Some('P'),
+            Self::Linear => Some('L'),
+            Self::Agents => Some('A'),
+            _ => None,
+        }
+    }
+
+    pub fn from_shortcut(key: char) -> Option<Self> {
+        let key = key.to_ascii_uppercase();
+        Self::CARDS
+            .into_iter()
+            .find(|surface| surface.shortcut() == Some(key))
+    }
+
+    /// Placeholder body until the surface gets its implementation slice.
+    pub fn placeholder(self) -> Option<String> {
+        matches!(
+            self,
+            Self::Terminal | Self::Files | Self::Linear | Self::Agents
+        )
+        .then(|| format!("{}: coming in a later slice", self.title()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DockSurfaceMenu {
+    pub(crate) selected: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DiffCacheKey {
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) base: String,
+    pub(crate) ignore_whitespace: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffFileSummary {
+    pub(crate) path: String,
+    pub(crate) display_path: String,
+    pub(crate) additions: usize,
+    pub(crate) deletions: usize,
+    pub(crate) binary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffFileContent {
+    pub(crate) committed: Vec<super::diff::DiffLine>,
+    pub(crate) uncommitted: Vec<super::diff::DiffLine>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffCacheEntry {
+    pub(crate) branch: String,
+    pub(crate) files: Vec<DiffFileSummary>,
+    pub(crate) contents: std::collections::HashMap<String, DiffFileContent>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockFileRowHitArea {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) kind: crate::files::FileTreeRowKind,
+    pub(crate) rect: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1059,7 +1335,10 @@ pub(crate) enum HomeHitTarget {
     Agent,
     Model,
     Effort,
+    Context,
     Directory,
+    Workspace,
+    Ref,
     Target,
     PickerOption(usize),
 }
@@ -1070,11 +1349,37 @@ pub(crate) struct HomeHitArea {
     pub(crate) rect: Rect,
 }
 
+/// Which pane-toggle button in the tab row was pressed. TUI-only presentation
+/// state: it is resolved into the existing split/close runtime calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneToggleDirection {
+    Below,
+    Right,
+}
+
+impl PaneToggleDirection {
+    pub(crate) fn nav(self) -> crate::layout::NavDirection {
+        match self {
+            PaneToggleDirection::Below => crate::layout::NavDirection::Down,
+            PaneToggleDirection::Right => crate::layout::NavDirection::Right,
+        }
+    }
+
+    pub(crate) fn split(self) -> crate::api::schema::SplitDirection {
+        match self {
+            PaneToggleDirection::Below => crate::api::schema::SplitDirection::Down,
+            PaneToggleDirection::Right => crate::api::schema::SplitDirection::Right,
+        }
+    }
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     /// Full-width top status row (tmux-parity). Empty on mobile / tiny heights.
     pub status_bar_rect: Rect,
     pub sidebar_rect: Rect,
+    /// Sidebar-footer entry for the full-screen pull-request view.
+    pub(crate) sidebar_footer_work_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -1083,6 +1388,12 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub git_menu_button_hit_area: Rect,
+    pub git_menu_popup_rect: Rect,
+    pub git_menu_first_visible: usize,
+    pub git_menu_row_hit_areas: Vec<Rect>,
+    pub pane_toggle_below_hit_area: Rect,
+    pub pane_toggle_right_hit_area: Rect,
     pub terminal_area: Rect,
     pub info_panel_rect: Rect,
     pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
@@ -1100,10 +1411,21 @@ pub struct ViewState {
     pub dock_divider_rect: Rect,
     pub dock_tab_bar_rect: Rect,
     pub dock_tab_hit_areas: Vec<Rect>,
+    /// Close glyph of the active tab; empty when no surface is open.
+    pub dock_tab_close_rect: Rect,
+    /// The `+` that opens the surface chooser.
+    pub dock_plus_rect: Rect,
+    /// The `⤢` that maximises the dock.
+    pub dock_maximize_rect: Rect,
+    /// One rect per `DockSurface::CARDS` entry of the empty-dock grid.
+    pub dock_surface_card_hit_areas: Vec<Rect>,
+    /// Geometry of the open `+` menu.
+    pub(crate) dock_surface_menu_layout: Option<crate::ui::dropdown::DropdownLayout>,
     pub dock_home_section_hit_areas: Vec<Rect>,
     pub dock_home_tab_hit_areas: Vec<Rect>,
     pub(crate) dock_home_tab_keys: Vec<WorkItemKey>,
     pub dock_home_detail_tab_hit_areas: Vec<Rect>,
+    pub(crate) dock_file_row_hit_areas: Vec<DockFileRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
     /// Left-aligned status-bar buttons, computed once per frame so the rendered
@@ -1114,6 +1436,7 @@ pub struct ViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
     Home,
+    Work,
     BlockedFilter,
     Dock,
     /// Expand or collapse the usage detail in the status row.
@@ -1175,6 +1498,7 @@ pub enum Mode {
     Resize,
     ConfirmClose,
     ContextMenu,
+    GitMenu,
     Settings,
     GlobalMenu,
     KeybindHelp,
@@ -1184,7 +1508,10 @@ pub enum Mode {
 
 impl Mode {
     pub(crate) fn mouse_motion_changes_view(self) -> bool {
-        matches!(self, Self::GlobalMenu | Self::ContextMenu | Self::Navigator)
+        matches!(
+            self,
+            Self::GlobalMenu | Self::ContextMenu | Self::GitMenu | Self::Navigator
+        )
     }
 
     /// Whether keys in this mode are commands/navigation (an ASCII input source is wanted) rather
@@ -1208,10 +1535,41 @@ impl Mode {
                 | Mode::ConfirmClose
                 | Mode::ConfirmRemoveWorktree
                 | Mode::ContextMenu
+                | Mode::GitMenu
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
                 | Mode::WorkLinkPicker
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitAction {
+    Pull,
+    Commit,
+    Push,
+    CreatePr,
+}
+
+impl GitAction {
+    pub(crate) const ALL: [Self; 4] = [Self::Pull, Self::Commit, Self::Push, Self::CreatePr];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Pull => "⇣ Pull",
+            Self::Commit => "⊙ Commit",
+            Self::Push => "⇡ Push",
+            Self::CreatePr => "⑂ Create PR",
+        }
+    }
+
+    pub(crate) fn argv(self) -> &'static [&'static str] {
+        match self {
+            Self::Pull => &["git", "pull", "--rebase"],
+            Self::Commit => &["git", "commit"],
+            Self::Push => &["git", "push"],
+            Self::CreatePr => &["gh", "pr", "create", "--fill"],
+        }
     }
 }
 
@@ -1754,6 +2112,13 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneSettlementChange {
+    pub(crate) workspace_id: String,
+    pub(crate) pane_id: PaneId,
+    pub(crate) settled_at: Option<u64>,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1779,6 +2144,11 @@ pub struct AppState {
     pub(crate) home: Option<crate::app::home::HomeState>,
     /// Provider choices resolved outside `HomeState`, ready for the next Home open.
     pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
+    /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
+    pub(crate) home_ref_cache:
+        std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
+    /// Opening the ref picker asks the runtime layer to refresh this repository.
+    pub(crate) request_home_ref_refresh: Option<std::path::PathBuf>,
     /// Unsent text typed by a human in each pane. Home replies must not touch a
     /// pane while this draft exists because the terminal owns that edit buffer.
     pub(crate) pending_human_drafts: std::collections::HashMap<PaneId, String>,
@@ -1786,10 +2156,17 @@ pub struct AppState {
     pub(crate) status_metrics: Option<crate::platform::status_metrics::StatusMetricsSnapshot>,
     pub(crate) status_git_cwd: Option<std::path::PathBuf>,
     pub(crate) status_git_branch: Option<String>,
+    pub(crate) status_git_ahead_behind: Option<(usize, usize)>,
     /// Runtime-resolved cwd of the focused pane, projected from the same
     /// source the Git refresh uses so rendering never re-derives a weaker one.
     pub(crate) status_focused_cwd: Option<std::path::PathBuf>,
     pub(crate) status_focus_projection_initialized: bool,
+    /// Git root observed for a pane cwd, keyed by that cwd, or `None` when the
+    /// cwd is not inside a repository. Filled by the background Git work
+    /// context refresh so pure rendering can answer "is this pane in a repo?"
+    /// without touching the filesystem.
+    pub(crate) git_root_for_cwd:
+        std::collections::HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
     /// Pane whose most recent mouse event was forwarded to its terminal.
     pub(crate) forwarded_pane_input: Option<PaneId>,
     /// Whether the full-width top status row is enabled by configuration.
@@ -1810,6 +2187,7 @@ pub struct AppState {
     pub(crate) hide_done_after: std::time::Duration,
     pub(crate) reap_done_after: std::time::Duration,
     pub(crate) reap_done_panes: bool,
+    pub(crate) settle_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -1829,6 +2207,12 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    /// Set by a click on a tab-row pane toggle, drained by the runtime loop
+    /// into the same split/close calls the keybindings use.
+    pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
+    /// Git action chosen from the tab-row menu, drained by the runtime loop.
+    pub(crate) request_git_action: Option<GitAction>,
+    pub(crate) request_pr_land: Option<PrLandConfirmation>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
     pub request_pin_toggle: Option<(usize, usize)>,
@@ -1845,6 +2229,8 @@ pub struct AppState {
     pub request_client_config_reload: bool,
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
+    pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
+    pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -1862,6 +2248,19 @@ pub struct AppState {
     /// `collapsed_space_keys`, which folds one space inside the tree; this folds
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
+    pub(crate) sidebar_group_mode: SidebarGroupMode,
+    pub(crate) sidebar_group_menu_open: bool,
+    pub(crate) sidebar_group_menu_selected: usize,
+    pub(crate) sidebar_work_filter: SidebarWorkFilter,
+    pub(crate) sidebar_filter_menu_open: bool,
+    pub(crate) sidebar_filter_menu_selected: usize,
+    /// Dim work-item header the operator selected with the mouse. Enter on it
+    /// starts a thread for that ticket or conversation.
+    pub(crate) sidebar_selected_work_group: Option<String>,
+    pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
+    pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
+    pub(crate) sidebar_settled_menu_selected: usize,
+    pub(crate) pending_pane_settlement_changes: Vec<PaneSettlementChange>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1891,6 +2290,7 @@ pub struct AppState {
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
+    pub(crate) git_menu: MenuListState,
     // Notifications
     pub update_available: Option<String>,
     pub update_install_command: String,
@@ -1912,8 +2312,48 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub dock_width: u16,
     pub dock_collapsed: bool,
-    pub dock_tab: DockTab,
+    /// Active dock surface, `None` when nothing is open and the dock shows the
+    /// surface chooser. TUI presentation state; never leaves the client.
+    pub dock_tab: Option<DockSurface>,
+    /// Surfaces open as tabs, in strip order. TUI presentation state.
+    pub dock_open_surfaces: Vec<DockSurface>,
+    /// Dock takes the whole main area. TUI presentation state.
+    pub dock_maximized: bool,
+    /// Open `+` chooser dropdown. TUI presentation state.
+    pub(crate) dock_surface_menu: Option<DockSurfaceMenu>,
+    /// Keyboard focus sits on the chooser card grid. TUI presentation state.
+    pub(crate) dock_chooser_focused: bool,
     pub dock_scroll: u16,
+    pub(crate) dock_editor_focused: bool,
+    /// Diff interaction state is attach-local TUI state. The whitespace choice
+    /// survives surface switches for the lifetime of the client session.
+    pub(crate) dock_diff_focused: bool,
+    /// Compact PR surface interaction state. TUI presentation state: the
+    /// pull request itself is a shared work-index fact, the open menu and the
+    /// staged confirmation are not.
+    pub(crate) dock_pr_focused: bool,
+    pub(crate) dock_pr_checkout_menu: Option<PrCheckoutChoice>,
+    pub(crate) dock_pr_pending_land: Option<PrLandConfirmation>,
+    pub(crate) dock_diff_ignore_whitespace: bool,
+    pub(crate) dock_diff_selected: usize,
+    pub(crate) dock_diff_collapsed: std::collections::HashSet<String>,
+    pub(crate) dock_diff_request: Option<super::diff::DiffRefreshRequest>,
+    pub(crate) dock_diff_active_key: Option<DiffCacheKey>,
+    pub(crate) dock_diff_cache: std::collections::HashMap<DiffCacheKey, DiffCacheEntry>,
+    pub(crate) dock_diff_resolved_requests:
+        std::collections::HashMap<super::diff::DiffRefreshRequest, DiffCacheKey>,
+    pub(crate) dock_files_focused: bool,
+    pub(crate) dock_files_selection: Option<std::path::PathBuf>,
+    pub(crate) dock_files_filter: String,
+    pub(crate) dock_files_collapsed: std::collections::HashSet<std::path::PathBuf>,
+    /// Cached client-side file snapshots, keyed by repository root.
+    pub(crate) dock_file_cache:
+        std::collections::HashMap<std::path::PathBuf, crate::files::FileTreeSnapshot>,
+    pub(crate) dock_files_root: Option<std::path::PathBuf>,
+    pub(crate) dock_files_cwd: Option<std::path::PathBuf>,
+    pub(crate) dock_files_roots_by_cwd:
+        std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    pub(crate) files_icons: crate::config::FilesIconConfig,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
     pub(crate) dock_home_selection: Option<WorkItemKey>,
@@ -1951,7 +2391,12 @@ pub struct AppState {
     /// distinguish "off" from "on but not observed yet" instead of rendering
     /// one indistinguishable `unknown` for both.
     pub(crate) work_index_enabled: bool,
+    /// Client-local approval label used by the PR landing gate.
+    pub(crate) land_approval_label: String,
     pub(crate) work_index_linear_team_configured: bool,
+    pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
+    pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
+    pub(crate) dock_editor_requested_paths: std::collections::HashMap<PaneId, std::path::PathBuf>,
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
@@ -2209,6 +2654,47 @@ pub(crate) struct WorkViewState {
     /// `None` means the enabled index has not been collected yet.
     pub(crate) snapshot: Option<crate::work_index::Snapshot>,
     pub(crate) hint: Option<String>,
+    pub(crate) search: String,
+    pub(crate) search_focused: bool,
+    pub(crate) sort: crate::ui::work_list_detail::PrSort,
+    pub(crate) open_only: bool,
+    pub(crate) detail_tab: PrDetailTab,
+    pub(crate) checkout_menu: Option<PrCheckoutChoice>,
+    pub(crate) pending_land: Option<PrLandConfirmation>,
+    pub(crate) refreshing: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PrDetailTab {
+    #[default]
+    Summary,
+    Timeline,
+    Code,
+}
+
+impl PrDetailTab {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Summary => Self::Timeline,
+            Self::Timeline => Self::Code,
+            Self::Code => Self::Summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PrCheckoutChoice {
+    #[default]
+    CurrentCheckout,
+    NewWorktree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrLandConfirmation {
+    pub(crate) repo: String,
+    pub(crate) number: u64,
+    pub(crate) head_sha: String,
+    pub(crate) approval_signal: String,
 }
 
 impl WorkViewState {
@@ -2220,6 +2706,14 @@ impl WorkViewState {
             enabled,
             snapshot,
             hint: None,
+            search: String::new(),
+            search_focused: false,
+            sort: crate::ui::work_list_detail::PrSort::Updated,
+            open_only: true,
+            detail_tab: PrDetailTab::Summary,
+            checkout_menu: None,
+            pending_land: None,
+            refreshing: false,
         }
     }
 }
@@ -2294,7 +2788,10 @@ impl AppState {
     /// editing it is the deliberate one.
     pub(crate) fn show_scratchpad_tab(&mut self) {
         self.dock_collapsed = false;
-        self.dock_tab = DockTab::Scratchpad;
+        self.open_dock_surface(DockSurface::Scratchpad);
+        self.dock_editor_focused = false;
+        self.dock_diff_focused = false;
+        self.dock_files_focused = false;
     }
 
     pub(crate) fn toggle_loop_run_history(&mut self) {
@@ -2325,6 +2822,51 @@ impl AppState {
         self.dock_width_persistence_request.take()
     }
 
+    pub(crate) fn set_sidebar_group_mode(&mut self, mode: SidebarGroupMode) {
+        if self.sidebar_group_mode == mode {
+            self.sidebar_group_menu_open = false;
+            return;
+        }
+        self.sidebar_group_mode = mode;
+        self.sidebar_group_menu_selected = mode.index();
+        self.sidebar_group_menu_open = false;
+        self.sidebar_group_mode_persistence_request = Some(mode);
+        self.sidebar_selected_work_group = None;
+        self.sidebar_selected_settled = None;
+        self.sidebar_settled_menu_target = None;
+        self.sidebar_filter_menu_open = false;
+        self.workspace_scroll = 0;
+        self.mark_sidebar_projection_changed();
+    }
+
+    pub(crate) fn cycle_sidebar_group_mode(&mut self) {
+        self.set_sidebar_group_mode(self.sidebar_group_mode.next());
+    }
+
+    pub(crate) fn take_sidebar_group_mode_persistence_request(
+        &mut self,
+    ) -> Option<SidebarGroupMode> {
+        self.sidebar_group_mode_persistence_request.take()
+    }
+
+    pub(crate) fn set_sidebar_work_filter(&mut self, filter: SidebarWorkFilter) {
+        self.sidebar_filter_menu_open = false;
+        if self.sidebar_work_filter == filter {
+            return;
+        }
+        self.sidebar_work_filter = filter.clone();
+        self.sidebar_work_filter_persistence_request = Some(filter);
+        self.sidebar_selected_work_group = None;
+        self.workspace_scroll = 0;
+        self.mark_sidebar_projection_changed();
+    }
+
+    pub(crate) fn take_sidebar_work_filter_persistence_request(
+        &mut self,
+    ) -> Option<SidebarWorkFilter> {
+        self.sidebar_work_filter_persistence_request.take()
+    }
+
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
@@ -2347,13 +2889,130 @@ impl AppState {
             &mut self.sidebar_presentation.projection_revision,
             &mut other.projection_revision,
         );
+        std::mem::swap(&mut self.sidebar_group_mode, &mut other.group_mode);
+        std::mem::swap(
+            &mut self.sidebar_group_menu_open,
+            &mut other.group_menu_open,
+        );
+        std::mem::swap(
+            &mut self.sidebar_group_menu_selected,
+            &mut other.group_menu_selected,
+        );
+        std::mem::swap(&mut self.sidebar_work_filter, &mut other.work_filter);
+        std::mem::swap(
+            &mut self.sidebar_filter_menu_open,
+            &mut other.filter_menu_open,
+        );
+        std::mem::swap(
+            &mut self.sidebar_filter_menu_selected,
+            &mut other.filter_menu_selected,
+        );
+        std::mem::swap(
+            &mut self.sidebar_selected_work_group,
+            &mut other.selected_work_group,
+        );
+        std::mem::swap(
+            &mut self.sidebar_selected_settled,
+            &mut other.selected_settled,
+        );
+        std::mem::swap(
+            &mut self.sidebar_settled_menu_target,
+            &mut other.settled_menu_target,
+        );
+        std::mem::swap(
+            &mut self.sidebar_settled_menu_selected,
+            &mut other.settled_menu_selected,
+        );
+    }
+
+    /// Open `surface` as a tab and make it active. Already-open surfaces are
+    /// only reactivated, so the strip order never shuffles under the user.
+    pub(crate) fn open_dock_surface(&mut self, surface: DockSurface) {
+        if !self.dock_open_surfaces.contains(&surface) {
+            self.dock_open_surfaces.push(surface);
+        }
+        self.dock_tab = Some(surface);
+        self.dock_surface_menu = None;
+        self.dock_chooser_focused = false;
+        if surface == DockSurface::Editor {
+            self.retry_dock_editor();
+        }
+    }
+
+    /// Close `surface`. The active surface moves to the neighbour that took its
+    /// place, or to `None` when the dock is left empty and becomes a chooser.
+    pub(crate) fn close_dock_surface(&mut self, surface: DockSurface) {
+        let Some(index) = self
+            .dock_open_surfaces
+            .iter()
+            .position(|open| *open == surface)
+        else {
+            return;
+        };
+        self.dock_open_surfaces.remove(index);
+        if self.dock_tab != Some(surface) {
+            return;
+        }
+        self.dock_tab = self
+            .dock_open_surfaces
+            .get(index)
+            .or_else(|| self.dock_open_surfaces.get(index.saturating_sub(1)))
+            .copied();
+        self.dock_scroll = 0;
+        if self.dock_tab.is_none() {
+            self.dock_editor_focused = false;
+            self.dock_home_focused = false;
+            self.dock_diff_focused = false;
+            self.dock_files_focused = false;
+            self.dock_chooser_focused = true;
+        }
+    }
+
+    pub(crate) fn toggle_dock_maximized(&mut self) {
+        self.dock_maximized = !self.dock_maximized;
+    }
+
+    /// Adjacent open surface, wrapping. `None` when nothing is open.
+    pub(crate) fn adjacent_dock_surface(&self, forward: bool) -> Option<DockSurface> {
+        let open = &self.dock_open_surfaces;
+        if open.is_empty() {
+            return None;
+        }
+        let current = self
+            .dock_tab
+            .and_then(|tab| open.iter().position(|surface| *surface == tab))
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % open.len()
+        } else {
+            (current + open.len() - 1) % open.len()
+        };
+        open.get(next).copied()
     }
 
     pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
         std::mem::swap(&mut self.dock_width, &mut other.width);
         std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
+        std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
+        std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
+        std::mem::swap(&mut self.dock_surface_menu, &mut other.surface_menu);
+        std::mem::swap(&mut self.dock_chooser_focused, &mut other.chooser_focused);
         std::mem::swap(&mut self.dock_scroll, &mut other.scroll);
+        std::mem::swap(&mut self.dock_editor_focused, &mut other.editor_focused);
+        std::mem::swap(&mut self.dock_diff_focused, &mut other.diff_focused);
+        std::mem::swap(
+            &mut self.dock_diff_ignore_whitespace,
+            &mut other.diff_ignore_whitespace,
+        );
+        std::mem::swap(&mut self.dock_diff_selected, &mut other.diff_selected);
+        std::mem::swap(&mut self.dock_diff_collapsed, &mut other.diff_collapsed);
+        std::mem::swap(&mut self.dock_diff_request, &mut other.diff_request);
+        std::mem::swap(&mut self.dock_diff_active_key, &mut other.diff_active_key);
+        std::mem::swap(&mut self.dock_files_focused, &mut other.files_focused);
+        std::mem::swap(&mut self.dock_files_selection, &mut other.files_selection);
+        std::mem::swap(&mut self.dock_files_filter, &mut other.files_filter);
+        std::mem::swap(&mut self.dock_files_collapsed, &mut other.files_collapsed);
         std::mem::swap(&mut self.dock_home_selection, &mut other.home_selection);
         std::mem::swap(
             &mut self.dock_home_ticket_selection,
@@ -2691,6 +3350,8 @@ impl AppState {
             inbox: None,
             home: None,
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
+            home_ref_cache: std::collections::HashMap::new(),
+            request_home_ref_refresh: None,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
@@ -2698,8 +3359,10 @@ impl AppState {
             }),
             status_git_cwd: None,
             status_git_branch: None,
+            status_git_ahead_behind: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
+            git_root_for_cwd: std::collections::HashMap::new(),
             forwarded_pane_input: None,
             status_bar_enabled: true,
             status_now_unix: None,
@@ -2715,6 +3378,7 @@ impl AppState {
             hide_done_after: std::time::Duration::from_secs(30 * 60),
             reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
             reap_done_panes: true,
+            settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -2729,6 +3393,9 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pane_toggle: None,
+            request_git_action: None,
+            request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -2740,6 +3407,8 @@ impl AppState {
             request_reload_config: false,
             request_client_config_reload: false,
             dock_width_persistence_request: None,
+            sidebar_group_mode_persistence_request: None,
+            sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -2750,10 +3419,18 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_sidebar_groups: std::iter::once(
-                crate::ui::RECENTLY_DONE_SECTION_TITLE.to_string(),
-            )
-            .collect(),
+            collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            sidebar_group_mode: SidebarGroupMode::Repo,
+            sidebar_group_menu_open: false,
+            sidebar_group_menu_selected: 0,
+            sidebar_work_filter: SidebarWorkFilter::default(),
+            sidebar_filter_menu_open: false,
+            sidebar_filter_menu_selected: 0,
+            sidebar_selected_work_group: None,
+            sidebar_selected_settled: None,
+            sidebar_settled_menu_target: None,
+            sidebar_settled_menu_selected: 0,
+            pending_pane_settlement_changes: Vec::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -2775,6 +3452,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_work_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -2783,6 +3461,12 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                git_menu_button_hit_area: Rect::default(),
+                git_menu_popup_rect: Rect::default(),
+                git_menu_first_visible: 0,
+                git_menu_row_hit_areas: Vec::new(),
+                pane_toggle_below_hit_area: Rect::default(),
+                pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 info_panel_rect: Rect::default(),
                 info_panel_link_rows: Vec::new(),
@@ -2798,10 +3482,16 @@ impl AppState {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_tab_close_rect: Rect::default(),
+                dock_plus_rect: Rect::default(),
+                dock_maximize_rect: Rect::default(),
+                dock_surface_card_hit_areas: Vec::new(),
+                dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
+                dock_file_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -2812,6 +3502,7 @@ impl AppState {
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
+            git_menu: MenuListState::new(0),
             update_available: None,
             update_install_command: "herdr update".into(),
             latest_release_notes_available: false,
@@ -2829,8 +3520,33 @@ impl AppState {
             sidebar_max_width: 36,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: DockTab::Home,
+            dock_tab: Some(DockSurface::Home),
+            dock_open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_maximized: false,
+            dock_surface_menu: None,
+            dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_editor_focused: false,
+            dock_diff_focused: false,
+            dock_pr_focused: false,
+            dock_pr_checkout_menu: None,
+            dock_pr_pending_land: None,
+            dock_diff_ignore_whitespace: false,
+            dock_diff_selected: 0,
+            dock_diff_collapsed: std::collections::HashSet::new(),
+            dock_diff_request: None,
+            dock_diff_active_key: None,
+            dock_diff_cache: std::collections::HashMap::new(),
+            dock_diff_resolved_requests: std::collections::HashMap::new(),
+            dock_files_focused: false,
+            dock_files_selection: None,
+            dock_files_filter: String::new(),
+            dock_files_collapsed: std::collections::HashSet::new(),
+            dock_file_cache: std::collections::HashMap::new(),
+            dock_files_root: None,
+            dock_files_cwd: None,
+            dock_files_roots_by_cwd: std::collections::HashMap::new(),
+            files_icons: crate::config::FilesIconConfig::Badges,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -2846,7 +3562,11 @@ impl AppState {
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
+            land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
             work_index_linear_team_configured: false,
+            dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_errors: std::collections::HashMap::new(),
+            dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,

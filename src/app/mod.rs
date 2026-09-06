@@ -14,10 +14,14 @@ pub(crate) use api_helpers::read_terminal_snapshot;
 pub(crate) mod claude_subagents;
 mod config_io;
 mod creation;
+pub(crate) mod diff;
+mod files;
 pub(crate) mod foreground_process;
+mod git_actions;
 mod git_refresh;
 pub(crate) mod home;
 pub(crate) mod home_catalog;
+pub(crate) mod home_refs;
 mod ids;
 pub(crate) mod inbox;
 mod input;
@@ -27,6 +31,7 @@ mod repo_routing;
 mod runtime;
 mod runtime_mutations;
 mod session;
+mod settled;
 pub mod state;
 mod terminal_targets;
 mod terminal_titles;
@@ -67,7 +72,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::events::AppEvent;
 
-pub use state::{AppState, DockTab, Mode, ToastKind, ViewState};
+pub use state::{AppState, DockSurface, Mode, ToastKind, ViewState};
 
 pub(crate) fn load_plugin_manifest(
     path: &str,
@@ -101,6 +106,12 @@ pub(crate) struct GitRefreshInFlight {
     pub(crate) deadline: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FilesRefreshInFlight {
+    pub(crate) generation: u64,
+    pub(crate) cwd: std::path::PathBuf,
+}
+
 impl PaneClickState {
     fn is_double_click_for(self, next: Self) -> bool {
         self.pane_id == next.pane_id
@@ -122,6 +133,8 @@ pub struct App {
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    /// Runtime-only markers for shell panes launched from the git menu.
+    pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -151,6 +164,12 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) diff_refresh_in_flight: Option<(u64, diff::DiffRefreshTarget)>,
+    pub(crate) last_diff_refresh_generation: u64,
+    pub(crate) files_refresh_in_flight: Option<FilesRefreshInFlight>,
+    pub(crate) last_files_refresh_generation: u64,
+    pub(crate) dock_files_refresh_demand: bool,
+    pub(crate) home_ref_refreshes_in_flight: HashSet<std::path::PathBuf>,
     pub(crate) git_work_context_refresh_in_flight:
         Option<work_context_git::GitWorkContextRefreshInFlight>,
     pub(crate) git_work_context_refresh_due_after_in_flight: bool,
@@ -222,6 +241,7 @@ pub struct App {
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
+    pub(crate) pending_first_frame_pane: Option<crate::layout::PaneId>,
     pub(crate) input_leases: input::InputLeaseTable,
     pub render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
@@ -645,12 +665,33 @@ impl App {
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        #[cfg(not(test))]
+        let sidebar_group_mode = crate::client::presentation::load_sidebar_group_mode();
+        #[cfg(test)]
+        let sidebar_group_mode = state::SidebarGroupMode::default();
+        #[cfg(not(test))]
+        let sidebar_work_filter = crate::client::presentation::load_sidebar_work_filter();
+        #[cfg(test)]
+        let sidebar_work_filter = state::SidebarWorkFilter::default();
 
         let mut state = AppState {
-            collapsed_sidebar_groups: std::iter::once(
-                crate::ui::RECENTLY_DONE_SECTION_TITLE.to_string(),
-            )
+            collapsed_sidebar_groups: std::iter::once(format!(
+                "{}:{}",
+                sidebar_group_mode.collapse_namespace(),
+                crate::ui::RECENTLY_DONE_SECTION_TITLE
+            ))
             .collect(),
+            sidebar_group_mode,
+            sidebar_group_menu_open: false,
+            sidebar_group_menu_selected: sidebar_group_mode.index(),
+            sidebar_work_filter,
+            sidebar_filter_menu_open: false,
+            sidebar_filter_menu_selected: 0,
+            sidebar_selected_work_group: None,
+            sidebar_selected_settled: None,
+            sidebar_settled_menu_target: None,
+            sidebar_settled_menu_selected: 0,
+            pending_pane_settlement_changes: Vec::new(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
@@ -665,12 +706,16 @@ impl App {
             } else {
                 crate::app::home_catalog::cached_home_catalog_for_current_profile()
             },
+            home_ref_cache: std::collections::HashMap::new(),
+            request_home_ref_refresh: None,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,
+            status_git_ahead_behind: None,
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
+            git_root_for_cwd: std::collections::HashMap::new(),
             forwarded_pane_input: None,
             status_bar_enabled: config.ui.status_bar.enabled,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
@@ -685,6 +730,12 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             ),
             reap_done_panes: config.session.reap_done_panes,
+            settle_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .settle_after_days
+                    .saturating_mul(24 * 60 * 60),
+            ),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -699,6 +750,9 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_pane_toggle: None,
+            request_git_action: None,
+            request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
@@ -710,6 +764,8 @@ impl App {
             request_reload_config: false,
             request_client_config_reload: false,
             dock_width_persistence_request: None,
+            sidebar_group_mode_persistence_request: None,
+            sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -750,6 +806,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
+                sidebar_footer_work_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -758,6 +815,12 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                git_menu_button_hit_area: Rect::default(),
+                git_menu_popup_rect: Rect::default(),
+                git_menu_first_visible: 0,
+                git_menu_row_hit_areas: Vec::new(),
+                pane_toggle_below_hit_area: Rect::default(),
+                pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 info_panel_rect: Rect::default(),
                 info_panel_link_rows: Vec::new(),
@@ -773,10 +836,16 @@ impl App {
                 dock_divider_rect: Rect::default(),
                 dock_tab_bar_rect: Rect::default(),
                 dock_tab_hit_areas: Vec::new(),
+                dock_tab_close_rect: Rect::default(),
+                dock_plus_rect: Rect::default(),
+                dock_maximize_rect: Rect::default(),
+                dock_surface_card_hit_areas: Vec::new(),
+                dock_surface_menu_layout: None,
                 dock_home_section_hit_areas: Vec::new(),
                 dock_home_tab_hit_areas: Vec::new(),
                 dock_home_tab_keys: Vec::new(),
                 dock_home_detail_tab_hit_areas: Vec::new(),
+                dock_file_row_hit_areas: Vec::new(),
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
@@ -787,6 +856,7 @@ impl App {
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
+            git_menu: state::MenuListState::new(0),
             update_available,
             update_install_command,
             latest_release_notes_available,
@@ -804,8 +874,33 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
-            dock_tab: state::DockTab::Home,
+            dock_tab: Some(state::DockSurface::Home),
+            dock_open_surfaces: state::DockSurface::DEFAULT_OPEN.to_vec(),
+            dock_maximized: false,
+            dock_surface_menu: None,
+            dock_chooser_focused: false,
             dock_scroll: 0,
+            dock_editor_focused: false,
+            dock_diff_focused: false,
+            dock_pr_focused: false,
+            dock_pr_checkout_menu: None,
+            dock_pr_pending_land: None,
+            dock_diff_ignore_whitespace: false,
+            dock_diff_selected: 0,
+            dock_diff_collapsed: std::collections::HashSet::new(),
+            dock_diff_request: None,
+            dock_diff_active_key: None,
+            dock_diff_cache: std::collections::HashMap::new(),
+            dock_diff_resolved_requests: std::collections::HashMap::new(),
+            dock_files_focused: false,
+            dock_files_selection: None,
+            dock_files_filter: String::new(),
+            dock_files_collapsed: std::collections::HashSet::new(),
+            dock_file_cache: std::collections::HashMap::new(),
+            dock_files_root: None,
+            dock_files_cwd: None,
+            dock_files_roots_by_cwd: std::collections::HashMap::new(),
+            files_icons: config.files.icons,
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -821,11 +916,15 @@ impl App {
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
+            land_approval_label: config.land.approval_label.clone(),
             work_index_linear_team_configured: config
                 .work_index
                 .linear_team
                 .as_deref()
                 .is_some_and(|team| !team.trim().is_empty()),
+            dock_editor_sessions: std::collections::HashMap::new(),
+            dock_editor_errors: std::collections::HashMap::new(),
+            dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
@@ -944,6 +1043,9 @@ impl App {
         if !cfg!(test) {
             let catalog_tx = event_tx.clone();
             std::thread::spawn(move || {
+                if let Some(catalog) = crate::app::home_catalog::refresh_claude_catalog() {
+                    let _ = catalog_tx.blocking_send(AppEvent::HomeCatalogRefreshed { catalog });
+                }
                 if let Some(catalog) = crate::app::home_catalog::refresh_codex_catalog() {
                     let _ = catalog_tx.blocking_send(AppEvent::HomeCatalogRefreshed { catalog });
                 }
@@ -977,6 +1079,7 @@ impl App {
             connectivity_probed_at: cfg!(test).then(Instant::now),
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
+            git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
             loop_history_reader,
@@ -993,6 +1096,12 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            diff_refresh_in_flight: None,
+            last_diff_refresh_generation: 0,
+            files_refresh_in_flight: None,
+            last_files_refresh_generation: 0,
+            dock_files_refresh_demand: false,
+            home_ref_refreshes_in_flight: HashSet::new(),
             git_work_context_refresh_in_flight: None,
             git_work_context_refresh_due_after_in_flight: false,
             git_work_context_rotation: 0,
@@ -1058,6 +1167,7 @@ impl App {
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
+            pending_first_frame_pane: None,
             input_leases: input::InputLeaseTable::default(),
             api_rx,
             event_hub,
@@ -1088,8 +1198,20 @@ impl App {
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
         >,
+        dock_editors: &[crate::server::handoff::DockEditorHandoff],
     ) -> io::Result<Self> {
         let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
+        let editor_imports: Vec<(
+            crate::server::handoff::DockEditorHandoff,
+            crate::handoff_runtime::ImportedHandoffRuntime,
+        )> = dock_editors
+            .iter()
+            .filter_map(|editor| {
+                imports
+                    .remove(&editor.editor_pane_id)
+                    .map(|import| (editor.clone(), import))
+            })
+            .collect();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -1146,9 +1268,69 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        app.restore_handoff_dock_editors(config, editor_imports);
         app.sync_agent_metadata_deadline();
         app.sync_agent_activity_refresh_deadline(now);
         Ok(app)
+    }
+
+    #[cfg(unix)]
+    fn restore_handoff_dock_editors(
+        &mut self,
+        config: &Config,
+        editor_imports: Vec<(
+            crate::server::handoff::DockEditorHandoff,
+            crate::handoff_runtime::ImportedHandoffRuntime,
+        )>,
+    ) {
+        for (editor, import) in editor_imports {
+            let agent_pane_id = self
+                .state
+                .pane_id_aliases
+                .get(&editor.agent_pane_id)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(editor.agent_pane_id));
+            if self.find_pane(agent_pane_id).is_none() {
+                tracing::warn!(
+                    agent_pane = agent_pane_id.raw(),
+                    "dropping imported dock editor whose agent pane did not restore"
+                );
+                continue;
+            }
+            let editor_pane_id = crate::layout::PaneId::alloc();
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            let import = crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: import.master_fd,
+                state: import.state.with_pane_id(editor_pane_id),
+            };
+            match crate::terminal::TerminalRuntime::from_handoff_fd(
+                import,
+                config.advanced.scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+                self.state.host_terminal_appearance,
+                self.event_tx.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            ) {
+                Ok(runtime) => {
+                    self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+                    self.state.dock_editor_sessions.insert(
+                        agent_pane_id,
+                        state::DockEditorSession {
+                            pane_id: editor_pane_id,
+                            terminal_id,
+                        },
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to import a dock editor runtime");
+                    self.state.dock_editor_errors.insert(
+                        agent_pane_id,
+                        "editor did not survive the update".to_string(),
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1201,6 +1383,22 @@ impl App {
             return false;
         }
         self.project_status_context_from_cached()
+    }
+
+    pub(crate) fn record_pending_first_frame(&mut self) {
+        let Some(pane_id) = self.pending_first_frame_pane else {
+            return;
+        };
+        if self
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .any(|info| info.id == pane_id)
+        {
+            crate::logging::pane_first_frame(pane_id.raw());
+            self.pending_first_frame_pane = None;
+        }
     }
 
     pub(crate) fn sync_prefix_input_source(&mut self, previous_mode: Mode) {
@@ -1310,6 +1508,17 @@ impl App {
                 needs_render = true;
             }
 
+            if self.apply_pane_toggle_request() {
+                needs_render = true;
+            }
+
+            if self.apply_git_action_request() {
+                needs_render = true;
+            }
+            if self.apply_pr_land_request() {
+                needs_render = true;
+            }
+
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
@@ -1390,6 +1599,12 @@ impl App {
             if let Some(width) = self.state.take_dock_width_persistence_request() {
                 crate::client::presentation::save_dock_width(width);
             }
+            if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
+                crate::client::presentation::save_sidebar_group_mode(mode);
+            }
+            if let Some(filter) = self.state.take_sidebar_work_filter_persistence_request() {
+                crate::client::presentation::save_sidebar_work_filter(filter);
+            }
 
             if needs_render && self.can_render_now(now) {
                 self.sync_status_context_before_render();
@@ -1428,6 +1643,8 @@ impl App {
                             area,
                         );
                     }
+                    self.ensure_dock_editor();
+                    self.resize_dock_editor();
                     self.ensure_scratchpad();
                     crate::ui::render_with_runtime_registry_and_handles(
                         &self.state,
@@ -1762,6 +1979,12 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
+            self.state.settle_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .settle_after_days
+                    .saturating_mul(24 * 60 * 60),
+            );
             if hide_threshold_changed {
                 self.state.mark_sidebar_projection_changed();
             }
@@ -1940,6 +2163,14 @@ impl App {
         if !invalid_section("worktrees") {
             self.state.worktree_directory =
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
+        }
+
+        if !invalid_section("files") {
+            self.state.files_icons = config.files.icons;
+        }
+
+        if !invalid_section("land") {
+            self.state.land_approval_label = config.land.approval_label.clone();
         }
 
         if !invalid_section("work_index") {
@@ -2123,6 +2354,13 @@ impl App {
                     let key = self.input_leases.normalize_press(&lease_key, key);
                     match key.kind {
                         crossterm::event::KeyEventKind::Press => {
+                            if self.handle_dock_surface_menu_key(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             // Home is a launch overlay, and `terminal_input_context`
                             // reports no pane context while it is open. Settle home
                             // first: a key it has no use for closes it and then
@@ -2134,6 +2372,34 @@ impl App {
                                 continue;
                             }
                             if self.handle_dock_home_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_diff_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_files_key(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_pr_key_headless(&key) {
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            if self.handle_dock_chooser_key_headless(&key) {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
@@ -2323,6 +2589,9 @@ impl App {
             Mode::ContextMenu => {
                 self.handle_context_menu_key_via_api(key_event);
             }
+            Mode::GitMenu => {
+                input::handle_git_menu_key(&mut self.state, key_event);
+            }
             Mode::KeybindHelp => {
                 input::handle_keybind_help_key(&mut self.state, key);
             }
@@ -2377,6 +2646,120 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[cfg(unix)]
+    fn imported_editor_runtime(
+        pane_id: crate::layout::PaneId,
+    ) -> (
+        crate::terminal::TerminalRuntime,
+        crate::handoff_runtime::ImportedHandoffRuntime,
+    ) {
+        let (events, _events_rx) = tokio::sync::mpsc::channel(16);
+        let runtime = TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("spawn editor pane");
+        runtime
+            .pause_handoff_reader(std::time::Duration::from_secs(2))
+            .expect("quiesce the pty actor");
+        let master_fd = runtime.duplicate_handoff_fd().expect("duplicate pty fd");
+        let state = runtime.handoff_runtime_state(pane_id.raw());
+        (
+            runtime,
+            crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state },
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_imported_dock_editor_reattaches_to_its_renamed_agent_pane() {
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("editor")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let agent_pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let exported_agent_pane_id = agent_pane_id.raw() + 1_000;
+        app.state
+            .pane_id_aliases
+            .insert(exported_agent_pane_id, agent_pane_id);
+        let exported_editor_pane_id = crate::layout::PaneId::alloc();
+        let (source, import) = imported_editor_runtime(exported_editor_pane_id);
+        let child_pid = source.child_pid().expect("editor child pid");
+
+        app.restore_handoff_dock_editors(
+            &Config::default(),
+            vec![(
+                crate::server::handoff::DockEditorHandoff {
+                    agent_pane_id: exported_agent_pane_id,
+                    editor_pane_id: exported_editor_pane_id.raw(),
+                },
+                import,
+            )],
+        );
+
+        let session = app
+            .state
+            .dock_editor_sessions
+            .get(&agent_pane_id)
+            .expect("editor reattached to its agent pane")
+            .clone();
+        assert!(app.terminal_runtimes.get(&session.terminal_id).is_some());
+        assert_ne!(session.pane_id, exported_editor_pane_id);
+        assert_eq!(unsafe { libc::kill(child_pid as i32, 0) }, 0);
+        drop(source);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_imported_dock_editor_is_dropped_when_its_agent_pane_is_gone() {
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let exported_editor_pane_id = crate::layout::PaneId::alloc();
+        let (source, import) = imported_editor_runtime(exported_editor_pane_id);
+
+        app.restore_handoff_dock_editors(
+            &Config::default(),
+            vec![(
+                crate::server::handoff::DockEditorHandoff {
+                    agent_pane_id: 4_242,
+                    editor_pane_id: exported_editor_pane_id.raw(),
+                },
+                import,
+            )],
+        );
+
+        assert!(app.state.dock_editor_sessions.is_empty());
+        drop(source);
+    }
 
     fn raw_key(
         code: KeyCode,
@@ -2494,6 +2877,27 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn pending_first_frame_marker_waits_for_visible_pane() {
+        let mut app = test_app();
+        let pane_id = crate::layout::PaneId::alloc();
+        app.pending_first_frame_pane = Some(pane_id);
+
+        app.record_pending_first_frame();
+        assert_eq!(app.pending_first_frame_pane, Some(pane_id));
+
+        app.state.view.pane_infos.push(crate::layout::PaneInfo {
+            id: pane_id,
+            rect: ratatui::layout::Rect::new(0, 0, 80, 24),
+            inner_rect: ratatui::layout::Rect::new(0, 0, 80, 24),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::NONE,
+            is_focused: true,
+        });
+        app.record_pending_first_frame();
+        assert!(app.pending_first_frame_pane.is_none());
     }
 
     #[test]
@@ -2961,6 +3365,7 @@ mod tests {
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(!changed);
@@ -2978,6 +3383,7 @@ mod tests {
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(app.git_refresh_in_flight.is_none());
@@ -3013,6 +3419,7 @@ mod tests {
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert_eq!(
@@ -3051,6 +3458,7 @@ mod tests {
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert_eq!(
@@ -3086,6 +3494,7 @@ mod tests {
                 space: None,
             }],
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(app.render_dirty.is_pending());
@@ -3319,6 +3728,7 @@ mod tests {
                 generation: 1,
                 results: Vec::new(),
                 cache_updates: Vec::new(),
+                file_fingerprints: Vec::new(),
             })
             .unwrap();
 
@@ -6553,6 +6963,7 @@ last_pane = "prefix+tab"
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert_eq!(app.status_context_focus, first_focus);

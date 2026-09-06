@@ -404,20 +404,44 @@ impl App {
         }
 
         changed |= self.clear_due_selection_highlight(now);
+        changed |= self.process_git_action_panes(now);
+
+        changed |= self.refresh_pane_settlement_at(now);
 
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
-        let detail_visible =
-            !self.state.dock_collapsed && self.state.dock_tab == crate::app::DockTab::Home;
+        let work_view_selection = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone());
+        let dock_pr_visible =
+            !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
+        let dock_pr_selection = dock_pr_visible
+            .then(|| crate::ui::dock::pr::focused_pr_key(&self.state))
+            .flatten();
+        let detail_visible = self.state.work_view.is_some()
+            || dock_pr_visible
+            || !self.state.dock_collapsed
+                && self.state.dock_tab == Some(crate::app::DockSurface::Home);
         self.start_work_item_detail_refresh_if_due(
             now,
-            self.state.dock_home_section,
-            self.state.dock_home_active_selection(),
+            if self.state.work_view.is_some() || dock_pr_visible {
+                crate::app::state::DockHomeSection::Prs
+            } else {
+                self.state.dock_home_section
+            },
+            work_view_selection
+                .or(dock_pr_selection)
+                .or_else(|| self.state.dock_home_active_selection()),
             detail_visible,
         );
         self.start_foreground_process_refresh_if_due(now);
         self.start_claude_subagent_refresh_if_due(now);
         self.start_git_status_refresh_if_due(now);
+        self.start_dock_diff_refresh_if_needed();
+        self.start_dock_files_refresh_if_needed();
+        self.start_home_ref_refresh_if_requested();
 
         if self
             .next_auto_update_check
@@ -897,6 +921,7 @@ impl App {
             self.loop_receipt_fallback_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
+            self.git_action_deadline(),
             render_deadline,
         ]
         .into_iter()

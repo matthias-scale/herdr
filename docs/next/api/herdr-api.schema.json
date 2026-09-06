@@ -621,6 +621,52 @@
                 "pane_id": {
                   "type": "string"
                 },
+                "settled_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_settled",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "settled_at"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_unsettled",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
                 "type": {
                   "const": "pane_focused",
                   "type": "string"
@@ -889,6 +935,8 @@
             "pane_created",
             "pane_closed",
             "pane_updated",
+            "pane_settled",
+            "pane_unsettled",
             "pane_focused",
             "pane_moved",
             "pane_output_changed",
@@ -1130,6 +1178,15 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "settled_at": {
+              "description": "Unix seconds when the server moved this pane out of active work.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
               ]
             },
             "state_labels": {
@@ -3832,6 +3889,7 @@
           "enum": [
             "ticket_ids",
             "pr_urls",
+            "missive_urls",
             "branch",
             "repo",
             "work_title",
@@ -3859,6 +3917,15 @@
                 "$ref": "#/schemas/request/$defs/PaneWorkContextField"
               },
               "type": "array"
+            },
+            "missive_urls": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "pane_id": {
               "type": "string"
@@ -4637,6 +4704,30 @@
               "properties": {
                 "type": {
                   "const": "pane.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.settled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "pane.unsettled",
                   "type": "string"
                 }
               },
@@ -6303,6 +6394,38 @@
         {
           "properties": {
             "method": {
+              "const": "pane.settle",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.unsettle",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.focus",
               "type": "string"
             },
@@ -7908,6 +8031,52 @@
                 "pane_id": {
                   "type": "string"
                 },
+                "settled_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_settled",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "settled_at"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_unsettled",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
                 "type": {
                   "const": "pane_focused",
                   "type": "string"
@@ -8191,6 +8360,8 @@
             "pane_created",
             "pane_closed",
             "pane_updated",
+            "pane_settled",
+            "pane_unsettled",
             "pane_focused",
             "pane_moved",
             "pane_output_changed",
@@ -8842,6 +9013,15 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "settled_at": {
+              "description": "Unix seconds when the server moved this pane out of active work.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
               ]
             },
             "state_labels": {

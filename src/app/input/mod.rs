@@ -52,7 +52,7 @@ mod terminal;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
-        handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
+        handle_git_menu_key, handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
         insert_keybind_help_query_text, insert_navigator_search_text, insert_rename_input_text,
         open_new_workspace_dialog,
     },
@@ -75,6 +75,7 @@ impl AppState {
     pub(super) fn home_dismiss_picker(&mut self) {
         if let Some(home) = self.home.as_mut() {
             home.picker = None;
+            home.browse = None;
         }
     }
 
@@ -99,7 +100,10 @@ impl AppState {
                 crate::app::home::HomePicker::Agent => crate::app::home::HomeFocus::Agent,
                 crate::app::home::HomePicker::Model => crate::app::home::HomeFocus::Model,
                 crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
+                crate::app::home::HomePicker::Context => crate::app::home::HomeFocus::Context,
                 crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
+                crate::app::home::HomePicker::Workspace => crate::app::home::HomeFocus::Workspace,
+                crate::app::home::HomePicker::Ref => crate::app::home::HomeFocus::Ref,
                 crate::app::home::HomePicker::Target => crate::app::home::HomeFocus::Target,
             });
         }
@@ -142,7 +146,27 @@ impl App {
         if self.state.popup_pane.is_some() {
             return self.handle_terminal_key(key).await;
         }
+        if self.handle_dock_surface_menu_key(&key) {
+            return None;
+        }
         let key_event = key.as_key_event();
+        if self.state.sidebar_settled_menu_target.is_some()
+            && self.handle_sidebar_settled_key(key_event)
+        {
+            return None;
+        }
+        if self.state.handle_sidebar_group_menu_key(key_event) {
+            return None;
+        }
+        if self.state.handle_sidebar_filter_menu_key(key_event) {
+            return None;
+        }
+        if self.state.handle_sidebar_work_group_key(key_event) {
+            return None;
+        }
+        if self.handle_sidebar_settled_key(key_event) {
+            return None;
+        }
         if self.handle_symphony_key(key_event) {
             return None;
         }
@@ -158,7 +182,19 @@ impl App {
         if self.state.inbox.is_some() {
             return self.handle_inbox_key(key).await;
         }
+        if self.handle_dock_files_key(&key) {
+            return None;
+        }
         if self.handle_dock_home_key(&key) {
+            return None;
+        }
+        if self.handle_dock_diff_key(&key) {
+            return None;
+        }
+        if self.handle_dock_pr_key(&key) {
+            return None;
+        }
+        if self.handle_dock_chooser_key(&key) {
             return None;
         }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
@@ -189,6 +225,7 @@ impl App {
                 Mode::ContextMenu => {
                     self.handle_context_menu_key_via_api(key_event);
                 }
+                Mode::GitMenu => handle_git_menu_key(&mut self.state, key_event),
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
                 Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
@@ -202,10 +239,83 @@ impl App {
         None
     }
 
+    /// Card shortcuts are written uppercase, so the shift that produces them is
+    /// part of the binding rather than a different chord.
+    fn dock_shortcut_modifiers(modifiers: KeyModifiers) -> bool {
+        modifiers.is_empty() || modifiers == KeyModifiers::SHIFT
+    }
+
+    /// Keys of the surface chooser: the card-grid shortcuts of an empty dock,
+    /// the open `+` menu, and the one keypress that restores a maximised dock.
+    fn handle_dock_chooser_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal || self.state.dock_collapsed {
+            return false;
+        }
+        let event = key.as_key_event();
+
+        // The uppercase card shortcuts remain available while a non-terminal
+        // dock surface owns focus. Requiring Shift here preserves Home's
+        // lowercase action keys and never steals input from the editor PTY.
+        if (self.state.dock_home_focused || self.state.dock_diff_focused)
+            && event.modifiers == KeyModifiers::SHIFT
+        {
+            if let KeyCode::Char(character) = event.code {
+                if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
+                    return self.state.activate_dock_surface(surface);
+                }
+            }
+        }
+
+        // A maximised dock leaves no pane to type into, so one Esc gives the
+        // main area back. The editor is the exception: its keys belong to the
+        // PTY, and the ⤢ click restores it instead.
+        if self.state.dock_maximized
+            && !self.state.dock_editor_focused
+            && event.code == KeyCode::Esc
+            && event.modifiers.is_empty()
+        {
+            self.state.dock_maximized = false;
+            return true;
+        }
+
+        let dock_surface_focused = self.state.dock_home_focused
+            || self.state.dock_files_focused
+            || self.state.dock_chooser_focused;
+        if dock_surface_focused && self.state.dock_tab.is_some() {
+            if let KeyCode::Char(character) = event.code {
+                if Self::dock_shortcut_modifiers(event.modifiers) {
+                    if let Some(surface) = crate::app::DockSurface::from_shortcut(character) {
+                        return self.state.activate_dock_surface(surface);
+                    }
+                }
+            }
+        }
+
+        if self.state.dock_tab.is_some() || !self.state.dock_chooser_focused {
+            return false;
+        }
+        match event.code {
+            KeyCode::Char(character) if Self::dock_shortcut_modifiers(event.modifiers) => {
+                match crate::app::DockSurface::from_shortcut(character) {
+                    Some(surface) => {
+                        self.state.activate_dock_surface(surface);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            KeyCode::Esc => {
+                self.state.dock_chooser_focused = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
         if self.state.mode != Mode::Terminal
             || self.state.dock_collapsed
-            || self.state.dock_tab != crate::app::DockTab::Home
+            || self.state.dock_tab != Some(crate::app::DockSurface::Home)
             || !self.state.dock_home_focused
         {
             return false;
@@ -300,6 +410,44 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn handle_dock_diff_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Diff)
+            || !self.state.dock_diff_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        let file_count = self
+            .state
+            .dock_diff_active_key
+            .as_ref()
+            .and_then(|key| self.state.dock_diff_cache.get(key))
+            .map_or(0, |entry| entry.files.len());
+        match event.code {
+            KeyCode::Char('w') => self.state.toggle_dock_diff_whitespace(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if file_count > 0 {
+                    self.state.dock_diff_selected =
+                        (self.state.dock_diff_selected + 1).min(file_count - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.state.dock_diff_selected = self.state.dock_diff_selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                self.state.toggle_selected_dock_diff_file();
+            }
+            KeyCode::Esc => self.state.dock_diff_focused = false,
+            _ => return false,
+        }
+        true
     }
 
     /// Stage a pull request action for confirmation. Returns false when the
@@ -403,6 +551,20 @@ impl App {
         self.state.popup_pane.is_none() && self.handle_dock_home_key(key)
     }
 
+    pub(crate) fn handle_dock_diff_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_diff_key(key)
+    }
+
+    pub(crate) fn handle_dock_pr_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_pr_key(key)
+    }
+
+    /// Same for the surface chooser: an empty dock owns its card shortcuts
+    /// before a pane sees them.
+    pub(crate) fn handle_dock_chooser_key_headless(&mut self, key: &TerminalKey) -> bool {
+        self.state.popup_pane.is_none() && self.handle_dock_chooser_key(key)
+    }
+
     /// Home owns the full key stream so navigation never leaks into a pane.
     /// Headless mirror.
     pub(crate) fn handle_home_key_headless(&mut self, key: KeyEvent) -> bool {
@@ -413,6 +575,21 @@ impl App {
         let Some(home) = self.state.home.as_mut() else {
             return false;
         };
+        if matches!(
+            home.picker,
+            Some(crate::app::home::HomePicker::Directory | crate::app::home::HomePicker::Ref)
+        ) {
+            for character in text.chars() {
+                match home.picker {
+                    Some(crate::app::home::HomePicker::Directory) => {
+                        home.directory_filter.push(character)
+                    }
+                    Some(crate::app::home::HomePicker::Ref) => home.ref_filter.push(character),
+                    _ => {}
+                }
+            }
+            return true;
+        }
         match home.focus {
             Some(crate::app::home::HomeFocus::Prompt) => home.prompt.push_str(text),
             Some(crate::app::home::HomeFocus::Reply) => {
@@ -421,6 +598,7 @@ impl App {
             }
             _ => {}
         }
+        self.start_home_ref_refresh_if_requested();
         true
     }
 
@@ -430,13 +608,19 @@ impl App {
             return false;
         }
 
-        if self
-            .state
-            .home
-            .as_ref()
-            .is_some_and(|home| home.picker.is_some())
-        {
+        if let Some(picker) = self.state.home.as_ref().and_then(|home| home.picker) {
             match event.code {
+                // The path input owns tab, enter and escape: they complete,
+                // accept and leave the input rather than moving the composer.
+                KeyCode::Tab if event.modifiers.is_empty() && self.state.home_browse_active() => {
+                    self.state.home_browse_complete();
+                }
+                KeyCode::Enter if event.modifiers.is_empty() && self.state.home_browse_active() => {
+                    self.state.home_browse_accept();
+                }
+                KeyCode::Esc if self.state.home_browse_active() => {
+                    self.state.home_browse_cancel();
+                }
                 KeyCode::Tab if event.modifiers.is_empty() => {
                     let queue_empty = self.state.blocked_agents().is_empty();
                     self.state.home_move_composer_focus(false, queue_empty);
@@ -445,11 +629,51 @@ impl App {
                     let queue_empty = self.state.blocked_agents().is_empty();
                     self.state.home_move_composer_focus(true, queue_empty);
                 }
-                KeyCode::Up | KeyCode::Char('k') if event.modifiers.is_empty() => {
+                KeyCode::Up if event.modifiers.is_empty() => {
                     self.state.home_move_picker(-1);
                 }
-                KeyCode::Down | KeyCode::Char('j') if event.modifiers.is_empty() => {
+                KeyCode::Down if event.modifiers.is_empty() => {
                     self.state.home_move_picker(1);
+                }
+                KeyCode::Char('k')
+                    if event.modifiers.is_empty()
+                        && !matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
+                {
+                    self.state.home_move_picker(-1);
+                }
+                KeyCode::Char('j')
+                    if event.modifiers.is_empty()
+                        && !matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
+                {
+                    self.state.home_move_picker(1);
+                }
+                KeyCode::Backspace
+                    if event.modifiers.is_empty()
+                        && matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
+                {
+                    self.state.home_pop_picker_filter();
+                }
+                KeyCode::Char(character)
+                    if event.modifiers.is_empty()
+                        && matches!(
+                            picker,
+                            crate::app::home::HomePicker::Directory
+                                | crate::app::home::HomePicker::Ref
+                        ) =>
+                {
+                    self.state.home_push_picker_filter(character);
                 }
                 KeyCode::Enter if event.modifiers.is_empty() => {
                     self.state.home_accept_picker();
@@ -482,6 +706,16 @@ impl App {
                     home.select_next(&queue);
                 }
             }
+            // Shift+Enter is the newline, so plain Enter stays the submit key
+            // the composer already trained the operator on.
+            KeyCode::Enter
+                if event.modifiers == KeyModifiers::SHIFT
+                    && focus == Some(crate::app::home::HomeFocus::Prompt) =>
+            {
+                if let Some(home) = self.state.home.as_mut() {
+                    home.append_prompt('\n');
+                }
+            }
             KeyCode::Enter if event.modifiers.is_empty() => match focus {
                 None => {
                     self.state.jump_to_selected_home_agent(&queue);
@@ -489,7 +723,10 @@ impl App {
                 Some(crate::app::home::HomeFocus::Reply) => {
                     self.reply_to_selected_home_agent();
                 }
-                Some(crate::app::home::HomeFocus::Prompt) => self.dispatch_home_prompt(),
+                Some(crate::app::home::HomeFocus::Prompt) => {
+                    crate::logging::home_enter();
+                    self.dispatch_home_prompt();
+                }
                 Some(focus) => {
                     if let Some(picker) = crate::app::home::HomePicker::for_focus(focus) {
                         self.state.home_open_picker(picker);
@@ -551,10 +788,19 @@ impl App {
             }
             _ => {}
         }
+        self.start_home_ref_refresh_if_requested();
         true
     }
 
     fn dispatch_home_prompt(&mut self) {
+        if self
+            .state
+            .home
+            .as_ref()
+            .is_some_and(|home| home.pending_dispatch.is_some())
+        {
+            return;
+        }
         let Some(plan) = self
             .state
             .home
@@ -579,21 +825,45 @@ impl App {
             return;
         };
 
-        match self.dispatch_home_composer(plan) {
+        crate::logging::home_dispatch_started(
+            &format!("{:?}", plan.agent),
+            plan.argv.first().map(String::as_str),
+            &format!("{:?}", plan.workspace),
+            &format!("{:?}", plan.target),
+            &plan.directory,
+        );
+
+        let dispatch = match plan.workspace {
+            crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),
+            crate::app::home::HomeWorkspace::CurrentCheckout
+                if plan
+                    .git_ref
+                    .as_ref()
+                    .is_some_and(|git_ref| !git_ref.is_current()) =>
+            {
+                self.start_home_checkout(plan)
+            }
+            crate::app::home::HomeWorkspace::CurrentCheckout
+            | crate::app::home::HomeWorkspace::PreviousWorktree(_) => self
+                .dispatch_home_composer(plan)
+                .map_err(|error| error.to_string()),
+        };
+        match dispatch {
             Ok(()) => {
-                self.state.clear_home();
-                self.state.mode = Mode::Terminal;
+                if self
+                    .state
+                    .home
+                    .as_ref()
+                    .is_none_or(|home| home.pending_dispatch.is_none())
+                {
+                    self.state.clear_home();
+                    self.state.mode = Mode::Terminal;
+                }
             }
             Err(error) => {
-                let previous_toast = self.state.toast.clone();
-                self.state.toast = Some(crate::app::state::ToastNotification {
-                    kind: crate::app::state::ToastKind::NeedsAttention,
-                    title: "dispatch failed".into(),
-                    context: error.to_string(),
-                    position: None,
-                    target: None,
-                });
-                self.sync_toast_deadline(previous_toast);
+                if let Some(home) = self.state.home.as_mut() {
+                    home.dispatch_error = Some(error);
+                }
             }
         }
     }
@@ -683,6 +953,7 @@ impl App {
             StatusButtonAction::Home => {
                 self.state.toggle_home();
             }
+            StatusButtonAction::Work => self.toggle_work_view(),
             StatusButtonAction::BlockedFilter => {
                 self.state.blocked_filter = !self.state.blocked_filter;
                 self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -726,79 +997,473 @@ impl App {
         let enabled = self.work_index_config.enabled;
         let snapshot = enabled.then(|| self.work_index_snapshot.clone()).flatten();
         self.state.toggle_work_view(enabled, snapshot);
+        if self.state.work_view.is_some() && enabled {
+            self.next_work_index_refresh = std::time::Instant::now();
+            if let Some(view) = self.state.work_view.as_mut() {
+                view.refreshing = true;
+            }
+        }
     }
 
     pub(crate) fn handle_work_view_key(&mut self, key: KeyEvent) -> bool {
-        let Some(state) = self.state.work_view.as_mut() else {
+        let Some(state) = self.state.work_view.as_ref() else {
             return false;
         };
+        if state.pending_land.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        self.state.request_pr_land = state.pending_land.take();
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.pending_land = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if state.checkout_menu.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.checkout_menu = Some(match state.checkout_menu {
+                            Some(crate::app::state::PrCheckoutChoice::CurrentCheckout) => {
+                                crate::app::state::PrCheckoutChoice::NewWorktree
+                            }
+                            _ => crate::app::state::PrCheckoutChoice::CurrentCheckout,
+                        });
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.open_selected_pr_checkout(),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.checkout_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if state.search_focused {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.search_focused = false;
+                    }
+                }
+                KeyCode::Backspace if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.search.pop();
+                        state.selected = None;
+                    }
+                }
+                KeyCode::Char(character)
+                    if key.modifiers.is_empty()
+                        || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.search.push(character);
+                        state.selected = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_work_view();
                 self.state.mode = Mode::Terminal;
             }
             KeyCode::Left if key.modifiers.is_empty() => {
-                state.rotate(false);
-                state.hint = None;
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.rotate(false);
+                    state.hint = None;
+                }
             }
             KeyCode::Right if key.modifiers.is_empty() => {
-                state.rotate(true);
-                state.hint = None;
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.rotate(true);
+                    state.hint = None;
+                }
             }
             KeyCode::Up if key.modifiers.is_empty() => {
-                state.move_selection(-1);
-                state.hint = None;
+                self.move_pr_view_selection(-1);
             }
             KeyCode::Down if key.modifiers.is_empty() => {
-                state.move_selection(1);
-                state.hint = None;
+                self.move_pr_view_selection(1);
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                self.focus_work_view_selected_pane();
+            KeyCode::Char('/') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.search_focused = true;
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.sort = state.sort.next();
+                    state.selected = None;
+                }
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
-                self.cycle_work_view_repo_filter();
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.open_only = !state.open_only;
+                    state.selected = None;
+                }
+            }
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.detail_tab = state.detail_tab.next();
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.checkout_menu = Some(Default::default());
+                }
+            }
+            KeyCode::Char('l') if key.modifiers.is_empty() => self.stage_selected_pr_land(),
+            KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                self.next_work_index_refresh = std::time::Instant::now();
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.refreshing = true;
+                }
             }
             _ => {}
         }
         true
     }
 
-    fn focus_work_view_selected_pane(&mut self) {
-        let Some(row) = self
+    fn visible_pr_view_keys(&self) -> Vec<crate::app::state::WorkItemKey> {
+        let Some(view) = self.state.work_view.as_ref() else {
+            return Vec::new();
+        };
+        let observed_at = view
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observed_at)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        view.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                crate::ui::work_list_detail::sorted_filtered_prs(
+                    &snapshot.items,
+                    &self.state.work_item_detail_cache,
+                    &view.search,
+                    view.sort,
+                    view.open_only,
+                    observed_at,
+                    &self.state.land_approval_label,
+                )
+                .into_iter()
+                .map(|item| crate::app::state::WorkItemKey {
+                    repo: item.summary.repo.clone(),
+                    pr_number: item.summary.pr_number,
+                    pr_url: item.summary.pr_url.clone(),
+                    ticket_id: None,
+                })
+                .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn move_pr_view_selection(&mut self, delta: i64) {
+        let keys = self.visible_pr_view_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let current = self
             .state
             .work_view
             .as_ref()
-            .and_then(|state| state.selected_row())
+            .and_then(|view| view.selected.as_ref())
+            .and_then(|selected| keys.iter().position(|key| key == selected))
+            .unwrap_or(0);
+        let next = (current as i64 + delta).clamp(0, keys.len().saturating_sub(1) as i64) as usize;
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.selected = keys.get(next).cloned();
+            view.hint = None;
+        }
+    }
+
+    fn selected_pr_parts(
+        &self,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        String,
+        crate::app::home::HomePrContext,
+    )> {
+        let keys = self.visible_pr_view_keys();
+        let key = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone())
+            .or_else(|| keys.first().cloned())?;
+        let summary = self
+            .state
+            .work_view
+            .as_ref()?
+            .snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)?;
+        let number = summary.pr_number?;
+        let url = summary.pr_url.clone().or_else(|| {
+            self.state
+                .work_item_detail_cache
+                .get(&key)
+                .and_then(|detail| detail.url.clone())
+        })?;
+        let head = self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .and_then(|detail| detail.head_ref_name.clone())
+            .or_else(|| summary.branch.clone())?;
+        let pr = crate::app::home::HomePrContext {
+            url,
+            number,
+            repo: summary.repo.clone(),
+        };
+        Some((key, head, pr))
+    }
+
+    fn open_selected_pr_checkout(&mut self) {
+        let Some((_key, head, pr)) = self.selected_pr_parts() else {
+            return;
+        };
+        let choice = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.checkout_menu)
+            .unwrap_or_default();
+        self.open_pr_home(head, choice, String::new(), pr);
+    }
+
+    fn fix_selected_pr_comment(&mut self) {
+        let Some((key, head, pr)) = self.selected_pr_parts() else {
+            return;
+        };
+        let Some(body) = self
+            .state
+            .work_item_detail_cache
+            .get(&key)
+            .and_then(|detail| {
+                detail
+                    .comments
+                    .iter()
+                    .max_by_key(|comment| comment.created_at)
+            })
+            .map(|comment| comment.body.clone())
         else {
             return;
         };
-        let Some(pane_id) = row.owner_pane_id else {
-            if let Some(state) = self.state.work_view.as_mut() {
-                state.hint = Some(format!("no owning pane for #{}", row.number));
-            }
-            return;
-        };
-        if self.parse_pane_id(&pane_id).is_none() {
-            if let Some(state) = self.state.work_view.as_mut() {
-                state.hint = Some(format!("owning pane {pane_id} is no longer open"));
-            }
-            return;
-        }
-        self.runtime_pane_focus("tui.work_view.focus_owner", pane_id);
-        self.state.clear_work_view();
-        self.state.mode = Mode::Terminal;
+        self.open_pr_home(
+            head,
+            crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            body,
+            pr,
+        );
     }
 
-    fn cycle_work_view_repo_filter(&mut self) {
-        let Some(state) = self.state.work_view.as_mut() else {
+    fn open_pr_home(
+        &mut self,
+        head: String,
+        choice: crate::app::state::PrCheckoutChoice,
+        prompt: String,
+        pr: crate::app::home::HomePrContext,
+    ) {
+        let directory = self
+            .state
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.values())
+                    .any(|pane| {
+                        self.state
+                            .terminals
+                            .get(&pane.attached_terminal_id)
+                            .and_then(|terminal| terminal.effective_work_context().repo.as_deref())
+                            .is_some_and(|repo| {
+                                crate::work_context::repo_slugs_match(repo, &pr.repo)
+                            })
+                    })
+            })
+            .map(|workspace| workspace.identity_cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            });
+        let directory = self
+            .state
+            .git_root_for_cwd
+            .get(&directory)
+            .and_then(Clone::clone)
+            .unwrap_or(directory);
+        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        home.directory = directory.clone();
+        home.ref_directory = directory.clone();
+        home.ref_repo_root = Some(directory);
+        home.workspace = match choice {
+            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                crate::app::home::HomeWorkspace::CurrentCheckout
+            }
+            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                crate::app::home::HomeWorkspace::NewWorktree
+            }
+        };
+        home.selected_ref = Some(crate::app::home_refs::HomeRef {
+            name: head,
+            oid: String::new(),
+            tag: None,
+        });
+        home.pr = Some(pr);
+        home.prompt = prompt;
+        self.state.work_view = None;
+        self.state.inbox = None;
+        self.state.home = Some(home);
+    }
+
+    fn stage_selected_pr_land(&mut self) {
+        let Some((key, _, _)) = self.selected_pr_parts() else {
             return;
         };
-        let next = state.cycle_repo_filter();
-        state.hint = Some(
-            next.map(|repo| format!("filter repo: {repo}"))
-                .unwrap_or_else(|| "showing all repos".into()),
-        );
+        let Some(confirmation) = self.pr_land_confirmation(&key) else {
+            return;
+        };
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.pending_land = Some(confirmation);
+        }
+    }
+
+    /// The Land confirmation for `key`, or `None` when landing is disabled.
+    /// Shared by the full-screen view and the compact dock surface so both
+    /// gate on exactly the same evidence.
+    pub(crate) fn pr_land_confirmation(
+        &self,
+        key: &crate::app::state::WorkItemKey,
+    ) -> Option<crate::app::state::PrLandConfirmation> {
+        let number = key.pr_number?;
+        let detail = self.state.work_item_detail_cache.get(key)?;
+        let crate::ui::work_list_detail::PrLandStatus::Enabled(approval_signal) =
+            crate::ui::work_list_detail::pr_land_status(detail, &self.state.land_approval_label)
+        else {
+            return None;
+        };
+        let head_sha = detail.head_sha.clone()?;
+        Some(crate::app::state::PrLandConfirmation {
+            repo: key.repo.clone(),
+            number,
+            head_sha,
+            approval_signal: approval_signal.confirmation_label(),
+        })
+    }
+
+    /// Branch to check out for `key`: the fetched head, else the branch the
+    /// work index recorded for the pull request.
+    fn pr_head_ref(&self, key: &crate::app::state::WorkItemKey) -> Option<String> {
+        self.state
+            .work_item_detail_cache
+            .get(key)
+            .and_then(|detail| detail.head_ref_name.clone())
+            .or_else(|| {
+                self.state
+                    .work_index_snapshot
+                    .as_ref()?
+                    .items
+                    .iter()
+                    .find(|item| item.repo == key.repo && item.pr_number == key.pr_number)
+                    .and_then(|item| item.branch.clone())
+            })
+    }
+
+    /// Keys of the compact PR surface: the same Check out and Land actions as
+    /// the full-screen view, over the focused pane's primary pull request.
+    fn handle_dock_pr_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.mode != Mode::Terminal
+            || self.state.dock_collapsed
+            || self.state.dock_tab != Some(crate::app::DockSurface::Pr)
+            || !self.state.dock_pr_focused
+        {
+            return false;
+        }
+        let event = key.as_key_event();
+        if !event.modifiers.is_empty() {
+            return false;
+        }
+        if self.state.dock_pr_pending_land.is_some() {
+            match event.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.state.request_pr_land = self.state.dock_pr_pending_land.take();
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => self.state.dock_pr_pending_land = None,
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = self.state.dock_pr_checkout_menu {
+            match event.code {
+                KeyCode::Up | KeyCode::Down => {
+                    self.state.dock_pr_checkout_menu = Some(match choice {
+                        crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                            crate::app::state::PrCheckoutChoice::NewWorktree
+                        }
+                        crate::app::state::PrCheckoutChoice::NewWorktree => {
+                            crate::app::state::PrCheckoutChoice::CurrentCheckout
+                        }
+                    });
+                }
+                KeyCode::Enter => self.open_dock_pr_checkout(choice),
+                KeyCode::Esc => self.state.dock_pr_checkout_menu = None,
+                _ => {}
+            }
+            return true;
+        }
+        match event.code {
+            KeyCode::Char('c') => {
+                self.state.dock_pr_checkout_menu = Some(Default::default());
+            }
+            KeyCode::Char('l') => self.stage_dock_pr_land(),
+            KeyCode::Esc => self.state.dock_pr_focused = false,
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_dock_pr_checkout(&mut self, choice: crate::app::state::PrCheckoutChoice) {
+        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return;
+        };
+        let Some(head) = self.pr_head_ref(&key) else {
+            return;
+        };
+        let Some(number) = key.pr_number else {
+            return;
+        };
+        let Some(url) = key.pr_url.clone() else {
+            return;
+        };
+        let pr = crate::app::home::HomePrContext {
+            url,
+            number,
+            repo: key.repo,
+        };
+        self.state.dock_pr_checkout_menu = None;
+        self.open_pr_home(head, choice, String::new(), pr);
+    }
+
+    fn stage_dock_pr_land(&mut self) {
+        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return;
+        };
+        self.state.dock_pr_pending_land = self.pr_land_confirmation(&key);
     }
 
     fn open_selected_symphony_workflow(&mut self) {
@@ -987,6 +1652,11 @@ impl App {
             return;
         }
 
+        if let Some(runtime) = self.dock_editor_runtime() {
+            let _ = runtime.send_paste(text).await;
+            return;
+        }
+
         if let Some(ws_idx) = self.state.active {
             let pane_id = self
                 .state
@@ -1170,6 +1840,16 @@ impl App {
         if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
+            let work = self.state.view.sidebar_footer_work_hit_area;
+            if mouse.column >= work.x
+                && mouse.column < work.x.saturating_add(work.width)
+                && mouse.row >= work.y
+                && mouse.row < work.y.saturating_add(work.height)
+            {
+                self.toggle_work_view();
+                return;
+            }
+
             if let Some(copy_value) = self
                 .state
                 .view
@@ -1289,11 +1969,15 @@ impl App {
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
             let action = self.state.handle_mouse(&mut self.terminal_runtimes, mouse);
+            self.start_home_ref_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }
             if let Some(action) = action {
                 match action {
+                    MouseAction::SettledMenu { index } => {
+                        self.apply_sidebar_settled_menu_action(index)
+                    }
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")
                     }
@@ -1471,7 +2155,10 @@ impl App {
             return;
         };
 
+        self.state.dock_editor_focused = false;
         self.state.dock_home_focused = false;
+        self.state.dock_diff_focused = false;
+        self.state.dock_files_focused = false;
         // Focus through the runtime API before an application can consume its press.
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
@@ -1761,6 +2448,7 @@ fn app_for_mouse_test() -> App {
         crate::api::EventHub::default(),
     );
     app.state.mode = Mode::Terminal;
+    app.state.sidebar_collapsed = false;
     // Deliberately not the shipped default (`Hidden`): these tests click on a
     // tab row, so they need one.
     app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
@@ -1896,6 +2584,327 @@ mod tests {
         )
     }
 
+    #[test]
+    fn chooser_shortcuts_open_available_surfaces_and_ignore_the_rest() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_open_surfaces.clear();
+        app.state.dock_tab = None;
+        app.state.dock_chooser_focused = true;
+
+        // Uppercase arrives with shift; the card label is uppercase, so both
+        // spellings of the same shortcut have to work.
+        assert!(
+            app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('T'), KeyModifiers::SHIFT))
+        );
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Terminal));
+
+        app.state.dock_open_surfaces.clear();
+        app.state.dock_tab = None;
+        app.state.dock_chooser_focused = true;
+        assert!(app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty())));
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+
+        // No pull request on the focused pane: the card is inert, and the key
+        // travels on to whatever would have had it.
+        app.state.dock_open_surfaces.clear();
+        app.state.dock_tab = None;
+        app.state.dock_chooser_focused = true;
+        assert!(app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('p'), KeyModifiers::empty())));
+        assert_eq!(app.state.dock_tab, None);
+
+        // An unrelated key is not swallowed by the chooser.
+        assert!(!app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty())));
+    }
+
+    #[test]
+    fn shifted_surface_shortcut_switches_an_already_open_focused_dock() {
+        let mut app = test_app();
+        let mut workspace = crate::workspace::Workspace::test_new("one");
+        workspace.cached_git_space = crate::workspace::git_space_metadata(
+            &std::env::current_dir().expect("current test directory"),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
+        app.state.dock_home_focused = true;
+
+        assert!(app
+            .handle_dock_chooser_key(&TerminalKey::new(KeyCode::Char('D'), KeyModifiers::SHIFT,)));
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Diff));
+        assert!(app.state.dock_diff_focused);
+    }
+
+    #[test]
+    fn one_escape_restores_a_maximised_dock() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Scratchpad);
+        app.state.dock_maximized = true;
+
+        assert!(app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(!app.state.dock_maximized);
+        assert_eq!(
+            app.state.dock_tab,
+            Some(crate::app::DockSurface::Scratchpad),
+            "restoring the dock does not close the surface"
+        );
+
+        // The editor keeps its keys; only the ⤢ click restores it.
+        app.state.dock_maximized = true;
+        app.state.dock_tab = Some(crate::app::DockSurface::Editor);
+        app.state.dock_editor_focused = true;
+        assert!(
+            !app.handle_dock_chooser_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+        );
+        assert!(app.state.dock_maximized);
+    }
+
+    #[test]
+    fn diff_whitespace_key_updates_session_state_and_invalidates_the_active_projection() {
+        let mut app = test_app();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Diff);
+        app.state.dock_diff_focused = true;
+        app.state.dock_diff_active_key = Some(crate::app::state::DiffCacheKey {
+            root: std::path::PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        });
+
+        assert!(
+            app.handle_dock_diff_key(&TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+        );
+        assert!(app.state.dock_diff_ignore_whitespace);
+        assert!(app.state.dock_diff_active_key.is_none());
+
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
+        app.state.dock_tab = Some(crate::app::DockSurface::Diff);
+        assert!(app.state.dock_diff_ignore_whitespace);
+    }
+
+    #[test]
+    fn compact_pr_surface_keys_drive_the_5a_checkout_and_land_actions() {
+        let mut app = test_app();
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
+        app.state.dock_pr_focused = true;
+
+        assert!(
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+        assert_eq!(
+            app.state.dock_pr_checkout_menu,
+            Some(crate::app::state::PrCheckoutChoice::CurrentCheckout)
+        );
+        assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Down, KeyModifiers::empty())));
+        assert_eq!(
+            app.state.dock_pr_checkout_menu,
+            Some(crate::app::state::PrCheckoutChoice::NewWorktree)
+        );
+        assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.dock_pr_checkout_menu.is_none());
+
+        // Land is staged as a confirmation and only lands on an explicit yes,
+        // exactly as the full-screen view does.
+        let confirmation = crate::app::state::PrLandConfirmation {
+            repo: "owner/repo".into(),
+            number: 42,
+            head_sha: "abc123".into(),
+            approval_signal: "approved review".into(),
+        };
+        app.state.dock_pr_pending_land = Some(confirmation.clone());
+        assert!(
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()))
+        );
+        assert!(app.state.dock_pr_pending_land.is_none());
+        assert!(app.state.request_pr_land.is_none());
+        app.state.dock_pr_pending_land = Some(confirmation.clone());
+        assert!(
+            app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()))
+        );
+        assert_eq!(app.state.request_pr_land, Some(confirmation));
+
+        app.state.dock_pr_focused = false;
+        assert!(
+            !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn compact_pr_land_gate_matches_the_full_screen_matrix() {
+        let mut app = test_app();
+        let key = crate::app::state::WorkItemKey {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            ticket_id: None,
+        };
+        assert!(app.pr_land_confirmation(&key).is_none());
+        for (states, merge, expected) in [
+            (vec!["SUCCESS"], "CLEAN", true),
+            (vec!["FAILURE"], "CLEAN", false),
+            (vec!["SUCCESS"], "BEHIND", false),
+            (Vec::new(), "CLEAN", false),
+        ] {
+            let mut detail = crate::work_index::WorkItemDetail::empty();
+            detail.actions = states
+                .iter()
+                .map(|state| crate::work_index::WorkItemAction {
+                    name: "check".into(),
+                    state: (*state).into(),
+                })
+                .collect();
+            detail.merge_state_status = Some(merge.into());
+            detail.head_sha = Some("abc123".into());
+            detail.review_decision = Some("APPROVED".into());
+            app.state.work_item_detail_cache.insert(key.clone(), detail);
+            assert_eq!(app.pr_land_confirmation(&key).is_some(), expected);
+        }
+    }
+
+    #[test]
+    fn the_surface_menu_handles_navigation_and_selection() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
+
+        assert!(app
+            .handle_dock_surface_menu_key(&TerminalKey::new(KeyCode::Down, KeyModifiers::empty())));
+        assert_eq!(
+            app.state.dock_surface_menu.map(|menu| menu.selected),
+            Some(1)
+        );
+        assert!(app.handle_dock_surface_menu_key(&TerminalKey::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(app.state.dock_surface_menu.is_none());
+    }
+
+    fn files_with_open_surface_menu() -> App {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.dock_collapsed = false;
+        app.state.dock_tab = Some(crate::app::DockSurface::Files);
+        app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
+        app.state.dock_files_focused = true;
+        app.state.dock_files_filter = "needle".to_string();
+        app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
+        app
+    }
+
+    #[tokio::test]
+    async fn open_surface_menu_swallows_files_input_and_handles_terminal_shortcut() {
+        let mut app = files_with_open_surface_menu();
+
+        assert!(app
+            .handle_key(TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty()))
+            .await
+            .is_none());
+        assert_eq!(app.state.dock_files_filter, "needle");
+        assert!(app.state.dock_surface_menu.is_some());
+
+        assert!(app
+            .handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+            .await
+            .is_none());
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Terminal));
+        assert_eq!(app.state.dock_files_filter, "needle");
+        assert!(app.state.dock_surface_menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn surface_menu_escape_restores_files_focus() {
+        let mut app = files_with_open_surface_menu();
+
+        assert!(app
+            .handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await
+            .is_none());
+
+        assert!(app.state.dock_surface_menu.is_none());
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(app.state.dock_files_focused);
+        assert_eq!(app.state.dock_files_filter, "needle");
+    }
+
+    #[test]
+    fn selected_pr_checkout_carries_context_into_home_plan() {
+        let mut app = test_app();
+        let item = crate::work_index::WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: Some(42),
+            pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+            pr_title: Some("repair parser".into()),
+            pr_state: Some("open".into()),
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 1,
+            deletions: 0,
+            author: Some("ada".into()),
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Passing,
+            audience: crate::work_index::PrAudience::Authored,
+            ticket_ids: Vec::new(),
+            ticket_title: None,
+            ticket_state: None,
+            ticket_details: Vec::new(),
+            branch: Some("fix/parser".into()),
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: Default::default(),
+        };
+        app.state.work_view = Some(crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![item],
+                unavailable: None,
+                observed_at: std::time::SystemTime::now(),
+            }),
+        ));
+
+        app.open_selected_pr_checkout();
+
+        let home = app.state.home.as_mut().expect("checkout should open home");
+        assert_eq!(
+            home.pr,
+            Some(crate::app::home::HomePrContext {
+                url: "https://github.com/owner/repo/pull/42".into(),
+                number: 42,
+                repo: "owner/repo".into(),
+            })
+        );
+        home.prompt = "continue the review".into();
+        assert_eq!(home.dispatch_plan().expect("dispatch plan").pr, home.pr);
+    }
+
     fn dock_home_test_app(pr_numbers: &[u64]) -> App {
         let mut app = test_app();
         app.state.workspaces = pr_numbers
@@ -1907,7 +2916,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.dock_collapsed = false;
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
         for (ws_idx, number) in pr_numbers.iter().enumerate() {
             let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
@@ -2046,7 +3055,7 @@ mod tests {
             let mut app = dock_home_test_app(&[10, 20]);
             match guard {
                 "collapsed" => app.state.dock_collapsed = true,
-                "other tab" => app.state.dock_tab = crate::app::DockTab::Context,
+                "other tab" => app.state.dock_tab = Some(crate::app::DockSurface::Context),
                 "unfocused" => app.state.dock_home_focused = false,
                 _ => unreachable!(),
             }
@@ -2133,9 +3142,10 @@ navigate_workspace_down = "ctrl+j"
             "20"
         );
 
-        app.state.dock_tab = crate::app::DockTab::Scratchpad;
+        app.state.dock_tab = Some(crate::app::DockSurface::Editor);
+        app.state.dock_editor_focused = true;
         assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
-        app.state.dock_tab = crate::app::DockTab::Home;
+        app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = false;
         assert!(!app.handle_dock_home_key(&TerminalKey::new(KeyCode::Up, KeyModifiers::empty(),)));
     }
@@ -2257,6 +3267,55 @@ navigate_workspace_down = "ctrl+j"
         assert!(app.state.home.is_some());
         // Home covers the panes, so the click must not reach the one behind it.
         assert_eq!(app.state.workspaces[0].focused_pane_id(), before);
+    }
+
+    /// 1a-4: `Shift+Enter` extends the prompt, plain `Enter` still submits, and
+    /// `Esc` closes an open picker before it closes the composer.
+    #[tokio::test]
+    async fn shift_enter_adds_a_prompt_line_and_escape_closes_the_picker_first() {
+        let (mut app, _pane_ids) = app_with_blocked_home_rows(1);
+        {
+            let home = app.state.home.as_mut().expect("home");
+            home.focus = Some(crate::app::home::HomeFocus::Prompt);
+            home.prompt = "first".into();
+        }
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::SHIFT))
+            .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(
+            app.state.home.as_ref().map(|home| home.prompt.clone()),
+            Some("first\nx".to_string()),
+            "shift+enter must insert a newline rather than dispatch"
+        );
+
+        // Esc unwinds one layer at a time: picker, then composer, then home.
+        {
+            let home = app.state.home.as_mut().expect("home");
+            home.focus = Some(crate::app::home::HomeFocus::Workspace);
+            home.picker = Some(crate::app::home::HomePicker::Workspace);
+        }
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        let home = app.state.home.as_ref().expect("home stays open");
+        assert!(home.picker.is_none(), "esc closes the picker first");
+        assert_eq!(home.focus, Some(crate::app::home::HomeFocus::Workspace));
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .expect("home stays open")
+            .focus
+            .is_none());
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        assert!(app.state.home.is_none(), "the third esc closes home");
     }
 
     #[tokio::test]

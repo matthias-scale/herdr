@@ -38,10 +38,11 @@ struct WorkspaceGitRefreshJob {
 struct WorkspaceGitRefreshOutput {
     results: Vec<WorkspaceGitStatus>,
     cache_updates: Vec<(PathBuf, GitStatusCacheEntry)>,
+    file_fingerprints: Vec<(PathBuf, u64)>,
 }
 
 impl App {
-    fn git_program_for_refresh(&self) -> PathBuf {
+    pub(super) fn git_program_for_refresh(&self) -> PathBuf {
         #[cfg(test)]
         if let Some(program) = self.git_program_override.as_ref() {
             return program.clone();
@@ -82,7 +83,10 @@ impl App {
             return;
         }
 
-        if self.state.status_bar_enabled && self.sync_status_focused_runtime_cwd() {
+        let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
+        if (self.state.status_bar_enabled || git_menu_visible)
+            && self.sync_status_focused_runtime_cwd()
+        {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -109,16 +113,31 @@ impl App {
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
         let git_program = self.git_program_for_refresh();
+        let file_roots = self
+            .state
+            .dock_files_root
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         self.git_identity_refresh_requested = false;
         if refresh_repo_discovery {
             self.last_git_repo_discovery_refresh = now;
         }
         std::thread::spawn(move || {
-            let output = refresh_workspace_git_statuses(workspaces, &cache, deadline, &git_program);
+            let mut output =
+                refresh_workspace_git_statuses(workspaces, &cache, deadline, &git_program);
+            output.file_fingerprints = file_roots
+                .into_iter()
+                .filter_map(|root| {
+                    crate::files::git_file_fingerprint(&root, &git_program)
+                        .map(|fingerprint| (root, fingerprint))
+                })
+                .collect();
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
                 generation,
                 results: output.results,
                 cache_updates: output.cache_updates,
+                file_fingerprints: output.file_fingerprints,
             });
         });
     }
@@ -169,6 +188,10 @@ impl App {
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
         let mut demand = self.sidebar_git_refresh_demand();
         demand.branch |= self.state.status_bar_enabled;
+        demand.ahead_behind |= self.state.view.git_menu_button_hit_area.width > 0;
+        demand.branch |= !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Files);
+        demand.branch |= self.dock_files_refresh_demand;
         demand
     }
 
@@ -190,6 +213,11 @@ impl App {
     ) -> Vec<WorkspaceGitRefreshItem> {
         let mut workspace_demand = self.sidebar_git_refresh_demand();
         workspace_demand.branch |= self.git_identity_refresh_requested;
+        let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
+        workspace_demand.ahead_behind |= git_menu_visible;
+        workspace_demand.branch |= !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Files);
+        workspace_demand.branch |= self.dock_files_refresh_demand;
         let mut items = if workspace_demand.is_empty() {
             Vec::new()
         } else {
@@ -214,7 +242,7 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
-        if self.state.status_bar_enabled {
+        if self.state.status_bar_enabled || git_menu_visible {
             // The status bar projects whichever pane becomes focused next, so every
             // live pane cwd across all workspaces and tabs needs an observation.
             // Job-level deduplication by checkout/cache key happens downstream in
@@ -229,7 +257,14 @@ impl App {
                         ) else {
                             continue;
                         };
-                        push_branch_refresh_item(&mut items, ws, cwd, refresh_repo_discovery);
+                        push_focused_git_refresh_item(
+                            &mut items,
+                            ws,
+                            cwd,
+                            refresh_repo_discovery,
+                            self.state.status_bar_enabled,
+                            git_menu_visible,
+                        );
                     }
                 }
             }
@@ -242,7 +277,14 @@ impl App {
                 .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
             {
                 if let Some(cwd) = self.state.status_focused_cwd.clone() {
-                    push_branch_refresh_item(&mut items, ws, cwd, refresh_repo_discovery);
+                    push_focused_git_refresh_item(
+                        &mut items,
+                        ws,
+                        cwd,
+                        refresh_repo_discovery,
+                        self.state.status_bar_enabled,
+                        git_menu_visible,
+                    );
                 }
             }
         }
@@ -251,17 +293,20 @@ impl App {
     }
 }
 
-fn push_branch_refresh_item(
+fn push_focused_git_refresh_item(
     items: &mut Vec<WorkspaceGitRefreshItem>,
     ws: &crate::workspace::Workspace,
     cwd: PathBuf,
     refresh_repo_discovery: bool,
+    branch: bool,
+    ahead_behind: bool,
 ) {
     if let Some(existing) = items
         .iter_mut()
         .find(|item| item.workspace_id == ws.id && item.resolved_identity_cwd == cwd)
     {
-        existing.demand.branch = true;
+        existing.demand.branch |= branch;
+        existing.demand.ahead_behind |= ahead_behind;
         return;
     }
     let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
@@ -271,8 +316,8 @@ fn push_branch_refresh_item(
         resolved_identity_cwd: cwd,
         cache_key_hint,
         demand: GitStatusRefreshDemand {
-            branch: true,
-            ahead_behind: false,
+            branch,
+            ahead_behind,
         },
         updates_workspace_identity: false,
     });
@@ -351,6 +396,7 @@ fn refresh_workspace_git_statuses(
     WorkspaceGitRefreshOutput {
         results,
         cache_updates,
+        file_fingerprints: Vec::new(),
     }
 }
 
@@ -735,6 +781,29 @@ mod tests {
     }
 
     #[test]
+    fn visible_git_menu_button_demands_ahead_behind_from_existing_refresh() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+        app.state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 10, 1);
+
+        assert_eq!(
+            app.git_refresh_demand(),
+            GitStatusRefreshDemand {
+                branch: false,
+                ahead_behind: true,
+            }
+        );
+        assert!(app.git_refresh_deadline().is_some());
+        assert!(app
+            .workspace_git_refresh_items(false)
+            .iter()
+            .all(|item| item.demand.ahead_behind));
+    }
+
+    #[test]
     fn disabled_status_bar_keeps_sidebar_git_refresh() {
         let mut config = crate::config::Config::default();
         config.ui.status_bar.enabled = false;
@@ -914,6 +983,7 @@ mod tests {
             generation: 1,
             results: Vec::new(),
             cache_updates: Vec::new(),
+            file_fingerprints: Vec::new(),
         });
 
         assert!(app.git_refresh_in_flight.is_none());
@@ -925,6 +995,32 @@ mod tests {
             .git_refresh_deadline()
             .expect("refresh should be due once a workspace exists");
         assert!(deadline <= Instant::now());
+    }
+
+    #[test]
+    fn git_refresh_invalidates_changed_file_snapshot_for_its_root() {
+        let mut app = test_app(&crate::config::Config::default());
+        let root = std::env::current_dir().expect("current directory");
+        app.state.dock_file_cache.insert(
+            root.clone(),
+            crate::files::FileTreeSnapshot {
+                root: root.clone(),
+                files: Vec::new(),
+                fingerprint: 1,
+                source: crate::files::FileTreeSource::Git,
+                error: None,
+            },
+        );
+        app.test_begin_git_refresh(7);
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            generation: 7,
+            results: Vec::new(),
+            cache_updates: Vec::new(),
+            file_fingerprints: vec![(root.clone(), 2)],
+        });
+
+        assert!(!app.state.dock_file_cache.contains_key(&root));
     }
 
     // ac1: an expired refresh is invalidated, retried, and keeps the last good branch visible.

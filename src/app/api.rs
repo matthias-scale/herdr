@@ -104,11 +104,30 @@ impl App {
                     false
                 }
             }
+            AppEvent::HomeRefsRefreshed { repo_root, result } => {
+                self.handle_home_refs_refreshed(repo_root, result)
+            }
+            AppEvent::HomeCheckoutFinished { plan, result } => {
+                self.handle_home_checkout_finished(*plan, result)
+            }
             AppEvent::GitStatusRefreshed {
                 generation,
                 results,
                 cache_updates,
-            } => self.handle_git_status_refreshed(generation, results, cache_updates),
+                file_fingerprints,
+            } => self.handle_git_status_refreshed(
+                generation,
+                results,
+                cache_updates,
+                file_fingerprints,
+            ),
+            AppEvent::DockFilesRefreshed {
+                generation,
+                snapshot,
+            } => self.handle_dock_files_refreshed(generation, snapshot),
+            AppEvent::DiffRefreshed { generation, result } => {
+                self.handle_diff_refreshed(generation, *result)
+            }
             AppEvent::GitWorkContextRefreshed {
                 generation,
                 observations,
@@ -143,6 +162,7 @@ impl App {
         generation: u64,
         results: Vec<crate::workspace::WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
+        file_fingerprints: Vec<(std::path::PathBuf, u64)>,
     ) -> bool {
         let Some(refresh) = self.git_refresh_in_flight else {
             return false;
@@ -172,9 +192,20 @@ impl App {
             .state
             .status_bar_enabled
             .then(|| self.focused_status_context_key());
-        let changed = self
+        let mut changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+        for (root, fingerprint) in file_fingerprints {
+            let stale = self
+                .state
+                .dock_file_cache
+                .get(&root)
+                .is_some_and(|snapshot| snapshot.fingerprint != fingerprint);
+            if stale {
+                self.state.dock_file_cache.remove(&root);
+                changed = true;
+            }
+        }
         if let Some(projected_focus) = projected_focus {
             self.status_context_focus = projected_focus;
         }
@@ -241,6 +272,16 @@ impl App {
             return None;
         }
 
+        if let AppEvent::HomeRefsRefreshed { repo_root, result } = ev {
+            self.handle_home_refs_refreshed(repo_root, result);
+            return None;
+        }
+
+        if let AppEvent::HomeCheckoutFinished { plan, result } = ev {
+            self.handle_home_checkout_finished(*plan, result);
+            return None;
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -270,9 +311,19 @@ impl App {
             generation,
             results,
             cache_updates,
+            file_fingerprints,
         } = ev
         {
-            self.handle_git_status_refreshed(generation, results, cache_updates);
+            self.handle_git_status_refreshed(generation, results, cache_updates, file_fingerprints);
+            return None;
+        }
+
+        if let AppEvent::DockFilesRefreshed {
+            generation,
+            snapshot,
+        } = ev
+        {
+            self.handle_dock_files_refreshed(generation, snapshot);
             return None;
         }
 
@@ -283,6 +334,11 @@ impl App {
         } = ev
         {
             self.handle_git_work_context_refreshed(generation, observations, cache_updates);
+            return None;
+        }
+
+        if let AppEvent::DiffRefreshed { generation, result } = ev {
+            self.handle_diff_refreshed(generation, *result);
             return None;
         }
 
@@ -368,6 +424,9 @@ impl App {
             if let Some(ws_idx) = self.orphan_pane_work_owner(*pane_id) {
                 self.schedule_session_save();
                 self.emit_pane_updated(ws_idx, *pane_id);
+            }
+            if self.handle_dock_editor_exit(*pane_id) {
+                return None;
             }
             if self
                 .state
@@ -692,6 +751,7 @@ impl App {
         pane_id: crate::layout::PaneId,
         observed_at: Instant,
     ) {
+        self.state.note_pane_activity_at(pane_id, observed_at);
         self.record_contract_false_positive_for_pane(pane_id, observed_at);
         self.handle_internal_event(AppEvent::HookAuthorityRetired {
             pane_id,
@@ -1437,6 +1497,12 @@ impl App {
             Method::PaneList(params) => return self.handle_pane_list(request.id, params),
             Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
+            Method::PaneSettle(target) => {
+                return self.handle_pane_settlement(request.id, target, true)
+            }
+            Method::PaneUnsettle(target) => {
+                return self.handle_pane_settlement(request.id, target, false)
+            }
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneWorkContextSet(params) => {

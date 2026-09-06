@@ -20,7 +20,7 @@ pub use self::{
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, FleetConfig, FleetHostConfig, HostCursorModeConfig,
+        ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
         NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
         TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
         ToastHerdrPosition, UpdateChannelConfig, WorkIndexConfig, MAX_TOAST_DELAY_SECONDS,
@@ -32,6 +32,9 @@ pub use self::{
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
 };
+
+#[cfg(test)]
+pub(crate) use self::model::DEFAULT_LAND_APPROVAL_LABEL;
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;

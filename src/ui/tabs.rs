@@ -1,7 +1,8 @@
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
-    widgets::Paragraph,
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
     Frame,
 };
 
@@ -18,6 +19,14 @@ pub(crate) const PIN_GLYPH_ON: char = '*';
 pub(crate) const PIN_GLYPH_OFF: char = ' ';
 
 const MIN_TAB_WIDTH: u16 = 8;
+/// One cell of padding on each side of the glyph, matching `+` and the scroll
+/// arrows so the whole trailing control group has the same click rhythm.
+pub(crate) const PANE_TOGGLE_BUTTON_WIDTH: u16 = 3;
+pub(crate) const PANE_TOGGLE_BELOW_GLYPH: char = '\u{25ad}';
+pub(crate) const PANE_TOGGLE_RIGHT_GLYPH: char = '\u{25af}';
+pub(crate) const GIT_MENU_BUTTON_WIDTH: u16 = 10;
+pub(crate) const GIT_MENU_STATUS: &str = "⚠ Behind upstream. Pull first.";
+pub(crate) const GIT_MENU_UNAVAILABLE: &str = "Not a git repository";
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 
@@ -28,6 +37,11 @@ pub(crate) struct TabBarView {
     pub scroll_left_hit_area: Rect,
     pub scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub git_menu_button_hit_area: Rect,
+    /// Splits the focused pane below, or closes the pane already below it.
+    pub pane_toggle_below_hit_area: Rect,
+    /// Splits the focused pane to the right, or closes the pane already there.
+    pub pane_toggle_right_hit_area: Rect,
 }
 
 fn tab_width(
@@ -215,7 +229,158 @@ fn max_tab_scroll(
         .unwrap_or(0)
 }
 
+fn active_tab_cell_width(ws: &crate::workspace::Workspace, view: &TabBarView) -> u16 {
+    view.tab_hit_areas
+        .get(ws.active_tab)
+        .map(|rect| rect.width)
+        .unwrap_or(0)
+}
+
 pub(crate) fn compute_tab_bar_view(
+    ws: &crate::workspace::Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    area: Rect,
+    current_scroll: usize,
+    follow_active: bool,
+    mouse_chrome: bool,
+) -> TabBarView {
+    if !mouse_chrome || area.width == 0 || area.height == 0 {
+        return compute_tab_bar_view_inner(
+            ws,
+            terminals,
+            area,
+            current_scroll,
+            follow_active,
+            mouse_chrome,
+        );
+    }
+
+    // The buttons are the rightmost content, so they are paid for out of the
+    // tab strip's width. When that would truncate the active tab title they are
+    // dropped entirely rather than shown over a clipped label.
+    let actions_width =
+        GIT_MENU_BUTTON_WIDTH.saturating_add(PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2));
+    if area.width > actions_width {
+        let tabs_area = Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(actions_width),
+            area.height,
+        );
+        let mut view = compute_tab_bar_view_inner(
+            ws,
+            terminals,
+            tabs_area,
+            current_scroll,
+            follow_active,
+            true,
+        );
+        // The active tab may already be clipped by a narrow row; the buttons
+        // only have to not make that worse.
+        let full_view =
+            compute_tab_bar_view_inner(ws, terminals, area, current_scroll, follow_active, true);
+        let budget =
+            active_tab_cell_width(ws, &full_view).min(tab_width(ws, terminals, ws.active_tab));
+        if budget > 0 && active_tab_cell_width(ws, &view) >= budget {
+            let menu_x = area.x + area.width - actions_width;
+            view.git_menu_button_hit_area = Rect::new(menu_x, area.y, GIT_MENU_BUTTON_WIDTH, 1);
+            let below_x = menu_x + GIT_MENU_BUTTON_WIDTH;
+            view.pane_toggle_below_hit_area =
+                Rect::new(below_x, area.y, PANE_TOGGLE_BUTTON_WIDTH, 1);
+            view.pane_toggle_right_hit_area = Rect::new(
+                below_x + PANE_TOGGLE_BUTTON_WIDTH,
+                area.y,
+                PANE_TOGGLE_BUTTON_WIDTH,
+                1,
+            );
+            return view;
+        }
+    }
+
+    compute_tab_bar_view_inner(ws, terminals, area, current_scroll, follow_active, true)
+}
+
+/// Where the toggles go when the tab row cannot host them.
+///
+/// The tab row is optional and absent by default: `tab_bar_position` defaults
+/// to `hidden`, and `hide_tab_bar_when_single_tab` removes it again for a
+/// one-tab workspace. Anchoring the buttons to that row alone made them
+/// unreachable in the configuration most sessions actually run, so they fall
+/// back to the right end of the status row -- the same "title row" the design
+/// draws them on -- and keep their geometry, hit testing and toggle semantics.
+pub(crate) fn tab_action_fallback_hit_areas(
+    status_bar_rect: Rect,
+    mouse_chrome: bool,
+) -> (Rect, Rect, Rect) {
+    let actions_width =
+        GIT_MENU_BUTTON_WIDTH.saturating_add(PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2));
+    if !mouse_chrome || status_bar_rect.height == 0 || status_bar_rect.width <= actions_width {
+        return (Rect::default(), Rect::default(), Rect::default());
+    }
+    let menu_x = status_bar_rect.x + status_bar_rect.width - actions_width;
+    let below_x = menu_x + GIT_MENU_BUTTON_WIDTH;
+    (
+        Rect::new(menu_x, status_bar_rect.y, GIT_MENU_BUTTON_WIDTH, 1),
+        Rect::new(below_x, status_bar_rect.y, PANE_TOGGLE_BUTTON_WIDTH, 1),
+        Rect::new(
+            below_x + PANE_TOGGLE_BUTTON_WIDTH,
+            status_bar_rect.y,
+            PANE_TOGGLE_BUTTON_WIDTH,
+            1,
+        ),
+    )
+}
+
+/// The width the status row must keep clear when it hosts the toggles.
+pub(crate) fn tab_action_status_bar_reserved_width(app: &AppState, status_bar_rect: Rect) -> u16 {
+    let menu = app.view.git_menu_button_hit_area;
+    let below = app.view.pane_toggle_below_hit_area;
+    let right = app.view.pane_toggle_right_hit_area;
+    if menu.width == 0 || menu.y != status_bar_rect.y || status_bar_rect.height == 0 {
+        return 0;
+    }
+    menu.width
+        .saturating_add(below.width)
+        .saturating_add(right.width)
+}
+
+pub(crate) fn git_menu_status_visible(ahead_behind: Option<(usize, usize)>) -> bool {
+    ahead_behind.is_some_and(|(_, behind)| behind > 0)
+}
+
+pub(crate) fn git_menu_dropdown_layout(
+    anchor: Rect,
+    area: Rect,
+    selected: usize,
+    ahead_behind: Option<(usize, usize)>,
+    in_git_repo: bool,
+) -> Option<crate::ui::dropdown::DropdownLayout> {
+    let item_count = if in_git_repo {
+        crate::app::state::GitAction::ALL.len() + usize::from(git_menu_status_visible(ahead_behind))
+    } else {
+        1
+    };
+    crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor,
+            item_count,
+            selected: if in_git_repo {
+                selected.min(crate::app::state::GitAction::ALL.len() - 1)
+            } else {
+                0
+            },
+            has_filter: false,
+            max_rows: item_count,
+            min_width: 34,
+        },
+        area,
+    )
+}
+
+fn compute_tab_bar_view_inner(
     ws: &crate::workspace::Workspace,
     terminals: &std::collections::HashMap<
         crate::terminal::TerminalId,
@@ -243,6 +408,9 @@ pub(crate) fn compute_tab_bar_view(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area: Rect::default(),
+            git_menu_button_hit_area: Rect::default(),
+            pane_toggle_below_hit_area: Rect::default(),
+            pane_toggle_right_hit_area: Rect::default(),
         };
     }
 
@@ -269,6 +437,9 @@ pub(crate) fn compute_tab_bar_view(
             scroll_left_hit_area: Rect::default(),
             scroll_right_hit_area: Rect::default(),
             new_tab_hit_area,
+            git_menu_button_hit_area: Rect::default(),
+            pane_toggle_below_hit_area: Rect::default(),
+            pane_toggle_right_hit_area: Rect::default(),
         };
     }
 
@@ -313,6 +484,9 @@ pub(crate) fn compute_tab_bar_view(
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
+        git_menu_button_hit_area: Rect::default(),
+        pane_toggle_below_hit_area: Rect::default(),
+        pane_toggle_right_hit_area: Rect::default(),
     }
 }
 
@@ -357,6 +531,116 @@ fn tab_drop_indicator_x(
     }
 
     None
+}
+
+/// Drawn from the top-level render pass because these controls move to the
+/// status row whenever the tab row is hidden.
+pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
+    let p = &app.palette;
+    let menu_rect = app.view.git_menu_button_hit_area;
+    if app.mouse_capture && menu_rect.width > 0 {
+        let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(app);
+        let open = app.mode == crate::app::Mode::GitMenu;
+        let label = if open && app.view.git_menu_popup_rect.width == 0 {
+            " no room "
+        } else {
+            " ⇣ Pull ▾ "
+        };
+        let style = if !in_git_repo {
+            Style::default()
+                .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
+                .bg(p.surface0)
+                .add_modifier(Modifier::DIM)
+        } else if open {
+            Style::default()
+                .fg(panel_contrast_fg(p))
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
+                .bg(p.surface0)
+        };
+        frame.render_widget(Paragraph::new(label).style(style), menu_rect);
+    }
+
+    for (rect, glyph, direction) in [
+        (
+            app.view.pane_toggle_below_hit_area,
+            PANE_TOGGLE_BELOW_GLYPH,
+            crate::app::state::PaneToggleDirection::Below,
+        ),
+        (
+            app.view.pane_toggle_right_hit_area,
+            PANE_TOGGLE_RIGHT_GLYPH,
+            crate::app::state::PaneToggleDirection::Right,
+        ),
+    ] {
+        if !app.mouse_capture || rect.width == 0 {
+            continue;
+        }
+        // Accent means "a pane is already there", so the same click closes it.
+        let style = if app.pane_toggle_sibling(direction).is_some() {
+            Style::default().fg(p.accent)
+        } else {
+            Style::default().fg(p.overlay1)
+        };
+        frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), rect);
+    }
+}
+
+pub(super) fn render_git_menu(app: &AppState, frame: &mut Frame) {
+    if app.mode != crate::app::Mode::GitMenu || app.view.git_menu_popup_rect.width == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, app.view.git_menu_popup_rect);
+    if !crate::ui::dock::chooser::focused_in_git_repo(app) {
+        if let Some(rect) = app.view.git_menu_row_hit_areas.first().copied() {
+            let style = Style::default()
+                .fg(app.palette.overlay0)
+                .bg(app.palette.panel_bg);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {GIT_MENU_UNAVAILABLE}"),
+                    style,
+                )))
+                .style(Style::default().bg(app.palette.panel_bg)),
+                rect,
+            );
+        }
+        return;
+    }
+    let action_count = crate::app::state::GitAction::ALL.len();
+    for (offset, rect) in app.view.git_menu_row_hit_areas.iter().copied().enumerate() {
+        let index = app.view.git_menu_first_visible + offset;
+        let (label, style) = if let Some(action) = crate::app::state::GitAction::ALL.get(index) {
+            let style = if index == app.git_menu.highlighted {
+                Style::default()
+                    .fg(panel_contrast_fg(&app.palette))
+                    .bg(app.palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg)
+            };
+            (action.label(), style)
+        } else {
+            debug_assert_eq!(index, action_count);
+            (
+                GIT_MENU_STATUS,
+                Style::default()
+                    .fg(app.palette.yellow)
+                    .bg(app.palette.panel_bg),
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!(" {label}"), style)))
+                .style(Style::default().bg(app.palette.panel_bg)),
+            rect,
+        );
+    }
 }
 
 pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -525,6 +809,25 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    fn set_focused_git_availability(app: &mut AppState, in_git_repo: bool) {
+        if app.workspaces.is_empty() {
+            app.workspaces = vec![Workspace::test_new("git-menu")];
+            app.active = Some(0);
+            app.ensure_test_terminals();
+        }
+        let workspace = &app.workspaces[app.active.expect("active workspace")];
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal").clone();
+        let cwd = app
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal state")
+            .cwd
+            .clone();
+        app.git_root_for_cwd
+            .insert(cwd.clone(), in_git_repo.then_some(cwd));
     }
 
     #[test]
@@ -840,5 +1143,202 @@ mod tests {
 
         let row = buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0);
         assert!(row.contains('馈'), "tab row: {row:?}");
+    }
+
+    fn tab_bar_view_at(width: u16, tab_name: &str) -> (crate::workspace::Workspace, TabBarView) {
+        let app = AppState::test_new();
+        let ws = Workspace::test_new(tab_name);
+        let view = compute_tab_bar_view(
+            &ws,
+            &app.terminals,
+            Rect::new(0, 0, width, 1),
+            0,
+            true,
+            true,
+        );
+        (ws, view)
+    }
+
+    #[test]
+    fn pane_toggle_buttons_sit_at_the_right_end_of_the_tab_row() {
+        for width in [80u16, 120] {
+            let (_, view) = tab_bar_view_at(width, "test");
+            assert_eq!(
+                view.git_menu_button_hit_area,
+                Rect::new(width - 16, 0, GIT_MENU_BUTTON_WIDTH, 1),
+                "width {width}"
+            );
+            assert_eq!(
+                view.pane_toggle_below_hit_area,
+                Rect::new(width - 6, 0, 3, 1),
+                "width {width}"
+            );
+            assert_eq!(
+                view.pane_toggle_right_hit_area,
+                Rect::new(width - 3, 0, 3, 1),
+                "width {width}"
+            );
+            // The tab strip and the `+` button stay left of every action.
+            assert!(view.new_tab_hit_area.x + view.new_tab_hit_area.width <= width - 16);
+            assert!(view
+                .tab_hit_areas
+                .iter()
+                .all(|rect| rect.x + rect.width <= width - 16));
+        }
+    }
+
+    #[test]
+    fn pane_toggle_buttons_are_hidden_when_the_row_cannot_spare_the_width() {
+        let app = AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let long_tab = ws.test_add_tab(Some("a-very-long-tab-title-here"));
+        ws.active_tab = long_tab;
+        let narrow =
+            compute_tab_bar_view(&ws, &app.terminals, Rect::new(0, 0, 20, 1), 0, true, true);
+        assert_eq!(narrow.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(narrow.pane_toggle_right_hit_area, Rect::default());
+        assert_eq!(narrow.git_menu_button_hit_area, Rect::default());
+
+        // The same long title with room to spare keeps the buttons.
+        let wide =
+            compute_tab_bar_view(&ws, &app.terminals, Rect::new(0, 0, 120, 1), 0, true, true);
+        assert_eq!(wide.pane_toggle_below_hit_area, Rect::new(114, 0, 3, 1));
+        assert_eq!(wide.git_menu_button_hit_area, Rect::new(104, 0, 10, 1));
+
+        // Without mouse chrome there are no clickable controls at all.
+        let app = AppState::test_new();
+        let ws = Workspace::test_new("test");
+        let view =
+            compute_tab_bar_view(&ws, &app.terminals, Rect::new(0, 0, 120, 1), 0, true, false);
+        assert_eq!(view.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(view.pane_toggle_right_hit_area, Rect::default());
+        assert_eq!(view.git_menu_button_hit_area, Rect::default());
+    }
+
+    #[test]
+    fn pane_toggle_buttons_render_their_glyphs_and_accent_the_close_side() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        let root = ws.tabs[0].root_pane;
+        ws.tabs[0].layout.focus_pane(root);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.mouse_capture = true;
+        app.view.tab_bar_rect = Rect::new(0, 0, 40, 1);
+        let view = compute_tab_bar_view(
+            &app.workspaces[0],
+            &app.terminals,
+            app.view.tab_bar_rect,
+            0,
+            true,
+            true,
+        );
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        app.view.new_tab_hit_area = view.new_tab_hit_area;
+        app.view.pane_toggle_below_hit_area = view.pane_toggle_below_hit_area;
+        app.view.pane_toggle_right_hit_area = view.pane_toggle_right_hit_area;
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_tab_bar(&app, frame, app.view.tab_bar_rect);
+                render_tab_action_buttons(&app, frame);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = buffer_row_text(buffer, app.view.tab_bar_rect, 0);
+        assert!(row.contains(PANE_TOGGLE_BELOW_GLYPH), "tab row: {row:?}");
+        assert!(row.contains(PANE_TOGGLE_RIGHT_GLYPH), "tab row: {row:?}");
+
+        let below_style = buffer[(app.view.pane_toggle_below_hit_area.x + 1, 0)].style();
+        let right_style = buffer[(app.view.pane_toggle_right_hit_area.x + 1, 0)].style();
+        assert_eq!(below_style.fg, Some(app.palette.accent));
+        assert_ne!(right_style.fg, Some(app.palette.accent));
+    }
+
+    #[test]
+    fn git_menu_layout_opens_downward_and_adds_only_the_behind_status_row() {
+        let anchor = Rect::new(70, 2, GIT_MENU_BUTTON_WIDTH, 1);
+        let area = Rect::new(0, 0, 120, 40);
+
+        for (ahead_behind, expected_rows) in [
+            (None, 4),
+            (Some((2, 0)), 4),
+            (Some((0, 1)), 5),
+            (Some((2, 3)), 5),
+        ] {
+            assert_eq!(
+                git_menu_status_visible(ahead_behind),
+                ahead_behind.is_some_and(|(_, behind)| behind > 0)
+            );
+            let layout = git_menu_dropdown_layout(anchor, area, 0, ahead_behind, true)
+                .expect("menu fits below the tab row");
+            assert_eq!(layout.rect.y, anchor.y + anchor.height);
+            assert_eq!(layout.visible_rows, expected_rows);
+        }
+
+        let unavailable = git_menu_dropdown_layout(anchor, area, 3, Some((2, 3)), false)
+            .expect("info row fits below the tab row");
+        assert_eq!(unavailable.rect.y, anchor.y + anchor.height);
+        assert_eq!(unavailable.visible_rows, 1);
+    }
+
+    #[test]
+    fn git_menu_renders_actions_in_order_then_nonselectable_status() {
+        let mut app = AppState::test_new();
+        set_focused_git_availability(&mut app, true);
+        app.mode = crate::app::Mode::GitMenu;
+        app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 5);
+        app.view.git_menu_row_hit_areas = (1..=5).map(|y| Rect::new(0, y, 34, 1)).collect();
+        app.status_git_ahead_behind = Some((0, 1));
+
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render_git_menu(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = (1..=5)
+            .map(|y| buffer_row_text(buffer, Rect::new(0, y, 34, 1), y))
+            .collect::<Vec<_>>();
+        assert!(rows[0].contains("Pull"), "{rows:?}");
+        assert!(rows[1].contains("Commit"), "{rows:?}");
+        assert!(rows[2].contains("Push"), "{rows:?}");
+        assert!(rows[3].contains("Create PR"), "{rows:?}");
+        assert!(rows[4].contains(GIT_MENU_STATUS), "{rows:?}");
+        assert_ne!(buffer[(1, 5)].style().bg, Some(app.palette.accent));
+    }
+
+    #[test]
+    fn git_menu_dims_button_and_renders_only_info_outside_repository() {
+        let mut app = AppState::test_new();
+        set_focused_git_availability(&mut app, false);
+        app.mouse_capture = true;
+        app.mode = crate::app::Mode::GitMenu;
+        app.view.git_menu_button_hit_area = Rect::new(0, 0, GIT_MENU_BUTTON_WIDTH, 1);
+        app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 1);
+        app.view.git_menu_row_hit_areas = vec![Rect::new(0, 1, 34, 1)];
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_tab_action_buttons(&app, frame);
+                render_git_menu(&app, frame);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let button_style = buffer[(1, 0)].style();
+        assert_eq!(
+            button_style.fg,
+            Some(readable_fg_on(
+                app.palette.surface0,
+                &[app.palette.overlay1, app.palette.text]
+            ))
+        );
+        assert!(button_style.add_modifier.contains(Modifier::DIM));
+        let row = buffer_row_text(buffer, Rect::new(0, 1, 34, 1), 1);
+        assert!(row.contains(GIT_MENU_UNAVAILABLE), "menu row: {row:?}");
+        assert!(!row.contains("Pull"), "menu row: {row:?}");
     }
 }

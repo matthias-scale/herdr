@@ -292,6 +292,8 @@ pub struct SessionConfig {
     /// Automatically close eligible Done panes. Set false to disable reaping.
     /// Default: true.
     pub reap_done_panes: bool,
+    /// Settle panes with no activity after this many days. Default: 3.
+    pub settle_after_days: u64,
 }
 
 impl Default for SessionConfig {
@@ -301,6 +303,7 @@ impl Default for SessionConfig {
             hide_done_after_minutes: 30,
             reap_done_after_minutes: 4 * 60,
             reap_done_panes: true,
+            settle_after_days: 3,
         }
     }
 }
@@ -348,6 +351,39 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub land: LandConfig,
+    pub files: FilesConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesIconConfig {
+    #[default]
+    Badges,
+    Nerd,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct FilesConfig {
+    pub icons: FilesIconConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LandConfig {
+    /// PR label accepted as an explicit landing approval signal.
+    pub approval_label: String,
+}
+
+pub const DEFAULT_LAND_APPROVAL_LABEL: &str = "approved";
+
+impl Default for LandConfig {
+    fn default() -> Self {
+        Self {
+            approval_label: DEFAULT_LAND_APPROVAL_LABEL.into(),
+        }
+    }
 }
 
 pub const DEFAULT_FULL_LIFECYCLE_HOOK_AUTHORITY_TIMEOUT_SECONDS: u64 = 600;
@@ -546,6 +582,8 @@ pub struct KeysConfig {
     pub resize_mode: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+shift+b"
     pub toggle_sidebar: BindingConfig,
+    /// Cycle the sidebar grouping mode. Unset by default.
+    pub sidebar_cycle_group_mode: BindingConfig,
     /// Toggle the sidebar blocked filter. Default: "prefix+f".
     pub toggle_blocked_filter: BindingConfig,
     /// Toggle dock collapse. Default: ["prefix+shift+e", "ctrl+alt+d"]
@@ -718,6 +756,7 @@ pub(crate) struct KeysConfigOverlay {
     resize_mode: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
+    sidebar_cycle_group_mode: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_blocked_filter: Option<BindingConfig>,
@@ -829,6 +868,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_pin_tab);
         apply_field!(resize_mode);
         apply_field!(toggle_sidebar);
+        apply_field!(sidebar_cycle_group_mode);
         apply_field!(toggle_blocked_filter);
         apply_field!(toggle_dock);
         apply_field!(previous_dock_tab);
@@ -955,6 +995,7 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_pin_tab, keybinds.toggle_pin_tab);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(sidebar_cycle_group_mode, keybinds.sidebar_cycle_group_mode);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
         copy_effective_action_field!(toggle_dock, keybinds.toggle_dock);
         copy_effective_action_field!(previous_dock_tab, keybinds.previous_dock_tab);
@@ -1346,6 +1387,7 @@ impl Default for KeysConfig {
             toggle_pin_tab: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
+            sidebar_cycle_group_mode: BindingConfig::empty(),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
             toggle_dock: BindingConfig::Many(vec!["prefix+shift+e".into(), "ctrl+alt+d".into()]),
             previous_dock_tab: BindingConfig::one("prefix+shift+["),
@@ -1613,6 +1655,7 @@ new_cwd = "~/Projects"
         assert_eq!(default_config.session.hide_done_after_minutes, 30);
         assert_eq!(default_config.session.reap_done_after_minutes, 240);
         assert!(default_config.session.reap_done_panes);
+        assert_eq!(default_config.session.settle_after_days, 3);
 
         let toml = r#"
 [session]
@@ -1620,12 +1663,14 @@ resume_agents_on_restore = false
 hide_done_after_minutes = 15
 reap_done_after_minutes = 90
 reap_done_panes = false
+settle_after_days = 7
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
         assert_eq!(config.session.hide_done_after_minutes, 15);
         assert_eq!(config.session.reap_done_after_minutes, 90);
         assert!(!config.session.reap_done_panes);
+        assert_eq!(config.session.settle_after_days, 7);
     }
 
     #[test]
@@ -2230,5 +2275,19 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn files_icons_default_to_badges_and_parse_nerd() {
+        assert_eq!(Config::default().files.icons, FilesIconConfig::Badges);
+        let config: Config = toml::from_str("[files]\nicons = \"nerd\"\n").unwrap();
+        assert_eq!(config.files.icons, FilesIconConfig::Nerd);
+    }
+
+    #[test]
+    fn land_approval_label_defaults_and_parses() {
+        assert_eq!(Config::default().land.approval_label, "approved");
+        let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
+        assert_eq!(config.land.approval_label, "ship-it");
     }
 }

@@ -67,6 +67,7 @@ mod connectivity;
 mod contract_false_positive;
 mod detect;
 mod events;
+mod files;
 mod ghostty;
 mod handoff_runtime;
 mod input;
@@ -184,6 +185,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # GitHub repositories to include, for example ["owner/repo"].
 # repos = []
 
+[land]
+# PRs can land after an approved review or this exact label.
+# approval_label = "approved"
+
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
@@ -245,6 +250,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+shift+b"
+# sidebar_cycle_group_mode = ""
 # toggle_blocked_filter = "prefix+f"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
@@ -403,6 +409,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# File tree badges are portable. Set this to "nerd" only when the terminal font
+# includes Nerd Font glyphs.
+[files]
+# icons = "badges"
+
 # Full-width top status row on desktop layouts.
 [ui.status_bar]
 # enabled = true
@@ -446,6 +457,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # reap_done_after_minutes = 240
 # Set false to disable automatic pane reaping entirely.
 # reap_done_panes = true
+# Move inactive or completed work into the Settled sidebar section after this many days.
+# settle_after_days = 3
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
@@ -1021,7 +1034,10 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# full_lifecycle_hook_authority_timeout_seconds = 600"));
         assert!(DEFAULT_CONFIG.contains("# hide_done_after_minutes = 30"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_after_minutes = 240"));
+        assert!(DEFAULT_CONFIG.contains("# settle_after_days = 3"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
+        assert!(DEFAULT_CONFIG.contains("[land]\n# PRs can land after"));
+        assert!(DEFAULT_CONFIG.contains("# approval_label = \"approved\""));
     }
 
     #[test]

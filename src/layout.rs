@@ -405,6 +405,45 @@ impl TileLayout {
     }
 
     /// Access the tree root for serialization.
+    /// The pane a pane-toggle button acts on: the nearest sibling subtree's
+    /// edge pane on `nav`'s side of the focused pane, as the split tree already
+    /// defines adjacency. Pure tree walk, so it needs no rendered geometry.
+    pub fn adjacent_sibling_pane(&self, nav: NavDirection) -> Option<PaneId> {
+        let mut path = Vec::new();
+        if !path_to_pane(&self.root, self.focus, &mut path) {
+            return None;
+        }
+        let axis = nav_axis(nav);
+        let toward_second = matches!(nav, NavDirection::Right | NavDirection::Down);
+
+        let mut ancestors = Vec::new();
+        let mut node = &self.root;
+        for branch in &path {
+            let Node::Split { first, second, .. } = node else {
+                return None;
+            };
+            ancestors.push((node, *branch));
+            node = if *branch { second } else { first };
+        }
+
+        ancestors.into_iter().rev().find_map(|(node, branch)| {
+            let Node::Split {
+                direction,
+                first,
+                second,
+                ..
+            } = node
+            else {
+                return None;
+            };
+            if *direction != axis || branch == toward_second {
+                return None;
+            }
+            let sibling = if toward_second { second } else { first };
+            Some(edge_pane(sibling, axis, toward_second))
+        })
+    }
+
     pub fn root(&self) -> &Node {
         &self.root
     }
@@ -416,6 +455,56 @@ impl TileLayout {
             root,
             focus,
             prev_focus: None,
+        }
+    }
+}
+
+fn nav_axis(nav: NavDirection) -> Direction {
+    match nav {
+        NavDirection::Left | NavDirection::Right => Direction::Horizontal,
+        NavDirection::Up | NavDirection::Down => Direction::Vertical,
+    }
+}
+
+/// Branch path from `node` down to `target`, `false` for the first child.
+fn path_to_pane(node: &Node, target: PaneId, path: &mut Vec<bool>) -> bool {
+    match node {
+        Node::Pane(id) => *id == target,
+        Node::Split { first, second, .. } => {
+            path.push(false);
+            if path_to_pane(first, target, path) {
+                return true;
+            }
+            path.pop();
+            path.push(true);
+            if path_to_pane(second, target, path) {
+                return true;
+            }
+            path.pop();
+            false
+        }
+    }
+}
+
+/// The pane of `node` closest to the shared edge: along `axis` take the child
+/// facing the focused pane, across it take the first child.
+fn edge_pane(node: &Node, axis: Direction, toward_second: bool) -> PaneId {
+    let mut current = node;
+    loop {
+        match current {
+            Node::Pane(id) => return *id,
+            Node::Split {
+                direction,
+                first,
+                second,
+                ..
+            } => {
+                current = if *direction == axis && !toward_second {
+                    second
+                } else {
+                    first
+                };
+            }
         }
     }
 }
@@ -1312,5 +1401,76 @@ mod tests {
         assert_eq!(layout.focused(), pane(4));
         assert!(layout.close_focused());
         assert_eq!(layout.focused(), pane(2));
+    }
+
+    #[test]
+    fn adjacent_sibling_pane_reads_the_split_tree_on_each_side() {
+        // pane 1 | (pane 2 over (pane 3 | pane 4))
+        let mut layout = sample_layout();
+
+        // Focus pane 2: the subtree below it starts with pane 3.
+        assert_eq!(
+            layout.adjacent_sibling_pane(NavDirection::Down),
+            Some(pane(3))
+        );
+        // Nothing to its right inside its own vertical split, and pane 1 is left.
+        assert_eq!(layout.adjacent_sibling_pane(NavDirection::Right), None);
+        assert_eq!(
+            layout.adjacent_sibling_pane(NavDirection::Left),
+            Some(pane(1))
+        );
+        assert_eq!(layout.adjacent_sibling_pane(NavDirection::Up), None);
+
+        layout.focus_pane(pane(3));
+        assert_eq!(
+            layout.adjacent_sibling_pane(NavDirection::Right),
+            Some(pane(4))
+        );
+        assert_eq!(
+            layout.adjacent_sibling_pane(NavDirection::Up),
+            Some(pane(2))
+        );
+        assert_eq!(layout.adjacent_sibling_pane(NavDirection::Down), None);
+    }
+
+    #[test]
+    fn adjacent_sibling_pane_is_none_for_a_single_pane() {
+        let (layout, _) = TileLayout::new();
+        assert_eq!(layout.adjacent_sibling_pane(NavDirection::Down), None);
+        assert_eq!(layout.adjacent_sibling_pane(NavDirection::Right), None);
+    }
+
+    #[test]
+    fn adjacent_sibling_pane_picks_the_nearest_edge_of_the_sibling_subtree() {
+        // pane 1 over (pane 2 over pane 3): from pane 1, down is pane 2.
+        let layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                leading: false,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    leading: false,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(2))),
+                    second: Box::new(Node::Pane(pane(3))),
+                }),
+            },
+            pane(1),
+        );
+        assert_eq!(
+            layout.adjacent_sibling_pane(NavDirection::Down),
+            Some(pane(2))
+        );
+
+        // From pane 3, up is the bottom edge of the sibling above, pane 2 is
+        // its own sibling; from pane 2 up is pane 1.
+        let mut layout = layout;
+        layout.focus_pane(pane(2));
+        assert_eq!(
+            layout.adjacent_sibling_pane(NavDirection::Up),
+            Some(pane(1))
+        );
     }
 }

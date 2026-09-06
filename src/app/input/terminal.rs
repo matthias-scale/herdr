@@ -144,6 +144,16 @@ impl App {
             return None;
         }
 
+        if let Some(terminal_id) = self.dock_editor_terminal_id() {
+            let rt = self.terminal_runtimes.get(&terminal_id)?;
+            rt.scroll_reset();
+            let bytes = rt.encode_terminal_key(key);
+            return Some(PreparedPaneInput {
+                target: TerminalInputTarget { terminal_id },
+                bytes: Bytes::from(bytes),
+            });
+        }
+
         let ws_idx = self.state.active?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
@@ -281,9 +291,11 @@ impl App {
         let runtime = if self.state.popup_pane.is_some() {
             self.popup_runtime()
         } else if self.state.mode == Mode::Terminal {
-            self.state.active.and_then(|ws_idx| {
-                self.state
-                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            self.dock_editor_runtime().or_else(|| {
+                self.state.active.and_then(|ws_idx| {
+                    self.state
+                        .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+                })
             })
         } else {
             None

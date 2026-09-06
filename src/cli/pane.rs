@@ -19,6 +19,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "list" => pane_list(&args[1..]),
         "current" => pane_current(&args[1..]),
         "get" => pane_get(&args[1..]),
+        "settle" => pane_settlement(&args[1..], true),
+        "unsettle" => pane_settlement(&args[1..], false),
         "layout" => pane_layout(&args[1..]),
         "process-info" => pane_process_info(&args[1..]),
         "neighbor" => pane_neighbor(&args[1..]),
@@ -97,6 +99,35 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn pane_settlement(args: &[String], settle: bool) -> std::io::Result<i32> {
+    let command = if settle { "settle" } else { "unsettle" };
+    let target = match parse_pane_settlement_args(args, command) {
+        Ok(target) => target,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    let method = if settle {
+        Method::PaneSettle(target)
+    } else {
+        Method::PaneUnsettle(target)
+    };
+    super::print_response(&super::send_request(&Request {
+        id: format!("cli:pane:{command}"),
+        method,
+    })?)
+}
+
+fn parse_pane_settlement_args(args: &[String], command: &str) -> Result<PaneTarget, String> {
+    let [raw_pane_id] = args else {
+        return Err(format!("usage: herdr pane {command} <pane_id>"));
+    };
+    Ok(PaneTarget {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+    })
+}
+
 fn pane_work_context(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("get") => pane_work_context_get(&args[1..]),
@@ -151,6 +182,16 @@ fn parse_pane_work_context_set_args(args: &[String]) -> Result<PaneWorkContextSe
                 };
                 patch
                     .pr_urls
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
+                index += 2;
+            }
+            "--missive-url" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --missive-url".into());
+                };
+                patch
+                    .missive_urls
                     .get_or_insert_with(Vec::new)
                     .push(value.clone());
                 index += 2;
@@ -225,6 +266,9 @@ fn parse_work_context_field(
             Ok(crate::work_context::PaneWorkContextField::TicketIds)
         }
         "pr_urls" | "pr-urls" | "prs" => Ok(crate::work_context::PaneWorkContextField::PrUrls),
+        "missive_urls" | "missive-urls" | "missive" => {
+            Ok(crate::work_context::PaneWorkContextField::MissiveUrls)
+        }
         "branch" => Ok(crate::work_context::PaneWorkContextField::Branch),
         "repo" | "repository" => Ok(crate::work_context::PaneWorkContextField::Repo),
         "work_title" | "work-title" | "title" => {
@@ -239,7 +283,7 @@ fn parse_work_context_field(
 }
 
 fn work_context_set_usage() -> String {
-    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...".into()
+    "usage: herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--missive-url URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...".into()
 }
 
 fn pane_current(args: &[String]) -> std::io::Result<i32> {
@@ -1708,6 +1752,8 @@ fn print_pane_help() {
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane current [--pane ID|--current]");
     eprintln!("  herdr pane get <pane_id>");
+    eprintln!("  herdr pane settle <pane_id>");
+    eprintln!("  herdr pane unsettle <pane_id>");
     eprintln!("  herdr pane layout [--pane ID|--current]");
     eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
@@ -1771,6 +1817,10 @@ mod tests {
             "SCA-2",
             "--pr",
             "https://github.com/o/r/pull/9",
+            "--missive-url",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-1",
+            "--missive-url",
+            "https://mail.missiveapp.com/#inbox/conversations/sample-2",
             "--title",
             "Manual title",
             "--role",
@@ -1787,6 +1837,13 @@ mod tests {
             params.patch.pr_urls.unwrap(),
             vec!["https://github.com/o/r/pull/9"]
         );
+        assert_eq!(
+            params.patch.missive_urls.unwrap(),
+            vec![
+                "https://mail.missiveapp.com/#inbox/conversations/sample-1",
+                "https://mail.missiveapp.com/#inbox/conversations/sample-2",
+            ]
+        );
         assert_eq!(params.patch.work_title.as_deref(), Some("Manual title"));
         assert_eq!(
             params.patch.role,
@@ -1797,6 +1854,16 @@ mod tests {
             params.patch.clear_fields,
             vec![crate::work_context::PaneWorkContextField::Branch]
         );
+    }
+
+    #[test]
+    fn parse_pane_settle_and_unsettle_require_one_pane_id() {
+        for command in ["settle", "unsettle"] {
+            let target = parse_pane_settlement_args(&args(&["1-9"]), command).expect("parse");
+            assert_eq!(target.pane_id, "1-9");
+            assert!(parse_pane_settlement_args(&[], command).is_err());
+            assert!(parse_pane_settlement_args(&args(&["1-9", "extra"]), command).is_err());
+        }
     }
 
     #[test]

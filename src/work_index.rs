@@ -76,6 +76,10 @@ pub(crate) struct WorkItemDetail {
     pub(crate) url: Option<String>,
     pub(crate) review_decision: Option<String>,
     pub(crate) is_draft: Option<bool>,
+    pub(crate) reviewers: Vec<String>,
+    pub(crate) mergeable: Option<String>,
+    pub(crate) merge_state_status: Option<String>,
+    pub(crate) head_sha: Option<String>,
     pub(crate) checks: Option<WorkItemCheckSummary>,
     pub(crate) comments: Vec<WorkItemComment>,
     pub(crate) actions: Vec<WorkItemAction>,
@@ -110,6 +114,10 @@ impl WorkItemDetail {
             url: None,
             review_decision: None,
             is_draft: None,
+            reviewers: Vec::new(),
+            mergeable: None,
+            merge_state_status: None,
+            head_sha: None,
             checks: None,
             comments: Vec::new(),
             actions: Vec::new(),
@@ -227,6 +235,20 @@ pub(crate) struct WorkItem {
     pub review_decision: Option<String>,
     #[serde(default)]
     pub created_at: Option<SystemTime>,
+    #[serde(default)]
+    pub updated_at: Option<SystemTime>,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub check_state: PrCheckState,
+    #[serde(default)]
+    pub audience: PrAudience,
     pub ticket_ids: Vec<String>,
     pub ticket_title: Option<String>,
     pub ticket_state: Option<String>,
@@ -236,6 +258,25 @@ pub(crate) struct WorkItem {
     pub preview_urls: Vec<String>,
     pub panes: Vec<WorkItemPane>,
     pub source: WorkItemSource,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PrCheckState {
+    Passing,
+    Failing,
+    Pending,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PrAudience {
+    Authored,
+    Other,
+    #[default]
+    Unclassified,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +312,13 @@ struct GithubPullRequest {
     draft: bool,
     review_decision: Option<String>,
     created_at: Option<SystemTime>,
+    updated_at: Option<SystemTime>,
+    additions: u64,
+    deletions: u64,
+    author: Option<String>,
+    labels: Vec<String>,
+    check_state: PrCheckState,
+    audience: PrAudience,
 }
 
 type LinearTicket = WorkTicket;
@@ -320,7 +368,32 @@ pub(crate) fn refresh_work_index(
             gh_program,
             target_deadline(batch_deadline, target_timeout),
         ) {
-            Ok(mut values) => github.append(&mut values),
+            Ok(mut values) => {
+                let authored = fetch_github_pr_numbers(
+                    &repo,
+                    gh_program,
+                    &["--author", "@me"],
+                    target_deadline(batch_deadline, target_timeout),
+                )
+                .unwrap_or_default();
+                let others = fetch_github_pr_numbers(
+                    &repo,
+                    gh_program,
+                    &["--search", "review-requested:@me OR mentions:@me"],
+                    target_deadline(batch_deadline, target_timeout),
+                )
+                .unwrap_or_default();
+                for value in &mut values {
+                    value.audience = if authored.contains(&value.number) {
+                        PrAudience::Authored
+                    } else if others.contains(&value.number) {
+                        PrAudience::Other
+                    } else {
+                        PrAudience::Unclassified
+                    };
+                }
+                github.append(&mut values)
+            }
             Err(RefreshError::TimedOut) => {
                 return unavailable_snapshot("GitHub observation timed out")
             }
@@ -362,6 +435,13 @@ pub(crate) fn refresh_work_index(
             draft: pr.draft,
             review_decision: pr.review_decision,
             created_at: pr.created_at,
+            updated_at: pr.updated_at,
+            additions: pr.additions,
+            deletions: pr.deletions,
+            author: pr.author,
+            labels: pr.labels,
+            check_state: pr.check_state,
+            audience: pr.audience,
             ticket_ids: Vec::new(),
             ticket_title: None,
             ticket_state: None,
@@ -398,6 +478,13 @@ pub(crate) fn refresh_work_index(
                 draft: attachment.draft,
                 review_decision: None,
                 created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                labels: Vec::new(),
+                check_state: PrCheckState::Unknown,
+                audience: PrAudience::Unclassified,
                 ticket_ids: Vec::new(),
                 ticket_title: None,
                 ticket_state: None,
@@ -454,6 +541,13 @@ pub(crate) fn refresh_work_index(
             draft: false,
             review_decision: None,
             created_at: None,
+            updated_at: None,
+            additions: 0,
+            deletions: 0,
+            author: None,
+            labels: Vec::new(),
+            check_state: PrCheckState::Unknown,
+            audience: PrAudience::Unclassified,
             ticket_ids: vec![ticket.identifier.clone()],
             ticket_title: ticket.title.clone(),
             ticket_state: ticket.state.clone(),
@@ -532,7 +626,7 @@ fn fetch_github_pull_requests(
         "--limit",
         "200",
         "--json",
-        "number,title,headRefName,isDraft,reviewDecision,url,createdAt",
+        "number,title,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
     ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
@@ -574,13 +668,97 @@ fn fetch_github_pull_requests(
                     .get("createdAt")
                     .and_then(Value::as_str)
                     .and_then(parse_rfc3339_system_time),
+                updated_at: value
+                    .get("updatedAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_system_time),
+                additions: value.get("additions").and_then(Value::as_u64).unwrap_or(0),
+                deletions: value.get("deletions").and_then(Value::as_u64).unwrap_or(0),
+                author: value
+                    .get("author")
+                    .and_then(|author| author.get("login"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                labels: value
+                    .get("labels")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|label| value_text(Some(label)))
+                    .collect(),
+                check_state: pr_check_state(value.get("statusCheckRollup")),
+                audience: PrAudience::Unclassified,
             })
         })
         .collect())
 }
 
+fn fetch_github_pr_numbers(
+    repo: &str,
+    program: &Path,
+    filter: &[&str],
+    deadline: Instant,
+) -> Result<HashSet<u64>, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args(["pr", "list", "--repo", repo, "--state", "open"]);
+    command.args(filter);
+    command.args(["--limit", "200", "--json", "number"]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("GitHub PR audience observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub PR audience observation",
+            &output,
+        )));
+    }
+    let values = serde_json::from_slice::<Vec<Value>>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub PR audience observation returned invalid JSON".into())
+    })?;
+    Ok(values
+        .iter()
+        .filter_map(|value| value.get("number").and_then(Value::as_u64))
+        .collect())
+}
+
+fn pr_check_state(value: Option<&Value>) -> PrCheckState {
+    let Some(checks) = value.and_then(Value::as_array) else {
+        return PrCheckState::Unknown;
+    };
+    if checks.iter().any(|check| {
+        check
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .is_some_and(|state| {
+                matches!(
+                    state,
+                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+                )
+            })
+    }) {
+        PrCheckState::Failing
+    } else if checks.is_empty()
+        || checks.iter().any(|check| {
+            !matches!(
+                check.get("conclusion").and_then(Value::as_str),
+                Some("SUCCESS" | "NEUTRAL" | "SKIPPED")
+            )
+        })
+    {
+        PrCheckState::Pending
+    } else {
+        PrCheckState::Passing
+    }
+}
+
 const GITHUB_PULL_REQUEST_DETAIL_FIELDS: &str =
-    "number,title,body,author,baseRefName,headRefName,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,comments,files,commits";
+    "number,title,body,author,baseRefName,headRefName,headRefOid,createdAt,updatedAt,labels,url,reviewDecision,isDraft,statusCheckRollup,reviews,comments,files,commits,mergeable,mergeStateStatus";
 
 fn fetch_github_pull_request_detail(
     repo: &str,
@@ -646,6 +824,27 @@ fn fetch_github_pull_request_detail(
         url: value_text(value.get("url")),
         review_decision: value_text(value.get("reviewDecision")),
         is_draft: value.get("isDraft").and_then(Value::as_bool),
+        reviewers: value
+            .get("reviews")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|review| {
+                review
+                    .get("author")
+                    .and_then(|author| author.get("login"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .fold(Vec::new(), |mut reviewers, reviewer| {
+                if !reviewers.contains(&reviewer) {
+                    reviewers.push(reviewer);
+                }
+                reviewers
+            }),
+        mergeable: value_text(value.get("mergeable")),
+        merge_state_status: value_text(value.get("mergeStateStatus")),
+        head_sha: value_text(value.get("headRefOid")),
         checks: status_check_summary(value.get("statusCheckRollup")),
         comments: github_comments(value.get("comments")),
         actions: github_actions(value.get("statusCheckRollup")),
@@ -1243,6 +1442,13 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 draft: false,
                 review_decision: None,
                 created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                labels: Vec::new(),
+                check_state: PrCheckState::Unknown,
+                audience: PrAudience::Unclassified,
                 ticket_ids: {
                     // Sorted so the snapshot is byte-stable across refreshes:
                     // it is consumed as JSON by ghx and diffed by hand.
@@ -1390,6 +1596,9 @@ impl crate::app::App {
             generation,
             deadline,
         });
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.refreshing = true;
+        }
         let config = self.work_index_config.clone();
         let panes = self.collect_agent_infos();
         let event_tx = self.event_tx.clone();
@@ -1434,9 +1643,11 @@ impl crate::app::App {
         }
         if let Some(work_view) = self.state.work_view.as_mut() {
             work_view.replace_snapshot(snapshot.clone());
+            work_view.refreshing = false;
         }
         self.state.work_index_snapshot = Some(snapshot.clone());
         self.work_index_snapshot = Some(snapshot);
+        self.refresh_pane_settlement_at(Instant::now());
         self.invalidate_work_item_details();
         true
     }
@@ -1823,8 +2034,8 @@ mod tests {
         let (gh, _linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,headRefName,isDraft,reviewDecision,url,createdAt" || exit 42
-printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z"}]'
+test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
+printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"headRefName":"branch","baseRefName":"main","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","additions":12,"deletions":3,"labels":[{"name":"bug"}],"statusCheckRollup":[{"name":"test","conclusion":"SUCCESS"}]}]'
 "#,
             "#!/bin/sh\nprintf '%s' '[]'\n",
         );
@@ -1841,6 +2052,13 @@ printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"r
             pull_requests[0].created_at,
             parse_rfc3339_system_time("2026-08-30T11:22:33Z")
         );
+        assert_eq!(pull_requests[0].author.as_deref(), Some("ada"));
+        assert_eq!(
+            (pull_requests[0].additions, pull_requests[0].deletions),
+            (12, 3)
+        );
+        assert_eq!(pull_requests[0].labels, vec!["bug"]);
+        assert_eq!(pull_requests[0].check_state, PrCheckState::Passing);
     }
 
     #[test]
@@ -1851,7 +2069,7 @@ printf '%s' '[{"number":7,"title":"PR","headRefName":"branch","isDraft":false,"r
             &format!(
                 r#"#!/bin/sh
 test "$*" = "pr view 7 --repo owner/repo --json {GITHUB_PULL_REQUEST_DETAIL_FIELDS}" || exit 42
-printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}]}}'
+printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"}},"baseRefName":"main","headRefName":"feat/detail","headRefOid":"abcdef012345","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-30T12:22:33Z","labels":[{{"name":"high-risk"}}],"url":"https://github.com/owner/repo/pull/7","reviewDecision":"REVIEW_REQUIRED","isDraft":false,"statusCheckRollup":[{{"name":"test","conclusion":"FAILURE"}},{{"name":"lint","conclusion":"SUCCESS"}}],"reviews":[{{"author":{{"login":"grace"}}}}],"comments":[{{"author":{{"login":"reviewer"}},"body":"Looks good"}}],"files":[{{"path":"src/lib.rs","additions":4,"deletions":2}}],"commits":[{{"oid":"abcdef012345","messageHeadline":"fix detail"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}}'
 "#
             ),
             "#!/bin/sh\nprintf '%s' '[]'\n",
@@ -1867,7 +2085,11 @@ printf '%s' '{{"number":7,"title":"Detail","body":"Body","author":{{"login":"ms"
 
         assert_eq!(detail.title.as_deref(), Some("Detail"));
         assert_eq!(detail.author.as_deref(), Some("ms"));
+        assert_eq!(detail.reviewers, vec!["grace"]);
+        assert_eq!(detail.head_sha.as_deref(), Some("abcdef012345"));
+        assert_eq!(detail.merge_state_status.as_deref(), Some("CLEAN"));
         assert_eq!(detail.labels, vec!["high-risk"]);
+        assert_eq!(detail.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
         assert_eq!(
             detail.checks,
             Some(WorkItemCheckSummary {

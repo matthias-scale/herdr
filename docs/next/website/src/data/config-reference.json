@@ -626,6 +626,12 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.sidebar_cycle_group_mode",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Cycle the sidebar grouping mode."
+        },
+        {
           "key": "keys.toggle_blocked_filter",
           "type": "keybinding",
           "default": "\"prefix+f\"",
@@ -946,6 +952,22 @@
           "type": "color",
           "default": "\"cyan\"",
           "description": "Accent color for highlights, borders, and navigation UI. Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250))."
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "title": "Files",
+      "keys": [
+        {
+          "key": "files.icons",
+          "type": "enum",
+          "default": "\"badges\"",
+          "description": "File marker style in the Files dock. Badges are portable; nerd uses Nerd Font glyphs.",
+          "values": [
+            "badges",
+            "nerd"
+          ]
         }
       ]
     },
@@ -1271,6 +1293,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Automatically close eligible Done panes. Set false to disable reaping entirely."
+        },
+        {
+          "key": "session.settle_after_days",
+          "type": "integer",
+          "default": "3",
+          "description": "Move completed or inactive panes into the Settled sidebar section after this many days without activity."
         }
       ]
     },
@@ -1313,6 +1341,18 @@
           "type": "list of strings",
           "default": "[]",
           "description": "GitHub repositories to index as owner/repo values."
+        }
+      ]
+    },
+    {
+      "id": "land",
+      "title": "Pull request landing",
+      "keys": [
+        {
+          "key": "land.approval_label",
+          "type": "string",
+          "default": "\"approved\"",
+          "description": "Exact pull request label accepted as an approval signal for the Land action."
         }
       ]
     },

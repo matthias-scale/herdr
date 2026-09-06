@@ -16,6 +16,7 @@ mod dock_context;
 mod dock_scratchpad;
 #[path = "ui/dock/shortcuts.rs"]
 mod dock_shortcuts;
+pub(crate) mod dropdown;
 mod home;
 mod inbox;
 pub(crate) mod info_panel;
@@ -43,6 +44,7 @@ mod tabs;
 mod text;
 mod widgets;
 mod work_link_picker;
+pub(crate) mod work_list_detail;
 mod work_view;
 
 use self::dialogs::{
@@ -85,7 +87,10 @@ pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
-use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+use self::sidebar::{
+    render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
+    render_sidebar_group_menu, render_sidebar_settled_menu,
+};
 #[cfg(test)]
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
@@ -97,7 +102,7 @@ use self::symphony::render as render_symphony;
 pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
-use self::tabs::render_tab_bar;
+use self::tabs::{render_git_menu, render_tab_action_buttons, render_tab_bar};
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
@@ -118,13 +123,16 @@ pub(crate) use self::{
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, sidebar_header_new_space_rect,
-        sidebar_header_overflow_rect, sidebar_row_index_for_workspace,
-        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col, sidebar_thread_entries,
+        relative_agent_navigation_entry, sidebar_dim_header_at, sidebar_filter_anchor_rect,
+        sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
+        sidebar_group_mode_anchor_rect, sidebar_header_new_space_rect,
+        sidebar_header_overflow_rect, sidebar_nested_header_at, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
+        sidebar_settled_menu_layout, sidebar_thread_entries, sidebar_work_group_activation,
         workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, SidebarRow, WorkspaceListEntry,
+        AgentPanelEntry, SidebarFilterOption, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -137,7 +145,7 @@ pub(crate) use self::{
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
-    tabs::compute_tab_bar_view,
+    tabs::{compute_tab_bar_view, tab_action_fallback_hit_areas},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -305,6 +313,10 @@ fn compute_view_internal(
     } else if available_after_sidebar < DOCK_MIN_WIDTH + DOCK_MIN_TERMINAL_WIDTH {
         app.dock_collapsed = true;
         DOCK_COLLAPSED_WIDTH
+    } else if app.dock_maximized {
+        // Maximised, the dock owns the whole main area; the sidebar keeps its
+        // width so the session stays navigable.
+        available_after_sidebar
     } else {
         app.dock_width
             .clamp(DOCK_MIN_WIDTH, DOCK_MAX_WIDTH)
@@ -313,7 +325,7 @@ fn compute_view_internal(
 
     let [sidebar_area, main_area, dock_area] = Layout::horizontal([
         Constraint::Length(sidebar_w),
-        Constraint::Min(1),
+        Constraint::Min(0),
         Constraint::Length(dock_w),
     ])
     .areas(body_area);
@@ -374,6 +386,53 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
+    // A hidden tab row leaves the toggles homeless; the status row takes them.
+    let (git_menu_button_hit_area, pane_toggle_below_hit_area, pane_toggle_right_hit_area) =
+        if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
+            (
+                tab_bar_view.git_menu_button_hit_area,
+                tab_bar_view.pane_toggle_below_hit_area,
+                tab_bar_view.pane_toggle_right_hit_area,
+            )
+        } else if app.active.is_some() {
+            tabs::tab_action_fallback_hit_areas(status_bar_rect, app.mouse_capture)
+        } else {
+            (Rect::default(), Rect::default(), Rect::default())
+        };
+
+    let git_menu_layout = (app.mode == Mode::GitMenu).then(|| {
+        let in_git_repo = dock::chooser::focused_in_git_repo(app);
+        tabs::git_menu_dropdown_layout(
+            git_menu_button_hit_area,
+            area,
+            app.git_menu.highlighted,
+            app.status_git_ahead_behind,
+            in_git_repo,
+        )
+    });
+    let git_menu_layout = git_menu_layout.flatten();
+    let git_menu_popup_rect = git_menu_layout
+        .as_ref()
+        .map(|layout| layout.rect)
+        .unwrap_or_default();
+    let git_menu_first_visible = git_menu_layout
+        .as_ref()
+        .map(|layout| layout.first_visible)
+        .unwrap_or_default();
+    let git_menu_row_hit_areas = git_menu_layout
+        .map(|layout| {
+            (0..layout.visible_rows)
+                .map(|offset| {
+                    Rect::new(
+                        layout.list_rect.x,
+                        layout.list_rect.y + offset as u16,
+                        layout.list_rect.width,
+                        1,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let TabSurfaceLayout {
         pane_infos,
@@ -413,21 +472,39 @@ fn compute_view_internal(
     } else {
         sidebar::compute_tab_card_areas(app, sidebar_area)
     };
+    let sidebar_footer_work_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_work_hit_area(sidebar_area)
+    };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
-    let (
-        dock_handle_rect,
-        dock_divider_rect,
-        dock_tab_bar_rect,
-        dock_tab_hit_areas,
-        dock_body_rect,
-    ) = dock_geometry(dock_area, app.dock_collapsed);
+    let DockGeometry {
+        handle: dock_handle_rect,
+        divider: dock_divider_rect,
+        tab_bar: dock_tab_bar_rect,
+        tabs: dock_tab_hit_areas,
+        close: dock_tab_close_rect,
+        plus: dock_plus_rect,
+        maximize: dock_maximize_rect,
+        body: dock_body_rect,
+    } = dock_geometry(
+        dock_area,
+        app.dock_collapsed,
+        &app.dock_open_surfaces,
+        app.dock_tab,
+    );
+    let dock_surface_card_hit_areas = if app.dock_collapsed || app.dock_tab.is_some() {
+        Vec::new()
+    } else {
+        dock::chooser_card_hit_areas(dock_body_rect)
+    };
     let (
         dock_home_section_hit_areas,
         dock_home_tab_hit_areas,
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
-    ) = if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Home {
+    ) = if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Home) {
         let projection = app.dock_home_projection();
         let layouts = match app.dock_home_section {
             crate::app::state::DockHomeSection::Prs => {
@@ -483,11 +560,18 @@ fn compute_view_internal(
     } else {
         Vec::new()
     };
+    let dock_file_row_hit_areas =
+        if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Files) {
+            dock::files::row_hit_areas(app, dock_body_rect)
+        } else {
+            Vec::new()
+        };
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
+        sidebar_footer_work_hit_area,
         workspace_card_areas,
         agent_card_areas,
         visible_agent_activity_instants,
@@ -496,6 +580,12 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        git_menu_button_hit_area,
+        git_menu_popup_rect,
+        git_menu_first_visible,
+        git_menu_row_hit_areas,
+        pane_toggle_below_hit_area,
+        pane_toggle_right_hit_area,
         terminal_area,
         info_panel_rect,
         // Both surfaces feed one list because one click handler serves it: the panel
@@ -506,7 +596,7 @@ fn compute_view_internal(
             } else {
                 Vec::new()
             };
-            if !app.dock_collapsed && app.dock_tab == crate::app::DockTab::Context {
+            if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
                 rows.extend(dock_context::context_link_rows(app, dock_body_rect));
             }
             rows
@@ -517,7 +607,7 @@ fn compute_view_internal(
             Vec::new()
         },
         scratchpad_link_rows: if !app.dock_collapsed
-            && app.dock_tab == crate::app::DockTab::Scratchpad
+            && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
         {
             dock_scratchpad::scratchpad_link_rows(app, dock_body_rect)
         } else {
@@ -535,12 +625,21 @@ fn compute_view_internal(
         dock_divider_rect,
         dock_tab_bar_rect,
         dock_tab_hit_areas,
+        dock_tab_close_rect,
+        dock_plus_rect,
+        dock_maximize_rect,
+        dock_surface_card_hit_areas,
+        dock_surface_menu_layout: None,
         dock_home_section_hit_areas,
         dock_home_tab_hit_areas,
         dock_home_tab_keys,
         dock_home_detail_tab_hit_areas,
+        dock_file_row_hit_areas,
         dock_body_rect,
     };
+    // The menu anchors on the `+`, so its geometry needs the strip already
+    // stored on the view.
+    app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
     app.sync_copy_mode_search_geometry();
 }
 
@@ -550,48 +649,84 @@ fn uses_mobile_layout(app: &AppState, area: Rect) -> bool {
             && usize::from(area.width) < status::minimum_required_status_width(app))
 }
 
-/// Returns `(handle, divider, tab_bar, tab_hit_areas, body)`. Collapsed, the dock
-/// is nothing but its handle, so everything else comes back empty.
-fn dock_geometry(area: Rect, collapsed: bool) -> (Rect, Rect, Rect, Vec<Rect>, Rect) {
+/// Tab-strip and body geometry of the dock. Collapsed, the dock is nothing but
+/// its handle, so everything else comes back empty.
+pub(crate) struct DockGeometry {
+    pub handle: Rect,
+    pub divider: Rect,
+    pub tab_bar: Rect,
+    pub tabs: Vec<Rect>,
+    pub close: Rect,
+    pub plus: Rect,
+    pub maximize: Rect,
+    pub body: Rect,
+}
+
+impl DockGeometry {
+    fn empty(handle: Rect) -> Self {
+        Self {
+            handle,
+            divider: Rect::default(),
+            tab_bar: Rect::default(),
+            tabs: Vec::new(),
+            close: Rect::default(),
+            plus: Rect::default(),
+            maximize: Rect::default(),
+            body: Rect::default(),
+        }
+    }
+}
+
+fn dock_geometry(
+    area: Rect,
+    collapsed: bool,
+    open: &[crate::app::DockSurface],
+    active: Option<crate::app::DockSurface>,
+) -> DockGeometry {
     if area.width == 0 || area.height == 0 {
-        return (
-            Rect::default(),
-            Rect::default(),
-            Rect::default(),
-            Vec::new(),
-            Rect::default(),
-        );
+        return DockGeometry::empty(Rect::default());
     }
 
     let handle = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
     if collapsed || area.width < 3 || area.height < 2 {
-        return (
-            handle,
-            Rect::default(),
-            Rect::default(),
-            Vec::new(),
-            Rect::default(),
-        );
+        return DockGeometry::empty(handle);
     }
 
     let divider = Rect::new(area.x, area.y, 1, area.height);
     let content = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
     let [tab_bar, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(content);
-    let tab_hit_areas = dock_tab_hit_areas(tab_bar);
-    (handle, divider, tab_bar, tab_hit_areas, body)
-}
 
-/// Tabs take the width their labels need so that adding one does not truncate the
-/// labels already there. Only when the labels genuinely do not fit does the bar
-/// fall back to equal shares, which truncates every label evenly rather than
-/// starving the ones at the end.
-fn dock_tab_hit_areas(tab_bar: Rect) -> Vec<Rect> {
-    let widths: Vec<u16> = crate::app::DockTab::ALL
+    // Width the strip wants: every open tab, the trailing `+`, and the `⤢`
+    // pinned to the right edge. The maximise glyph only claims its two columns
+    // when the tabs do not need them.
+    let wanted: u16 = open
         .iter()
-        .map(|tab| u16::try_from(tab.label().chars().count().saturating_add(1)).unwrap_or(u16::MAX))
-        .collect();
-    horizontal_tab_hit_areas(tab_bar, &widths)
+        .map(|surface| dock::tab_width(*surface, active == Some(*surface)))
+        .fold(dock::PLUS_WIDTH, u16::saturating_add);
+    let (strip, maximize) = if tab_bar.width >= wanted.saturating_add(2) {
+        (
+            Rect::new(tab_bar.x, tab_bar.y, tab_bar.width - 2, 1),
+            Rect::new(tab_bar.right() - 1, tab_bar.y, 1, 1),
+        )
+    } else {
+        (tab_bar, Rect::default())
+    };
+
+    // The hit areas come from the same layout the strip is drawn from, so the
+    // `+` cell a click lands in is the cell the glyph occupies.
+    let dock::StripLayout { tabs, close, plus } = dock::strip_layout(strip, open, active);
+
+    DockGeometry {
+        handle,
+        divider,
+        tab_bar,
+        tabs,
+        close,
+        plus,
+        maximize,
+        body,
+    }
 }
 
 pub(crate) fn horizontal_tab_hit_areas(tab_bar: Rect, widths: &[u16]) -> Vec<Rect> {
@@ -684,6 +819,7 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
+        sidebar_footer_work_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
@@ -692,6 +828,12 @@ fn compute_mobile_view(
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
+        git_menu_button_hit_area: Rect::default(),
+        git_menu_popup_rect: Rect::default(),
+        git_menu_first_visible: 0,
+        git_menu_row_hit_areas: Vec::new(),
+        pane_toggle_below_hit_area: Rect::default(),
+        pane_toggle_right_hit_area: Rect::default(),
         terminal_area,
         info_panel_rect: Rect::default(),
         info_panel_link_rows: Vec::new(),
@@ -709,10 +851,16 @@ fn compute_mobile_view(
         dock_divider_rect: Rect::default(),
         dock_tab_bar_rect: Rect::default(),
         dock_tab_hit_areas: Vec::new(),
+        dock_tab_close_rect: Rect::default(),
+        dock_plus_rect: Rect::default(),
+        dock_maximize_rect: Rect::default(),
+        dock_surface_card_hit_areas: Vec::new(),
+        dock_surface_menu_layout: None,
         dock_home_section_hit_areas: Vec::new(),
         dock_home_tab_hit_areas: Vec::new(),
         dock_home_tab_keys: Vec::new(),
         dock_home_detail_tab_hit_areas: Vec::new(),
+        dock_file_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
     if app.mode == Mode::Navigate {
@@ -773,6 +921,9 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
+    if app.view.layout != ViewLayout::Mobile {
+        render_tab_action_buttons(app, frame);
+    }
     if let Some(detail) = app.symphony_detail.as_ref() {
         render_symphony(
             &app.palette,
@@ -791,8 +942,8 @@ fn render_with_runtime_registry_inner(
             detail.observed_at,
             frame,
         );
-    } else if let Some(state) = app.work_view.as_ref() {
-        render_work_view(&app.palette, state, terminal_area, frame);
+    } else if app.work_view.is_some() {
+        render_work_view(app, terminal_area, frame);
     } else if app.home.is_some() {
         let queue = app.blocked_agents();
         let counts = app.home_counts(&queue);
@@ -822,7 +973,7 @@ fn render_with_runtime_registry_inner(
         render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
     }
     if app.view.layout != ViewLayout::Mobile {
-        render_dock(app, frame);
+        render_dock(app, terminal_runtimes, frame);
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
@@ -855,6 +1006,7 @@ fn render_with_runtime_registry_inner(
         Mode::ContextMenu => {
             render_context_menu(app, frame);
         }
+        Mode::GitMenu => render_git_menu(app, frame),
         Mode::Settings => render_settings_overlay(app, frame, frame.area()),
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
             render_rename_overlay(app, frame, frame.area())
@@ -870,6 +1022,9 @@ fn render_with_runtime_registry_inner(
         Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
         Mode::Terminal => {}
     }
+    render_sidebar_group_menu(app, frame);
+    render_sidebar_filter_menu(app, frame);
+    render_sidebar_settled_menu(app, frame);
 }
 
 fn render_navigation_chrome(
@@ -1301,12 +1456,222 @@ mod tests {
         assert!(app.view.terminal_area.width >= 1);
     }
 
+    /// Screen size, open surfaces and the strip row the dock draws for them.
+    fn strip_row(width: u16, height: u16, open: &[crate::app::DockSurface]) -> (String, AppState) {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = open.to_vec();
+        app.dock_tab = open.first().copied();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, width, height);
+
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal
+            .draw(|frame| render(&app, frame))
+            .expect("render dock");
+        let buffer = terminal.backend().buffer().clone();
+        let strip = app.view.dock_tab_bar_rect;
+        let row = (strip.x..strip.right())
+            .map(|col| buffer[(col, strip.y)].symbol())
+            .collect::<String>();
+        (row, app)
+    }
+
+    fn three_and_seven_tabs() -> [Vec<crate::app::DockSurface>; 2] {
+        use crate::app::DockSurface;
+        [
+            vec![DockSurface::Home, DockSurface::Editor, DockSurface::Files],
+            vec![
+                DockSurface::Home,
+                DockSurface::Editor,
+                DockSurface::Shortcuts,
+                DockSurface::Context,
+                DockSurface::Scratchpad,
+                DockSurface::Files,
+                DockSurface::Diff,
+            ],
+        ]
+    }
+
+    #[test]
+    fn the_dock_strip_keeps_one_space_between_tab_labels() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            for open in three_and_seven_tabs() {
+                let (row, app) = strip_row(width, height, &open);
+                let rendered = app
+                    .dock_open_surfaces
+                    .iter()
+                    .copied()
+                    .zip(app.view.dock_tab_hit_areas.iter())
+                    .filter(|(_, area)| area.width > 0)
+                    .map(|(surface, area)| (surface, *area))
+                    .collect::<Vec<_>>();
+                assert!(!rendered.is_empty(), "{width}x{height}: no tab drawn");
+                for (surface, area) in rendered {
+                    let start = usize::from(area.x - app.view.dock_tab_bar_rect.x);
+                    let cells = row.chars().skip(start).take(usize::from(area.width));
+                    let drawn = cells.collect::<String>();
+                    let label = surface
+                        .label()
+                        .chars()
+                        .take(usize::from(area.width.saturating_sub(1)))
+                        .collect::<String>();
+                    assert!(
+                        drawn.starts_with(&label),
+                        "{width}x{height}: {drawn:?} does not start with {label:?}"
+                    );
+                    assert!(
+                        drawn.ends_with(' '),
+                        "{width}x{height}: {drawn:?} has no separating space in {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_plus_hit_area_is_the_cell_the_strip_draws_the_plus_in() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            for open in three_and_seven_tabs() {
+                let (row, app) = strip_row(width, height, &open);
+                let plus = app.view.dock_plus_rect;
+                assert_eq!(plus.width, crate::ui::dock::PLUS_WIDTH);
+                assert_eq!(plus.y, app.view.dock_tab_bar_rect.y);
+                let cell = usize::from(plus.x - app.view.dock_tab_bar_rect.x);
+                assert_eq!(
+                    row.chars().nth(cell),
+                    Some('+'),
+                    "{width}x{height}: the + is not at {plus:?} in {row:?}"
+                );
+                assert_eq!(
+                    row.matches('+').count(),
+                    1,
+                    "{width}x{height}: more than one + in {row:?}"
+                );
+                assert!(app.on_dock_plus(plus.x, plus.y));
+                // The tab left of the `+` must not claim its cell.
+                assert_eq!(app.dock_tab_at(plus.x, plus.y), None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolled_strip_gives_hidden_tabs_no_hit_area() {
+        use crate::app::DockSurface;
+        let open = three_and_seven_tabs()[1].clone();
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = open.clone();
+        app.dock_tab = Some(DockSurface::Diff);
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let hidden = app.view.dock_tab_hit_areas[0];
+        assert_eq!(hidden.width, 0, "the first tab scrolled out of the strip");
+        assert_eq!(
+            app.dock_tab_at(hidden.x, app.view.dock_tab_bar_rect.y),
+            None
+        );
+        let active = app.view.dock_tab_hit_areas[open.len() - 1];
+        assert!(active.width > 0, "the active tab stays visible");
+        assert!(active.right() <= app.view.dock_plus_rect.x);
+    }
+
+    #[test]
+    fn the_dock_strip_ends_with_a_plus_and_a_maximise_glyph() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let tabs = app.view.dock_tab_hit_areas.clone();
+        assert_eq!(tabs.len(), app.dock_open_surfaces.len());
+        assert!(app.view.dock_plus_rect.x >= tabs.last().expect("a tab").right());
+        assert!(app.view.dock_maximize_rect.x >= app.view.dock_plus_rect.right());
+        assert!(app.view.dock_maximize_rect.right() <= app.view.dock_rect.right());
+        // The close glyph sits inside the active tab, after its label.
+        let active = tabs.first().copied().expect("home is active");
+        assert_eq!(app.view.dock_tab_close_rect.y, active.y);
+        assert!(app.view.dock_tab_close_rect.x > active.x);
+        assert!(app.view.dock_tab_close_rect.right() <= active.right());
+    }
+
+    #[test]
+    fn an_empty_dock_lays_out_the_card_grid_instead_of_tabs() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces.clear();
+        app.dock_tab = None;
+        app.dock_chooser_focused = true;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 120, 40);
+
+        compute_view(&mut app, area);
+        assert!(app.view.dock_tab_hit_areas.is_empty());
+        assert_eq!(
+            app.view.dock_surface_card_hit_areas.len(),
+            crate::app::DockSurface::CARDS.len()
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Open a surface"));
+        for surface in crate::app::DockSurface::CARDS {
+            assert!(screen.contains(surface.title()), "missing {surface:?}");
+        }
+    }
+
+    #[test]
+    fn a_maximised_dock_takes_the_main_area_and_a_restore_gives_it_back() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.dock_collapsed = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 120, 40);
+
+        compute_view(&mut app, area);
+        let normal = app.view.dock_rect.width;
+
+        app.dock_maximized = true;
+        compute_view(&mut app, area);
+        let maximised = app.view.dock_rect.width;
+        assert!(maximised > normal);
+        assert_eq!(
+            app.view.dock_rect.right(),
+            area.right(),
+            "the dock still ends at the screen edge"
+        );
+
+        app.dock_maximized = false;
+        compute_view(&mut app, area);
+        assert_eq!(app.view.dock_rect.width, normal);
+    }
+
     #[test]
     fn an_open_dock_exposes_every_named_tab_and_a_body_area() {
         let mut app = crate::app::state::AppState::test_new();
         app.dock_collapsed = false;
-        // Exercise the scratchpad body independently of the Home tab.
-        app.dock_tab = crate::app::DockTab::Scratchpad;
+        // Home is the default tab now; this case still asserts the editor body.
+        app.dock_tab = Some(crate::app::DockSurface::Editor);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1325,17 +1690,17 @@ mod tests {
 
         assert_eq!(
             app.view.dock_tab_hit_areas.len(),
-            crate::app::DockTab::ALL.len()
+            app.dock_open_surfaces.len()
         );
         assert!(app.view.dock_body_rect.height > 0);
-        for tab in crate::app::DockTab::ALL {
+        for tab in app.dock_open_surfaces.iter().copied() {
             assert!(
                 screen.contains(tab.label()),
                 "missing {} in {screen:?}",
                 tab.label()
             );
         }
-        assert!(screen.contains("no repository for this pane"));
+        assert!(screen.contains("focus an agent first"));
     }
 
     #[test]
@@ -1343,7 +1708,7 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         app.mobile_width_threshold = 0;
         app.dock_collapsed = false;
-        app.dock_tab = crate::app::DockTab::Home;
+        app.dock_tab = Some(crate::app::DockSurface::Home);
         app.workspaces = vec![Workspace::test_new("review")];
         app.active = Some(0);
         app.mode = Mode::Terminal;
@@ -1387,7 +1752,7 @@ mod tests {
         assert!(app.view.dock_home_detail_tab_hit_areas.is_empty());
 
         app.dock_collapsed = false;
-        app.dock_tab = crate::app::DockTab::Scratchpad;
+        app.dock_tab = Some(crate::app::DockSurface::Editor);
         compute_view(&mut app, screen);
         assert!(app.view.dock_home_tab_hit_areas.is_empty());
         assert!(app.view.dock_home_tab_keys.is_empty());
@@ -1602,6 +1967,133 @@ mod tests {
         assert_eq!(app.view.tab_bar_rect, Rect::default());
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
+    }
+
+    /// The buttons were only ever computed for the tab row, which the shipped
+    /// default config does not draw: `tab_bar_position` defaults to `hidden`.
+    /// Every unit test used `AppState::test_new()`, whose tab row is `Top`, so
+    /// the whole feature was invisible at runtime while the tests were green.
+    #[test]
+    fn pane_toggles_fall_back_to_the_status_row_under_the_default_config() {
+        assert_eq!(
+            crate::config::Config::default().ui.tab_bar_position,
+            crate::config::TabBarPositionConfig::Hidden,
+            "the default config hides the tab row; the toggles must survive that"
+        );
+
+        for (width, height) in [(120u16, 40u16), (80, 24)] {
+            let mut app = crate::app::state::AppState::test_new();
+            let defaults = crate::config::Config::default();
+            app.tab_bar_position = defaults.ui.tab_bar_position;
+            app.hide_tab_bar_when_single_tab = defaults.ui.hide_tab_bar_when_single_tab;
+            app.mouse_capture = defaults.ui.mouse_capture;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.selected = 0;
+            app.mode = Mode::Terminal;
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+
+            assert_eq!(app.view.tab_bar_rect, Rect::default(), "{width}x{height}");
+            let status = app.view.status_bar_rect;
+            let git = app.view.git_menu_button_hit_area;
+            let below = app.view.pane_toggle_below_hit_area;
+            let right = app.view.pane_toggle_right_hit_area;
+            assert_eq!(
+                git,
+                Rect::new(status.x + status.width - 16, status.y, 10, 1)
+            );
+            assert_eq!(
+                below,
+                Rect::new(status.x + status.width - 6, status.y, 3, 1)
+            );
+            assert_eq!(right, Rect::new(below.x + 3, status.y, 3, 1));
+
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+            let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
+            assert!(
+                row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH),
+                "{width}x{height} status row: {row:?}"
+            );
+            assert!(
+                row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH),
+                "{width}x{height} status row: {row:?}"
+            );
+            assert!(
+                row.contains("⇣ Pull ▾"),
+                "{width}x{height} status row: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_view_records_git_menu_button_popup_and_row_hit_areas() {
+        for (width, height) in [(120u16, 40u16), (80, 24)] {
+            let mut app = crate::app::state::AppState::test_new();
+            let defaults = crate::config::Config::default();
+            app.tab_bar_position = defaults.ui.tab_bar_position;
+            app.mouse_capture = true;
+            app.workspaces = vec![Workspace::test_new("one")];
+            app.active = Some(0);
+            app.ensure_test_terminals();
+            let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+            let terminal_id = app.workspaces[0]
+                .terminal_id(pane_id)
+                .expect("terminal")
+                .clone();
+            let cwd = app
+                .terminals
+                .get(&terminal_id)
+                .expect("terminal state")
+                .cwd
+                .clone();
+            app.git_root_for_cwd.insert(cwd.clone(), Some(cwd));
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            app.status_git_cwd = app.status_focused_cwd.clone();
+            app.status_git_ahead_behind = Some((0, 1));
+            app.mode = Mode::GitMenu;
+
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+
+            assert_eq!(app.view.git_menu_button_hit_area.width, 10);
+            assert_eq!(
+                app.view.git_menu_popup_rect.y,
+                app.view.git_menu_button_hit_area.y + 1
+            );
+            assert_eq!(app.view.git_menu_row_hit_areas.len(), 5);
+            assert!(app
+                .view
+                .git_menu_row_hit_areas
+                .iter()
+                .all(|row| app.view.git_menu_popup_rect.contains((row.x, row.y).into())));
+        }
+    }
+
+    /// Keyboard-only sessions keep a clean row: no hit areas and no glyphs.
+    #[test]
+    fn pane_toggles_stay_absent_without_mouse_capture() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.tab_bar_position = crate::config::TabBarPositionConfig::Hidden;
+        app.mouse_capture = false;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        assert_eq!(app.view.pane_toggle_below_hit_area, Rect::default());
+        assert_eq!(app.view.pane_toggle_right_hit_area, Rect::default());
+        assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let status = app.view.status_bar_rect;
+        let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
+        assert!(!row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH), "{row:?}");
+        assert!(!row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH), "{row:?}");
     }
 
     #[test]

@@ -75,6 +75,16 @@ pub enum AppEvent {
     HomeCatalogRefreshed {
         catalog: crate::app::home_catalog::HomeProviderCatalog,
     },
+    /// Background ref discovery completed for one repository.
+    HomeRefsRefreshed {
+        repo_root: std::path::PathBuf,
+        result: Result<crate::app::home_refs::HomeRefCacheEntry, String>,
+    },
+    /// A requested Home checkout completed before agent launch.
+    HomeCheckoutFinished {
+        plan: Box<crate::app::home::HomeDispatchPlan>,
+        result: Result<(), String>,
+    },
     /// A pane's child process exited.
     PaneDied { pane_id: PaneId },
     /// Fallback detector state changed in a pane.
@@ -180,6 +190,17 @@ pub enum AppEvent {
         generation: u64,
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
+        file_fingerprints: Vec<(std::path::PathBuf, u64)>,
+    },
+    /// A focused pane's file tree finished loading outside the render thread.
+    DockFilesRefreshed {
+        generation: u64,
+        snapshot: crate::files::FileTreeSnapshot,
+    },
+    /// A dock diff summary or expanded file finished loading from git.
+    DiffRefreshed {
+        generation: u64,
+        result: Box<crate::app::diff::DiffRefreshResult>,
     },
     /// Background git/gh work-context observations completed for live panes.
     GitWorkContextRefreshed {
