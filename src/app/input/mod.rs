@@ -131,12 +131,14 @@ impl AppState {
 // Key handling
 // ---------------------------------------------------------------------------
 
-/// The three staged pull request actions.
+/// Pull request writes that share the confirm-then-run path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PullRequestAction {
     Approve,
     Merge,
     Close,
+    MarkDraft,
+    MarkReady,
 }
 
 impl App {
@@ -483,7 +485,17 @@ impl App {
         if repo.is_empty() {
             return false;
         }
-        self.state.dock_pending_write = Some(match action {
+        self.state.dock_pending_write = Some(Self::pull_request_write(action, repo, number));
+        self.state.dock_write_notice = None;
+        true
+    }
+
+    fn pull_request_write(
+        action: PullRequestAction,
+        repo: String,
+        number: u64,
+    ) -> crate::work_index::WorkItemWrite {
+        match action {
             PullRequestAction::Approve => {
                 crate::work_index::WorkItemWrite::ApprovePullRequest { repo, number }
             }
@@ -493,9 +505,13 @@ impl App {
             PullRequestAction::Close => {
                 crate::work_index::WorkItemWrite::ClosePullRequest { repo, number }
             }
-        });
-        self.state.dock_write_notice = None;
-        true
+            PullRequestAction::MarkDraft => {
+                crate::work_index::WorkItemWrite::MarkPullRequestDraft { repo, number }
+            }
+            PullRequestAction::MarkReady => {
+                crate::work_index::WorkItemWrite::MarkPullRequestReady { repo, number }
+            }
+        }
     }
 
     /// Turn the typed draft into a staged comment on whatever is selected.
@@ -2222,6 +2238,17 @@ impl App {
         if !event.modifiers.is_empty() {
             return false;
         }
+        if self.state.dock_pending_write.is_some() {
+            match event.code {
+                KeyCode::Char('y' | 'Y') => self.run_pending_dock_write(),
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    self.state.dock_pending_write = None;
+                    self.state.dock_write_notice = Some("cancelled".to_string());
+                }
+                _ => {}
+            }
+            return true;
+        }
         if self.state.dock_pr_pending_land.is_some() {
             match event.code {
                 KeyCode::Char('y' | 'Y') => {
@@ -2255,6 +2282,15 @@ impl App {
                 self.state.dock_pr_checkout_menu = Some(Default::default());
             }
             KeyCode::Char('l') => self.stage_dock_pr_land(),
+            KeyCode::Char('x') => {
+                return self.stage_dock_pr_action(PullRequestAction::Close);
+            }
+            KeyCode::Char('d') => {
+                return self.stage_dock_pr_action(PullRequestAction::MarkDraft);
+            }
+            KeyCode::Char('r') => {
+                return self.stage_dock_pr_action(PullRequestAction::MarkReady);
+            }
             KeyCode::Esc => self.state.dock_pr_focused = false,
             _ => return false,
         }
@@ -2288,6 +2324,21 @@ impl App {
             return;
         };
         self.state.dock_pr_pending_land = self.pr_land_confirmation(&key);
+    }
+
+    fn stage_dock_pr_action(&mut self, action: PullRequestAction) -> bool {
+        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return false;
+        };
+        let Some(number) = key.pr_number else {
+            return false;
+        };
+        if key.repo.is_empty() {
+            return false;
+        }
+        self.state.dock_pending_write = Some(Self::pull_request_write(action, key.repo, number));
+        self.state.dock_write_notice = None;
+        true
     }
 
     fn open_selected_symphony_workflow(&mut self) {
@@ -3605,6 +3656,49 @@ mod tests {
         assert!(
             !app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn compact_pr_state_writes_wait_for_confirmation() {
+        let mut app = dock_home_test_app(&[42]);
+        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
+        app.state.dock_home_focused = false;
+        app.state.dock_pr_focused = true;
+        app.work_index_gh_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
+
+        for (key, expected) in [
+            (
+                'x',
+                crate::work_index::WorkItemWrite::ClosePullRequest {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+            ),
+            (
+                'd',
+                crate::work_index::WorkItemWrite::MarkPullRequestDraft {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+            ),
+            (
+                'r',
+                crate::work_index::WorkItemWrite::MarkPullRequestReady {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+            ),
+        ] {
+            assert!(app
+                .handle_dock_pr_key(&TerminalKey::new(KeyCode::Char(key), KeyModifiers::empty(),)));
+            assert_eq!(app.state.dock_pending_write.as_ref(), Some(&expected));
+            assert!(
+                app.state.dock_write_notice.is_none(),
+                "staging must not invoke the configured gh program"
+            );
+            assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
+            assert!(app.state.dock_pending_write.is_none());
+        }
     }
 
     #[test]

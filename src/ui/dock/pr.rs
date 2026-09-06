@@ -139,6 +139,7 @@ pub(crate) fn render_pr_item(app: &AppState, frame: &mut Frame, area: Rect, item
             Style::default().fg(palette.subtext0),
         )),
         action_row(app, &actions),
+        pr_state_action_row(app),
     ];
     lines.extend(section_separator(
         palette,
@@ -188,6 +189,18 @@ pub(crate) fn render_pr_item(app: &AppState, frame: &mut Frame, area: Rect, item
                 .fg(palette.yellow)
                 .add_modifier(Modifier::BOLD),
         )));
+    } else if let Some(write) = app.dock_pending_write.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(" Confirm {}? [y/N]", write.describe()),
+            Style::default()
+                .fg(palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(notice) = app.dock_write_notice.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(" {notice}"),
+            Style::default().fg(palette.subtext0),
+        )));
     }
     frame.render_widget(Paragraph::new(lines).scroll((app.dock_scroll, 0)), area);
 
@@ -217,6 +230,17 @@ fn action_row(
             )
         };
         spans.push(Span::styled(format!("{label} "), style));
+    }
+    Line::from(spans)
+}
+
+fn pr_state_action_row(app: &AppState) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for label in ["Close", "Mark draft", "Mark ready"] {
+        spans.push(Span::styled(
+            format!("[{label}] "),
+            Style::default().fg(app.palette.accent),
+        ));
     }
     Line::from(spans)
 }
@@ -368,19 +392,20 @@ mod tests {
             observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
             approval_label: "approved",
         };
-        let rendered = body_text(&app, &item, 44, 11);
+        let rendered = body_text(&app, &item, 44, 12);
         let lines = rendered.lines().collect::<Vec<_>>();
         assert_eq!(lines[0], " #42 repair parser  ✓ 1/2");
         assert_eq!(lines[2], " [Check out ▾] [Land disabled]");
-        assert_eq!(lines[3], "");
-        assert_eq!(lines[4].trim_matches('─').trim(), "Checks  2");
-        assert_eq!(lines[7], "");
+        assert_eq!(lines[3], " [Close] [Mark draft] [Mark ready]");
+        assert_eq!(lines[4], "");
+        assert_eq!(lines[5].trim_matches('─').trim(), "Checks  2");
+        assert_eq!(lines[8], "");
         assert_eq!(
-            lines[8].trim_matches('─').trim(),
+            lines[9].trim_matches('─').trim(),
             "Comments  1  newest first"
         );
-        assert_eq!(lines[9], "  ✦ grace · 1m");
-        assert_eq!(lines[10], "    fix this");
+        assert_eq!(lines[10], "  ✦ grace · 1m");
+        assert_eq!(lines[11], "    fix this");
     }
 
     #[test]
