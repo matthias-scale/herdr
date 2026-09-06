@@ -1328,6 +1328,7 @@ impl App {
                         state.search.pop();
                         state.selected = None;
                         state.selected_missive = None;
+                        state.missive_detail_scroll = 0;
                     }
                 }
                 KeyCode::Char(character)
@@ -1338,6 +1339,7 @@ impl App {
                         state.search.push(character);
                         state.selected = None;
                         state.selected_missive = None;
+                        state.missive_detail_scroll = 0;
                     }
                 }
                 _ => {}
@@ -1367,6 +1369,20 @@ impl App {
             KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_pr_view_selection(1);
             }
+            KeyCode::PageUp if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    if state.projection == crate::app::state::WorkProjection::Missive {
+                        state.missive_detail_scroll = state.missive_detail_scroll.saturating_sub(5);
+                    }
+                }
+            }
+            KeyCode::PageDown if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    if state.projection == crate::app::state::WorkProjection::Missive {
+                        state.missive_detail_scroll = state.missive_detail_scroll.saturating_add(5);
+                    }
+                }
+            }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
                     state.search_focused = true;
@@ -1381,6 +1397,7 @@ impl App {
                     }
                     state.selected = None;
                     state.selected_missive = None;
+                    state.missive_detail_scroll = 0;
                 }
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
@@ -1392,6 +1409,7 @@ impl App {
                     }
                     state.selected = None;
                     state.selected_missive = None;
+                    state.missive_detail_scroll = 0;
                 }
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
@@ -1566,6 +1584,7 @@ impl App {
         if let Some(view) = self.state.work_view.as_mut() {
             view.selected_missive = conversations.get(next).map(|item| item.id.clone());
             view.hint = None;
+            view.missive_detail_scroll = 0;
         }
         self.next_work_index_refresh = std::time::Instant::now();
     }
@@ -1589,7 +1608,7 @@ impl App {
         };
         self.state.request_clipboard_write = Some(conversation.app_url.as_bytes().to_vec());
         if let Some(view) = self.state.work_view.as_mut() {
-            view.hint = Some(conversation.app_url);
+            view.hint = Some("Missive link copied".into());
         }
     }
 
@@ -4957,7 +4976,7 @@ navigate_workspace_down = "ctrl+j"
                 .work_view
                 .as_ref()
                 .and_then(|view| view.hint.as_deref()),
-            Some("missive://mail.missiveapp.com/#inbox/conversations/sample")
+            Some("Missive link copied")
         );
     }
 
@@ -4983,6 +5002,11 @@ navigate_workspace_down = "ctrl+j"
             .push(second);
         app.next_work_index_refresh =
             std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.state
+            .work_view
+            .as_mut()
+            .expect("Missive view")
+            .missive_detail_scroll = 9;
 
         app.move_missive_view_selection(1);
 
@@ -4993,7 +5017,35 @@ navigate_workspace_down = "ctrl+j"
                 .and_then(|view| view.selected_missive.as_deref()),
             Some("second")
         );
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| view.missive_detail_scroll),
+            Some(0)
+        );
         assert!(app.next_work_index_refresh <= std::time::Instant::now());
+    }
+
+    #[test]
+    fn missive_page_keys_scroll_detail_without_moving_the_conversation() {
+        let mut app = app_with_missive_view();
+        app.handle_work_view_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()));
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| (view.selected_missive.as_deref(), view.missive_detail_scroll)),
+            Some((None, 5))
+        );
+        app.handle_work_view_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| view.missive_detail_scroll),
+            Some(0)
+        );
     }
 
     #[test]

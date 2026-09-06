@@ -1046,21 +1046,32 @@ impl SidebarWorkFilter {
             .any(|assignee| assignee.eq_ignore_ascii_case(resolved))
     }
 
-    pub(crate) fn matches_missive(
+    pub(crate) fn matches_missive_conversation(
         &self,
-        assignee: Option<&str>,
-        closed: Option<bool>,
+        conversation: Option<&crate::work_index::MissiveConversation>,
         session: &crate::work_index::WorkIndexSession,
     ) -> bool {
-        let assignee_matches = assignee.is_none_or(|actual| {
-            assignee_filter_matches(
-                self.missive.assignee.as_deref(),
-                Some(actual),
-                session.missive.viewer.as_deref(),
-            )
-        });
-        let closed_matches = closed.is_none_or(|closed| self.missive.show_closed || !closed);
-        assignee_matches && closed_matches
+        let Some(conversation) = conversation else {
+            return true;
+        };
+        if conversation.closed && !self.missive.show_closed {
+            return false;
+        }
+        let Some(selected) = self.missive.assignee.as_deref() else {
+            return true;
+        };
+        let resolved = if selected == "me" {
+            let Some(viewer) = session.missive.viewer.as_deref() else {
+                return true;
+            };
+            viewer
+        } else {
+            selected
+        };
+        conversation
+            .assignees
+            .iter()
+            .any(|user| user.name.eq_ignore_ascii_case(resolved))
     }
 }
 
@@ -3254,6 +3265,7 @@ pub(crate) struct WorkViewState {
     pub(crate) ticket_more_menu: Option<TicketMoreChoice>,
     pub(crate) missive_start_menu: Option<PrCheckoutChoice>,
     pub(crate) selected_missive: Option<String>,
+    pub(crate) missive_detail_scroll: u16,
     pub(crate) ticket_comment_draft: Option<String>,
     pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
     pub(crate) refreshing: bool,
@@ -3429,6 +3441,7 @@ impl WorkViewState {
             ticket_more_menu: None,
             missive_start_menu: None,
             selected_missive: None,
+            missive_detail_scroll: 0,
             ticket_comment_draft: None,
             pending_write: None,
             refreshing: false,
