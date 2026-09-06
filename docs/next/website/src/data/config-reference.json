@@ -147,6 +147,48 @@
           "type": "color",
           "default": "unset",
           "description": "Override the peach color token on top of the base theme. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_neutral",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for backlog, todo, draft, closed, cancelled and unassigned work. Unset follows the muted chrome token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_active",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for work in progress. Unset follows yellow. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_review",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for work in review. Unset follows green. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_done",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for finished work. Unset follows blue. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_triage",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for triage. Unset follows peach. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_merged",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for a merged pull request. Unset follows mauve. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.custom.work_status_open",
+          "type": "color",
+          "default": "unset",
+          "description": "Override the sidebar group-header status glyph color for an open pull request or conversation. Unset follows green. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
         }
       ]
     },
