@@ -767,11 +767,11 @@ fn fetch_github_pull_request_detail(
     deadline: Instant,
 ) -> Result<WorkItemDetail, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
-    let number = number.to_string();
+    let number_arg = number.to_string();
     command.args([
         "pr",
         "view",
-        &number,
+        &number_arg,
         "--repo",
         repo,
         "--json",
@@ -850,10 +850,68 @@ fn fetch_github_pull_request_detail(
         actions: github_actions(value.get("statusCheckRollup")),
         files: github_files(value.get("files")),
         commits: github_commits(value.get("commits")),
-        unresolved_review_threads: None,
+        unresolved_review_threads: fetch_unresolved_review_thread_count(
+            repo, number, program, deadline,
+        ),
         unavailable: None,
         observed_at: SystemTime::now(),
     })
+}
+
+/// GraphQL query for a PR's review-thread resolution state. `gh pr view --json`
+/// does not expose this, so it takes a second call, kept small (thread
+/// resolution only) and best-effort: a failure here must never fail or delay
+/// the PR detail it's attached to.
+const UNRESOLVED_REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }";
+
+/// Count a pull request's unresolved review threads via `gh api graphql`.
+/// Degrades to `None` on any failure (bad repo slug, non-zero exit, timeout,
+/// malformed JSON) so the caller's detail fetch is never blocked by it.
+fn fetch_unresolved_review_thread_count(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Option<usize> {
+    let (owner, name) = repo.split_once('/')?;
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={UNRESOLVED_REVIEW_THREADS_QUERY}"),
+        "-F",
+        &format!("owner={owner}"),
+        "-F",
+        &format!("name={name}"),
+        "-F",
+        &format!("number={number}"),
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).ok()?;
+    parse_unresolved_review_thread_count(&value)
+}
+
+/// Pure parse of the `unresolvedReviewThreadsQuery` GraphQL response. Kept
+/// separate from the `gh` shellout so it can be exercised with a fixture
+/// instead of a live network call.
+fn parse_unresolved_review_thread_count(value: &Value) -> Option<usize> {
+    let nodes = value
+        .get("data")?
+        .get("repository")?
+        .get("pullRequest")?
+        .get("reviewThreads")?
+        .get("nodes")?
+        .as_array()?;
+    Some(
+        nodes
+            .iter()
+            .filter(|node| node.get("isResolved").and_then(Value::as_bool) == Some(false))
+            .count(),
+    )
 }
 
 /// Read one Linear issue with its comment threads.
@@ -1870,6 +1928,40 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unresolved_review_thread_count_counts_only_unresolved_nodes() {
+        let value: Value = serde_json::from_str(
+            r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+                 {"isResolved":false},
+                 {"isResolved":true},
+                 {"isResolved":false}
+               ]}}}}}"#,
+        )
+        .expect("valid fixture");
+
+        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(2));
+    }
+
+    #[test]
+    fn unresolved_review_thread_count_is_zero_when_every_thread_is_resolved() {
+        let value: Value = serde_json::from_str(
+            r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+                 {"isResolved":true}
+               ]}}}}}"#,
+        )
+        .expect("valid fixture");
+
+        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(0));
+    }
+
+    #[test]
+    fn unresolved_review_thread_count_is_none_on_a_malformed_response() {
+        let value: Value = serde_json::from_str(r#"{"data":null,"errors":[{"message":"boom"}]}"#)
+            .expect("valid fixture");
+
+        assert_eq!(super::parse_unresolved_review_thread_count(&value), None);
     }
 
     #[test]
