@@ -47,6 +47,7 @@ mod user_actions;
 mod widgets;
 mod work_link_picker;
 pub(crate) mod work_list_detail;
+mod work_status;
 mod work_view;
 
 use self::dialogs::{
