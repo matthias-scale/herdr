@@ -2,23 +2,29 @@
 set -euo pipefail
 
 usage() {
-    printf 'usage: HERDR_BIN=/path/to/herdr %s <session-name> [--reset]\n' "${0##*/}" >&2
+    printf 'usage: HERDR_BIN=/path/to/herdr %s <session-name> [--reset] [--agents]\n' \
+        "${0##*/}" >&2
 }
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
+if [[ $# -lt 1 ]]; then
     usage
     exit 2
 fi
 
 session_name=$1
+shift
 reset=false
-if [[ $# -eq 2 ]]; then
-    if [[ $2 != "--reset" ]]; then
-        usage
-        exit 2
-    fi
-    reset=true
-fi
+agents=false
+for option in "$@"; do
+    case $option in
+        --reset) reset=true ;;
+        --agents) agents=true ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+done
 
 if [[ -z $session_name || $session_name == "default" ]]; then
     printf 'refusing to seed the default Herdr session\n' >&2
@@ -30,6 +36,12 @@ if [[ -z ${HERDR_BIN:-} || ! -x ${HERDR_BIN:-} ]]; then
     exit 2
 fi
 HERDR_BIN=$(realpath -- "$HERDR_BIN")
+HERDR_SEED_CLAUDE=${HERDR_SEED_CLAUDE:-claude}
+HERDR_SEED_CODEX=${HERDR_SEED_CODEX:-codex}
+if [[ -z $HERDR_SEED_CLAUDE || -z $HERDR_SEED_CODEX ]]; then
+    printf 'HERDR_SEED_CLAUDE and HERDR_SEED_CODEX must not be empty\n' >&2
+    exit 2
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
     printf 'jq is required\n' >&2
@@ -66,9 +78,98 @@ print_panes() {
     local pane_name
     for pane_name in sample-linear sample-pr sample-missive sample-shell sample-settled; do
         jq -r --arg name "$pane_name" \
-            '.result.panes[] | select(.label == $name) | "\(.label): \(.pane_id)"' \
+            '.result.panes[] | select(.label == $name) | "\(.label): \(.pane_id) · \(.agent // "-") · \(.agent_status // "unknown")"' \
             <<<"$panes_json"
     done
+}
+
+report_work_title() {
+    local pane_id=$1
+    local title=$2
+    run_herdr pane report-metadata "$pane_id" \
+        --source t3-seed \
+        --title "$title" >/dev/null
+}
+
+wait_for_agent() {
+    local pane_id=$1
+    local expected_agent=$2
+    local pane_json
+    local detected_agent
+    local attempt
+    for attempt in {1..30}; do
+        pane_json=$(run_herdr pane list --workspace "$workspace_id")
+        detected_agent=$(jq -r --arg pane "$pane_id" \
+            '.result.panes[] | select(.pane_id == $pane) | .agent // empty' \
+            <<<"$pane_json")
+        if [[ -n $detected_agent ]]; then
+            if [[ $detected_agent != "$expected_agent" ]]; then
+                printf 'pane %s detected %s, expected %s\n' \
+                    "$pane_id" "$detected_agent" "$expected_agent" >&2
+                return 1
+            fi
+            return 0
+        fi
+        sleep 1
+    done
+    printf 'pane %s did not detect %s within 30 seconds\n' \
+        "$pane_id" "$expected_agent" >&2
+    return 1
+}
+
+wait_for_agent_startup() {
+    local pane_id=$1
+    local pane_json
+    local status
+    local attempt
+    for attempt in {1..30}; do
+        pane_json=$(run_herdr pane list --workspace "$workspace_id")
+        status=$(jq -r --arg pane "$pane_id" \
+            '.result.panes[] | select(.pane_id == $pane) | .agent_status // "unknown"' \
+            <<<"$pane_json")
+        if [[ $status != "working" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    printf 'pane %s was still starting after 30 seconds\n' "$pane_id" >&2
+    return 1
+}
+
+start_sample_agents() {
+    local pane_id
+    local command
+    local expected_agent
+    local current_agent
+    local index
+    local -a agent_specs=(
+        "$sample_linear|$HERDR_SEED_CLAUDE|claude"
+        "$sample_pr|$HERDR_SEED_CODEX|codex"
+        "$sample_missive|$HERDR_SEED_CLAUDE|claude"
+        "$sample_settled|$HERDR_SEED_CLAUDE|claude"
+    )
+
+    for index in "${!agent_specs[@]}"; do
+        IFS='|' read -r pane_id command expected_agent <<<"${agent_specs[$index]}"
+        current_agent=$(run_herdr pane list --workspace "$workspace_id" | \
+            jq -r --arg pane "$pane_id" \
+                '.result.panes[] | select(.pane_id == $pane) | .agent // empty')
+        if [[ $current_agent == "$expected_agent" ]]; then
+            continue
+        fi
+        if [[ -n $current_agent ]]; then
+            printf 'pane %s already has %s, expected %s\n' \
+                "$pane_id" "$current_agent" "$expected_agent" >&2
+            return 1
+        fi
+        run_herdr pane run "$pane_id" "$command" >/dev/null
+        wait_for_agent "$pane_id" "$expected_agent"
+        if (( index + 1 < ${#agent_specs[@]} )); then
+            sleep 5
+        fi
+    done
+    wait_for_agent_startup "$sample_settled"
+    settle_and_assert "$sample_settled"
 }
 
 settle_and_assert() {
@@ -111,9 +212,20 @@ elif [[ ${#sample_workspace_ids[@]} -gt 0 ]]; then
         printf 't3-sample exists with different panes; rerun with --reset\n' >&2
         exit 1
     fi
+    workspace_id=${sample_workspace_ids[0]}
     sample_settled=$(jq -er '.result.panes[] | select(.label == "sample-settled") | .pane_id' \
         <<<"$panes_json")
+    sample_linear=$(jq -er '.result.panes[] | select(.label == "sample-linear") | .pane_id' \
+        <<<"$panes_json")
+    sample_pr=$(jq -er '.result.panes[] | select(.label == "sample-pr") | .pane_id' \
+        <<<"$panes_json")
+    sample_missive=$(jq -er '.result.panes[] | select(.label == "sample-missive") | .pane_id' \
+        <<<"$panes_json")
     settle_and_assert "$sample_settled"
+    if [[ $agents == true ]]; then
+        start_sample_agents
+    fi
+    panes_json=$(run_herdr pane list --workspace "${sample_workspace_ids[0]}")
     print_panes "$panes_json"
     exit 0
 fi
@@ -128,6 +240,7 @@ run_herdr pane rename "$sample_linear" sample-linear >/dev/null
 run_herdr pane work-context set "$sample_linear" \
     --ticket SCA-3165 \
     --title 'image-edit-simple v3 reference addendum' >/dev/null
+report_work_title "$sample_linear" 'image-edit-simple v3 reference addendum'
 
 create_tab() {
     local pane_name=$1
@@ -147,19 +260,22 @@ create_tab() {
 sample_pr=$(create_tab sample-pr "$sample_cwd")
 run_herdr pane work-context set "$sample_pr" \
     --pr https://github.com/matthias-scale/herdr/pull/159 \
-    --ticket SCA-3165 >/dev/null
+    --ticket SCA-3165 \
+    --title 't3: home screen and dock' >/dev/null
+report_work_title "$sample_pr" 't3: home screen and dock'
 
 sample_missive=$(create_tab sample-missive "$sample_cwd")
 run_herdr pane work-context set "$sample_missive" \
     --missive-url https://mail.missiveapp.com/#inbox/conversations/sample-conversation-1 \
     --title 'Sample support conversation' >/dev/null
+report_work_title "$sample_missive" 'Sample support conversation'
 
 sample_shell=$(create_tab sample-shell /tmp)
 sample_settled=$(create_tab sample-settled "$sample_cwd")
 settle_and_assert "$sample_settled"
 
-printf 'sample-linear: %s\n' "$sample_linear"
-printf 'sample-pr: %s\n' "$sample_pr"
-printf 'sample-missive: %s\n' "$sample_missive"
-printf 'sample-shell: %s\n' "$sample_shell"
-printf 'sample-settled: %s\n' "$sample_settled"
+if [[ $agents == true ]]; then
+    start_sample_agents
+fi
+panes_json=$(run_herdr pane list --workspace "$workspace_id")
+print_panes "$panes_json"
