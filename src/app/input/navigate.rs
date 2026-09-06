@@ -3614,7 +3614,7 @@ mod tests {
         assert_eq!(
             action_for_key(
                 &state,
-                TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()),
+                TerminalKey::new(KeyCode::Char('c'), KeyModifiers::SHIFT),
                 BindingDispatch::Prefix,
             ),
             Some(NavigateAction::OpenMissiveView)

@@ -10985,8 +10985,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn missive_group_headers_use_indexed_subject_assignment_and_state() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::Missive;
-        app.sidebar_work_filter.missive.assignee = None;
-        app.sidebar_work_filter.missive.show_closed = true;
         app.work_index_snapshot
             .as_mut()
             .expect("work index snapshot")
@@ -11014,7 +11012,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 subject: "Needs owner".into(),
                 app_url: CONVERSATION_B.into(),
                 web_url: CONVERSATION_B.into(),
-                assignees: Vec::new(),
+                assignees: vec![crate::work_index::MissiveUser {
+                    id: "ada".into(),
+                    name: "Ada".into(),
+                    email: None,
+                    is_me: false,
+                }],
                 last_activity_at: None,
                 closed: false,
                 messages: Vec::new(),
@@ -11024,6 +11027,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             },
         ];
 
+        app.work_index_session.missive.viewer = Some("Mina".into());
+        assert_eq!(
+            work_group_shape(&app),
+            vec![("unlinked".to_string(), 2, false)],
+            "closed and wrong-assignee conversations stay hidden"
+        );
+        app.sidebar_work_filter.missive.assignee = None;
+        app.sidebar_work_filter.missive.show_closed = true;
+
         let headers = rendered_nested_headers(&mut app, 120, 40);
         let closed = headers
             .iter()
@@ -11031,12 +11043,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap_or_else(|| panic!("indexed closed conversation header in {headers:?}"));
         assert!(closed.0.contains("● aaa111"), "{:?}", closed.0);
         assert_eq!(closed.1, Some(app.palette.work_status_done()));
-        let unassigned = headers
+        let open = headers
             .iter()
             .find(|(line, _)| line.contains("bbb222 · Needs"))
-            .expect("indexed unassigned conversation header");
-        assert!(unassigned.0.contains("◌ bbb222"), "{:?}", unassigned.0);
-        assert_eq!(unassigned.1, Some(app.palette.work_status_neutral()));
+            .expect("indexed open conversation header");
+        assert!(open.0.contains("○ bbb222"), "{:?}", open.0);
+        assert_eq!(open.1, Some(app.palette.work_status_open()));
     }
 
     #[test]

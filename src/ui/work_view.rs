@@ -52,7 +52,6 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
             observed_at,
         )
     });
-    let teammate_count = crate::work_index::missive_assignees(state.snapshot.as_ref()).len();
     let columns = if area.width >= 96 {
         Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
     } else {
@@ -70,16 +69,15 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
     let left_inner = left.inner(columns[0]);
     frame.render_widget(left, columns[0]);
     let cursor = if state.search_focused { "▏" } else { "" };
+    let query = if state.search.is_empty() {
+        "search conversations"
+    } else {
+        &state.search
+    };
+    let filter = if state.open_only { "open" } else { "all" };
+    let query_width = usize::from(left_inner.width).saturating_sub(filter.chars().count() + 9);
     let mut lines = vec![Line::styled(
-        format!(
-            " 🔍 {}{cursor}   ⚲ {}   {teammate_count} teammates",
-            if state.search.is_empty() {
-                "search conversations"
-            } else {
-                &state.search
-            },
-            if state.open_only { "open" } else { "all" }
-        ),
+        format!(" 🔍 {}{cursor}  ⚲ {filter}", fit_cell(query, query_width)),
         Style::default().fg(palette.subtext0),
     )];
     let message = if !state.enabled {
@@ -219,10 +217,9 @@ fn render_missive_detail(
             Style::default().fg(app.palette.accent),
         ));
     }
-    frame.render_widget(
-        Paragraph::new(lines).scroll((state.missive_detail_scroll, 0)),
-        area,
-    );
+    let max_scroll = lines.len().saturating_sub(usize::from(area.height));
+    let scroll = usize::from(state.missive_detail_scroll).min(max_scroll) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 
     if let Some(choice) = state.missive_start_menu {
         render_missive_start_menu(app, frame, area, choice);
@@ -1199,8 +1196,9 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
             " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more"
         }
         WorkProjection::Missive => {
-            if area.width >= 96 {
-                " / search   ↑/↓ move   PgUp/PgDn detail   f open/all   c start thread   o Open in Missive   r refresh"
+            let wide = " / search   ↑/↓ move   PgUp/PgDn detail   f open/all   c start thread   o Open in Missive   r refresh";
+            if crate::ui::text::display_width(wide) <= usize::from(area.width) {
+                wide
             } else {
                 " / search  ↑/↓ conversation  PgUp/PgDn detail  c start  o copy  r refresh"
             }
@@ -1744,6 +1742,19 @@ mod tests {
         let scrolled = rendered_text_at(&state, 80, 24);
         assert!(scrolled.contains("message body 6"), "{scrolled}");
         assert!(!scrolled.contains("message body 0"), "{scrolled}");
+
+        state.missive_detail_scroll = u16::MAX;
+        let clamped = rendered_text_at(&state, 80, 24);
+        assert!(clamped.contains("message body 9"), "{clamped}");
+    }
+
+    #[test]
+    fn missive_controls_fit_each_responsive_layout() {
+        for width in [96, 100, 128] {
+            let text = rendered_text_at(&missive_state(1), width, 24);
+            assert!(text.contains("⚲ open"), "width {width}: {text}");
+            assert!(text.contains("r refresh"), "width {width}: {text}");
+        }
     }
 
     #[test]

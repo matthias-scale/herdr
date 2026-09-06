@@ -755,7 +755,7 @@ pub struct KeysConfig {
     pub usage: BindingConfig,
     /// Open the Linear Tickets view. Default: "prefix+ctrl+t"
     pub tickets: BindingConfig,
-    /// Open the read-only Missive conversation view. Default: "prefix+m"
+    /// Open the read-only Missive conversation view. Default: "prefix+shift+c"
     pub missive: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
@@ -1604,7 +1604,7 @@ impl Default for KeysConfig {
             work: BindingConfig::one("prefix+ctrl+w"),
             usage: BindingConfig::one("prefix+ctrl+y"),
             tickets: BindingConfig::one("prefix+ctrl+t"),
-            missive: BindingConfig::one("prefix+m"),
+            missive: BindingConfig::one("prefix+shift+c"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),

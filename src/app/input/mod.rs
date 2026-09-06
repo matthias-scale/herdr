@@ -1451,7 +1451,13 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('o') if key.modifiers.is_empty() => self.copy_selected_missive_url(),
+            KeyCode::Char('o') if key.modifiers.is_empty() => {
+                if self.state.work_view.as_ref().is_some_and(|state| {
+                    state.projection == crate::app::state::WorkProjection::Missive
+                }) {
+                    self.copy_selected_missive_url();
+                }
+            }
             KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 self.next_work_index_refresh = std::time::Instant::now();
@@ -4978,6 +4984,18 @@ navigate_workspace_down = "ctrl+j"
                 .and_then(|view| view.hint.as_deref()),
             Some("Missive link copied")
         );
+
+        app.state.request_clipboard_write = None;
+        let view = app.state.work_view.as_mut().expect("work view");
+        view.projection = crate::app::state::WorkProjection::PullRequests;
+        view.hint = None;
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert!(app.state.request_clipboard_write.is_none());
+        assert!(app
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.hint.is_none()));
     }
 
     #[test]
