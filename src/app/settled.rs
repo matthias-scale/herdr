@@ -178,7 +178,9 @@ impl AppState {
                         .as_ref()
                         .is_some_and(|key| pane.settled_work_key.as_ref() != Some(key));
                     observed_work_keys.push((ws_idx, *pane_id, work_key.clone()));
-                    let inactive = pane.activity.inactive_for(now) >= self.settle_after;
+                    let inactive = self.auto_settle_inactive
+                        && pane.activity.inactive_for(now) >= self.settle_after;
+                    let new_work_trigger = self.auto_settle_finished && new_work_trigger;
                     if pane.settled_at.is_none() && (inactive || new_work_trigger) {
                         candidates.push((ws_idx, *pane_id, work_key));
                     }

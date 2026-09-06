@@ -694,6 +694,7 @@ impl App {
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
+            sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
@@ -972,6 +973,12 @@ impl App {
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
+            combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
+            hide_whitespace_in_diff: config.ui.hide_whitespace_in_diff,
+            new_thread_workspace: config.ui.new_thread_workspace,
+            add_project_start_dir: config.ui.add_project_start_dir.clone(),
+            auto_settle_finished: config.session.auto_settle_finished,
+            auto_settle_inactive: config.session.auto_settle_inactive,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
@@ -2010,6 +2017,8 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
+            self.state.auto_settle_finished = config.session.auto_settle_finished;
+            self.state.auto_settle_inactive = config.session.auto_settle_inactive;
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session
@@ -2080,6 +2089,15 @@ impl App {
                 self.state.right_click_passthrough_modifiers =
                     config.ui.right_click_passthrough_modifiers();
                 self.state.confirm_close = config.ui.confirm_close;
+                if self.state.combine_repos_across_hosts != config.ui.combine_repos_across_hosts {
+                    self.state.combine_repos_across_hosts = config.ui.combine_repos_across_hosts;
+                    self.state.mark_sidebar_projection_changed();
+                }
+                self.state.hide_whitespace_in_diff = config.ui.hide_whitespace_in_diff;
+                self.state.new_thread_workspace = config.ui.new_thread_workspace;
+                self.state
+                    .add_project_start_dir
+                    .clone_from(&config.ui.add_project_start_dir);
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;

@@ -272,6 +272,9 @@ impl AppState {
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
         {
             if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                if index != self.sidebar_settled_menu_selected {
+                    self.sidebar_settled_menu_delete_armed = false;
+                }
                 self.sidebar_settled_menu_selected = index;
             }
             return None;
@@ -282,6 +285,7 @@ impl AppState {
                     return Some(MouseAction::SettledMenu { index });
                 }
                 self.sidebar_settled_menu_target = None;
+                self.sidebar_settled_menu_delete_armed = false;
             }
             return None;
         }

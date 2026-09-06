@@ -294,6 +294,12 @@ pub struct SessionConfig {
     pub reap_done_panes: bool,
     /// Settle panes with no activity after this many days. Default: 3.
     pub settle_after_days: u64,
+    /// Settle a pane when the work it is linked to finishes (its pull request
+    /// merged or closed, its ticket done). Default: true.
+    pub auto_settle_finished: bool,
+    /// Settle a pane that has been inactive for `settle_after_days`.
+    /// Default: true.
+    pub auto_settle_inactive: bool,
 }
 
 impl Default for SessionConfig {
@@ -304,6 +310,8 @@ impl Default for SessionConfig {
             reap_done_after_minutes: 4 * 60,
             reap_done_panes: true,
             settle_after_days: 3,
+            auto_settle_finished: true,
+            auto_settle_inactive: true,
         }
     }
 }
@@ -1176,6 +1184,33 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+/// Which workspace the Home composer preselects for a new thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NewThreadWorkspaceConfig {
+    /// Launch in the selected directory itself.
+    #[default]
+    CurrentCheckout,
+    /// Create a linked worktree first and launch there.
+    NewWorktree,
+}
+
+impl NewThreadWorkspaceConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentCheckout => "current_checkout",
+            Self::NewWorktree => "new_worktree",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CurrentCheckout => "current checkout",
+            Self::NewWorktree => "new worktree",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabBarPositionConfig {
@@ -1213,8 +1248,21 @@ pub struct UiConfig {
     pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
     pub mouse_scroll_lines: Option<NonZeroUsize>,
-    /// Ask for confirmation before closing a workspace. Default: true.
+    /// Ask for confirmation before closing a workspace, and before deleting a
+    /// settled thread from the sidebar menu. Default: true.
     pub confirm_close: bool,
+    /// Group workspaces that check out the same repository under one project
+    /// header even when their checkouts live on different hosts or roots.
+    /// Default: false, which keeps one header per checkout root.
+    pub combine_repos_across_hosts: bool,
+    /// Hide whitespace-only changes in the diff surface. Default: false.
+    pub hide_whitespace_in_diff: bool,
+    /// Workspace preselected in the Home composer for a new thread.
+    /// Default: current_checkout.
+    pub new_thread_workspace: NewThreadWorkspaceConfig,
+    /// Directory the add-project / directory picker starts in. Empty means the
+    /// last used directory, which is the current behaviour. Default: empty.
+    pub add_project_start_dir: String,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
     /// Ask for a workspace name before interactive creation. Default: false.
@@ -1537,6 +1585,10 @@ impl Default for UiConfig {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
+            combine_repos_across_hosts: false,
+            hide_whitespace_in_diff: false,
+            new_thread_workspace: NewThreadWorkspaceConfig::CurrentCheckout,
+            add_project_start_dir: String::new(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,

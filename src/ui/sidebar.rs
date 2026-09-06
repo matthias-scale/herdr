@@ -1020,6 +1020,26 @@ fn aggregate_tab_entries(
         .collect()
 }
 
+/// The key the sidebar groups a worktree space under.
+///
+/// Normally the space key, which is per checkout root, so the same repository
+/// cloned twice (a second host mounted locally, a second clone path) is two
+/// project headers. With `ui.combine_repos_across_hosts` the repo name alone is
+/// the key, so those checkouts collapse into one project.
+pub(crate) fn project_group_key(
+    app: &AppState,
+    space: &crate::workspace::WorktreeSpaceMembership,
+) -> String {
+    if !app.combine_repos_across_hosts {
+        return space.key.clone();
+    }
+    space
+        .repo_root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| space.key.clone())
+}
+
 pub(crate) fn workspace_parent_group_state(
     app: &AppState,
     ws_idx: usize,
@@ -1028,19 +1048,18 @@ pub(crate) fn workspace_parent_group_state(
     if space.is_linked_worktree {
         return None;
     }
+    let key = project_group_key(app, space);
     let member_count = app
         .workspaces
         .iter()
         .filter(|ws| {
             ws.worktree_space()
-                .is_some_and(|member| member.key == space.key)
+                .is_some_and(|member| project_group_key(app, member) == key)
         })
         .count();
     (member_count >= 2).then(|| {
-        (
-            space.key.clone(),
-            app.collapsed_space_keys.contains(&space.key),
-        )
+        let collapsed = app.collapsed_space_keys.contains(&key);
+        (key, collapsed)
     })
 }
 
@@ -1896,7 +1915,7 @@ pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
         .filter_map(|(idx, workspace)| {
             workspace
                 .worktree_space()
-                .is_some_and(|space| space.key == key)
+                .is_some_and(|space| project_group_key(app, space) == key)
                 .then_some(idx)
         })
         .collect()
@@ -1993,7 +2012,7 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         if let Some(space) = ws.worktree_space() {
             members_by_key
-                .entry(space.key.clone())
+                .entry(project_group_key(app, space))
                 .or_default()
                 .push(ws_idx);
         }
@@ -2021,15 +2040,16 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
         app.workspaces
             .get(idx)
             .and_then(|ws| ws.worktree_space())
-            .map(|space| space.key.clone())
+            .map(|space| project_group_key(app, space))
     });
 
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        let Some(space) = ws
+        let Some(group_key) = ws
             .worktree_space()
-            .filter(|space| grouped_keys.contains(&space.key))
+            .map(|space| project_group_key(app, space))
+            .filter(|key| grouped_keys.contains(key))
         else {
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
@@ -2038,11 +2058,11 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
             continue;
         };
 
-        if !emitted_groups.insert(space.key.clone()) {
+        if !emitted_groups.insert(group_key.clone()) {
             continue;
         }
 
-        let Some(members) = members_by_key.get(&space.key) else {
+        let Some(members) = members_by_key.get(&group_key) else {
             continue;
         };
         let Some(parent_idx) = members.iter().copied().find(|idx| {
@@ -2057,7 +2077,7 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
             });
             continue;
         };
-        let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
+        let collapsed = !force_expanded && app.collapsed_space_keys.contains(&group_key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
@@ -2066,7 +2086,7 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
         if collapsed {
             if let Some(active_idx) = visible_group_idx
                 .filter(|idx| *idx != parent_idx)
-                .filter(|_| active_group.as_deref() == Some(space.key.as_str()))
+                .filter(|_| active_group.as_deref() == Some(group_key.as_str()))
             {
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: active_idx,
@@ -3708,6 +3728,16 @@ pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
     "🗑 Delete",
 ];
 
+/// The delete row's label, which asks once before it closes the pane while
+/// `ui.confirm_close` is on.
+pub(crate) fn settled_menu_labels(app: &AppState) -> [&'static str; 4] {
+    let mut labels = SETTLED_MENU_LABELS;
+    if app.sidebar_settled_menu_delete_armed {
+        labels[3] = "🗑 Delete — press again to confirm";
+    }
+    labels
+}
+
 pub(crate) fn sidebar_settled_menu_layout(
     app: &AppState,
     area: Rect,
@@ -3772,7 +3802,7 @@ pub(super) fn render_sidebar_settled_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
-    let lines = SETTLED_MENU_LABELS
+    let lines = settled_menu_labels(app)
         .iter()
         .enumerate()
         .skip(layout.first_visible)

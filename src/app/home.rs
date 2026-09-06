@@ -470,6 +470,20 @@ impl HomeState {
         }
     }
 
+    /// A fresh composer whose workspace picker starts on the configured
+    /// default (`ui.new_thread_workspace`) rather than always on the current
+    /// checkout.
+    pub(crate) fn with_catalog_and_workspace(
+        catalog: HomeCatalog,
+        workspace: HomeWorkspace,
+    ) -> Self {
+        Self {
+            catalog,
+            workspace,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn replace_provider_catalog(&mut self, provider: HomeProviderCatalog) {
         let selected_agent = provider.agent == self.agent;
         self.catalog.replace(provider);
@@ -884,7 +898,7 @@ impl crate::app::state::AppState {
                 // Home and the inbox both want the whole frame; opening one puts
                 // the other away rather than stacking two overlays.
                 self.inbox = None;
-                Some(HomeState::with_catalog(self.home_catalog.clone()))
+                Some(self.new_home_state())
             }
         };
         if self.home.is_some() {
@@ -892,6 +906,24 @@ impl crate::app::state::AppState {
             // it on every frame and the render path must not run `git`.
             self.reset_home_ref_context(false);
         }
+    }
+
+    /// The workspace a freshly opened composer preselects, from
+    /// `ui.new_thread_workspace`.
+    pub(crate) fn default_home_workspace(&self) -> HomeWorkspace {
+        match self.new_thread_workspace {
+            crate::config::NewThreadWorkspaceConfig::CurrentCheckout => {
+                HomeWorkspace::CurrentCheckout
+            }
+            crate::config::NewThreadWorkspaceConfig::NewWorktree => HomeWorkspace::NewWorktree,
+        }
+    }
+
+    pub(crate) fn new_home_state(&self) -> HomeState {
+        HomeState::with_catalog_and_workspace(
+            self.home_catalog.clone(),
+            self.default_home_workspace(),
+        )
     }
 
     /// Open home as the launch screen, if the config wants it.
@@ -902,7 +934,7 @@ impl crate::app::state::AppState {
     /// is a concern of the thing that starts a session, not of the constructor.
     pub(crate) fn open_home_on_launch(&mut self, config: &crate::config::Config) {
         if config.ui.show_home_on_start {
-            self.home = Some(HomeState::with_catalog(self.home_catalog.clone()));
+            self.home = Some(self.new_home_state());
             self.inbox = None;
             self.reset_home_ref_context(false);
         }
@@ -918,7 +950,7 @@ impl crate::app::state::AppState {
         let mut home = self
             .home
             .take()
-            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+            .unwrap_or_else(|| self.new_home_state());
         home.prompt = activation.prompt;
         home.focus = Some(HomeFocus::Prompt);
         home.picker = None;
@@ -939,7 +971,7 @@ impl crate::app::state::AppState {
         let mut home = self
             .home
             .take()
-            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+            .unwrap_or_else(|| self.new_home_state());
         home.prompt.clear();
         home.directory = directory;
         home.workspace = workspace;
@@ -1192,6 +1224,7 @@ impl crate::app::state::AppState {
     }
 
     fn refresh_home_workspace_options(&mut self) {
+        let default_workspace = self.default_home_workspace();
         let directory = self.home_directory();
         let entries = super::worktrees::worktree_repo_root(&directory)
             .and_then(|repo_root| {
@@ -1202,7 +1235,7 @@ impl crate::app::state::AppState {
         if let Some(home) = self.home.as_mut() {
             home.workspace_options = options;
             if !home.workspace_options.contains(&home.workspace) {
-                home.workspace = HomeWorkspace::CurrentCheckout;
+                home.workspace = default_workspace;
             }
         }
     }
