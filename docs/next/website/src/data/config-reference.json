@@ -748,7 +748,7 @@
         {
           "key": "keys.missive",
           "type": "keybinding",
-          "default": "\"prefix+ctrl+m\"",
+          "default": "\"prefix+m\"",
           "description": "Open the read-only Missive conversations view."
         },
         {
