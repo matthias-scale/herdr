@@ -66,7 +66,6 @@ use self::{
         modal_action_from_key, ModalAction, ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
     },
     mouse::MouseAction,
-    settings::SettingsAction,
 };
 use super::state::{AppState, Mode};
 use super::App;
@@ -2587,29 +2586,7 @@ impl App {
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")
                     }
-                    MouseAction::Settings(action) => match action {
-                        SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                        SettingsAction::SaveStatusIndicators(style) => {
-                            self.save_status_indicators(style)
-                        }
-                        SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                        SettingsAction::SaveToastDelivery(delivery) => {
-                            self.save_toast_delivery(delivery)
-                        }
-                        SettingsAction::SaveAgentBorderLabels(enabled) => {
-                            self.save_agent_border_labels(enabled)
-                        }
-                        SettingsAction::SaveConfigEdit(edit) => self.save_config_edit(edit),
-                        SettingsAction::RestoreArchived(target) => {
-                            self.restore_archived_pane(&target);
-                        }
-                        SettingsAction::DeleteArchived(target) => {
-                            self.delete_archived_pane(&target);
-                        }
-                        SettingsAction::InstallRecommendedIntegrations => {
-                            self.install_recommended_integrations()
-                        }
-                    },
+                    MouseAction::Settings(action) => self.apply_settings_action(action),
                     // Home is a full-terminal overlay, but the sidebar sits
                     // outside it and its clicks fall through. Picking a session
                     // there used to move focus behind the overlay, leaving home

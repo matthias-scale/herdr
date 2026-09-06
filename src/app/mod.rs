@@ -34,6 +34,7 @@ mod runtime_mutations;
 mod session;
 pub(crate) mod settings_archive;
 pub(crate) mod settings_general;
+pub(crate) mod settings_keybindings;
 mod settled;
 pub mod state;
 mod terminal_targets;
@@ -1028,6 +1029,7 @@ impl App {
                 archive_delete_armed: false,
                 search: String::new(),
                 search_active: false,
+                keybind_capture: None,
             },
             tool_probes: crate::app::probes::ToolProbeState::Idle,
             integration_recommendations: crate::integration::integration_recommendations(),

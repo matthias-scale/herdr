@@ -72,7 +72,7 @@ pub(crate) fn settings_nav_scroll(app: &AppState, nav: Rect) -> usize {
     let selected = sections
         .iter()
         .position(|section| *section == app.settings.section)
-        .unwrap_or(0);
+        .unwrap_or_else(|| app.settings.section.index());
     if rows == 0 || selected < rows {
         0
     } else {
@@ -149,35 +149,6 @@ fn render_settings_general(app: &AppState, frame: &mut Frame, area: Rect) {
 // Keybindings
 // ---------------------------------------------------------------------------
 
-/// One row of the keybindings table. Headings are not selectable targets, they
-/// are only there so the table reads the way the help overlay does.
-pub(crate) struct KeybindingRow {
-    pub(crate) key: String,
-    pub(crate) label: String,
-    pub(crate) heading: bool,
-}
-
-/// The action-to-key table, including user-defined command bindings, from the
-/// same source the keybind help overlay reads.
-pub(crate) fn settings_keybinding_rows(app: &AppState) -> Vec<KeybindingRow> {
-    let mut rows = Vec::new();
-    for (group, entries) in super::keybind_help::keybind_help_groups(app) {
-        rows.push(KeybindingRow {
-            key: String::new(),
-            label: group.to_string(),
-            heading: true,
-        });
-        for (key, label) in entries {
-            rows.push(KeybindingRow {
-                key,
-                label: label.into_owned(),
-                heading: false,
-            });
-        }
-    }
-    rows
-}
-
 fn render_settings_keybindings(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let [title, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
@@ -188,14 +159,14 @@ fn render_settings_keybindings(app: &AppState, frame: &mut Frame, area: Rect) {
                 Style::default().fg(p.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   edit them under [keys] in the config file",
+                "   ↵ captures the next chord for the selected row",
                 Style::default().fg(p.overlay1),
             ),
         ])),
         title,
     );
 
-    let rows = settings_keybinding_rows(app);
+    let rows = crate::app::settings_keybindings::settings_keybinding_rows(app);
     let key_width = rows
         .iter()
         .map(|row| row.key.chars().count())
@@ -208,33 +179,52 @@ fn render_settings_keybindings(app: &AppState, frame: &mut Frame, area: Rect) {
         .selected
         .saturating_sub(visible.saturating_sub(1));
 
-    let lines = rows
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(visible)
-        .map(|(index, row)| {
-            if row.heading {
-                return Line::from(Span::styled(
-                    format!(" {}", row.label),
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ));
-            }
-            let selected = index == app.settings.list.selected;
-            let base = if selected {
-                Style::default().fg(p.text).bg(p.surface0)
-            } else {
-                Style::default().fg(p.subtext0)
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!(" {:<width$} ", row.key, width = key_width),
-                    base.fg(p.mauve).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(row.label.clone(), base),
-            ])
-        })
-        .collect::<Vec<_>>();
+    let capture = app.settings.keybind_capture.as_ref();
+    let mut lines = Vec::new();
+    for (index, row) in rows.iter().enumerate().skip(scroll).take(visible) {
+        if row.heading {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", row.label),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            )));
+            continue;
+        }
+        let selected = index == app.settings.list.selected;
+        let capturing = capture.is_some_and(|capture| capture.row == index);
+        let base = if selected {
+            Style::default().fg(p.text).bg(p.surface0)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+        let key = if capturing {
+            "press a chord".to_string()
+        } else {
+            row.key.clone()
+        };
+        let key_style = if capturing {
+            base.fg(p.yellow).add_modifier(Modifier::BOLD)
+        } else {
+            base.fg(p.mauve).add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:<width$} ", key, width = key_width.max(13)),
+                key_style,
+            ),
+            Span::styled(row.label.clone(), base),
+        ]));
+        // The refusal belongs on the row that caused it, not in a toast that
+        // outlives the capture.
+        if let Some(error) = capture
+            .filter(|capture| capture.row == index)
+            .and_then(|capture| capture.error.as_deref())
+        {
+            lines.push(Line::from(Span::styled(
+                format!("   {error}"),
+                Style::default().fg(p.red),
+            )));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), list);
 }
 
