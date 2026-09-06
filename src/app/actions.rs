@@ -3130,6 +3130,7 @@ impl AppState {
             | AppEvent::ConnectivityProbed { .. }
             | AppEvent::HomeCatalogRefreshed { .. }
             | AppEvent::HomeRefsRefreshed { .. }
+            | AppEvent::HomeGithubReposRefreshed { .. }
             | AppEvent::ToolProbesFinished { .. }
             | AppEvent::HomeCheckoutFinished { .. } => Vec::new(),
             AppEvent::PaneDied { pane_id } => {

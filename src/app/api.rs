@@ -107,6 +107,9 @@ impl App {
             AppEvent::HomeRefsRefreshed { repo_root, result } => {
                 self.handle_home_refs_refreshed(repo_root, result)
             }
+            AppEvent::HomeGithubReposRefreshed { owner, result } => {
+                self.handle_home_github_repos_refreshed(owner, result)
+            }
             AppEvent::ToolProbesFinished { probes } => self.handle_tool_probes_finished(probes),
             AppEvent::HomeCheckoutFinished { plan, result } => {
                 self.handle_home_checkout_finished(*plan, result)
@@ -279,6 +282,11 @@ impl App {
 
         if let AppEvent::HomeRefsRefreshed { repo_root, result } = ev {
             self.handle_home_refs_refreshed(repo_root, result);
+            return None;
+        }
+
+        if let AppEvent::HomeGithubReposRefreshed { owner, result } = ev {
+            self.handle_home_github_repos_refreshed(owner, result);
             return None;
         }
 
