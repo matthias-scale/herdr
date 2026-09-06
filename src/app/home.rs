@@ -157,7 +157,7 @@ impl HomeAccess {
 
     fn flags(self) -> &'static [&'static str] {
         match self {
-            Self::ClaudeDefault => &[],
+            Self::ClaudeDefault => &["--permission-mode", "default"],
             Self::ClaudeAcceptEdits => &["--permission-mode", "acceptEdits"],
             Self::ClaudePlan => &["--permission-mode", "plan"],
             Self::ClaudeBypass => &["--dangerously-skip-permissions"],
@@ -2335,7 +2335,15 @@ mod tests {
 
         assert_eq!(home.model, "default");
         assert_eq!(home.effort.as_deref(), Some("auto"));
-        assert_eq!(plan.argv, vec!["claude", "implement the retry cap"]);
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude",
+                "--permission-mode",
+                "default",
+                "implement the retry cap"
+            ]
+        );
     }
 
     #[test]
@@ -2554,6 +2562,8 @@ mod tests {
                 "claude-fable-5-1",
                 "--effort",
                 "high",
+                "--permission-mode",
+                "default",
                 "implement the retry cap",
             ]
         );
@@ -2579,7 +2589,11 @@ mod tests {
     #[test]
     fn access_modes_map_to_exact_provider_argv() {
         let cases = [
-            (Agent::Claude, HomeAccess::ClaudeDefault, Vec::<&str>::new()),
+            (
+                Agent::Claude,
+                HomeAccess::ClaudeDefault,
+                vec!["--permission-mode", "default"],
+            ),
             (
                 Agent::Claude,
                 HomeAccess::ClaudeAcceptEdits,
@@ -2689,6 +2703,8 @@ mod tests {
                 "claude",
                 "--model",
                 "claude-opus-5[1m]",
+                "--permission-mode",
+                "default",
                 "use the larger window",
             ]
         );
@@ -2712,6 +2728,8 @@ mod tests {
                 "claude-sonnet-5",
                 "--context-window",
                 "1m",
+                "--permission-mode",
+                "default",
                 "use the larger window",
             ]
         );
