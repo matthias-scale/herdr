@@ -324,6 +324,7 @@ impl App {
                     )?;
                 apply_home_work_context(
                     &mut terminal,
+                    &plan.work_context_patch,
                     plan.pr.as_ref(),
                     plan.ticket.as_ref(),
                     plan.missive.as_ref(),
@@ -370,6 +371,7 @@ impl App {
                 };
                 apply_home_work_context(
                     &mut terminal,
+                    &plan.work_context_patch,
                     plan.pr.as_ref(),
                     plan.ticket.as_ref(),
                     plan.missive.as_ref(),
@@ -755,21 +757,29 @@ fn terminal_agent_session_info(
 
 fn apply_home_work_context(
     terminal: &mut crate::terminal::TerminalState,
+    patch: &crate::work_context::PaneWorkContextPatch,
     pr: Option<&crate::app::home::HomePrContext>,
     ticket: Option<&crate::app::home::HomeTicketContext>,
     missive: Option<&crate::app::home::HomeMissiveContext>,
 ) -> std::io::Result<()> {
-    if pr.is_none() && ticket.is_none() && missive.is_none() {
+    let mut patch = patch.clone();
+    if patch.repo.is_none() {
+        patch.repo = pr.map(|pr| pr.repo.clone());
+    }
+    if patch.pr_urls.is_none() {
+        patch.pr_urls = pr.map(|pr| vec![pr.url.clone()]);
+    }
+    if patch.ticket_ids.is_none() {
+        patch.ticket_ids = ticket.map(|ticket| vec![ticket.identifier.clone()]);
+    }
+    if patch.missive_urls.is_none() {
+        patch.missive_urls = missive.map(|conversation| vec![conversation.web_url.clone()]);
+    }
+    if patch.is_empty() {
         return Ok(());
     }
     terminal
-        .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
-            repo: pr.map(|pr| pr.repo.clone()),
-            pr_urls: pr.map(|pr| vec![pr.url.clone()]),
-            ticket_ids: ticket.map(|ticket| vec![ticket.identifier.clone()]),
-            missive_urls: missive.map(|conversation| vec![conversation.web_url.clone()]),
-            ..Default::default()
-        })
+        .apply_manual_work_context_patch(patch)
         .map(|_| ())
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
@@ -1002,6 +1012,7 @@ mod tests {
             pr: None,
             ticket: None,
             missive: None,
+            work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],

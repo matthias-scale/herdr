@@ -1953,6 +1953,7 @@ mod tests {
             pr: None,
             ticket: None,
             missive: None,
+            work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
             target: HomeTarget::NewSpace,
             prompt: home.prompt.clone(),
             argv: vec!["codex".into(), "keep this prompt".into()],
