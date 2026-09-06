@@ -337,8 +337,22 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Pane scrollback lines to scroll per mouse wheel notch.
 # mouse_scroll_lines = 3
 
-# Ask for confirmation before closing a workspace
+# Ask for confirmation before closing a workspace, and before deleting a settled
+# thread from the sidebar menu or the settings archive.
 # confirm_close = true
+
+# Group workspaces that check out the same repository under one project header
+# even when their checkout roots differ.
+# combine_repos_across_hosts = false
+
+# Hide whitespace-only changes in the diff surface.
+# hide_whitespace_in_diff = false
+
+# Workspace preselected in the Home composer: "current_checkout" or "new_worktree".
+# new_thread_workspace = "current_checkout"
+
+# Directory the add-project picker starts in. Empty keeps the last used one.
+# add_project_start_dir = ""
 
 # Ask for a tab name before creating a new tab.
 # Set false to create tabs immediately with generated names.
@@ -461,6 +475,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # reap_done_panes = true
 # Move inactive or completed work into the Settled sidebar section after this many days.
 # settle_after_days = 3
+# Settle a pane when the work it is linked to finishes.
+# auto_settle_finished = true
+# Settle a pane that has only gone quiet for settle_after_days.
+# auto_settle_inactive = true
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.

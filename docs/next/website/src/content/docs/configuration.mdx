@@ -106,11 +106,17 @@ hide_done_after_minutes = 30
 reap_done_after_minutes = 240
 reap_done_panes = true
 settle_after_days = 3
+auto_settle_finished = true
+auto_settle_inactive = true
 ```
 
 Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose status is not Done. When the pane owns a linked Git worktree, Herdr removes that checkout only when it is clean and its commits are present on the configured upstream branch. Set `reap_done_panes = false` to keep automatic reaping disabled while retaining the Recently done section.
 
 Herdr moves panes into the collapsible Settled section when their primary pull request closes or merges, a linked ticket reaches Done, or they have no activity for `settle_after_days`. New pane input, output, or agent-state activity returns a settled pane to the active sidebar without stopping its terminal.
+
+The two triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, and `auto_settle_inactive = false` to stop settling panes that only went quiet. Both are on by default, and both are toggles in **Settings → General**.
+
+Settled panes are also listed in **Settings → Archive**, where `enter` restores one to the active sidebar and `d` closes it. When `ui.confirm_close` is on, `d` asks once before it closes anything.
 
 ## Remote attach
 
@@ -393,6 +399,35 @@ gpt-5.3-codex-spark = { input = 0.25, output = 2.0, cache_write = 0.25, cache_re
 
 Unknown model ids still count toward token and session totals. Their cost is shown
 as `—` until a pricing entry is added.
+
+### General settings keys
+
+Every row in **Settings → General** writes exactly one key. Herdr rewrites only
+that key and leaves the rest of the config file byte for byte as it was.
+
+```toml
+[ui]
+# Group workspaces that check out the same repository under one project header
+# even when their checkout roots differ, for example the same repo mounted from
+# two hosts. Default: false, one header per checkout root.
+combine_repos_across_hosts = false
+
+# Hide whitespace-only changes in the diff surface. Default: false.
+hide_whitespace_in_diff = false
+
+# Workspace preselected in the Home composer for a new thread.
+# "current_checkout" launches in the selected directory; "new_worktree" creates
+# a linked worktree first. Default: "current_checkout".
+new_thread_workspace = "current_checkout"
+
+# Directory the add-project picker starts in. Empty keeps the last used
+# directory, which is the default.
+add_project_start_dir = ""
+
+# Ask before closing a workspace, and before deleting a settled thread from the
+# sidebar menu or the settings archive. Default: true.
+confirm_close = true
+```
 
 ### Sidebar row layouts
 
