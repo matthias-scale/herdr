@@ -85,6 +85,11 @@ pub enum AppEvent {
         repo_root: std::path::PathBuf,
         result: Result<crate::app::home_refs::HomeRefCacheEntry, String>,
     },
+    /// GitHub repositories for the active add-project owner finished loading.
+    HomeGithubReposRefreshed {
+        owner: String,
+        result: Result<Vec<String>, String>,
+    },
     /// Background provider/integration probes for settings finished.
     ToolProbesFinished {
         probes: Vec<crate::app::probes::ToolProbe>,

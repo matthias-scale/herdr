@@ -932,6 +932,10 @@ impl HeadlessServer {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_git_action");
         }
+        if self.app.apply_add_project_clone_request() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_add_project_clone");
+        }
         if self.app.apply_user_action_request() {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_user_action");

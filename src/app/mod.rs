@@ -5,6 +5,7 @@
 //! - `input.rs` — key/mouse → action translation
 
 pub(crate) mod actions;
+mod add_project;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
@@ -860,6 +861,7 @@ impl App {
                 add_action_field_hit_areas: Vec::new(),
                 add_action_cancel_hit_area: Rect::default(),
                 add_action_save_hit_area: Rect::default(),
+                add_project_layout: crate::ui::add_project::AddProjectLayout::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,
@@ -1578,6 +1580,9 @@ impl App {
             }
 
             if self.apply_git_action_request() {
+                needs_render = true;
+            }
+            if self.apply_add_project_clone_request() {
                 needs_render = true;
             }
             if self.apply_user_action_request() {

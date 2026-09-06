@@ -8,6 +8,7 @@ use ratatui::{
 };
 use tokio::sync::Notify;
 
+pub(crate) mod add_project;
 mod dialogs;
 pub(crate) mod dock;
 #[path = "ui/dock/context.rs"]
@@ -50,6 +51,7 @@ pub(crate) mod work_list_detail;
 mod work_status;
 mod work_view;
 
+use self::add_project::render_add_project_overlay;
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
@@ -617,6 +619,10 @@ fn compute_view_internal(
     } else {
         user_actions::AddActionLayout::default()
     };
+    let add_project_layout = add_project::add_project_layout(
+        area,
+        app.home.as_ref().and_then(|home| home.add_project.as_ref()),
+    );
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
@@ -640,6 +646,7 @@ fn compute_view_internal(
         add_action_field_hit_areas: add_action_layout.fields,
         add_action_cancel_hit_area: add_action_layout.cancel,
         add_action_save_hit_area: add_action_layout.save,
+        add_project_layout,
         git_menu_button_hit_area,
         git_menu_popup_rect,
         git_menu_first_visible,
@@ -898,6 +905,10 @@ fn compute_mobile_view(
         add_action_field_hit_areas: Vec::new(),
         add_action_cancel_hit_area: Rect::default(),
         add_action_save_hit_area: Rect::default(),
+        add_project_layout: add_project::add_project_layout(
+            area,
+            app.home.as_ref().and_then(|home| home.add_project.as_ref()),
+        ),
         git_menu_button_hit_area: Rect::default(),
         git_menu_popup_rect: Rect::default(),
         git_menu_first_visible: 0,
@@ -1094,6 +1105,13 @@ fn render_with_runtime_registry_inner(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
         Mode::Terminal => {}
+    }
+    if app
+        .home
+        .as_ref()
+        .is_some_and(|home| home.add_project.is_some())
+    {
+        render_add_project_overlay(app, frame);
     }
     render_sidebar_group_menu(app, frame);
     render_sidebar_filter_menu(app, frame);

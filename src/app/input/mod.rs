@@ -609,6 +609,11 @@ impl App {
         let Some(home) = self.state.home.as_mut() else {
             return false;
         };
+        if let Some(project) = home.add_project.as_mut() {
+            project.push_text(text);
+            self.start_home_github_refresh_if_requested();
+            return true;
+        }
         if matches!(
             home.picker,
             Some(crate::app::home::HomePicker::Directory | crate::app::home::HomePicker::Ref)
@@ -640,6 +645,12 @@ impl App {
     fn handle_home_key_event(&mut self, event: KeyEvent) -> bool {
         if self.state.home.is_none() {
             return false;
+        }
+
+        if self.state.add_project_active() {
+            self.state.handle_add_project_key(event);
+            self.start_home_github_refresh_if_requested();
+            return true;
         }
 
         if let Some(picker) = self.state.home.as_ref().and_then(|home| home.picker) {
@@ -2882,6 +2893,12 @@ impl App {
             return;
         }
 
+        if self.state.add_project_active() {
+            self.state.handle_mouse(&mut self.terminal_runtimes, mouse);
+            self.start_home_github_refresh_if_requested();
+            return;
+        }
+
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
         if !handled_pane_double_click {
             self.focus_pane_before_mouse_press(mouse);
@@ -2892,6 +2909,7 @@ impl App {
         if !handled_pane_double_click {
             let action = self.state.handle_mouse(&mut self.terminal_runtimes, mouse);
             self.start_home_ref_refresh_if_requested();
+            self.start_home_github_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
                 self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
             }
