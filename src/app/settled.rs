@@ -127,16 +127,20 @@ impl AppState {
         changed
     }
 
-    pub(crate) fn observe_pane_output_at(
+    pub(crate) fn observe_pane_detection_snapshot_at(
         &mut self,
         pane_id: PaneId,
         revision: u64,
+        agent: Option<crate::detect::Agent>,
+        snapshot: &str,
         now: Instant,
     ) -> bool {
         let Some((ws_idx, pane)) = self.pane_state_mut(pane_id) else {
             return false;
         };
-        let activity = pane.activity.observe_content_revision(revision, now);
+        let activity = pane
+            .activity
+            .observe_detection_snapshot(revision, agent, snapshot, now);
         let changed = activity && pane.settled_at.take().is_some();
         if changed {
             let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -206,21 +210,31 @@ impl AppState {
 
 impl App {
     pub(crate) fn refresh_pane_settlement_at(&mut self, now: Instant) -> bool {
-        let revisions = self
+        let snapshots = self
             .state
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.tabs.iter())
             .flat_map(|tab| tab.panes.iter())
             .filter_map(|(pane_id, pane)| {
-                self.terminal_runtimes
-                    .get(&pane.attached_terminal_id)
-                    .map(|runtime| (*pane_id, runtime.content_revision()))
+                let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
+                let runtime = self.terminal_runtimes.get(&pane.attached_terminal_id)?;
+                let revision = runtime.content_revision();
+                let agent = terminal.effective_known_agent();
+                if !pane.activity.needs_detection_snapshot(revision, agent) {
+                    return None;
+                }
+                let content = runtime.detection_text();
+                let snapshot =
+                    crate::detect::manifest::non_chrome_activity_content(agent, &content);
+                Some((*pane_id, revision, agent, snapshot))
             })
             .collect::<Vec<_>>();
         let mut changed = false;
-        for (pane_id, revision) in revisions {
-            changed |= self.state.observe_pane_output_at(pane_id, revision, now);
+        for (pane_id, revision, agent, snapshot) in snapshots {
+            changed |= self
+                .state
+                .observe_pane_detection_snapshot_at(pane_id, revision, agent, &snapshot, now);
         }
         changed |= self.state.refresh_settled_panes_at(
             self.work_index_snapshot.as_ref(),
@@ -405,10 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn inactivity_settles_and_output_unsettles() {
+    fn inactivity_settles_and_detection_snapshot_change_unsettles() {
         let (mut state, pane_id) = state_with_context(Default::default());
         let now = Instant::now();
-        assert!(!state.observe_pane_output_at(pane_id, 0, now));
+        assert!(!state.observe_pane_detection_snapshot_at(pane_id, 1, None, "before", now));
         state.settle_after = Duration::from_secs(3 * 24 * 60 * 60);
         state.workspaces[0].tabs[0]
             .panes
@@ -418,8 +432,155 @@ mod tests {
             .set_last_at(now - state.settle_after);
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_002), 1);
 
-        assert!(state.observe_pane_output_at(pane_id, 1, now));
+        assert!(state.observe_pane_detection_snapshot_at(pane_id, 2, None, "after", now));
         assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn redraw_only_screen_update_keeps_settled_pane_and_inactivity_clock() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let now = Instant::now();
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .activity
+            .set_last_at(now);
+        let first_screen = "Done.\n\n────────────────────\n❯\n────────────────────\nstatus 10:41";
+        let second_screen = "Done.\n\n────────────────────\n❯\n────────────────────\nstatus 10:42";
+        assert_ne!(first_screen, second_screen);
+        let first = crate::detect::manifest::non_chrome_activity_content(
+            Some(crate::detect::Agent::Claude),
+            first_screen,
+        );
+        let second = crate::detect::manifest::non_chrome_activity_content(
+            Some(crate::detect::Agent::Claude),
+            second_screen,
+        );
+        assert_eq!(first, "Done.");
+        assert_eq!(first, second);
+        assert!(!state.observe_pane_detection_snapshot_at(
+            pane_id,
+            1,
+            Some(crate::detect::Agent::Claude),
+            &first,
+            now
+        ));
+        assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+
+        assert!(!state.observe_pane_detection_snapshot_at(
+            pane_id,
+            2,
+            Some(crate::detect::Agent::Claude),
+            &second,
+            now + Duration::from_secs(60)
+        ));
+        assert!(state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(now + Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn detected_agent_classifier_change_rebaselines_without_activity() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let now = Instant::now();
+        assert!(!state.observe_pane_detection_snapshot_at(
+            pane_id,
+            1,
+            None,
+            "────────────────────\n❯\n────────────────────\nstatus 10:41",
+            now,
+        ));
+        assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+
+        assert!(!state.observe_pane_detection_snapshot_at(
+            pane_id,
+            2,
+            Some(crate::detect::Agent::Claude),
+            "",
+            now + Duration::from_secs(1),
+        ));
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn delayed_claude_startup_chrome_keeps_settled_pane() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        let now = Instant::now();
+        let prompt_only = "────────────────────\n❯\n────────────────────\nstatus 10:41";
+        let with_startup = concat!(
+            "           Claude Code v2.1.263\n",
+            " ▐▛███▛█   Fable 5.1 with medium effort\n",
+            "▝▜██████▀  Claude Max\n",
+            "  ▝▝ ▝▝    ~/repo\n\n\n",
+            "                                ◐ medium · /effort\n",
+            "────────────────────\n❯\n────────────────────\nstatus 10:42",
+        );
+        let first = crate::detect::manifest::non_chrome_activity_content(
+            Some(crate::detect::Agent::Claude),
+            prompt_only,
+        );
+        let second = crate::detect::manifest::non_chrome_activity_content(
+            Some(crate::detect::Agent::Claude),
+            with_startup,
+        );
+        assert_eq!(first, "");
+        assert_eq!(first, second);
+        assert!(!state.observe_pane_detection_snapshot_at(
+            pane_id,
+            1,
+            Some(crate::detect::Agent::Claude),
+            &first,
+            now,
+        ));
+        assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+
+        assert!(!state.observe_pane_detection_snapshot_at(
+            pane_id,
+            2,
+            Some(crate::detect::Agent::Claude),
+            &second,
+            now + Duration::from_secs(60),
+        ));
+        assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn user_input_activity_clears_settled_pane() {
+        let (mut state, pane_id) = state_with_context(Default::default());
+        assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+
+        assert!(state.note_pane_activity_at(pane_id, Instant::now()));
+        assert!(!state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn transition_to_working_or_blocked_clears_settled_pane() {
+        for next_state in [AgentState::Working, AgentState::Blocked] {
+            let (mut state, pane_id) = state_with_context(Default::default());
+            assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+
+            state
+                .update_terminal_state(pane_id, |terminal| {
+                    Some(terminal.set_detected_state_with_screen_signals_at(
+                        Some(crate::detect::Agent::Claude),
+                        next_state,
+                        next_state == AgentState::Blocked,
+                        false,
+                        next_state == AgentState::Working,
+                        false,
+                        false,
+                        Instant::now(),
+                    ))
+                })
+                .expect("active agent transition");
+
+            assert!(!state.pane_is_settled(0, pane_id), "{next_state:?}");
+        }
     }
 
     #[test]

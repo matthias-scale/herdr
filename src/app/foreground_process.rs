@@ -477,6 +477,9 @@ impl crate::app::App {
                         now,
                     )
                 });
+            if process_changed {
+                self.state.note_pane_activity_at(observation.pane_id, now);
+            }
             if let Some(update) = update {
                 self.emit_pane_state_update(&update);
             }
@@ -973,6 +976,25 @@ mod tests {
         );
         assert!(app.foreground_process_refresh_in_flight.is_none());
         assert!(app.next_foreground_process_refresh > Instant::now());
+    }
+
+    #[test]
+    fn foreground_process_change_clears_settled_pane() {
+        let (mut app, pane_id, _) = app_with_test_pane("settled-foreground");
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        app.last_foreground_process_refresh_generation = 1;
+
+        assert!(app.handle_foreground_processes_refreshed(
+            1,
+            vec![ForegroundProcessObservation {
+                pane_id,
+                shell_pid: None,
+                process_name: Some("cargo".into()),
+                process_active: true,
+            }],
+        ));
+
+        assert!(!app.state.pane_is_settled(0, pane_id));
     }
 
     #[test]

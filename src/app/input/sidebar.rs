@@ -965,6 +965,22 @@ mod tests {
     }
 
     #[test]
+    fn settled_menu_resume_clears_settled_at() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+
+        app.apply_sidebar_settled_menu_action(0);
+
+        assert!(!app.state.pane_is_settled(0, target.pane_id));
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(target.pane_id)
+        );
+    }
+
+    #[test]
     fn settled_menu_opens_below_its_sidebar_row() {
         let mut app = app_for_mouse_test();
         let target = settled_target(&mut app);

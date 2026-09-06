@@ -7,12 +7,15 @@ const MAX_DISPLAY_DAYS: u64 = 999;
 
 /// Server-owned activity clock for one pane.
 ///
-/// The timestamp covers output, input, and agent-state changes. The content
-/// revision lets the periodic refresh turn PTY output into the same activity
-/// signal without coupling the terminal runtime to sidebar state.
+/// The timestamp covers user input, working or blocked agent transitions,
+/// foreground process changes, and changes to the terminal text above the
+/// agent's live UI chrome. Raw PTY writes do not advance it because idle agents
+/// repaint footers and status lines without doing new work.
 pub(crate) struct PaneActivity {
     last_at: Instant,
     content_revision: Option<u64>,
+    detection_agent: Option<crate::detect::Agent>,
+    detection_snapshot: Option<String>,
 }
 
 impl PaneActivity {
@@ -20,6 +23,8 @@ impl PaneActivity {
         Self {
             last_at: now,
             content_revision: None,
+            detection_agent: None,
+            detection_snapshot: None,
         }
     }
 
@@ -27,10 +32,31 @@ impl PaneActivity {
         self.last_at = now;
     }
 
-    pub(crate) fn observe_content_revision(&mut self, revision: u64, now: Instant) -> bool {
-        let changed = match self.content_revision.replace(revision) {
-            Some(previous) => previous != revision,
-            None => revision > 0,
+    pub(crate) fn needs_detection_snapshot(
+        &self,
+        revision: u64,
+        agent: Option<crate::detect::Agent>,
+    ) -> bool {
+        self.content_revision != Some(revision) || self.detection_agent != agent
+    }
+
+    pub(crate) fn observe_detection_snapshot(
+        &mut self,
+        revision: u64,
+        agent: Option<crate::detect::Agent>,
+        snapshot: &str,
+        now: Instant,
+    ) -> bool {
+        let classifier_changed = self.detection_agent != agent;
+        self.content_revision = Some(revision);
+        self.detection_agent = agent;
+        if classifier_changed {
+            self.detection_snapshot = Some(snapshot.to_string());
+            return false;
+        }
+        let changed = match self.detection_snapshot.replace(snapshot.to_string()) {
+            Some(previous) => previous != snapshot,
+            None => false,
         };
         if changed {
             self.note(now);
