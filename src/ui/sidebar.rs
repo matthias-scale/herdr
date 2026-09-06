@@ -10995,10 +10995,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 app_url: CONVERSATION_A.into(),
                 web_url: CONVERSATION_A.into(),
                 assignees: vec![crate::work_index::MissiveUser {
-                    id: "ada".into(),
-                    name: "Ada".into(),
+                    id: "mina".into(),
+                    name: "Mina".into(),
                     email: None,
-                    is_me: false,
+                    is_me: true,
                 }],
                 last_activity_at: None,
                 closed: true,
@@ -11031,7 +11031,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             work_group_shape(&app),
             vec![("unlinked".to_string(), 2, false)],
-            "closed and wrong-assignee conversations stay hidden"
+            "closed viewer-assigned and open wrong-assignee conversations stay hidden"
         );
         app.sidebar_work_filter.missive.assignee = None;
         app.sidebar_work_filter.missive.show_closed = true;
