@@ -9711,6 +9711,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
         assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Pr));
         assert!(!app.dock_surface_override);
+
+        app.open_dock_surface(crate::app::DockSurface::Diff);
+        app.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        assert_eq!(app.dock_tab, Some(crate::app::DockSurface::Diff));
+        assert!(!app.dock_surface_override);
     }
 
     #[test]

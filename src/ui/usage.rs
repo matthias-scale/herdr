@@ -18,6 +18,15 @@ use crate::{
 };
 
 const BAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const COMPACT_HEADER_CONTROLS: [(UsageHitTarget, u16); 7] = [
+    (UsageHitTarget::Cost, 6),
+    (UsageHitTarget::Tokens, 8),
+    (UsageHitTarget::Hours24, 5),
+    (UsageHitTarget::Days7, 4),
+    (UsageHitTarget::Days30, 5),
+    (UsageHitTarget::Days90, 5),
+    (UsageHitTarget::Rescan, 1),
+];
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Totals {
@@ -89,7 +98,7 @@ pub(crate) fn layout(area: Rect) -> UsageLayout {
     let outer = Block::default().borders(Borders::ALL).inner(area);
     let narrow = outer.width < 80;
     let rows = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(header_rows(outer.width)),
         Constraint::Length(if narrow { 10 } else { 9 }),
         Constraint::Length(if narrow { 3 } else { 2 }),
         Constraint::Min(3),
@@ -114,6 +123,24 @@ pub(crate) fn layout(area: Rect) -> UsageLayout {
     }
 }
 
+fn header_rows(width: u16) -> u16 {
+    if width >= 49 {
+        return 2;
+    }
+    let mut control_rows = 1u16;
+    let mut used = 0u16;
+    for (_, control_width) in COMPACT_HEADER_CONTROLS {
+        let needed = control_width.saturating_add(u16::from(used > 0));
+        if used > 0 && used.saturating_add(needed) > width {
+            control_rows = control_rows.saturating_add(1);
+            used = control_width;
+        } else {
+            used = used.saturating_add(needed);
+        }
+    }
+    control_rows.saturating_add(1)
+}
+
 pub(crate) fn hit_areas(area: Rect) -> Vec<UsageHitArea> {
     let layout = layout(area);
     let mut areas = header_hit_areas(layout.header);
@@ -122,23 +149,39 @@ pub(crate) fn hit_areas(area: Rect) -> Vec<UsageHitArea> {
 }
 
 fn header_hit_areas(header: Rect) -> Vec<UsageHitArea> {
-    let mut x = header.right().saturating_sub(49).max(header.x);
-    let y = if header.width < 80 {
+    let compact = header.width < 49;
+    let controls = if compact {
+        COMPACT_HEADER_CONTROLS
+    } else {
+        [
+            (UsageHitTarget::Cost, 6),
+            (UsageHitTarget::Tokens, 8),
+            (UsageHitTarget::Hours24, 6),
+            (UsageHitTarget::Days7, 5),
+            (UsageHitTarget::Days30, 6),
+            (UsageHitTarget::Days90, 6),
+            (UsageHitTarget::Rescan, 3),
+        ]
+    };
+    let mut x = if compact {
+        header.x
+    } else {
+        header.right().saturating_sub(49).max(header.x)
+    };
+    let mut y = if header.width < 80 {
         header.y.saturating_add(1)
     } else {
         header.y
     };
-    let controls = [
-        (UsageHitTarget::Cost, 6),
-        (UsageHitTarget::Tokens, 8),
-        (UsageHitTarget::Hours24, 6),
-        (UsageHitTarget::Days7, 5),
-        (UsageHitTarget::Days30, 6),
-        (UsageHitTarget::Days90, 6),
-        (UsageHitTarget::Rescan, 3),
-    ];
     let mut areas = Vec::new();
     for (target, width) in controls {
+        if compact && x > header.x && x.saturating_add(width) > header.right() {
+            x = header.x;
+            y = y.saturating_add(1);
+        }
+        if y >= header.bottom() {
+            break;
+        }
         let width = width.min(header.right().saturating_sub(x));
         if width > 0 {
             areas.push(UsageHitArea {
