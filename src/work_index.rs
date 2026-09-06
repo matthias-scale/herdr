@@ -4124,6 +4124,8 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
         let path = dir.join("work-index.json");
         let snapshot = Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: Some("Linear observation timed out".to_string()),
             observed_at: SystemTime::now(),
         };
