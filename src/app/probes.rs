@@ -201,7 +201,9 @@ fn run_probe(spec: &ProbeSpec) -> ToolProbe {
             ToolProbeOutcome::TimedOut,
             format!("{} did not answer in 3s", spec.program),
         ),
-        Err(ProbeFailure::Failed(err)) => (ToolProbeOutcome::NeedsAttention, probe_detail_line(&err)),
+        Err(ProbeFailure::Failed(err)) => {
+            (ToolProbeOutcome::NeedsAttention, probe_detail_line(&err))
+        }
     };
     ToolProbe {
         label: spec.label,
@@ -257,7 +259,10 @@ mod tests {
 
     #[test]
     fn probe_detail_line_takes_the_first_non_empty_line() {
-        assert_eq!(probe_detail_line("\n\n  2.1.4 (Claude Code)\nmore\n"), "2.1.4 (Claude Code)");
+        assert_eq!(
+            probe_detail_line("\n\n  2.1.4 (Claude Code)\nmore\n"),
+            "2.1.4 (Claude Code)"
+        );
         assert_eq!(probe_detail_line(""), "");
     }
 

@@ -76,7 +76,11 @@ impl GeneralRow {
             Self::ProjectGrouping => on_off(state.combine_repos_across_hosts),
             Self::AutoSettleFinished => on_off(state.auto_settle_finished),
             Self::AutoSettleInactive => on_off(state.auto_settle_inactive),
-            Self::SettleAfterDays => state.settle_after.as_secs().div_ceil(24 * 60 * 60).to_string(),
+            Self::SettleAfterDays => state
+                .settle_after
+                .as_secs()
+                .div_ceil(24 * 60 * 60)
+                .to_string(),
             Self::HideWhitespace => on_off(state.hide_whitespace_in_diff),
             Self::NewThreadWorkspace => state.new_thread_workspace.label().to_string(),
             Self::AddProjectStartDir => {
@@ -235,6 +239,9 @@ mod tests {
     fn the_start_directory_row_is_not_editable_in_place() {
         let state = AppState::test_new();
         assert!(!GeneralRow::AddProjectStartDir.is_editable());
-        assert_eq!(cycle_general_row(&state, GeneralRow::AddProjectStartDir), None);
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::AddProjectStartDir),
+            None
+        );
     }
 }

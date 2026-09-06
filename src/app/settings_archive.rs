@@ -38,9 +38,7 @@ impl AppState {
                                 .clone()
                                 .or_else(|| context.session_name.clone())
                         })
-                        .or_else(|| {
-                            terminal.map(|terminal| terminal.cwd.display().to_string())
-                        })
+                        .or_else(|| terminal.map(|terminal| terminal.cwd.display().to_string()))
                         .unwrap_or_else(|| format!("{pane_id:?}"));
                     entries.push(ArchiveEntry {
                         target: PaneFocusTarget {

@@ -88,8 +88,7 @@ pub(crate) fn general_row_offsets() -> Vec<(u16, u16)> {
 
 fn render_settings_general(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-    let [title, list] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [title, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     frame.render_widget(
         Paragraph::new("general").style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
         title,
@@ -118,7 +117,10 @@ fn render_settings_general(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1)
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{} {label}", if selected { "▸" } else { " " }), label_style),
+            Span::styled(
+                format!("{} {label}", if selected { "▸" } else { " " }),
+                label_style,
+            ),
             Span::raw(" ".repeat(pad)),
             Span::styled(value, value_style),
         ]));
@@ -167,8 +169,7 @@ pub(crate) fn settings_keybinding_rows(app: &AppState) -> Vec<KeybindingRow> {
 
 fn render_settings_keybindings(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-    let [title, list] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [title, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -239,28 +240,21 @@ fn render_probe_section(
     description: &str,
 ) {
     let p = &app.palette;
-    let [heading, body] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    let [heading, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
                 title,
                 Style::default().fg(p.text).add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                description,
-                Style::default().fg(p.overlay1),
-            )),
+            Line::from(Span::styled(description, Style::default().fg(p.overlay1))),
         ]),
         heading,
     );
 
     if app.tool_probes_pending() {
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                " checking…",
-                Style::default().fg(p.overlay1),
-            )),
+            Paragraph::new(Span::styled(" checking…", Style::default().fg(p.overlay1))),
             body,
         );
         return;
@@ -293,8 +287,7 @@ fn render_probe_section(
 
 fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-    let [heading, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [heading, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     frame.render_widget(
         Paragraph::new("source control")
             .style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
@@ -337,8 +330,7 @@ fn render_settings_source_control(app: &AppState, frame: &mut Frame, area: Rect)
 
 fn render_settings_about(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-    let [heading, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [heading, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     frame.render_widget(
         Paragraph::new("about").style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
         heading,
@@ -369,8 +361,7 @@ fn render_settings_about(app: &AppState, frame: &mut Frame, area: Rect) {
 
 fn render_settings_archive(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-    let [heading, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [heading, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -425,7 +416,11 @@ fn render_settings_archive(app: &AppState, frame: &mut Frame, area: Rect) {
             };
             Line::from(vec![
                 Span::styled(
-                    format!("{} {:<14}", if selected { "▸" } else { " " }, entry.workspace),
+                    format!(
+                        "{} {:<14}",
+                        if selected { "▸" } else { " " },
+                        entry.workspace
+                    ),
                     style,
                 ),
                 Span::styled(entry.title.clone(), style),
@@ -537,9 +532,7 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
             "agent CLIs found on PATH",
         ),
         SettingsSection::Integrations => render_settings_integrations(app, frame, content_area),
-        SettingsSection::SourceControl => {
-            render_settings_source_control(app, frame, content_area)
-        }
+        SettingsSection::SourceControl => render_settings_source_control(app, frame, content_area),
         SettingsSection::Archive => render_settings_archive(app, frame, content_area),
         SettingsSection::About => render_settings_about(app, frame, content_area),
     }

@@ -947,10 +947,7 @@ impl crate::app::state::AppState {
         let Some(activation) = crate::ui::sidebar_work_group_activation(self, key) else {
             return false;
         };
-        let mut home = self
-            .home
-            .take()
-            .unwrap_or_else(|| self.new_home_state());
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt = activation.prompt;
         home.focus = Some(HomeFocus::Prompt);
         home.picker = None;
@@ -968,10 +965,7 @@ impl crate::app::state::AppState {
         directory: PathBuf,
         workspace: HomeWorkspace,
     ) {
-        let mut home = self
-            .home
-            .take()
-            .unwrap_or_else(|| self.new_home_state());
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt.clear();
         home.directory = directory;
         home.workspace = workspace;
