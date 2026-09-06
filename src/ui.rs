@@ -119,7 +119,8 @@ pub(crate) use self::{
         remove_worktree_popup_rect, rename_button_rects,
     },
     settings::{
-        settings_button_rects, settings_popup_height, settings_show_primary_action,
+        general_row_offsets, settings_areas, settings_button_rects, settings_keybinding_rows,
+        settings_nav_scroll, settings_popup_height, settings_show_primary_action,
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{

@@ -901,11 +901,15 @@ mod tests {
             app.state.select_settled_menu_action(0),
             Some(super::SettledMenuAction::Resume(target.clone()))
         );
+        // Delete asks once while ui.confirm_close is on.
         app.state.sidebar_settled_menu_target = Some(target.clone());
+        assert_eq!(app.state.select_settled_menu_action(3), None);
+        assert!(app.state.sidebar_settled_menu_delete_armed);
         assert_eq!(
             app.state.select_settled_menu_action(3),
             Some(super::SettledMenuAction::Delete(target.clone()))
         );
+        assert!(!app.state.sidebar_settled_menu_delete_armed);
 
         for (index, expected_workspace) in [
             (1, crate::app::home::HomeWorkspace::CurrentCheckout),
@@ -928,6 +932,36 @@ mod tests {
             assert_eq!(plan.directory, directory);
             assert_eq!(plan.workspace, expected_workspace);
         }
+    }
+
+    #[test]
+    fn settled_menu_delete_is_immediate_when_confirmation_is_off() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.confirm_close = false;
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+
+        assert_eq!(
+            app.state.select_settled_menu_action(3),
+            Some(super::SettledMenuAction::Delete(target))
+        );
+    }
+
+    #[test]
+    fn settled_menu_delete_disarms_when_another_row_is_pressed() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+
+        assert_eq!(app.state.select_settled_menu_action(3), None);
+        assert_eq!(
+            app.state.select_settled_menu_action(0),
+            Some(super::SettledMenuAction::Resume(target.clone()))
+        );
+        assert!(!app.state.sidebar_settled_menu_delete_armed);
+
+        app.state.sidebar_settled_menu_target = Some(target);
+        assert_eq!(app.state.select_settled_menu_action(3), None);
     }
 
     #[test]

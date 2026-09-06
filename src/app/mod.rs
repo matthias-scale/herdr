@@ -23,6 +23,8 @@ pub(crate) mod home;
 pub(crate) mod home_catalog;
 pub(crate) mod home_refs;
 pub(crate) mod probes;
+pub(crate) mod settings_archive;
+pub(crate) mod settings_general;
 mod ids;
 pub(crate) mod inbox;
 mod input;
@@ -1023,6 +1025,7 @@ impl App {
                 list: state::SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
+                archive_delete_armed: false,
             },
             tool_probes: crate::app::probes::ToolProbeState::Idle,
             integration_recommendations: crate::integration::integration_recommendations(),
