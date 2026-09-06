@@ -107,6 +107,44 @@ use crate::workspace::Workspace;
 // Theme palette — all UI colors in one place, ready for theming
 // ---------------------------------------------------------------------------
 
+/// Group-header status colours (F12-3): the glyph tint for a Linear ticket
+/// state, a pull request state, or a Missive conversation state.
+///
+/// Every entry is an override. `None` follows the theme tone named on the
+/// accessor, so a theme that retints `yellow` retints "in progress" with it
+/// and only a user who wants a different status vocabulary has to say so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkStatusColors {
+    /// Backlog, todo, draft, closed, cancelled, unassigned.
+    pub neutral: Option<Color>,
+    /// In progress.
+    pub active: Option<Color>,
+    /// In review.
+    pub review: Option<Color>,
+    /// Done, closed conversation.
+    pub done: Option<Color>,
+    /// Triage.
+    pub triage: Option<Color>,
+    /// Merged pull request.
+    pub merged: Option<Color>,
+    /// Open pull request, open conversation.
+    pub open: Option<Color>,
+}
+
+impl WorkStatusColors {
+    /// Every entry unset: the built-in themes tint status glyphs from their
+    /// own tokens rather than carrying a second copy of them.
+    pub const DEFAULT: Self = Self {
+        neutral: None,
+        active: None,
+        review: None,
+        done: None,
+        triage: None,
+        merged: None,
+        open: None,
+    };
+}
+
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +185,8 @@ pub struct Palette {
     pub teal: Color,
     /// Interrupted / warning states.
     pub peach: Color,
+    /// Group-header status glyph colours. Unset entries follow the theme.
+    pub work_status: WorkStatusColors,
 }
 
 /// Resolve a ratatui color to concrete channels for legibility decisions.
@@ -233,6 +273,7 @@ impl Palette {
             blue: Color::Rgb(137, 180, 250),
             teal: Color::Rgb(148, 226, 213),
             peach: Color::Rgb(250, 179, 135),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -256,6 +297,7 @@ impl Palette {
             blue: Color::Rgb(30, 102, 245),
             teal: Color::Rgb(23, 146, 153),
             peach: Color::Rgb(254, 100, 11),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -279,6 +321,7 @@ impl Palette {
             blue: Color::Blue,
             teal: Color::Cyan,
             peach: Color::Yellow,
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -302,6 +345,7 @@ impl Palette {
             blue: Color::Rgb(122, 162, 247),
             teal: Color::Rgb(125, 207, 255),
             peach: Color::Rgb(255, 158, 100),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -325,6 +369,7 @@ impl Palette {
             blue: Color::Rgb(46, 125, 233),
             teal: Color::Rgb(17, 140, 116),
             peach: Color::Rgb(177, 92, 0),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -348,6 +393,7 @@ impl Palette {
             blue: Color::Rgb(139, 233, 253), // cyan-ish
             teal: Color::Rgb(139, 233, 253),
             peach: Color::Rgb(255, 184, 108),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -374,6 +420,7 @@ impl Palette {
             blue: Color::Rgb(129, 161, 193),
             teal: Color::Rgb(143, 188, 187),
             peach: Color::Rgb(208, 135, 112),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -397,6 +444,7 @@ impl Palette {
             blue: Color::Rgb(131, 165, 152),
             teal: Color::Rgb(142, 192, 124),
             peach: Color::Rgb(254, 128, 25),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -420,6 +468,7 @@ impl Palette {
             blue: Color::Rgb(7, 102, 120),
             teal: Color::Rgb(66, 123, 88),
             peach: Color::Rgb(175, 58, 3),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -443,6 +492,7 @@ impl Palette {
             blue: Color::Rgb(97, 175, 239),
             teal: Color::Rgb(86, 182, 194),
             peach: Color::Rgb(209, 154, 102),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -466,6 +516,7 @@ impl Palette {
             blue: Color::Rgb(64, 120, 242),
             teal: Color::Rgb(1, 132, 188),
             peach: Color::Rgb(152, 104, 1),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -489,6 +540,7 @@ impl Palette {
             blue: Color::Rgb(113, 183, 255),
             teal: Color::Rgb(57, 197, 207),
             peach: Color::Rgb(255, 183, 87),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -512,6 +564,7 @@ impl Palette {
             blue: Color::Rgb(3, 73, 180),
             teal: Color::Rgb(27, 124, 131),
             peach: Color::Rgb(112, 44, 0),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -535,6 +588,7 @@ impl Palette {
             blue: Color::Rgb(38, 139, 210),
             teal: Color::Rgb(42, 161, 152),
             peach: Color::Rgb(203, 75, 22),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -558,6 +612,7 @@ impl Palette {
             blue: Color::Rgb(38, 139, 210),
             teal: Color::Rgb(42, 161, 152),
             peach: Color::Rgb(203, 75, 22),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -581,6 +636,7 @@ impl Palette {
             blue: Color::Rgb(126, 156, 216),
             teal: Color::Rgb(127, 180, 202),
             peach: Color::Rgb(255, 160, 102),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -604,6 +660,7 @@ impl Palette {
             blue: Color::Rgb(77, 105, 155),
             teal: Color::Rgb(78, 140, 162),
             peach: Color::Rgb(204, 109, 0),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -627,6 +684,7 @@ impl Palette {
             blue: Color::Rgb(49, 116, 143),    // pine
             teal: Color::Rgb(156, 207, 216),   // foam
             peach: Color::Rgb(234, 154, 151),  // rose
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -650,6 +708,7 @@ impl Palette {
             blue: Color::Rgb(40, 105, 131),
             teal: Color::Rgb(86, 148, 159),
             peach: Color::Rgb(215, 130, 126),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -673,6 +732,7 @@ impl Palette {
             blue: Color::Rgb(176, 176, 176),
             teal: Color::Rgb(102, 221, 204),
             peach: Color::Rgb(255, 199, 153),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -697,6 +757,43 @@ impl Palette {
     }
 
     /// Resolve a theme by name. Returns None for unknown names.
+    /// Status glyph colour for backlog, todo, draft, closed, cancelled and
+    /// unassigned work. Defaults to the muted chrome tone (gray).
+    pub fn work_status_neutral(&self) -> Color {
+        self.work_status.neutral.unwrap_or(self.overlay0)
+    }
+
+    /// Status glyph colour for work in progress. Defaults to yellow.
+    pub fn work_status_active(&self) -> Color {
+        self.work_status.active.unwrap_or(self.yellow)
+    }
+
+    /// Status glyph colour for work in review. Defaults to green.
+    pub fn work_status_review(&self) -> Color {
+        self.work_status.review.unwrap_or(self.green)
+    }
+
+    /// Status glyph colour for finished work. Defaults to blue.
+    pub fn work_status_done(&self) -> Color {
+        self.work_status.done.unwrap_or(self.blue)
+    }
+
+    /// Status glyph colour for triage. Defaults to orange.
+    pub fn work_status_triage(&self) -> Color {
+        self.work_status.triage.unwrap_or(self.peach)
+    }
+
+    /// Status glyph colour for a merged pull request. Defaults to purple.
+    pub fn work_status_merged(&self) -> Color {
+        self.work_status.merged.unwrap_or(self.mauve)
+    }
+
+    /// Status glyph colour for an open pull request or conversation.
+    /// Defaults to green.
+    pub fn work_status_open(&self) -> Color {
+        self.work_status.open.unwrap_or(self.green)
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
             "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
@@ -782,6 +879,27 @@ impl Palette {
         }
         if let Some(c) = &custom.peach {
             self.peach = parse_color(c);
+        }
+        if let Some(c) = &custom.work_status_neutral {
+            self.work_status.neutral = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_active {
+            self.work_status.active = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_review {
+            self.work_status.review = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_done {
+            self.work_status.done = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_triage {
+            self.work_status.triage = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_merged {
+            self.work_status.merged = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_open {
+            self.work_status.open = Some(parse_color(c));
         }
         self
     }
