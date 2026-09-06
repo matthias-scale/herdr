@@ -7,7 +7,7 @@
 
 use crate::app::state::{WorkItemKey, WorkProjection, WorkViewState};
 use crate::work_context::repo_slugs_match;
-use crate::work_index::{Snapshot, WorkItem};
+use crate::work_index::{Snapshot, WorkIndexUnavailable, WorkItem};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,7 +524,7 @@ pub(crate) struct DockHomeProjection {
     pub(crate) unbound_prs: Option<usize>,
     pub(crate) unbound_tickets: Option<usize>,
     pub(crate) observed_at: Option<std::time::SystemTime>,
-    pub(crate) unavailable: Option<String>,
+    pub(crate) unavailable: Option<WorkIndexUnavailable>,
     /// Whether the work index is configured on. Without it, "switched off" and
     /// "on but nothing observed yet" render as the same `unknown`.
     pub(crate) index_enabled: bool,

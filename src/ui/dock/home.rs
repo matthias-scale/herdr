@@ -869,7 +869,11 @@ fn ticket_detail_lines(
 }
 
 fn observed_line(projection: &DockHomeProjection, now: SystemTime) -> String {
-    if let Some(reason) = projection.unavailable.as_deref() {
+    if let Some(reason) = projection
+        .unavailable
+        .as_ref()
+        .map(crate::work_index::WorkIndexUnavailable::summary)
+    {
         return format!("unavailable: {reason}");
     }
     let Some(observed_at) = projection.observed_at else {
@@ -1057,8 +1061,21 @@ pub(super) fn render_home(app: &AppState, frame: &mut Frame, area: Rect) {
         DockHomeSection::XPolls => projection.poll_rows.is_empty(),
     };
     if active_empty {
-        let reason = if let Some(reason) = projection.unavailable.as_deref() {
-            format!("unavailable: {reason}")
+        let unavailable_source = match app.dock_home_section {
+            DockHomeSection::Prs => Some(crate::work_index::WorkIndexSource::Github),
+            DockHomeSection::Tickets => Some(crate::work_index::WorkIndexSource::Linear),
+            DockHomeSection::XPolls => None,
+        };
+        let unavailable_reason = match unavailable_source {
+            Some(source) => projection
+                .unavailable
+                .as_ref()
+                .and_then(|unavailable| unavailable.reason(source))
+                .map(|reason| (source, reason)),
+            None => None,
+        };
+        let reason = if let Some((source, reason)) = unavailable_reason {
+            format!("unavailable: {}: {reason}", source.label())
         } else {
             match app.dock_home_section {
                 DockHomeSection::Prs => "no pr-bound panes",
@@ -1866,15 +1883,33 @@ mod tests {
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("Linear observation timed out".into()),
+            unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Linear,
+                "observation timed out",
+            )),
             observed_at: SystemTime::now(),
         });
         let unavailable = text(&render(&app, Rect::new(0, 0, 50, 12)));
         assert!(
-            unavailable.contains("unavailable: Linear observation timed out"),
+            unavailable.contains("unavailable: Linear: observation timed out"),
             "{unavailable:?}"
         );
         assert!(!unavailable.contains("no matching tickets"));
+
+        app.work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Github,
+            "rate limited",
+        ));
+        let healthy_empty = render(&app, Rect::new(0, 0, 50, 12));
+        let empty_line = line_text(&healthy_empty, TAB_ROWS);
+        assert!(empty_line.contains("no matching tickets"), "{empty_line:?}");
+        assert!(
+            !empty_line.contains("GitHub: rate limited"),
+            "{empty_line:?}"
+        );
     }
 
     #[test]
@@ -1907,12 +1942,15 @@ mod tests {
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("github timed out".into()),
+            unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Github,
+                "timed out",
+            )),
             observed_at: SystemTime::now(),
         });
         let terminal = render(&app, Rect::new(0, 0, 30, 10));
         let text = text(&terminal);
-        assert!(text.contains("unavailable: github timed out"), "{text:?}");
+        assert!(text.contains("unavailable: GitHub: timed out"), "{text:?}");
         assert!(!text.contains("observed"), "{text:?}");
     }
 

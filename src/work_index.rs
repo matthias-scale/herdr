@@ -330,6 +330,8 @@ pub(crate) struct MissiveConversation {
     pub(crate) last_activity_at: Option<SystemTime>,
     pub(crate) closed: bool,
     #[serde(default)]
+    pub(crate) pane_bound: bool,
+    #[serde(default)]
     pub(crate) messages: Vec<MissiveEntry>,
     #[serde(default)]
     pub(crate) notes: Vec<MissiveEntry>,
@@ -337,6 +339,95 @@ pub(crate) struct MissiveConversation {
     pub(crate) drafts: Vec<MissiveEntry>,
     #[serde(default)]
     pub(crate) posts: Vec<MissiveEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkIndexSource {
+    Github,
+    Linear,
+    Missive,
+}
+
+impl WorkIndexSource {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Github => "GitHub",
+            Self::Linear => "Linear",
+            Self::Missive => "Missive",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkIndexUnavailable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linear: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    missive: Option<String>,
+}
+
+impl WorkIndexUnavailable {
+    pub(crate) fn only(source: WorkIndexSource, reason: impl Into<String>) -> Self {
+        let mut unavailable = Self::default();
+        let reason = Self::normalized_reason(source, reason.into());
+        match source {
+            WorkIndexSource::Github => unavailable.github = Some(reason),
+            WorkIndexSource::Linear => unavailable.linear = Some(reason),
+            WorkIndexSource::Missive => unavailable.missive = Some(reason),
+        }
+        unavailable
+    }
+
+    fn record(&mut self, source: WorkIndexSource, reason: impl Into<String>) {
+        if self.is_empty() {
+            *self = Self::only(source, reason);
+            return;
+        }
+        let destination = match source {
+            WorkIndexSource::Github => &mut self.github,
+            WorkIndexSource::Linear => &mut self.linear,
+            WorkIndexSource::Missive => &mut self.missive,
+        };
+        if destination.is_none() {
+            *destination = Some(Self::normalized_reason(source, reason.into()));
+        }
+    }
+
+    fn normalized_reason(source: WorkIndexSource, reason: String) -> String {
+        reason
+            .strip_prefix(source.label())
+            .map(|reason| reason.trim_start_matches([' ', ':']).to_string())
+            .unwrap_or(reason)
+    }
+
+    pub(crate) fn reason(&self, source: WorkIndexSource) -> Option<&str> {
+        match source {
+            WorkIndexSource::Github => self.github.as_deref(),
+            WorkIndexSource::Linear => self.linear.as_deref(),
+            WorkIndexSource::Missive => self.missive.as_deref(),
+        }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        [
+            WorkIndexSource::Github,
+            WorkIndexSource::Linear,
+            WorkIndexSource::Missive,
+        ]
+        .into_iter()
+        .filter_map(|source| {
+            self.reason(source)
+                .map(|reason| format!("{}: {reason}", source.label()))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+    }
+
+    fn is_empty(&self) -> bool {
+        self.github.is_none() && self.linear.is_none() && self.missive.is_none()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,8 +449,23 @@ pub(crate) struct Snapshot {
     /// identity in a later session.
     #[serde(skip)]
     pub missive_users: Vec<MissiveUser>,
-    pub unavailable: Option<String>,
+    pub unavailable: Option<WorkIndexUnavailable>,
     pub observed_at: SystemTime,
+}
+
+impl Snapshot {
+    pub(crate) fn unavailable_reason(&self, source: WorkIndexSource) -> Option<&str> {
+        self.unavailable
+            .as_ref()
+            .and_then(|unavailable| unavailable.reason(source))
+    }
+
+    pub(crate) fn unavailable_summary(&self) -> Option<String> {
+        self.unavailable
+            .as_ref()
+            .map(WorkIndexUnavailable::summary)
+            .filter(|summary| !summary.is_empty())
+    }
 }
 
 /// Provider identities and assignable users observed by the work-index job.
@@ -692,6 +798,7 @@ fn parse_missive_conversation_for_user(
                     .is_some_and(|closed| !closed.is_null())
             })
             || closed_for_user,
+        pane_bound: false,
         id,
         app_url,
         web_url,
@@ -786,12 +893,28 @@ fn fetch_missive_snapshot(
     batch_deadline: Instant,
     target_timeout: Duration,
 ) -> Result<(Vec<MissiveConversation>, Vec<MissiveUser>), RefreshError> {
+    let pane_ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.missive_urls.iter())
+        .filter_map(|url| missive_conversation_id(url).map(str::to_string))
+        .collect::<HashSet<_>>();
     let configured = config
         .team
         .as_deref()
         .is_some_and(|team| !team.trim().is_empty());
     let token_available =
         std::env::var_os(&config.token_env).is_some_and(|value| !value.is_empty());
+    if !configured && !pane_ids.is_empty() {
+        return Err(RefreshError::Failed(
+            "Missive team is not configured".into(),
+        ));
+    }
+    if !token_available && !pane_ids.is_empty() {
+        return Err(RefreshError::Failed(format!(
+            "Missive token environment variable {} is not set",
+            config.token_env
+        )));
+    }
     if !configured || !token_available {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -825,27 +948,30 @@ fn fetch_missive_snapshot(
     )?;
     let mut conversations =
         parse_missive_conversations_for_user(&conversations_value, current_user_id);
-    let mut detail_ids = panes
-        .iter()
-        .flat_map(|pane| pane.work_context.missive_urls.iter())
-        .filter_map(|url| missive_conversation_id(url).map(str::to_string))
-        .collect::<HashSet<_>>();
+    for conversation in &mut conversations {
+        conversation.pane_bound = pane_ids.contains(&conversation.id);
+    }
+    let mut detail_ids = pane_ids.clone();
     if let Some(selected) = selected_conversation {
         detail_ids.insert(selected.to_string());
     } else if let Some(first) = conversations.first() {
         detail_ids.insert(first.id.clone());
     }
     for id in detail_ids {
-        let Ok(detail) = fetch_missive_conversation_detail(
+        let detail = fetch_missive_conversation_detail(
             &id,
             current_user_id,
             config,
             program,
             batch_deadline,
             target_timeout,
-        ) else {
-            continue;
+        );
+        let mut detail = match detail {
+            Ok(detail) => detail,
+            Err(error) if pane_ids.contains(&id) => return Err(error),
+            Err(_) => continue,
         };
+        detail.pane_bound = pane_ids.contains(&id);
         if let Some(index) = conversations
             .iter()
             .position(|conversation| conversation.id == detail.id)
@@ -857,6 +983,122 @@ fn fetch_missive_snapshot(
     }
     conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.last_activity_at));
     Ok((conversations, users))
+}
+
+fn work_index_repos(config: &WorkIndexConfig, panes: &[AgentInfo]) -> Vec<String> {
+    let mut repos: Vec<String> = Vec::new();
+    let candidates = config
+        .repos
+        .iter()
+        .filter_map(|repo| normalize_repo_slug(repo).ok())
+        .chain(
+            panes
+                .iter()
+                .filter_map(|pane| pane.work_context.repo.as_deref())
+                .filter_map(|repo| normalize_repo_slug(repo).ok()),
+        )
+        .chain(
+            panes
+                .iter()
+                .flat_map(|pane| pane.work_context.pr_urls.iter())
+                .filter_map(|url| repo_slug_from_pr_url(url)),
+        );
+    for candidate in candidates {
+        if !repos.iter().any(|repo| repo_slugs_match(repo, &candidate)) {
+            repos.push(candidate);
+        }
+    }
+    repos
+}
+
+fn pane_pr_urls(panes: &[AgentInfo]) -> Vec<String> {
+    let mut urls = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.pr_urls.iter().cloned())
+        .collect::<Vec<_>>();
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn pane_ticket_ids(panes: &[AgentInfo]) -> Vec<String> {
+    let mut ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.ticket_ids.iter())
+        .filter_map(|id| normalize_ticket_id(id).ok())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn previous_github(previous: Option<&Snapshot>) -> Vec<GithubPullRequest> {
+    previous
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .filter(|item| item.source.github)
+        .filter_map(|item| {
+            Some(GithubPullRequest {
+                repo: item.repo.clone(),
+                number: item.pr_number?,
+                url: item.pr_url.clone()?,
+                title: item.pr_title.clone()?,
+                body: item.ticket_ids.join(" "),
+                branch: item.branch.clone().unwrap_or_default(),
+                draft: item.draft,
+                state: item.pr_state.clone().unwrap_or_else(|| "open".into()),
+                review_decision: item.review_decision.clone(),
+                created_at: item.created_at,
+                updated_at: item.updated_at,
+                additions: item.additions,
+                deletions: item.deletions,
+                author: item.author.clone(),
+                assignees: item.assignees.clone(),
+                labels: item.labels.clone(),
+                check_state: item.check_state,
+                audience: item.audience,
+            })
+        })
+        .collect()
+}
+
+fn previous_linear(previous: Option<&Snapshot>) -> Vec<LinearTicket> {
+    let mut tickets = Vec::new();
+    for ticket in previous
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .filter(|item| item.source.linear)
+        .flat_map(|item| item.ticket_details.iter())
+    {
+        if !tickets
+            .iter()
+            .any(|existing: &LinearTicket| existing.identifier == ticket.identifier)
+        {
+            tickets.push(ticket.clone());
+        }
+    }
+    tickets
+}
+
+fn previous_missive(previous: Option<&Snapshot>, panes: &[AgentInfo]) -> Vec<MissiveConversation> {
+    let pane_ids = panes
+        .iter()
+        .flat_map(|pane| pane.work_context.missive_urls.iter())
+        .filter_map(|url| missive_conversation_id(url))
+        .collect::<HashSet<_>>();
+    previous
+        .map(|snapshot| {
+            snapshot
+                .conversations
+                .iter()
+                .cloned()
+                .map(|mut conversation| {
+                    conversation.pane_bound = pane_ids.contains(conversation.id.as_str());
+                    conversation
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -873,8 +1115,7 @@ pub(crate) fn refresh_work_index(
         config,
         &MissiveConfig::default(),
         panes,
-        None,
-        None,
+        WorkIndexRefreshContext::default(),
         now,
         batch_deadline,
         target_timeout,
@@ -884,12 +1125,18 @@ pub(crate) fn refresh_work_index(
     )
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorkIndexRefreshContext<'a> {
+    pub(crate) selected_missive: Option<&'a str>,
+    pub(crate) session_missive_users: Option<&'a [MissiveUser]>,
+    pub(crate) previous: Option<&'a Snapshot>,
+}
+
 pub(crate) fn refresh_work_index_with_missive(
     config: &WorkIndexConfig,
     missive: &MissiveConfig,
     panes: &[AgentInfo],
-    selected_missive: Option<&str>,
-    session_missive_users: Option<&[MissiveUser]>,
+    context: WorkIndexRefreshContext<'_>,
     now: Instant,
     batch_deadline: Instant,
     target_timeout: Duration,
@@ -897,38 +1144,66 @@ pub(crate) fn refresh_work_index_with_missive(
     linearis_program: &Path,
     curl_program: &Path,
 ) -> Snapshot {
+    let WorkIndexRefreshContext {
+        selected_missive,
+        session_missive_users,
+        previous,
+    } = context;
     if !config.enabled {
-        return unavailable_snapshot("work index disabled");
+        return Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::now(),
+        };
     }
 
-    let repos = config
-        .repos
-        .iter()
-        .filter_map(|repo| normalize_repo_slug(repo).ok())
-        .collect::<Vec<_>>();
-    let mut degraded: Option<String> = None;
+    let repos = work_index_repos(config, panes);
+    let mut degraded = WorkIndexUnavailable::default();
+    let previous_github = previous_github(previous);
     let mut github = Vec::new();
-    for repo in repos {
+    let mut listed_pr_urls = HashSet::new();
+    for repo in &repos {
         match fetch_github_pull_requests(
-            &repo,
+            repo,
             gh_program,
             target_deadline(batch_deadline, target_timeout),
         ) {
             Ok(mut values) => {
-                let authored = fetch_github_pr_numbers(
-                    &repo,
+                listed_pr_urls.extend(values.iter().map(|value| value.url.clone()));
+                let authored = match fetch_github_pr_numbers(
+                    repo,
                     gh_program,
                     &["--author", "@me"],
                     target_deadline(batch_deadline, target_timeout),
-                )
-                .unwrap_or_default();
-                let others = fetch_github_pr_numbers(
-                    &repo,
+                ) {
+                    Ok(numbers) => numbers,
+                    Err(RefreshError::TimedOut) => {
+                        degraded.record(WorkIndexSource::Github, "audience observation timed out");
+                        HashSet::new()
+                    }
+                    Err(RefreshError::Failed(message)) => {
+                        degraded.record(WorkIndexSource::Github, message);
+                        HashSet::new()
+                    }
+                };
+                let others = match fetch_github_pr_numbers(
+                    repo,
                     gh_program,
                     &["--search", "review-requested:@me OR mentions:@me"],
                     target_deadline(batch_deadline, target_timeout),
-                )
-                .unwrap_or_default();
+                ) {
+                    Ok(numbers) => numbers,
+                    Err(RefreshError::TimedOut) => {
+                        degraded.record(WorkIndexSource::Github, "audience observation timed out");
+                        HashSet::new()
+                    }
+                    Err(RefreshError::Failed(message)) => {
+                        degraded.record(WorkIndexSource::Github, message);
+                        HashSet::new()
+                    }
+                };
                 for value in &mut values {
                     value.audience = if authored.contains(&value.number) {
                         PrAudience::Authored
@@ -941,33 +1216,150 @@ pub(crate) fn refresh_work_index_with_missive(
                 github.append(&mut values)
             }
             Err(RefreshError::TimedOut) => {
-                return unavailable_snapshot("GitHub observation timed out")
+                degraded.record(WorkIndexSource::Github, "observation timed out");
+                github.extend(
+                    previous_github
+                        .iter()
+                        .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
+                        .cloned(),
+                );
             }
-            Err(RefreshError::Failed(message)) => return unavailable_snapshot(message),
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Github, message);
+                github.extend(
+                    previous_github
+                        .iter()
+                        .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
+                        .cloned(),
+                );
+            }
+        }
+    }
+    for url in pane_pr_urls(panes) {
+        if listed_pr_urls.contains(&url) {
+            continue;
+        }
+        match fetch_github_pull_request(
+            &url,
+            gh_program,
+            target_deadline(batch_deadline, target_timeout),
+        ) {
+            Ok(pull_request) => {
+                if let Some(index) = github
+                    .iter()
+                    .position(|existing| existing.url == pull_request.url)
+                {
+                    github[index] = pull_request;
+                } else {
+                    github.push(pull_request);
+                }
+            }
+            Err(RefreshError::TimedOut) => {
+                degraded.record(
+                    WorkIndexSource::Github,
+                    "pull request observation timed out",
+                );
+                if !github.iter().any(|pull_request| pull_request.url == url) {
+                    if let Some(pull_request) = previous_github
+                        .iter()
+                        .find(|pull_request| pull_request.url == url)
+                    {
+                        github.push(pull_request.clone());
+                    }
+                }
+            }
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Github, message);
+                if !github.iter().any(|pull_request| pull_request.url == url) {
+                    if let Some(pull_request) = previous_github
+                        .iter()
+                        .find(|pull_request| pull_request.url == url)
+                    {
+                        github.push(pull_request.clone());
+                    }
+                }
+            }
         }
     }
 
-    let tickets = match config.linear_team.as_deref() {
+    let previous_tickets = previous_linear(previous);
+    let mut listed_ticket_ids = HashSet::new();
+    let mut tickets = match config.linear_team.as_deref() {
         Some(team) if !team.trim().is_empty() => match fetch_linear_tickets(
             team,
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
         ) {
-            Ok(tickets) => tickets,
+            Ok(tickets) => {
+                listed_ticket_ids.extend(
+                    tickets
+                        .iter()
+                        .map(|ticket| ticket.identifier.to_ascii_uppercase()),
+                );
+                tickets
+            }
             // Neither a timeout nor a failure may throw away a live GitHub
             // half: 74 pull requests with no ticket edge still beat an empty
             // index. Degrade and name the cause instead.
             Err(RefreshError::TimedOut) => {
-                degraded = Some("Linear observation timed out".to_string());
-                Vec::new()
+                degraded.record(WorkIndexSource::Linear, "observation timed out");
+                previous_tickets.clone()
             }
             Err(RefreshError::Failed(message)) => {
-                degraded = Some(message);
-                Vec::new()
+                degraded.record(WorkIndexSource::Linear, message);
+                previous_tickets.clone()
             }
         },
         _ => Vec::new(),
     };
+    for identifier in pane_ticket_ids(panes) {
+        if listed_ticket_ids.contains(&identifier.to_ascii_uppercase()) {
+            continue;
+        }
+        match fetch_linear_ticket(
+            &identifier,
+            linearis_program,
+            target_deadline(batch_deadline, target_timeout),
+        ) {
+            Ok(ticket) => {
+                if let Some(index) = tickets.iter().position(|existing| {
+                    existing.identifier.eq_ignore_ascii_case(&ticket.identifier)
+                }) {
+                    tickets[index] = ticket;
+                } else {
+                    tickets.push(ticket);
+                }
+            }
+            Err(RefreshError::TimedOut) => {
+                degraded.record(WorkIndexSource::Linear, "ticket observation timed out");
+                if !tickets
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                {
+                    if let Some(ticket) = previous_tickets
+                        .iter()
+                        .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                    {
+                        tickets.push(ticket.clone());
+                    }
+                }
+            }
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Linear, message);
+                if !tickets
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                {
+                    if let Some(ticket) = previous_tickets
+                        .iter()
+                        .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&identifier))
+                    {
+                        tickets.push(ticket.clone());
+                    }
+                }
+            }
+        }
+    }
     let attachments = fetch_attachments(&tickets, linearis_program, batch_deadline, target_timeout);
     let (conversations, missive_users) = match fetch_missive_snapshot(
         missive,
@@ -980,12 +1372,12 @@ pub(crate) fn refresh_work_index_with_missive(
     ) {
         Ok(snapshot) => snapshot,
         Err(RefreshError::TimedOut) => {
-            degraded = degraded.or_else(|| Some("Missive observation timed out".into()));
-            (Vec::new(), Vec::new())
+            degraded.record(WorkIndexSource::Missive, "observation timed out");
+            (previous_missive(previous, panes), Vec::new())
         }
         Err(RefreshError::Failed(message)) => {
-            degraded = degraded.or(Some(message));
-            (Vec::new(), Vec::new())
+            degraded.record(WorkIndexSource::Missive, message);
+            (previous_missive(previous, panes), Vec::new())
         }
     };
 
@@ -1150,7 +1542,7 @@ pub(crate) fn refresh_work_index_with_missive(
         items,
         conversations,
         missive_users,
-        unavailable: degraded,
+        unavailable: (!degraded.is_empty()).then_some(degraded),
         observed_at: SystemTime::now(),
     }
 }
@@ -1173,16 +1565,6 @@ fn exit_detail(label: &str, output: &std::process::Output) -> String {
     match detail {
         Some(detail) => format!("{label} exited unsuccessfully: {detail}"),
         None => format!("{label} exited unsuccessfully"),
-    }
-}
-
-fn unavailable_snapshot(message: impl Into<String>) -> Snapshot {
-    Snapshot {
-        items: Vec::new(),
-        conversations: Vec::new(),
-        missive_users: Vec::new(),
-        unavailable: Some(message.into()),
-        observed_at: SystemTime::now(),
     }
 }
 
@@ -1338,6 +1720,65 @@ pub(crate) fn resolve_missive_assignees(users: &[MissiveUser]) -> ProviderDirect
     }
 }
 
+const GITHUB_PULL_REQUEST_SUMMARY_FIELDS: &str = "number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url";
+
+fn parse_github_pull_request(value: Value, fallback_repo: &str) -> Option<GithubPullRequest> {
+    let url = value.get("url")?.as_str()?.to_string();
+    Some(GithubPullRequest {
+        repo: repo_slug_from_pr_url(&url).unwrap_or_else(|| fallback_repo.to_string()),
+        number: value.get("number")?.as_u64()?,
+        url,
+        title: value.get("title")?.as_str()?.to_string(),
+        body: value_text(value.get("body")).unwrap_or_default(),
+        branch: value.get("headRefName")?.as_str()?.to_string(),
+        draft: value
+            .get("isDraft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        state: value
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("OPEN")
+            .to_ascii_lowercase(),
+        review_decision: value
+            .get("reviewDecision")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        created_at: value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        updated_at: value
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        additions: value.get("additions").and_then(Value::as_u64).unwrap_or(0),
+        deletions: value.get("deletions").and_then(Value::as_u64).unwrap_or(0),
+        author: value
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        assignees: value
+            .get("assignees")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|assignee| nested_text(Some(assignee), "login"))
+            .collect(),
+        labels: value
+            .get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| value_text(Some(label)))
+            .collect(),
+        check_state: pr_check_state(value.get("statusCheckRollup")),
+        audience: PrAudience::Unclassified,
+    })
+}
+
 fn fetch_github_pull_requests(
     repo: &str,
     program: &Path,
@@ -1354,7 +1795,7 @@ fn fetch_github_pull_requests(
         "--limit",
         "200",
         "--json",
-        "number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
+        GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
     ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
@@ -1375,63 +1816,45 @@ fn fetch_github_pull_requests(
         .map_err(|_| RefreshError::Failed("GitHub observation returned invalid JSON".into()))?;
     Ok(values
         .into_iter()
-        .filter_map(|value| {
-            let url = value.get("url")?.as_str()?.to_string();
-            Some(GithubPullRequest {
-                repo: repo_slug_from_pr_url(&url).unwrap_or_else(|| repo.to_string()),
-                number: value.get("number")?.as_u64()?,
-                url,
-                title: value.get("title")?.as_str()?.to_string(),
-                body: value_text(value.get("body")).unwrap_or_default(),
-                branch: value.get("headRefName")?.as_str()?.to_string(),
-                draft: value
-                    .get("isDraft")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                state: value
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("OPEN")
-                    .to_ascii_lowercase(),
-                review_decision: value
-                    .get("reviewDecision")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string),
-                created_at: value
-                    .get("createdAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                updated_at: value
-                    .get("updatedAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                additions: value.get("additions").and_then(Value::as_u64).unwrap_or(0),
-                deletions: value.get("deletions").and_then(Value::as_u64).unwrap_or(0),
-                author: value
-                    .get("author")
-                    .and_then(|author| author.get("login"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                assignees: value
-                    .get("assignees")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|assignee| nested_text(Some(assignee), "login"))
-                    .collect(),
-                labels: value
-                    .get("labels")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|label| value_text(Some(label)))
-                    .collect(),
-                check_state: pr_check_state(value.get("statusCheckRollup")),
-                audience: PrAudience::Unclassified,
-            })
-        })
+        .filter_map(|value| parse_github_pull_request(value, repo))
         .collect())
+}
+
+fn fetch_github_pull_request(
+    url: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<GithubPullRequest, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "pr",
+        "view",
+        url,
+        "--json",
+        GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("GitHub pull request observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "GitHub pull request observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("GitHub pull request observation returned invalid JSON".into())
+    })?;
+    let fallback_repo = repo_slug_from_pr_url(url).unwrap_or_default();
+    parse_github_pull_request(value, &fallback_repo).ok_or_else(|| {
+        RefreshError::Failed("GitHub pull request observation returned an invalid item".into())
+    })
 }
 
 fn fetch_github_pr_numbers(
@@ -1984,6 +2407,73 @@ fn fetch_linear_tickets(
     Ok(deduplicated)
 }
 
+fn parse_linear_ticket(value: &Value, group: TicketGroup) -> Option<LinearTicket> {
+    let identifier = normalize_ticket_id(value.get("identifier")?.as_str()?).ok()?;
+    Some(WorkTicket {
+        url: value_text(value.get("url")).or_else(|| linear_ticket_url(&identifier)),
+        identifier,
+        title: value_text(value.get("title")),
+        description: value_text(value.get("description")),
+        state: nested_text(value.get("state"), "name"),
+        assignee: nested_text(value.get("assignee"), "name"),
+        priority: value
+            .get("priority")
+            .and_then(Value::as_u64)
+            .and_then(|priority| u8::try_from(priority).ok()),
+        cycle: nested_text(value.get("cycle"), "name"),
+        group,
+        created_at: value
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        updated_at: value
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_system_time),
+        branch: value_text(value.get("branchName")),
+        labels: value
+            .get("labels")
+            .and_then(|labels| labels.get("nodes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| nested_text(Some(label), "name"))
+            .collect(),
+        parent: value.get("parent").and_then(format_linear_reference),
+        relations: format_linear_relations(value),
+    })
+}
+
+fn fetch_linear_ticket(
+    identifier: &str,
+    program: &Path,
+    deadline: Instant,
+) -> Result<LinearTicket, RefreshError> {
+    let mut command = crate::noninteractive_process::command(program);
+    command.args(["issues", "read", identifier]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
+        |error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                RefreshError::TimedOut
+            } else {
+                RefreshError::Failed(format!("Linear ticket observation failed: {error}"))
+            }
+        },
+    )?;
+    if !output.status.success() {
+        return Err(RefreshError::Failed(exit_detail(
+            "Linear ticket observation",
+            &output,
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
+        RefreshError::Failed("Linear ticket observation returned invalid JSON".into())
+    })?;
+    parse_linear_ticket(&value, TicketGroup::Assigned).ok_or_else(|| {
+        RefreshError::Failed("Linear ticket observation returned an invalid item".into())
+    })
+}
+
 fn ticket_group_rank(group: TicketGroup) -> u8 {
     match group {
         TicketGroup::Assigned => 0,
@@ -2059,42 +2549,7 @@ fn fetch_linear_ticket_group(
     };
     Ok(nodes
         .iter()
-        .filter_map(|node| {
-            let identifier = normalize_ticket_id(node.get("identifier")?.as_str()?).ok()?;
-            Some(WorkTicket {
-                url: linear_ticket_url(&identifier),
-                identifier,
-                title: value_text(node.get("title")),
-                description: value_text(node.get("description")),
-                state: nested_text(node.get("state"), "name"),
-                assignee: nested_text(node.get("assignee"), "name"),
-                priority: node
-                    .get("priority")
-                    .and_then(Value::as_u64)
-                    .and_then(|priority| u8::try_from(priority).ok()),
-                cycle: nested_text(node.get("cycle"), "name"),
-                group,
-                created_at: node
-                    .get("createdAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                updated_at: node
-                    .get("updatedAt")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_system_time),
-                branch: value_text(node.get("branchName")),
-                labels: node
-                    .get("labels")
-                    .and_then(|labels| labels.get("nodes"))
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|label| nested_text(Some(label), "name"))
-                    .collect(),
-                parent: node.get("parent").and_then(format_linear_reference),
-                relations: format_linear_relations(node),
-            })
-        })
+        .filter_map(|node| parse_linear_ticket(node, group))
         .collect())
 }
 
@@ -2385,8 +2840,28 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
     }
 }
 
+fn work_index_snapshot_path_for(
+    state_dir: &Path,
+    session_name: Option<&str>,
+) -> std::path::PathBuf {
+    state_dir.join("work-index").join(format!(
+        "{}.json",
+        session_name.unwrap_or(crate::session::DEFAULT_SESSION_NAME)
+    ))
+}
+
 pub(crate) fn work_index_snapshot_path() -> std::path::PathBuf {
-    crate::config::state_dir().join("work-index.json")
+    let session_name = crate::session::active_name();
+    work_index_snapshot_path_for(&crate::config::state_dir(), session_name.as_deref())
+}
+
+pub(crate) fn remove_session_snapshot(session_name: &str) -> io::Result<()> {
+    let path = work_index_snapshot_path_for(&crate::config::state_dir(), Some(session_name));
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
@@ -2520,6 +2995,8 @@ impl crate::app::App {
         }
         let config = self.work_index_config.clone();
         let panes = self.collect_agent_infos();
+        let mut session_config = config.clone();
+        session_config.repos = work_index_repos(&config, &panes);
         let selected_missive = self
             .state
             .work_view
@@ -2533,6 +3010,7 @@ impl crate::app::App {
         let missive = self.missive_config.clone();
         let session_missive_users =
             (!session.missive_users.is_empty()).then(|| session.missive_users.clone());
+        let previous_snapshot = self.work_index_snapshot.clone();
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
@@ -2540,8 +3018,11 @@ impl crate::app::App {
                     &config,
                     &missive,
                     &panes,
-                    selected_missive.as_deref(),
-                    session_missive_users.as_deref(),
+                    WorkIndexRefreshContext {
+                        selected_missive: selected_missive.as_deref(),
+                        session_missive_users: session_missive_users.as_deref(),
+                        previous: previous_snapshot.as_ref(),
+                    },
                     Instant::now(),
                     deadline,
                     WORK_INDEX_TARGET_TIMEOUT,
@@ -2550,7 +3031,7 @@ impl crate::app::App {
                     &curl_program,
                 );
                 let session = resolve_work_index_session(
-                    &config,
+                    &session_config,
                     session,
                     &snapshot.missive_users,
                     deadline,
@@ -3058,6 +3539,96 @@ esac
     }
 
     #[test]
+    fn pane_conversation_missing_from_list_is_fetched_and_marked_bound() {
+        let dir = fixture_dir("missive-pane-fallback");
+        let curl = dir.join("curl");
+        let log = dir.join("curl-argv.log");
+        write_executable(
+            &curl,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+for argument do url="$argument"; done
+case "$url" in
+  *"/users") printf '%s' '{{"users":[{{"id":"me","name":"Ada","me":true}}]}}' ;;
+  *"/conversations?team_all=team") printf '%s' '{{"conversations":[]}}' ;;
+  *"/conversations/pane-only/messages") printf '%s' '{{"messages":[]}}' ;;
+  *"/conversations/pane-only/drafts") printf '%s' '{{"drafts":[]}}' ;;
+  *"/conversations/pane-only/posts") printf '%s' '{{"posts":[]}}' ;;
+  *"/conversations/pane-only/comments") printf '%s' '{{"comments":[]}}' ;;
+  *"/conversations/pane-only") printf '%s' '{{"conversations":[{{"id":"pane-only","subject":"Pane conversation","web_url":"https://mail.missiveapp.com/#inbox/conversations/pane-only"}}]}}' ;;
+  *) exit 65 ;;
+esac
+"#,
+                log.display()
+            ),
+        );
+        let token_env = format!(
+            "HERDR_TEST_MISSIVE_TOKEN_{}",
+            crate::config::test_unique_suffix().replace('-', "_")
+        );
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set(&token_env, "test-token");
+        let config = MissiveConfig {
+            token_env,
+            team: Some("team".into()),
+            organization: None,
+        };
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/pane-only".into()],
+            ..Default::default()
+        });
+
+        let (conversations, _) = fetch_missive_snapshot(
+            &config,
+            &panes,
+            None,
+            None,
+            &curl,
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(2),
+        )
+        .expect("Missive pane fallback");
+
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].subject, "Pane conversation");
+        assert!(conversations[0].pane_bound);
+        let argv = std::fs::read_to_string(log).expect("curl argv");
+        assert!(argv.contains("/conversations/pane-only"));
+    }
+
+    #[test]
+    fn retained_missive_conversations_recompute_pane_binding() {
+        let previous = Snapshot {
+            items: Vec::new(),
+            conversations: vec![MissiveConversation {
+                id: "previous".into(),
+                subject: "Previous".into(),
+                app_url: "missive://previous".into(),
+                web_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+                assignees: Vec::new(),
+                last_activity_at: None,
+                closed: false,
+                pane_bound: true,
+                messages: Vec::new(),
+                notes: Vec::new(),
+                drafts: Vec::new(),
+                posts: Vec::new(),
+            }],
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        assert!(!previous_missive(Some(&previous), &[])[0].pane_bound);
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/previous".into()],
+            ..Default::default()
+        });
+        assert!(previous_missive(Some(&previous), &panes)[0].pane_bound);
+    }
+
+    #[test]
     fn missive_session_users_are_not_persisted() {
         let snapshot = Snapshot {
             items: Vec::new(),
@@ -3191,6 +3762,40 @@ esac
         }
     }
 
+    fn panes_with_context(context: crate::work_context::PaneWorkContext) -> Vec<AgentInfo> {
+        vec![AgentInfo {
+            terminal_id: "terminal".into(),
+            work_context: context,
+            name: Some("fixture".into()),
+            agent: Some("codex".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: Some("cx".into()),
+            agent_status: AgentStatus::Idle,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            screen_detection_skipped: false,
+            state_labels: HashMap::new(),
+            tokens: HashMap::new(),
+            gates: Vec::new(),
+            items: Vec::new(),
+            decisions: Vec::new(),
+            agent_session: None,
+            workspace_id: "workspace".into(),
+            tab_id: "tab".into(),
+            pane_id: "pane".into(),
+            focused: true,
+            launch_pending: false,
+            interactive_ready: true,
+            state_change_seq: 0,
+            cwd: None,
+            foreground_cwd: None,
+            revision: 0,
+        }]
+    }
+
     fn fake_programs(
         dir: &Path,
         gh: &str,
@@ -3201,6 +3806,185 @@ esac
         write_executable(&gh_path, gh);
         write_executable(&linearis_path, linearis);
         (gh_path, linearis_path)
+    }
+
+    #[test]
+    fn pane_declared_objects_are_fetched_with_empty_repo_config() {
+        let dir = fixture_dir("pane-fallback");
+        let gh_log = dir.join("gh-argv.log");
+        let linear_log = dir.join("linear-argv.log");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "pr list --repo pane/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[]' ;;
+  "pr list --repo pane/repo --state open"*) printf '%s' '[]' ;;
+  "pr view https://github.com/pane/repo/pull/77 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":77,"title":"Merged pane PR","body":"","state":"MERGED","headRefName":"issue/out-9","url":"https://github.com/pane/repo/pull/77"}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                gh_log.display()
+            ),
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "issues list"*) printf '%s' '{{"nodes":[]}}' ;;
+  "cycles list"*) printf '%s' '{{"nodes":[]}}' ;;
+  "issues read SCA-9999") printf '%s' '{{"identifier":"SCA-9999","title":"Outside filter","description":"full summary","state":{{"name":"Canceled"}},"assignee":{{"name":"other"}},"priority":1,"branchName":"issue/sca-9999"}}' ;;
+  "attachments list SCA-9999"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+                linear_log.display()
+            ),
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            repo: Some("pane/repo".into()),
+            pr_urls: vec!["https://github.com/pane/repo/pull/77".into()],
+            ticket_ids: vec!["SCA-9999".into()],
+            ..Default::default()
+        });
+        let mut config = config();
+        config.repos.clear();
+
+        let snapshot = refresh_work_index(
+            &config,
+            &panes,
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        let pull_request = snapshot
+            .items
+            .iter()
+            .find(|item| item.pr_url.as_deref() == Some("https://github.com/pane/repo/pull/77"))
+            .expect("pane pull request");
+        assert_eq!(pull_request.pr_title.as_deref(), Some("Merged pane PR"));
+        assert_eq!(pull_request.pr_state.as_deref(), Some("merged"));
+        assert!(pull_request.source.github && pull_request.source.pane);
+        let ticket = snapshot
+            .items
+            .iter()
+            .flat_map(|item| item.ticket_details.iter())
+            .find(|ticket| ticket.identifier == "SCA-9999")
+            .expect("pane ticket");
+        assert_eq!(ticket.title.as_deref(), Some("Outside filter"));
+        assert_eq!(ticket.description.as_deref(), Some("full summary"));
+        assert!(snapshot.items.iter().any(|item| {
+            item.source.linear && item.source.pane && item.ticket_ids == ["SCA-9999"]
+        }));
+        let gh_argv = std::fs::read_to_string(gh_log).expect("GitHub argv");
+        assert!(gh_argv.contains("pr list --repo pane/repo --state all"));
+        assert!(gh_argv.contains(&format!(
+            "pr view https://github.com/pane/repo/pull/77 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}"
+        )));
+        let linear_argv = std::fs::read_to_string(linear_log).expect("Linear argv");
+        assert!(linear_argv
+            .lines()
+            .any(|line| line == "issues read SCA-9999"));
+    }
+
+    #[test]
+    fn repo_union_deduplicates_config_pane_and_pull_request_repositories() {
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            repo: Some("owner/repo".into()),
+            pr_urls: vec![
+                "https://github.com/OWNER/repo/pull/1".into(),
+                "https://github.com/pane/other/pull/2".into(),
+            ],
+            ..Default::default()
+        });
+        let mut config = config();
+        config.repos = vec!["owner/repo".into(), "configured/only".into()];
+
+        assert_eq!(
+            work_index_repos(&config, &panes),
+            ["owner/repo", "configured/only", "pane/other"]
+        );
+    }
+
+    #[test]
+    fn failed_repository_does_not_discard_a_successful_pane_pull_request() {
+        let dir = fixture_dir("partial-repo-failure");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr list --repo good/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[{{"number":77,"title":"Fresh pane PR","body":"","state":"MERGED","headRefName":"issue/77","url":"https://github.com/good/repo/pull/77"}}]' ;;
+  "pr list --repo bad/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' 'rate limited' >&2; exit 42 ;;
+  *"--state open"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#
+            ),
+            "#!/bin/sh\nprintf '%s' '{\"nodes\":[]}'\n",
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            pr_urls: vec!["https://github.com/good/repo/pull/77".into()],
+            ..Default::default()
+        });
+        let mut config = config();
+        config.repos = vec!["good/repo".into(), "bad/repo".into()];
+
+        let snapshot = refresh_work_index(
+            &config,
+            &panes,
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        assert!(snapshot.items.iter().any(|item| {
+            item.pr_number == Some(77)
+                && item.pr_title.as_deref() == Some("Fresh pane PR")
+                && item.source.github
+                && item.source.pane
+        }));
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Github)
+            .is_some_and(|reason| reason.contains("rate limited")));
+    }
+
+    #[test]
+    fn github_audience_failure_is_named_without_discarding_pull_requests() {
+        let dir = fixture_dir("github-audience-failure");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr list --repo owner/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[{{"number":7,"title":"Visible PR","body":"","state":"OPEN","headRefName":"issue/7","url":"https://github.com/owner/repo/pull/7"}}]' ;;
+  *"--state open"*) printf '%s' 'audience unavailable' >&2; exit 42 ;;
+  *) exit 43 ;;
+esac
+"#
+            ),
+            "#!/bin/sh\nprintf '%s' '{\"nodes\":[]}'\n",
+        );
+
+        let snapshot = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        assert!(snapshot.items.iter().any(|item| item.pr_number == Some(7)));
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Github)
+            .is_some_and(|reason| reason.contains("audience unavailable")));
     }
 
     #[test]
@@ -4023,9 +4807,101 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
         assert_eq!(snapshot.items.len(), 1);
         assert_eq!(snapshot.items[0].pr_number, Some(7));
         let unavailable = snapshot.unavailable.expect("degraded message");
+        let unavailable = unavailable.summary();
         // Collapsed to one line, so the cause is legible rather than "{".
         assert!(unavailable.contains("No API token found"), "{unavailable}");
         assert!(!unavailable.contains('\n'));
+    }
+
+    #[test]
+    fn provider_failures_keep_previous_source_items_and_name_every_reason() {
+        let dir = fixture_dir("all-sources-degraded");
+        let (good_gh, good_linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+case "$*" in
+  *"--author @me"*|*"review-requested:@me"*) printf '%s' '[]' ;;
+  *) printf '%s' '[{"number":7,"title":"Previous PR","body":"","state":"OPEN","headRefName":"old","url":"https://github.com/owner/repo/pull/7"}]' ;;
+esac
+"#,
+            r#"#!/bin/sh
+case "$*" in
+  "issues list"*) printf '%s' '{"nodes":[{"identifier":"SCA-2","title":"Previous ticket","state":{"name":"In Progress"}}]}' ;;
+  "cycles list"*) printf '%s' '{"nodes":[]}' ;;
+  "attachments list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let mut previous = refresh_work_index(
+            &config(),
+            &[],
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &good_gh,
+            &good_linearis,
+        );
+        previous.conversations.push(MissiveConversation {
+            id: "previous".into(),
+            subject: "Previous conversation".into(),
+            app_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/previous".into(),
+            assignees: Vec::new(),
+            last_activity_at: None,
+            closed: false,
+            pane_bound: true,
+            messages: Vec::new(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        });
+        let (failed_gh, failed_linearis) = fake_programs(
+            &dir,
+            "#!/bin/sh\nprintf '%s' 'github rate limited' >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s' 'linear rate limited' >&2\nexit 1\n",
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/previous".into()],
+            ..Default::default()
+        });
+
+        let snapshot = refresh_work_index_with_missive(
+            &config(),
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                previous: Some(&previous),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &failed_gh,
+            &failed_linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        assert!(snapshot
+            .items
+            .iter()
+            .any(|item| item.pr_title.as_deref() == Some("Previous PR")));
+        assert!(snapshot.items.iter().any(|item| {
+            item.ticket_details
+                .iter()
+                .any(|ticket| ticket.title.as_deref() == Some("Previous ticket"))
+        }));
+        assert_eq!(snapshot.conversations[0].subject, "Previous conversation");
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Github)
+            .is_some_and(|reason| reason.contains("github rate limited")));
+        assert!(snapshot
+            .unavailable_reason(WorkIndexSource::Linear)
+            .is_some_and(|reason| reason.contains("linear rate limited")));
+        assert_eq!(
+            snapshot.unavailable_reason(WorkIndexSource::Missive),
+            Some("team is not configured")
+        );
     }
 
     #[test]
@@ -4068,8 +4944,8 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
         );
         assert!(snapshot.items.is_empty());
         assert_eq!(
-            snapshot.unavailable.as_deref(),
-            Some("GitHub observation timed out")
+            snapshot.unavailable_reason(WorkIndexSource::Github),
+            Some("observation timed out")
         );
     }
 
@@ -4095,8 +4971,8 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
 
         assert!(snapshot.items.is_empty());
         assert_eq!(
-            snapshot.unavailable.as_deref(),
-            Some("Linear observation timed out")
+            snapshot.unavailable_reason(WorkIndexSource::Linear),
+            Some("observation timed out")
         );
     }
 
@@ -4119,6 +4995,51 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
     }
 
     #[test]
+    fn snapshot_path_is_scoped_to_session_name_including_default() {
+        let state_dir = Path::new("/tmp/herdr-state");
+        assert_eq!(
+            work_index_snapshot_path_for(state_dir, None),
+            state_dir.join("work-index/default.json")
+        );
+        assert_eq!(
+            work_index_snapshot_path_for(state_dir, Some("customer-support")),
+            state_dir.join("work-index/customer-support.json")
+        );
+    }
+
+    #[test]
+    fn cold_load_reads_only_its_session_snapshot_and_ignores_legacy_file() {
+        let dir = fixture_dir("session-snapshot-isolation");
+        let alpha_path = work_index_snapshot_path_for(&dir, Some("alpha"));
+        let beta_path = work_index_snapshot_path_for(&dir, Some("beta"));
+        let legacy_path = dir.join("work-index.json");
+        let snapshot = |reason| Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(WorkIndexUnavailable::only(WorkIndexSource::Github, reason)),
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+        write_snapshot(&alpha_path, &snapshot("alpha")).expect("alpha snapshot");
+        write_snapshot(&beta_path, &snapshot("beta")).expect("beta snapshot");
+        write_snapshot(&legacy_path, &snapshot("legacy")).expect("legacy snapshot");
+
+        assert_eq!(
+            load_snapshot(&alpha_path)
+                .and_then(|snapshot| snapshot.unavailable_summary())
+                .as_deref(),
+            Some("GitHub: alpha")
+        );
+        assert_eq!(
+            load_snapshot(&beta_path)
+                .and_then(|snapshot| snapshot.unavailable_summary())
+                .as_deref(),
+            Some("GitHub: beta")
+        );
+        assert!(load_snapshot(&work_index_snapshot_path_for(&dir, None)).is_none());
+    }
+
+    #[test]
     fn load_snapshot_round_trips_a_written_snapshot() {
         let dir = fixture_dir("load-round-trip");
         let path = dir.join("work-index.json");
@@ -4126,7 +5047,10 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("Linear observation timed out".to_string()),
+            unavailable: Some(WorkIndexUnavailable::only(
+                WorkIndexSource::Linear,
+                "observation timed out",
+            )),
             observed_at: SystemTime::now(),
         };
         write_snapshot(&path, &snapshot).expect("write snapshot");

@@ -97,9 +97,15 @@ pub(crate) fn render_pr(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let Some(item) = focused_pr_item(app) else {
+        let message = match app.work_index_snapshot.as_ref() {
+            Some(snapshot) => snapshot
+                .unavailable_reason(crate::work_index::WorkIndexSource::Github)
+                .map(|reason| format!(" GitHub: {reason}"))
+                .unwrap_or_else(|| " pull request absent from latest index".into()),
+            None => " pull request not indexed yet".into(),
+        };
         frame.render_widget(
-            Paragraph::new(" pull request not indexed yet")
-                .style(Style::default().fg(app.palette.overlay1)),
+            Paragraph::new(message).style(Style::default().fg(app.palette.overlay1)),
             Rect::new(area.x, area.y, area.width, 1),
         );
         return;
@@ -297,7 +303,8 @@ fn render_checkout_menu(app: &AppState, frame: &mut Frame, area: Rect, choice: P
 mod tests {
     use super::*;
     use crate::work_index::{
-        PrAudience, PrCheckState, WorkItem as IndexedWorkItem, WorkItemAction, WorkItemComment,
+        PrAudience, PrCheckState, WorkIndexSource, WorkIndexUnavailable,
+        WorkItem as IndexedWorkItem, WorkItemAction, WorkItemComment,
         WorkItemDetail as IndexedWorkItemDetail, WorkItemSource,
     };
     use ratatui::{backend::TestBackend, Terminal};
@@ -511,6 +518,68 @@ mod tests {
         assert!(focused_pr_item(&app).is_none());
         app.dock_collapsed = false;
         assert!(!app.activate_dock_surface(crate::app::DockSurface::Pr));
+    }
+
+    #[test]
+    fn unresolved_pane_pull_request_shows_github_failure_reason() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("pr")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .replace_prevalidated_manual_work_context(PaneWorkContext {
+                pr_urls: vec!["https://github.com/owner/repo/pull/77".into()],
+                ..Default::default()
+            });
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(WorkIndexUnavailable::only(
+                WorkIndexSource::Github,
+                "rate limited",
+            )),
+            observed_at: SystemTime::UNIX_EPOCH,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(48, 4)).expect("test terminal");
+        terminal
+            .draw(|frame| render_pr(&app, frame, frame.area()))
+            .expect("render PR failure");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("GitHub: rate limited"), "{text:?}");
+        assert!(!text.contains("not indexed yet"), "{text:?}");
+
+        app.work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .unavailable = None;
+        terminal
+            .draw(|frame| render_pr(&app, frame, frame.area()))
+            .expect("render successful empty PR observation");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("pull request absent from latest index"),
+            "{text:?}"
+        );
+        assert!(!text.contains("not indexed yet"), "{text:?}");
     }
 
     #[test]

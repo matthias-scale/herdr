@@ -37,9 +37,15 @@ pub(crate) fn render_missive(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let Some(item) = focused_conversation(app) else {
+        let message = match app.work_index_snapshot.as_ref() {
+            Some(snapshot) => snapshot
+                .unavailable_reason(crate::work_index::WorkIndexSource::Missive)
+                .map(|reason| format!(" Missive: {reason}"))
+                .unwrap_or_else(|| " conversation absent from latest index".into()),
+            None => " conversation not indexed yet".into(),
+        };
         frame.render_widget(
-            Paragraph::new(" conversation not indexed yet")
-                .style(Style::default().fg(app.palette.overlay1)),
+            Paragraph::new(message).style(Style::default().fg(app.palette.overlay1)),
             Rect::new(area.x, area.y, area.width, 1),
         );
         return;
@@ -102,7 +108,10 @@ fn relative_time(then: Option<std::time::SystemTime>, now: std::time::SystemTime
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_index::{MissiveConversation, MissiveEntry, MissiveUser, Snapshot};
+    use crate::work_index::{
+        MissiveConversation, MissiveEntry, MissiveUser, Snapshot, WorkIndexSource,
+        WorkIndexUnavailable,
+    };
     use ratatui::{backend::TestBackend, Terminal};
     use std::time::SystemTime;
 
@@ -120,6 +129,7 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            pane_bound: false,
             messages: vec![MissiveEntry {
                 id: "message".into(),
                 author: Some("Customer".into()),
@@ -199,5 +209,69 @@ mod tests {
             observed_at: SystemTime::UNIX_EPOCH,
         };
         assert_eq!(snapshot.conversations.len(), 1);
+    }
+
+    #[test]
+    fn unresolved_pane_conversation_shows_missive_failure_reason() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("missive")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("focused terminal")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                missive_urls: vec![
+                    "https://mail.missiveapp.com/#inbox/conversations/missing".into()
+                ],
+                ..Default::default()
+            });
+        app.work_index_snapshot = Some(Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some(WorkIndexUnavailable::only(
+                WorkIndexSource::Missive,
+                "token unavailable",
+            )),
+            observed_at: SystemTime::UNIX_EPOCH,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(48, 4)).expect("test terminal");
+        terminal
+            .draw(|frame| render_missive(&app, frame, frame.area()))
+            .expect("render Missive failure");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Missive: token unavailable"), "{text:?}");
+        assert!(!text.contains("not indexed yet"), "{text:?}");
+
+        app.work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .unavailable = None;
+        terminal
+            .draw(|frame| render_missive(&app, frame, frame.area()))
+            .expect("render successful empty Missive observation");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("conversation absent from latest index"),
+            "{text:?}"
+        );
+        assert!(!text.contains("not indexed yet"), "{text:?}");
     }
 }

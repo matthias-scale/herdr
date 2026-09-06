@@ -1556,12 +1556,8 @@ fn sidebar_tab_groups(
                     );
                     continue;
                 };
-                let title_suffix = context
-                    .work_title
-                    .as_deref()
-                    .or(context.session_name.as_deref());
                 for url in &context.pr_urls {
-                    if app
+                    let title_suffix = app
                         .work_index_snapshot
                         .as_ref()
                         .and_then(|snapshot| {
@@ -1570,13 +1566,9 @@ fn sidebar_tab_groups(
                                 .iter()
                                 .find(|item| item.pr_url.as_deref() == Some(url.as_str()))
                         })
-                        .is_some_and(|item| {
-                            !app.sidebar_work_filter
-                                .matches_github(item, &app.work_index_session)
-                        })
-                    {
-                        continue;
-                    }
+                        .and_then(|item| item.pr_title.as_deref())
+                        .or(context.work_title.as_deref())
+                        .or(context.session_name.as_deref());
                     let number = pull_request_number(url).unwrap_or(url);
                     let title = work_group_header_title(&format!("#{number}"), title_suffix);
                     push_sidebar_tab_group(
@@ -1911,6 +1903,25 @@ fn work_group_index(groups: &[SidebarWorkGroup], key: &str) -> Option<usize> {
     groups.iter().position(|group| group.key == key)
 }
 
+fn pane_bound_ticket(app: &AppState, identifier: &str) -> bool {
+    context_panes(app).any(|context| {
+        context
+            .ticket_ids
+            .iter()
+            .any(|ticket| ticket.eq_ignore_ascii_case(identifier))
+    })
+}
+
+fn pane_bound_conversation(app: &AppState, url: &str) -> bool {
+    let id = missive_url_tail(url);
+    context_panes(app).any(|context| {
+        context
+            .missive_urls
+            .iter()
+            .any(|candidate| candidate == url || missive_url_tail(candidate) == id)
+    })
+}
+
 fn push_unlinked_entry(groups: &mut Vec<SidebarWorkGroup>, entry: AgentPanelEntry) {
     match work_group_index(groups, UNLINKED_GROUP_KEY) {
         Some(index) => groups[index].entries.push(entry),
@@ -1939,9 +1950,10 @@ pub(crate) fn sidebar_work_groups(
     let mut groups: Vec<SidebarWorkGroup> = Vec::new();
     if mode == SidebarGroupMode::LinearTeam {
         for row in app.dock_home_projection().ticket_rows {
-            if !app
-                .sidebar_work_filter
-                .matches_linear(&row.ticket, &app.work_index_session)
+            if !pane_bound_ticket(app, &row.ticket.identifier)
+                && !app
+                    .sidebar_work_filter
+                    .matches_linear(&row.ticket, &app.work_index_session)
             {
                 continue;
             }
@@ -1969,9 +1981,10 @@ pub(crate) fn sidebar_work_groups(
             .map(|snapshot| snapshot.conversations.as_slice())
             .unwrap_or_default()
         {
-            if !app
-                .sidebar_work_filter
-                .matches_missive_conversation(Some(conversation), &app.work_index_session)
+            if !pane_bound_conversation(app, indexed_missive_url(conversation))
+                && !app
+                    .sidebar_work_filter
+                    .matches_missive_conversation(Some(conversation), &app.work_index_session)
             {
                 continue;
             }
@@ -2039,12 +2052,6 @@ pub(crate) fn sidebar_work_groups(
                 // of them.
                 for url in urls {
                     let conversation = indexed_missive_conversation(app, url);
-                    if !app
-                        .sidebar_work_filter
-                        .matches_missive_conversation(conversation, &app.work_index_session)
-                    {
-                        continue;
-                    }
                     let group_url = conversation.map(indexed_missive_url).unwrap_or(url);
                     let key = format!("missive:{group_url}");
                     let index = match work_group_index(&groups, &key) {
@@ -2152,6 +2159,20 @@ pub(crate) fn sidebar_unassigned_objects(
             .into_iter()
             .filter(|group| group.entries.is_empty() && !group.unlinked)
             .filter_map(|group| {
+                let identifier = group.key.strip_prefix("linear:")?;
+                let ticket = app
+                    .work_index_snapshot
+                    .as_ref()?
+                    .items
+                    .iter()
+                    .flat_map(|item| item.ticket_details.iter())
+                    .find(|ticket| ticket.identifier.eq_ignore_ascii_case(identifier))?;
+                if !app
+                    .sidebar_work_filter
+                    .matches_linear(ticket, &app.work_index_session)
+                {
+                    return None;
+                }
                 Some(SidebarUnassignedObject {
                     key: group.key,
                     title: group.title,
@@ -2284,6 +2305,14 @@ pub(crate) fn sidebar_unassigned_objects(
             .into_iter()
             .filter(|group| group.entries.is_empty() && !group.unlinked)
             .filter_map(|group| {
+                let url = group.key.strip_prefix("missive:")?;
+                let conversation = indexed_missive_conversation(app, url)?;
+                if !app
+                    .sidebar_work_filter
+                    .matches_missive_conversation(Some(conversation), &app.work_index_session)
+                {
+                    return None;
+                }
                 Some(SidebarUnassignedObject {
                     key: group.key,
                     title: group.title,
@@ -9145,6 +9174,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assignees: Vec::new(),
             last_activity_at: None,
             closed: false,
+            pane_bound: false,
             messages: Vec::new(),
             notes: Vec::new(),
             drafts: Vec::new(),
@@ -9562,7 +9592,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn the_work_filter_narrows_tickets_by_team_and_assignee() {
+    fn the_work_filter_narrows_unassigned_tickets_but_keeps_pane_links() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
@@ -9584,15 +9614,107 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.sidebar_work_filter.assignee = Some("jacob".into());
-        // Filtering a ticket out takes the panes only that ticket had; the
-        // two-ticket pane survives under the ticket that remains.
+        // Every SCA ticket is pane-linked in this fixture, so the assignee
+        // filter may only keep narrowing the unassigned section.
         assert_eq!(
             work_group_shape(&app),
             vec![
+                ("SCA-3102 · annual credits".to_string(), 1, false),
+                ("SCA-3165 · image-edit v3".to_string(), 1, false),
                 ("SCA-3170 · ads skill map".to_string(), 1, false),
                 ("unlinked".to_string(), 1, false),
             ]
         );
+    }
+
+    #[test]
+    fn pane_bound_ticket_survives_filters_while_unassigned_items_do_not() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
+        app.sidebar_work_filter.team = Some("SCA".into());
+        app.sidebar_work_filter.assignee = Some("nobody".into());
+        let snapshot = app.work_index_snapshot.as_mut().expect("snapshot");
+        snapshot
+            .items
+            .iter_mut()
+            .find(|item| item.ticket_ids == ["OPS-12"])
+            .expect("stale pane-bound ticket item")
+            .source
+            .pane = true;
+
+        assert!(work_group_shape(&app)
+            .iter()
+            .any(|(title, count, dim)| title.starts_with("SCA-3102") && *count == 1 && !dim));
+        assert!(sidebar_unassigned_objects(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::LinearTeam,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn pane_bound_pull_request_survives_filters_while_unassigned_items_do_not() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("fixture terminal");
+        let mut context = terminal.effective_work_context().clone();
+        context.pr_urls = vec!["https://github.com/scalable-so/herdr/pull/159".into()];
+        terminal.replace_prevalidated_manual_work_context(context);
+        let item = app
+            .work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .items
+            .iter_mut()
+            .find(|item| item.pr_number == Some(159))
+            .expect("pane pull request");
+        item.source.github = true;
+        item.source.pane = true;
+        item.pr_state = Some("merged".into());
+
+        assert!(work_group_shape(&app)
+            .iter()
+            .any(|(title, count, dim)| title.starts_with("#159") && *count == 1 && !dim));
+        assert!(sidebar_unassigned_objects(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::RepoPr,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn pane_bound_conversation_survives_filters_while_unassigned_items_do_not() {
+        let mut app = sidebar_work_item_fixture();
+        app.sidebar_group_mode = SidebarGroupMode::Missive;
+        let mut linked = missive_conversation("aaa111", "Linked", CONVERSATION_A);
+        linked.closed = true;
+        linked.pane_bound = true;
+        let mut stale = missive_conversation("ccc333", "Stale", CONVERSATION_C);
+        stale.closed = true;
+        stale.pane_bound = true;
+        app.work_index_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .conversations = vec![linked, stale];
+
+        assert!(work_group_shape(&app)
+            .iter()
+            .any(|(title, count, dim)| title.starts_with("aaa111") && *count == 1 && !dim));
+        assert!(sidebar_unassigned_objects(
+            &app,
+            &sidebar_thread_entries(&app),
+            SidebarGroupMode::Missive,
+        )
+        .is_empty());
     }
 
     #[test]
@@ -9741,7 +9863,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn injected_me_identity_filters_linear_and_github_projections() {
+    fn injected_me_identity_filters_unlinked_objects_but_keeps_pane_links() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter::default();
@@ -9755,6 +9877,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             [
                 "SCA-3102 · annual credits",
                 "SCA-3165 · image-edit v3",
+                "SCA-3170 · ads skill map",
                 "unlinked",
             ]
         );
@@ -11950,6 +12073,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 }],
                 last_activity_at: None,
                 closed: true,
+                pane_bound: false,
                 messages: Vec::new(),
                 notes: Vec::new(),
                 drafts: Vec::new(),
@@ -11968,6 +12092,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 }],
                 last_activity_at: None,
                 closed: false,
+                pane_bound: false,
                 messages: Vec::new(),
                 notes: Vec::new(),
                 drafts: Vec::new(),
@@ -11978,8 +12103,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.work_index_session.missive.viewer = Some("Mina".into());
         assert_eq!(
             work_group_shape(&app),
-            vec![("unlinked".to_string(), 2, false)],
-            "closed viewer-assigned and open wrong-assignee conversations stay hidden"
+            vec![
+                ("aaa111 · Refund approved".to_string(), 1, false),
+                ("bbb222 · Needs owner".to_string(), 1, false),
+                ("unlinked".to_string(), 2, false),
+            ],
+            "pane-linked conversations stay visible through sidebar filters"
         );
         app.sidebar_work_filter.missive.assignee = None;
         app.sidebar_work_filter.missive.show_closed = true;

@@ -80,20 +80,25 @@ fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         format!(" 🔍 {}{cursor}  ⚲ {filter}", fit_cell(query, query_width)),
         Style::default().fg(palette.subtext0),
     )];
-    let message = if !state.enabled {
+    let blocking_message = if !state.enabled {
         Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
         Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.clone())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
         frame.render_widget(Paragraph::new(lines), left_inner);
         return;
+    }
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Missive)
+    }) {
+        lines.push(Line::styled(
+            format!("Missive: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
     let items = items.unwrap_or_default();
     let selected = state
@@ -324,20 +329,25 @@ fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut
         ),
         Style::default().fg(palette.subtext0),
     )];
-    let message = if !state.enabled {
+    let blocking_message = if !state.enabled {
         Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
         Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.clone())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
         frame.render_widget(Paragraph::new(lines), left_inner);
         return;
+    }
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Linear)
+    }) {
+        lines.push(Line::styled(
+            format!("Linear: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
     let items = items.unwrap_or_default();
     let selected = state
@@ -407,17 +417,14 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let message = if !state.enabled {
-        Some("work index disabled")
+    let blocking_message = if !state.enabled {
+        Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
-        Some("work index not yet collected")
+        Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.as_deref())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(palette.subtext0)),
             inner,
@@ -428,7 +435,16 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
     let Some(projection) = projection else {
         return;
     };
-    let mut lines = vec![Line::styled(
+    let mut lines = Vec::new();
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
+    }) {
+        lines.push(Line::styled(
+            format!("GitHub: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    lines.push(Line::styled(
         format_review_queue_summary(
             projection.awaiting_review_count,
             projection.ticket_in_review_count,
@@ -437,7 +453,7 @@ fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, fra
         Style::default()
             .fg(palette.subtext0)
             .add_modifier(Modifier::BOLD),
-    )];
+    ));
     if projection.rows.is_empty() {
         lines.push(Line::styled(
             "  no PRs awaiting review",
@@ -523,20 +539,25 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
         ),
         Style::default().fg(palette.subtext0),
     )];
-    let message = if !state.enabled {
+    let blocking_message = if !state.enabled {
         Some("work index disabled".to_string())
     } else if state.snapshot.is_none() {
         Some("work index not yet collected".to_string())
     } else {
-        state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.unavailable.clone())
+        None
     };
-    if let Some(message) = message {
+    if let Some(message) = blocking_message {
         lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
         frame.render_widget(Paragraph::new(lines), left_inner);
         return;
+    }
+    if let Some(reason) = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.unavailable_reason(crate::work_index::WorkIndexSource::Github)
+    }) {
+        lines.push(Line::styled(
+            format!("GitHub: {reason}"),
+            Style::default().fg(palette.subtext0),
+        ));
     }
     let items = items.unwrap_or_default();
     let selected = state
@@ -1338,6 +1359,7 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            pane_bound: false,
             messages: (0..message_count)
                 .map(|index| crate::work_index::MissiveEntry {
                     id: format!("message-{index}"),
@@ -1495,11 +1517,14 @@ mod tests {
                 items: Vec::new(),
                 conversations: Vec::new(),
                 missive_users: Vec::new(),
-                unavailable: Some("GitHub observation failed".to_string()),
+                unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                    crate::work_index::WorkIndexSource::Github,
+                    "observation failed",
+                )),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
         ))
-        .contains("GitHub observation failed"));
+        .contains("GitHub: observation failed"));
 
         let mut placeholder = WorkViewState::new(true, Some(snapshot(Vec::new())));
         placeholder.projection = WorkProjection::Tickets;
@@ -1522,7 +1547,10 @@ mod tests {
                 items: Vec::new(),
                 conversations: Vec::new(),
                 missive_users: Vec::new(),
-                unavailable: Some("unavailable".to_string()),
+                unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                    crate::work_index::WorkIndexSource::Github,
+                    "unavailable",
+                )),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
         );
@@ -1647,6 +1675,62 @@ mod tests {
     }
 
     #[test]
+    fn github_degradation_does_not_hide_linear_items() {
+        let mut degraded = snapshot(vec![ticket(
+            "SCA-3165",
+            crate::work_index::TicketGroup::Assigned,
+        )]);
+        degraded.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Github,
+            "rate limited",
+        ));
+        let mut state = WorkViewState::new(true, Some(degraded));
+        state.projection = WorkProjection::Tickets;
+
+        let text = rendered_text_at(&state, 100, 24);
+        assert!(text.contains("SCA-3165"), "{text}");
+        assert!(!text.contains("GitHub: rate limited"), "{text}");
+    }
+
+    #[test]
+    fn degraded_sources_keep_their_previous_rows_visible() {
+        let mut github_snapshot = snapshot(vec![pr("owner/repo", 77, &[])]);
+        github_snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Github,
+            "rate limited",
+        ));
+        let github = rendered_text_at(&WorkViewState::new(true, Some(github_snapshot)), 100, 24);
+        assert!(github.contains("GitHub: rate limited"), "{github}");
+        assert!(github.contains("PR 77"), "{github}");
+
+        let mut linear_snapshot = snapshot(vec![ticket(
+            "SCA-3165",
+            crate::work_index::TicketGroup::Assigned,
+        )]);
+        linear_snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Linear,
+            "rate limited",
+        ));
+        let mut linear_state = WorkViewState::new(true, Some(linear_snapshot));
+        linear_state.projection = WorkProjection::Tickets;
+        let linear = rendered_text_at(&linear_state, 100, 24);
+        assert!(linear.contains("Linear: rate limited"), "{linear}");
+        assert!(linear.contains("SCA-3165"), "{linear}");
+
+        let mut missive_snapshot = snapshot(Vec::new());
+        missive_snapshot.conversations = vec![missive_conversation(1)];
+        missive_snapshot.unavailable = Some(crate::work_index::WorkIndexUnavailable::only(
+            crate::work_index::WorkIndexSource::Missive,
+            "rate limited",
+        ));
+        let mut missive_state = WorkViewState::new(true, Some(missive_snapshot));
+        missive_state.projection = WorkProjection::Missive;
+        let missive = rendered_text_at(&missive_state, 100, 24);
+        assert!(missive.contains("Missive: rate limited"), "{missive}");
+        assert!(missive.contains("Billing question"), "{missive}");
+    }
+
+    #[test]
     fn ticket_dropdowns_open_downward_and_clamp() {
         let area = Rect::new(10, 4, 60, 8);
         for (anchor_x, count, selected, width) in [(12, 2, 1, 42), (29, 4, 3, 20), (54, 3, 2, 20)] {
@@ -1673,6 +1757,7 @@ mod tests {
             }],
             last_activity_at: Some(SystemTime::UNIX_EPOCH),
             closed: false,
+            pane_bound: false,
             messages: vec![crate::work_index::MissiveEntry {
                 id: "message".into(),
                 author: Some("Customer".into()),
@@ -1803,11 +1888,17 @@ mod tests {
             items: Vec::new(),
             conversations: Vec::new(),
             missive_users: Vec::new(),
-            unavailable: Some("Missive observation timed out".into()),
+            unavailable: Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Missive,
+                "observation timed out",
+            )),
             observed_at: SystemTime::UNIX_EPOCH,
         });
         let failed = rendered_text(&state);
-        assert!(failed.contains("Missive observation timed out"), "{failed}");
+        assert!(
+            failed.contains("Missive: observation timed out"),
+            "{failed}"
+        );
 
         state.snapshot.as_mut().expect("snapshot").unavailable = None;
         let empty = rendered_text(&state);
