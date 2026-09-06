@@ -224,6 +224,7 @@ pub enum AppEvent {
     WorkIndexRefreshed {
         generation: u64,
         snapshot: crate::work_index::Snapshot,
+        session: crate::work_index::WorkIndexSession,
     },
     /// One bounded batch of GitHub detail observations completed.
     WorkItemDetailRefreshed {

@@ -197,6 +197,7 @@ pub struct App {
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    pub(crate) work_index_session: crate::work_index::WorkIndexSession,
     pub(crate) work_item_detail_refresh_in_flight:
         Option<crate::work_index::WorkItemDetailRefreshInFlight>,
     pub(crate) last_work_item_detail_refresh_generation: u64,
@@ -943,6 +944,7 @@ impl App {
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: None,
+            work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
@@ -1160,6 +1162,7 @@ impl App {
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
             work_index_snapshot: None,
+            work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_refresh_in_flight: None,
             last_work_item_detail_refresh_generation: 0,
             last_applied_work_item_detail_refresh_generation: 0,
@@ -2990,7 +2993,11 @@ mod tests {
             unavailable: None,
             observed_at: std::time::SystemTime::now(),
         };
-        assert!(!app.handle_work_index_refreshed(3, snapshot));
+        assert!(!app.handle_work_index_refreshed(
+            3,
+            snapshot,
+            crate::work_index::WorkIndexSession::default(),
+        ));
         assert!(app.work_index_snapshot.is_none());
     }
 

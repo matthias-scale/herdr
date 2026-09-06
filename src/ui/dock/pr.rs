@@ -288,6 +288,7 @@ mod tests {
             additions: 13,
             deletions: 1,
             author: Some("ada".into()),
+            assignees: vec!["ada".into()],
             labels: Vec::new(),
             check_state: PrCheckState::Passing,
             audience: PrAudience::Authored,
