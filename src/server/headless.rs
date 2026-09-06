@@ -6260,6 +6260,7 @@ mod tests {
                 Some(client_tx),
             );
             client.dock_presentation = crate::app::state::DockPresentationState {
+                surface_override: true,
                 width: dock_width,
                 collapsed: false,
                 tab: Some(crate::app::DockSurface::Editor),
