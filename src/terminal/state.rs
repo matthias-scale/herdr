@@ -500,6 +500,10 @@ pub struct TerminalState {
     /// Live direct sub-agents reported by a provider-owned runtime source.
     /// `None` means unavailable or not yet reconstructed.
     pub active_subagents: Option<u32>,
+    /// Runtime-only detail from the same Claude transcript scan as
+    /// `active_subagents`. It is not persisted or exposed through the API.
+    pub(crate) claude_subagent_observations:
+        Option<Vec<crate::app::claude_subagents::ClaudeSubagentObservation>>,
     /// Last background observation of the pane's distinct foreground process.
     pub(crate) foreground_process_name: Option<String>,
     foreground_process_active: bool,
@@ -579,6 +583,7 @@ impl TerminalState {
             holds_shell: false,
             stale_resolution: None,
             active_subagents: None,
+            claude_subagent_observations: None,
             foreground_process_name: None,
             foreground_process_active: false,
             last_agent_state_change_seq: None,
@@ -778,9 +783,28 @@ impl TerminalState {
 
     pub(crate) fn set_active_subagents(&mut self, count: Option<u32>) -> bool {
         if self.active_subagents == count {
+            if count.is_none() && self.claude_subagent_observations.take().is_some() {
+                self.revision = self.revision.wrapping_add(1);
+                return true;
+            }
             return false;
         }
         self.active_subagents = count;
+        if count.is_none() {
+            self.claude_subagent_observations = None;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn set_claude_subagent_observations(
+        &mut self,
+        observations: Option<Vec<crate::app::claude_subagents::ClaudeSubagentObservation>>,
+    ) -> bool {
+        if self.claude_subagent_observations == observations {
+            return false;
+        }
+        self.claude_subagent_observations = observations;
         self.revision = self.revision.wrapping_add(1);
         true
     }

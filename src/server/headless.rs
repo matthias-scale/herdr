@@ -6284,6 +6284,8 @@ mod tests {
                 files_selection: None,
                 files_filter: String::new(),
                 files_collapsed: std::collections::HashSet::new(),
+                agents_focused: false,
+                agents_selection: None,
                 home_selection: None,
                 home_ticket_selection: None,
                 home_poll_selection: None,

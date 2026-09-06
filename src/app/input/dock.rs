@@ -113,7 +113,13 @@ impl AppState {
     /// or menu row is inert rather than opening an empty surface.
     pub(crate) fn activate_dock_surface(&mut self, surface: DockSurface) -> bool {
         let (context, in_git_repo) = crate::ui::dock::chooser::focused_availability(self);
-        if !crate::ui::dock::chooser::surface_available(surface, &context, in_git_repo) {
+        let has_subagents = crate::ui::dock::agents::has_focused_observations(self);
+        if !crate::ui::dock::chooser::surface_available(
+            surface,
+            &context,
+            in_git_repo,
+            has_subagents,
+        ) {
             return false;
         }
         self.open_dock_surface(surface);
@@ -122,9 +128,13 @@ impl AppState {
         self.dock_home_focused = surface == DockSurface::Home;
         self.dock_diff_focused = surface == DockSurface::Diff;
         self.dock_files_focused = surface == DockSurface::Files;
+        self.dock_agents_focused = surface == DockSurface::Agents;
         self.dock_pr_focused = surface == DockSurface::Pr;
         self.dock_pr_checkout_menu = None;
         self.dock_pr_pending_land = None;
+        if self.dock_agents_focused {
+            self.reconcile_dock_agents_selection();
+        }
         true
     }
 
@@ -346,6 +356,7 @@ mod tests {
         // No focused pane: no pull request and no ticket.
         assert!(!app.activate_dock_surface(DockSurface::Pr));
         assert!(!app.activate_dock_surface(DockSurface::Linear));
+        assert!(!app.activate_dock_surface(DockSurface::Agents));
         assert!(app.dock_open_surfaces.is_empty());
         assert_eq!(app.dock_tab, None);
 

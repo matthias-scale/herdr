@@ -192,7 +192,7 @@ fn compact_row_dot_text(entry: &AgentPanelEntry) -> String {
     compact_row_dot(entry).to_string()
 }
 
-fn compact_dot_for_state(
+pub(crate) fn compact_dot_for_state(
     state: AgentState,
     // Seen no longer selects a shape: done-unread and idle-seen are both `○`,
     // separated by colour via state_label_color.

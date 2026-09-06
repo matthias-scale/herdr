@@ -286,6 +286,7 @@ mod tests {
             crate::app::DockSurface::Linear,
             &crate::work_context::PaneWorkContext::default(),
             true,
+            false,
         ));
     }
 

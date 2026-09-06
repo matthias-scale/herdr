@@ -513,6 +513,7 @@ mod tests {
             crate::app::DockSurface::Pr,
             &PaneWorkContext::default(),
             true,
+            false,
         ));
         assert!(focused_pr_key(&app).is_none());
         assert!(focused_pr_item(&app).is_none());

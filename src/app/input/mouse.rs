@@ -774,6 +774,8 @@ impl AppState {
                         && self.dock_tab == Some(crate::app::DockSurface::Diff);
                     self.dock_files_focused = !self.dock_collapsed
                         && self.dock_tab == Some(crate::app::DockSurface::Files);
+                    self.dock_agents_focused = !self.dock_collapsed
+                        && self.dock_tab == Some(crate::app::DockSurface::Agents);
                     self.mark_session_dirty();
                     return None;
                 }
@@ -808,6 +810,8 @@ impl AppState {
                             self.dock_tab == Some(crate::app::DockSurface::Diff);
                         self.dock_files_focused =
                             self.dock_tab == Some(crate::app::DockSurface::Files);
+                        self.dock_agents_focused =
+                            self.dock_tab == Some(crate::app::DockSurface::Agents);
                     }
                     return None;
                 }
@@ -825,6 +829,10 @@ impl AppState {
                     self.dock_home_focused = tab == crate::app::DockSurface::Home;
                     self.dock_diff_focused = tab == crate::app::DockSurface::Diff;
                     self.dock_files_focused = tab == crate::app::DockSurface::Files;
+                    self.dock_agents_focused = tab == crate::app::DockSurface::Agents;
+                    if self.dock_agents_focused {
+                        self.reconcile_dock_agents_selection();
+                    }
                     return None;
                 }
                 if self.on_dock_diff_whitespace_toggle(mouse.column, mouse.row) {
@@ -839,6 +847,9 @@ impl AppState {
                     return None;
                 }
                 if self.click_dock_file_row(mouse.column, mouse.row) {
+                    return None;
+                }
+                if self.click_dock_agent_row(mouse.column, mouse.row) {
                     return None;
                 }
                 if let Some(section) = self.dock_home_section_at(mouse.column, mouse.row) {
@@ -906,6 +917,8 @@ impl AppState {
                         self.dock_tab == Some(crate::app::DockSurface::Editor);
                     self.dock_diff_focused = self.dock_tab == Some(crate::app::DockSurface::Diff);
                     self.dock_files_focused = self.dock_tab == Some(crate::app::DockSurface::Files);
+                    self.dock_agents_focused =
+                        self.dock_tab == Some(crate::app::DockSurface::Agents);
                     // Clicking an empty dock hands it the keyboard so the card
                     // shortcuts work without a tab to focus first.
                     self.dock_chooser_focused = self.dock_tab.is_none();
@@ -1498,12 +1511,20 @@ impl AppState {
             MouseEventKind::ScrollUp
                 if in_dock && dock_body_contains(self, mouse.column, mouse.row) =>
             {
-                self.dock_scroll = self.dock_scroll.saturating_sub(3);
+                if self.dock_tab == Some(crate::app::DockSurface::Agents) {
+                    self.scroll_dock_agents(-3);
+                } else {
+                    self.dock_scroll = self.dock_scroll.saturating_sub(3);
+                }
             }
             MouseEventKind::ScrollDown
                 if in_dock && dock_body_contains(self, mouse.column, mouse.row) =>
             {
-                self.dock_scroll = self.dock_scroll.saturating_add(3);
+                if self.dock_tab == Some(crate::app::DockSurface::Agents) {
+                    self.scroll_dock_agents(3);
+                } else {
+                    self.dock_scroll = self.dock_scroll.saturating_add(3);
+                }
             }
 
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
