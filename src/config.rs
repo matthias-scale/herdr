@@ -23,7 +23,8 @@ pub use self::{
         ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
         NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
         TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
-        ToastHerdrPosition, UpdateChannelConfig, WorkIndexConfig, MAX_TOAST_DELAY_SECONDS,
+        ToastHerdrPosition, UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
+        MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,

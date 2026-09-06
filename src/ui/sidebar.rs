@@ -652,6 +652,19 @@ pub(crate) fn sidebar_footer_work_hit_area(area: Rect) -> Rect {
     )
 }
 
+pub(crate) fn sidebar_footer_usage_hit_area(area: Rect) -> Rect {
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 6 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(4),
+        area.bottom().saturating_sub(1),
+        3,
+        1,
+    )
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -2904,6 +2917,15 @@ pub(super) fn render_sidebar(
             Style::default().fg(p.overlay0)
         };
         frame.render_widget(Paragraph::new(Span::styled(" ⑂ ", style)), work);
+    }
+    let usage = sidebar_footer_usage_hit_area(area);
+    if usage.width > 0 {
+        let style = if app.usage_view.is_some() {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(" ▥ ", style)), usage);
     }
 }
 

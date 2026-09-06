@@ -137,6 +137,9 @@ impl App {
                 generation,
                 snapshot,
             } => self.handle_work_index_refreshed(generation, snapshot),
+            AppEvent::UsageScanFinished { generation, result } => {
+                self.handle_usage_scan_finished(generation, result)
+            }
             AppEvent::WorkItemDetailRefreshed {
                 generation,
                 details,
@@ -348,6 +351,11 @@ impl App {
         } = ev
         {
             self.handle_work_index_refreshed(generation, snapshot);
+            return None;
+        }
+
+        if let AppEvent::UsageScanFinished { generation, result } = ev {
+            self.handle_usage_scan_finished(generation, result);
             return None;
         }
 

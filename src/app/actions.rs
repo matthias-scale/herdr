@@ -3115,6 +3115,7 @@ impl AppState {
             AppEvent::LoopRunHistoryChanged => Vec::new(),
             AppEvent::StatusMetricsRefreshed { .. }
             | AppEvent::ProviderUsageRefreshed { .. }
+            | AppEvent::UsageScanFinished { .. }
             | AppEvent::ConnectivityProbed { .. }
             | AppEvent::HomeCatalogRefreshed { .. }
             | AppEvent::HomeRefsRefreshed { .. }
