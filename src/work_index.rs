@@ -244,6 +244,8 @@ pub(crate) struct WorkItem {
     #[serde(default)]
     pub author: Option<String>,
     #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
     pub check_state: PrCheckState,
@@ -317,6 +319,22 @@ pub(crate) struct Snapshot {
     pub observed_at: SystemTime,
 }
 
+/// Provider identities and assignable users observed by the work-index job.
+/// This is session runtime state, not part of the persisted work-index cache.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkIndexSession {
+    pub(crate) linear: ProviderDirectory,
+    pub(crate) github: ProviderDirectory,
+    pub(crate) missive: ProviderDirectory,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProviderDirectory {
+    pub(crate) viewer: Option<String>,
+    pub(crate) assignees: Vec<String>,
+    resolved: bool,
+}
+
 #[derive(Debug, Clone)]
 struct GithubPullRequest {
     repo: String,
@@ -326,12 +344,14 @@ struct GithubPullRequest {
     body: String,
     branch: String,
     draft: bool,
+    state: String,
     review_decision: Option<String>,
     created_at: Option<SystemTime>,
     updated_at: Option<SystemTime>,
     additions: u64,
     deletions: u64,
     author: Option<String>,
+    assignees: Vec<String>,
     labels: Vec<String>,
     check_state: PrCheckState,
     audience: PrAudience,
@@ -454,7 +474,7 @@ pub(crate) fn refresh_work_index(
                 pr_number: Some(pr.number),
                 pr_url: Some(pr.url),
                 pr_title: Some(pr.title),
-                pr_state: Some("open".into()),
+                pr_state: Some(pr.state),
                 draft: pr.draft,
                 review_decision: pr.review_decision,
                 created_at: pr.created_at,
@@ -462,6 +482,7 @@ pub(crate) fn refresh_work_index(
                 additions: pr.additions,
                 deletions: pr.deletions,
                 author: pr.author,
+                assignees: pr.assignees,
                 labels: pr.labels,
                 check_state: pr.check_state,
                 audience: pr.audience,
@@ -506,6 +527,7 @@ pub(crate) fn refresh_work_index(
                 additions: 0,
                 deletions: 0,
                 author: None,
+                assignees: Vec::new(),
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
@@ -569,6 +591,7 @@ pub(crate) fn refresh_work_index(
             additions: 0,
             deletions: 0,
             author: None,
+            assignees: Vec::new(),
             labels: Vec::new(),
             check_state: PrCheckState::Unknown,
             audience: PrAudience::Unclassified,
@@ -634,6 +657,147 @@ fn target_deadline(batch_deadline: Instant, target_timeout: Duration) -> Instant
     (Instant::now() + target_timeout).min(batch_deadline)
 }
 
+/// Resolve provider-local "me" identities and assignee directories once per
+/// app session. Callers retain the returned value across index refreshes.
+pub(crate) fn resolve_work_index_session(
+    config: &WorkIndexConfig,
+    mut session: WorkIndexSession,
+    batch_deadline: Instant,
+    target_timeout: Duration,
+    gh_program: &Path,
+    linearis_program: &Path,
+) -> WorkIndexSession {
+    if !session.linear.resolved {
+        session.linear = fetch_linear_directory(
+            linearis_program,
+            target_deadline(batch_deadline, target_timeout),
+        );
+        session.linear.resolved = true;
+    }
+    if !session.github.resolved {
+        session.github =
+            fetch_github_directory(&config.repos, gh_program, batch_deadline, target_timeout);
+        session.github.resolved = true;
+    }
+    if !session.missive.resolved {
+        session.missive = resolve_missive_assignees();
+        session.missive.resolved = true;
+    }
+    session
+}
+
+fn fetch_linear_directory(program: &Path, deadline: Instant) -> ProviderDirectory {
+    let viewer = {
+        let mut command = crate::noninteractive_process::command(program);
+        command.args(["auth", "status", "--compact"]);
+        crate::noninteractive_process::output_with_deadline(command, deadline)
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .and_then(|value| nested_text(value.get("user"), "name"))
+    };
+    let mut assignees = {
+        let mut command = crate::noninteractive_process::command(program);
+        command.args(["users", "list", "--active", "-l", "250", "--compact"]);
+        crate::noninteractive_process::output_with_deadline(command, deadline)
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .and_then(|value| value.get("nodes").and_then(Value::as_array).cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|user| nested_text(Some(&user), "name"))
+            .collect::<Vec<_>>()
+    };
+    include_viewer(&mut assignees, viewer.as_deref());
+    ProviderDirectory {
+        viewer,
+        assignees,
+        resolved: true,
+    }
+}
+
+fn fetch_github_directory(
+    repos: &[String],
+    program: &Path,
+    batch_deadline: Instant,
+    target_timeout: Duration,
+) -> ProviderDirectory {
+    let viewer = {
+        let mut command = crate::noninteractive_process::command(program);
+        command.args(["api", "user"]);
+        crate::noninteractive_process::output_with_deadline(
+            command,
+            target_deadline(batch_deadline, target_timeout),
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|value| nested_text(Some(&value), "login"))
+    };
+    let mut assignees = Vec::new();
+    for repo in repos
+        .iter()
+        .filter_map(|repo| normalize_repo_slug(repo).ok())
+    {
+        let mut command = crate::noninteractive_process::command(program);
+        command.args([
+            "api",
+            &format!("repos/{repo}/assignees"),
+            "--paginate",
+            "--slurp",
+        ]);
+        let Some(value) = crate::noninteractive_process::output_with_deadline(
+            command,
+            target_deadline(batch_deadline, target_timeout),
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok()) else {
+            continue;
+        };
+        collect_github_assignees(&value, &mut assignees);
+    }
+    include_viewer(&mut assignees, viewer.as_deref());
+    ProviderDirectory {
+        viewer,
+        assignees,
+        resolved: true,
+    }
+}
+
+fn collect_github_assignees(value: &Value, assignees: &mut Vec<String>) {
+    let Some(values) = value.as_array() else {
+        return;
+    };
+    for value in values {
+        if value.is_array() {
+            collect_github_assignees(value, assignees);
+        } else if let Some(login) = nested_text(Some(value), "login") {
+            assignees.push(login);
+        }
+    }
+}
+
+fn include_viewer(assignees: &mut Vec<String>, viewer: Option<&str>) {
+    if let Some(viewer) = viewer {
+        assignees.push(viewer.to_string());
+    }
+    assignees.sort_by_key(|value| value.to_ascii_lowercase());
+    assignees.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+}
+
+/// f12b replaces this seam with the read-only Missive `/users` result.
+/// Until then the UI can offer its semantic `me` choice without inventing a
+/// concrete user identity.
+pub(crate) fn resolve_missive_assignees() -> ProviderDirectory {
+    ProviderDirectory {
+        viewer: Some("me".into()),
+        assignees: vec!["me".into()],
+        resolved: true,
+    }
+}
+
 fn fetch_github_pull_requests(
     repo: &str,
     program: &Path,
@@ -646,11 +810,11 @@ fn fetch_github_pull_requests(
         "--repo",
         repo,
         "--state",
-        "open",
+        "all",
         "--limit",
         "200",
         "--json",
-        "number,title,body,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
+        "number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url",
     ]);
     let output = crate::noninteractive_process::output_with_deadline(command, deadline).map_err(
         |error| {
@@ -684,6 +848,11 @@ fn fetch_github_pull_requests(
                     .get("isDraft")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                state: value
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("OPEN")
+                    .to_ascii_lowercase(),
                 review_decision: value
                     .get("reviewDecision")
                     .and_then(Value::as_str)
@@ -704,6 +873,13 @@ fn fetch_github_pull_requests(
                     .and_then(|author| author.get("login"))
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                assignees: value
+                    .get("assignees")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|assignee| nested_text(Some(assignee), "login"))
+                    .collect(),
                 labels: value
                     .get("labels")
                     .and_then(Value::as_array)
@@ -1563,6 +1739,7 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
                 additions: 0,
                 deletions: 0,
                 author: None,
+                assignees: Vec::new(),
                 labels: Vec::new(),
                 check_state: PrCheckState::Unknown,
                 audience: PrAudience::Unclassified,
@@ -1721,6 +1898,7 @@ impl crate::app::App {
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
+        let session = self.work_index_session.clone();
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
@@ -1733,9 +1911,18 @@ impl crate::app::App {
                     &gh_program,
                     &linearis_program,
                 );
+                let session = resolve_work_index_session(
+                    &config,
+                    session,
+                    deadline,
+                    WORK_INDEX_TARGET_TIMEOUT,
+                    &gh_program,
+                    &linearis_program,
+                );
                 let _ = event_tx.blocking_send(crate::events::AppEvent::WorkIndexRefreshed {
                     generation,
                     snapshot,
+                    session,
                 });
             });
     }
@@ -1744,6 +1931,7 @@ impl crate::app::App {
         &mut self,
         generation: u64,
         snapshot: Snapshot,
+        session: WorkIndexSession,
     ) -> bool {
         if generation <= self.last_applied_work_index_refresh_generation
             || generation != self.last_work_index_refresh_generation
@@ -1762,6 +1950,8 @@ impl crate::app::App {
             work_view.replace_snapshot(snapshot.clone());
             work_view.refreshing = false;
         }
+        self.work_index_session = session.clone();
+        self.state.work_index_session = session;
         self.state.work_index_snapshot = Some(snapshot.clone());
         self.work_index_snapshot = Some(snapshot);
         self.refresh_pane_settlement_at(Instant::now());
@@ -2148,13 +2338,64 @@ mod tests {
     }
 
     #[test]
+    fn work_index_session_resolves_me_once_with_injected_programs() {
+        let dir = fixture_dir("session-identities");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            r#"#!/bin/sh
+case "$*" in
+  "api user") printf '%s' '{"login":"matthias"}' ;;
+  "api repos/owner/repo/assignees --paginate --slurp") printf '%s' '[[{"login":"grace"},{"login":"matthias"}]]' ;;
+  *) exit 42 ;;
+esac
+"#,
+            r#"#!/bin/sh
+case "$*" in
+  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"name":"Matthias"}}' ;;
+  "users list --active -l 250 --compact") printf '%s' '{"nodes":[{"name":"Ada"},{"name":"Matthias"}]}' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let deadline = Instant::now() + WORK_INDEX_BATCH_TIMEOUT;
+        let session = resolve_work_index_session(
+            &config(),
+            WorkIndexSession::default(),
+            deadline,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+        );
+
+        assert_eq!(session.linear.viewer.as_deref(), Some("Matthias"));
+        assert_eq!(session.linear.assignees, ["Ada", "Matthias"]);
+        assert_eq!(session.github.viewer.as_deref(), Some("matthias"));
+        assert_eq!(session.github.assignees, ["grace", "matthias"]);
+        assert_eq!(session.missive.assignees, ["me"]);
+
+        let unchanged = resolve_work_index_session(
+            &config(),
+            session.clone(),
+            deadline,
+            WORK_INDEX_TARGET_TIMEOUT,
+            Path::new("/usr/bin/false"),
+            Path::new("/usr/bin/false"),
+        );
+        assert_eq!(
+            unchanged, session,
+            "resolved providers are not queried twice"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn github_pull_request_fetch_requests_created_at() {
         let dir = fixture_dir("github-created-at");
         let (gh, _linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,body,author,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
-printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"headRefName":"branch","baseRefName":"main","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","additions":12,"deletions":3,"labels":[{"name":"bug"}],"statusCheckRollup":[{"name":"test","conclusion":"SUCCESS"}]}]'
+test "$*" = "pr list --repo owner/repo --state all --limit 200 --json number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
+printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"login":"grace"}],"state":"MERGED","headRefName":"branch","baseRefName":"main","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","additions":12,"deletions":3,"labels":[{"name":"bug"}],"statusCheckRollup":[{"name":"test","conclusion":"SUCCESS"}]}]'
 "#,
             "#!/bin/sh\nprintf '%s' '[]'\n",
         );
@@ -2172,6 +2413,8 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"headRefName":"b
             parse_rfc3339_system_time("2026-08-30T11:22:33Z")
         );
         assert_eq!(pull_requests[0].author.as_deref(), Some("ada"));
+        assert_eq!(pull_requests[0].assignees, vec!["grace"]);
+        assert_eq!(pull_requests[0].state, "merged");
         assert_eq!(
             (pull_requests[0].additions, pull_requests[0].deletions),
             (12, 3)
