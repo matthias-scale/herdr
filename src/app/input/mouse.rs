@@ -5,9 +5,9 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, HomeHitTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
+        HomeHitTarget, MenuListState, Mode, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -126,6 +126,44 @@ impl AppState {
         self.forwarded_pane_input = None;
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
+            return None;
+        }
+        if self.mode == Mode::AddAction {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if rect_contains(self.view.add_action_close_hit_area, mouse.column, mouse.row)
+                    || rect_contains(
+                        self.view.add_action_cancel_hit_area,
+                        mouse.column,
+                        mouse.row,
+                    )
+                {
+                    self.add_action = None;
+                    self.mode = Mode::Terminal;
+                } else if rect_contains(self.view.add_action_save_hit_area, mouse.column, mouse.row)
+                {
+                    self.request_save_add_action = true;
+                } else if let Some(field) =
+                    self.view
+                        .add_action_field_hit_areas
+                        .iter()
+                        .find_map(|(field, rect)| {
+                            rect_contains(*rect, mouse.column, mouse.row).then_some(*field)
+                        })
+                {
+                    if let Some(action) = self.add_action.as_mut() {
+                        action.field = field;
+                        match field {
+                            crate::app::state::AddActionField::RunOnWorktreeCreate => {
+                                action.run_on_worktree_create = !action.run_on_worktree_create;
+                            }
+                            crate::app::state::AddActionField::OpenInBottomPane => {
+                                action.open_in_bottom_pane = !action.open_in_bottom_pane;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             return None;
         }
 
@@ -342,6 +380,36 @@ impl AppState {
                 }
             }
             return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && rect_contains(
+                self.view.add_action_button_hit_area,
+                mouse.column,
+                mouse.row,
+            )
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+        {
+            self.add_action = Some(AddActionState::default());
+            self.mode = Mode::AddAction;
+            return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+        {
+            if let Some(index) = self
+                .view
+                .user_action_hit_areas
+                .iter()
+                .find_map(|(index, rect)| {
+                    rect_contains(*rect, mouse.column, mouse.row).then_some(*index)
+                })
+            {
+                self.request_user_action = Some(index);
+                self.mode = Mode::Terminal;
+                return None;
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))

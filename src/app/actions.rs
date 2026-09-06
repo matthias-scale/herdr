@@ -1938,6 +1938,8 @@ impl AppState {
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
             self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
+            self.view.add_action_button_hit_area = ratatui::layout::Rect::default();
+            self.view.user_action_hit_areas.clear();
             self.view.git_menu_button_hit_area = ratatui::layout::Rect::default();
             self.view.git_menu_popup_rect = ratatui::layout::Rect::default();
             self.view.git_menu_first_visible = 0;
@@ -1947,6 +1949,7 @@ impl AppState {
             return;
         };
 
+        let visible_user_actions = crate::ui::visible_user_actions(self);
         let layout = crate::ui::compute_tab_bar_view(
             ws,
             &self.terminals,
@@ -1954,24 +1957,32 @@ impl AppState {
             self.tab_scroll,
             self.tab_scroll_follow_active,
             self.mouse_capture,
+            &visible_user_actions,
         );
         self.tab_scroll = layout.scroll;
         self.view.tab_hit_areas = layout.tab_hit_areas;
         self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
         self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
         self.view.new_tab_hit_area = layout.new_tab_hit_area;
-        self.view.git_menu_button_hit_area = layout.git_menu_button_hit_area;
         // Mirrors `compute_view`: a hidden or too-narrow tab row hands the
         // toggles to the status row instead of dropping them.
-        let (menu, below, right) = if layout.pane_toggle_below_hit_area.width > 0 {
+        let (add, actions, menu, below, right) = if layout.pane_toggle_below_hit_area.width > 0 {
             (
+                layout.add_action_button_hit_area,
+                layout.user_action_hit_areas,
                 layout.git_menu_button_hit_area,
                 layout.pane_toggle_below_hit_area,
                 layout.pane_toggle_right_hit_area,
             )
         } else {
-            crate::ui::tab_action_fallback_hit_areas(self.view.status_bar_rect, self.mouse_capture)
+            crate::ui::tab_action_fallback_hit_areas(
+                self.view.status_bar_rect,
+                self.mouse_capture,
+                &visible_user_actions,
+            )
         };
+        self.view.add_action_button_hit_area = add;
+        self.view.user_action_hit_areas = actions;
         self.view.git_menu_button_hit_area = menu;
         self.view.pane_toggle_below_hit_area = below;
         self.view.pane_toggle_right_hit_area = right;

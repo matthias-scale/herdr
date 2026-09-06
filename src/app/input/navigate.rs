@@ -97,6 +97,12 @@ impl App {
             return;
         }
 
+        if let Some(index) = user_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
+            self.state.request_user_action = Some(index);
+            leave_command_mode(&mut self.state);
+            return;
+        }
+
         if let Some(action) =
             indexed_navigation_action(&self.state, &raw_key, BindingDispatch::Prefix)
         {
@@ -175,6 +181,12 @@ impl App {
 
         if let Some(binding) = command_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
             self.launch_custom_command(binding, ActionContext::Navigate);
+            return;
+        }
+
+        if let Some(index) = user_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
+            self.state.request_user_action = Some(index);
+            leave_navigate_mode(&mut self.state);
             return;
         }
 
@@ -1602,6 +1614,27 @@ pub(crate) fn command_for_key(
             BindingDispatch::Prefix => binding.bindings.matches_prefix_key(key),
         })
         .cloned()
+}
+
+pub(crate) fn user_action_for_key(
+    state: &AppState,
+    key: &TerminalKey,
+    dispatch: BindingDispatch,
+) -> Option<usize> {
+    let repo = state.focused_repo_slug();
+    state
+        .keybinds
+        .user_actions
+        .iter()
+        .enumerate()
+        .find(|(_, action)| {
+            action.applies_to_repo(repo.as_deref())
+                && match dispatch {
+                    BindingDispatch::Direct => action.bindings.matches_direct_key(key),
+                    BindingDispatch::Prefix => action.bindings.matches_prefix_key(key),
+                }
+        })
+        .map(|(index, _)| index)
 }
 
 fn unmodified_digit_for_key(key: &TerminalKey) -> Option<char> {
@@ -5704,5 +5737,33 @@ navigate_pane_down = "ctrl+j"
 
         assert!(state.detach_requested);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn user_action_key_dispatch_respects_trigger_and_repo_scope() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.user_actions = vec![crate::config::UserAction {
+            name: "test".into(),
+            command: "just test".into(),
+            bindings: crate::config::ActionKeybinds::prefix("t"),
+            run_on_worktree_create: false,
+            open_in_bottom_pane: true,
+            repo: None,
+        }];
+        let key = TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty());
+
+        assert_eq!(
+            user_action_for_key(&state, &key, BindingDispatch::Prefix),
+            Some(0)
+        );
+        assert_eq!(
+            user_action_for_key(&state, &key, BindingDispatch::Direct),
+            None
+        );
+        state.keybinds.user_actions[0].repo = Some("other/repo".into());
+        assert_eq!(
+            user_action_for_key(&state, &key, BindingDispatch::Prefix),
+            None
+        );
     }
 }

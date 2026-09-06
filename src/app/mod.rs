@@ -36,6 +36,7 @@ pub mod state;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+mod user_actions;
 pub(crate) mod work_context_git;
 mod worktrees;
 
@@ -762,6 +763,8 @@ impl App {
             request_new_tab: false,
             request_pane_toggle: None,
             request_git_action: None,
+            request_user_action: None,
+            request_save_add_action: false,
             request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
@@ -804,6 +807,7 @@ impl App {
             keybind_help: state::KeybindHelpState::default(),
             navigator: state::NavigatorState::default(),
             work_link_picker: None,
+            add_action: None,
             copy_mode: None,
             sidebar_presentation: state::SidebarPresentationState::default(),
             sidebar_projection_revision: 0,
@@ -828,6 +832,12 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                add_action_button_hit_area: Rect::default(),
+                user_action_hit_areas: Vec::new(),
+                add_action_close_hit_area: Rect::default(),
+                add_action_field_hit_areas: Vec::new(),
+                add_action_cancel_hit_area: Rect::default(),
+                add_action_save_hit_area: Rect::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,
@@ -1530,6 +1540,12 @@ impl App {
             if self.apply_git_action_request() {
                 needs_render = true;
             }
+            if self.apply_user_action_request() {
+                needs_render = true;
+            }
+            if self.apply_save_add_action_request() {
+                needs_render = true;
+            }
             if self.apply_pr_land_request() {
                 needs_render = true;
             }
@@ -2007,7 +2023,10 @@ impl App {
 
         if !invalid_section("keys") {
             match config.live_keybinds_with_diagnostics() {
-                Ok((live, keybind_diagnostics)) => {
+                Ok((mut live, keybind_diagnostics)) => {
+                    if invalid_section("actions") {
+                        live.keybinds.user_actions = self.state.keybinds.user_actions.clone();
+                    }
                     self.state.prefix_code = live.prefix.0;
                     self.state.prefix_mods = live.prefix.1;
                     self.state.keybinds = live.keybinds;
@@ -2614,6 +2633,9 @@ impl App {
             }
             Mode::GitMenu => {
                 input::handle_git_menu_key(&mut self.state, key_event);
+            }
+            Mode::AddAction => {
+                self.handle_add_action_key(key_event);
             }
             Mode::KeybindHelp => {
                 input::handle_keybind_help_key(&mut self.state, key);

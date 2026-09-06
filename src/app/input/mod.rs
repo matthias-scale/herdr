@@ -229,6 +229,7 @@ impl App {
                     self.handle_context_menu_key_via_api(key_event);
                 }
                 Mode::GitMenu => handle_git_menu_key(&mut self.state, key_event),
+                Mode::AddAction => self.handle_add_action_key(key_event),
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
                 Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
