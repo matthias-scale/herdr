@@ -165,13 +165,11 @@ impl crate::app::AppState {
     }
 
     pub(crate) fn toggle_inbox(&mut self) {
-        self.inbox = match self.inbox.take() {
-            Some(_) => None,
-            None => {
-                self.home = None;
-                Some(InboxState::default())
-            }
-        };
+        if self.inbox.take().is_some() {
+            return;
+        }
+        self.clear_home();
+        self.inbox = Some(InboxState::default());
     }
 
     pub(crate) fn clear_inbox(&mut self) {

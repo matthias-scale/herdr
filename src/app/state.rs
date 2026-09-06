@@ -1727,6 +1727,7 @@ pub(crate) enum HomeHitTarget {
     Agent,
     Model,
     Effort,
+    Access,
     Context,
     Directory,
     Workspace,
@@ -2704,6 +2705,8 @@ pub struct AppState {
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
+    /// Client-local provider choices retained when Home closes.
+    pub(crate) home_agent_choices: Vec<crate::app::home::HomeAgentChoice>,
     /// Provider choices resolved outside `HomeState`, ready for the next Home open.
     pub(crate) home_catalog: crate::app::home_catalog::HomeCatalog,
     /// Ref snapshots are TUI-only picker data, keyed by the repository's common root.
@@ -4133,6 +4136,7 @@ impl AppState {
             request_usage_scan: false,
             inbox: None,
             home: None,
+            home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,

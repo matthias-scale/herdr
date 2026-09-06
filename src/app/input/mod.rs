@@ -101,6 +101,7 @@ impl AppState {
                 crate::app::home::HomePicker::Agent => crate::app::home::HomeFocus::Agent,
                 crate::app::home::HomePicker::Model => crate::app::home::HomeFocus::Model,
                 crate::app::home::HomePicker::Effort => crate::app::home::HomeFocus::Effort,
+                crate::app::home::HomePicker::Access => crate::app::home::HomeFocus::Access,
                 crate::app::home::HomePicker::Context => crate::app::home::HomeFocus::Context,
                 crate::app::home::HomePicker::Directory => crate::app::home::HomeFocus::Directory,
                 crate::app::home::HomePicker::Workspace => crate::app::home::HomeFocus::Workspace,
@@ -1111,7 +1112,7 @@ impl App {
         });
         self.state.symphony_detail = None;
         self.state.inbox = None;
-        self.state.home = None;
+        self.state.clear_home();
         if self.state.work_view.is_some() && enabled {
             self.next_work_index_refresh = std::time::Instant::now();
             if let Some(view) = self.state.work_view.as_mut() {
@@ -1730,7 +1731,7 @@ impl App {
             .unwrap_or_else(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
             });
-        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        let mut home = self.state.new_home_state();
         home.directory = directory.clone();
         home.ref_directory = directory;
         home.workspace = match choice {
@@ -1838,7 +1839,7 @@ impl App {
             .and_then(|state| state.ticket_start_menu)
             .unwrap_or_default();
         let directory = self.ticket_checkout_directory(&ticket.identifier, &repo);
-        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        let mut home = self.state.new_home_state();
         home.directory = directory.clone();
         home.ref_directory = directory.clone();
         home.ref_repo_root = self
@@ -2158,7 +2159,7 @@ impl App {
             .get(&directory)
             .and_then(Clone::clone)
             .unwrap_or(directory);
-        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        let mut home = self.state.new_home_state();
         home.directory = directory.clone();
         home.ref_directory = directory.clone();
         home.ref_repo_root = Some(directory);

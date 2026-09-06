@@ -243,6 +243,7 @@ impl AppState {
                                 HomeHitTarget::Agent => crate::app::home::HomePicker::Agent,
                                 HomeHitTarget::Model => crate::app::home::HomePicker::Model,
                                 HomeHitTarget::Effort => crate::app::home::HomePicker::Effort,
+                                HomeHitTarget::Access => crate::app::home::HomePicker::Access,
                                 HomeHitTarget::Context => crate::app::home::HomePicker::Context,
                                 HomeHitTarget::Directory => crate::app::home::HomePicker::Directory,
                                 HomeHitTarget::Workspace => crate::app::home::HomePicker::Workspace,

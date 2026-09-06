@@ -734,6 +734,7 @@ impl App {
             request_usage_scan: false,
             inbox: None,
             home: None,
+            home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
                 crate::app::home_catalog::HomeCatalog::fallback()
             } else {
