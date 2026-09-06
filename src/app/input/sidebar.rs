@@ -44,7 +44,18 @@ impl AppState {
         crate::ui::dropdown::hit_test(&layout, col, row)
     }
 
+    /// Resolve a settled-menu row press into an action.
+    ///
+    /// The delete row asks once first while `ui.confirm_close` is on: the first
+    /// press arms the row and returns nothing, the second press deletes. Every
+    /// other row disarms it, so an armed delete cannot fire from a later press
+    /// on a different row.
     pub(crate) fn select_settled_menu_action(&mut self, index: usize) -> Option<SettledMenuAction> {
+        let delete_armed = std::mem::take(&mut self.sidebar_settled_menu_delete_armed);
+        if index == 3 && self.confirm_close && !delete_armed {
+            self.sidebar_settled_menu_delete_armed = true;
+            return None;
+        }
         let target = self.sidebar_settled_menu_target.take()?;
         self.sidebar_selected_settled = None;
         let ws_idx = self
@@ -620,12 +631,17 @@ impl super::super::App {
     pub(crate) fn handle_sidebar_settled_key(&mut self, key: KeyEvent) -> bool {
         if self.state.sidebar_settled_menu_target.is_some() {
             match key.code {
-                KeyCode::Esc => self.state.sidebar_settled_menu_target = None,
+                KeyCode::Esc => {
+                    self.state.sidebar_settled_menu_target = None;
+                    self.state.sidebar_settled_menu_delete_armed = false;
+                }
                 KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.sidebar_settled_menu_delete_armed = false;
                     self.state.sidebar_settled_menu_selected =
                         self.state.sidebar_settled_menu_selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.sidebar_settled_menu_delete_armed = false;
                     self.state.sidebar_settled_menu_selected = self
                         .state
                         .sidebar_settled_menu_selected
@@ -647,6 +663,7 @@ impl super::super::App {
             KeyCode::Enter => {
                 self.state.sidebar_settled_menu_target = Some(target);
                 self.state.sidebar_settled_menu_selected = 0;
+                self.state.sidebar_settled_menu_delete_armed = false;
                 true
             }
             KeyCode::Esc => {

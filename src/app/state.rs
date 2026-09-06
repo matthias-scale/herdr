@@ -2343,6 +2343,9 @@ pub struct AppState {
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
+    /// The settled menu's delete row has been pressed once and is waiting for
+    /// the confirming second press. Only armed while `ui.confirm_close` is on.
+    pub(crate) sidebar_settled_menu_delete_armed: bool,
     pub(crate) pending_pane_settlement_changes: Vec<PaneSettlementChange>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
@@ -2511,6 +2514,20 @@ pub struct AppState {
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
+    /// Group workspaces that check out the same repository under one project
+    /// header even when the checkout roots differ (`ui.combine_repos_across_hosts`).
+    pub combine_repos_across_hosts: bool,
+    /// Hide whitespace-only changes in the diff surface (`ui.hide_whitespace_in_diff`).
+    pub hide_whitespace_in_diff: bool,
+    /// Workspace preselected for a new Home thread (`ui.new_thread_workspace`).
+    pub new_thread_workspace: crate::config::NewThreadWorkspaceConfig,
+    /// Directory the add-project picker starts in (`ui.add_project_start_dir`).
+    /// Empty keeps the last used directory.
+    pub add_project_start_dir: String,
+    /// Settle a pane when its linked work finishes (`session.auto_settle_finished`).
+    pub auto_settle_finished: bool,
+    /// Settle a pane after `settle_after` of inactivity (`session.auto_settle_inactive`).
+    pub auto_settle_inactive: bool,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -3052,6 +3069,7 @@ impl AppState {
         self.sidebar_selected_work_group = None;
         self.sidebar_selected_settled = None;
         self.sidebar_settled_menu_target = None;
+        self.sidebar_settled_menu_delete_armed = false;
         self.sidebar_filter_menu_open = false;
         self.workspace_scroll = 0;
         self.mark_sidebar_projection_changed();
@@ -3654,6 +3672,7 @@ impl AppState {
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
+            sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
@@ -3825,6 +3844,12 @@ impl AppState {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
+            combine_repos_across_hosts: false,
+            hide_whitespace_in_diff: false,
+            new_thread_workspace: crate::config::NewThreadWorkspaceConfig::CurrentCheckout,
+            add_project_start_dir: String::new(),
+            auto_settle_finished: true,
+            auto_settle_inactive: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
