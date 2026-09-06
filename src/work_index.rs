@@ -859,13 +859,6 @@ fn fetch_missive_snapshot(
     Ok((conversations, users))
 }
 
-/// Stable assignee hook for the sidebar filter slice.
-pub(crate) fn missive_assignees(snapshot: Option<&Snapshot>) -> &[MissiveUser] {
-    snapshot
-        .map(|snapshot| snapshot.missive_users.as_slice())
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 pub(crate) fn refresh_work_index(
     config: &WorkIndexConfig,
@@ -2961,7 +2954,7 @@ esac
     }
 
     #[test]
-    fn missive_assignee_hook_reads_snapshot_users() {
+    fn missive_session_users_are_not_persisted() {
         let snapshot = Snapshot {
             items: Vec::new(),
             conversations: Vec::new(),
@@ -2974,15 +2967,6 @@ esac
             unavailable: None,
             observed_at: SystemTime::UNIX_EPOCH,
         };
-        assert_eq!(missive_assignees(Some(&snapshot))[0].name, "Ada");
-        assert_eq!(
-            missive_assignees(Some(&snapshot))
-                .iter()
-                .find(|user| user.is_me)
-                .map(|user| user.name.as_str()),
-            Some("Ada")
-        );
-        assert!(missive_assignees(None).is_empty());
         let persisted = serde_json::to_value(&snapshot).expect("serialize snapshot");
         assert!(persisted.get("missive_users").is_none());
     }
