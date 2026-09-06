@@ -10805,6 +10805,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect();
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items,
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -10861,6 +10863,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.work_index_enabled = true;
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items: vec![item],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: std::time::SystemTime::UNIX_EPOCH,
         });
