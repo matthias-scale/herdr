@@ -1871,6 +1871,23 @@ impl SettingsSection {
     }
 }
 
+/// The sections a search query leaves in the nav column, in nav order.
+///
+/// An empty query is not a filter, it is the whole list. A query that matches
+/// nothing returns nothing, so the column shows the operator that their query
+/// is the reason the list is empty rather than silently ignoring it.
+pub fn settings_sections_matching(query: &str) -> Vec<SettingsSection> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return SettingsSection::ALL.to_vec();
+    }
+    SettingsSection::ALL
+        .iter()
+        .copied()
+        .filter(|section| section.label().contains(&query))
+        .collect()
+}
+
 /// All built-in theme names in display order.
 pub const THEME_NAMES: &[&str] = &[
     "catppuccin",
@@ -1969,6 +1986,11 @@ pub struct SettingsState {
     /// The archive row's delete has been pressed once and waits for the
     /// confirming second press. Only armed while `ui.confirm_close` is on.
     pub archive_delete_armed: bool,
+    /// The section-nav filter query. TUI-only: nothing outside the settings
+    /// screen reads it and it is never persisted.
+    pub search: String,
+    /// Typed characters go to the filter line rather than the section list.
+    pub search_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3962,6 +3984,8 @@ impl AppState {
                 original_palette: None,
                 original_theme: None,
                 archive_delete_armed: false,
+                search: String::new(),
+                search_active: false,
             },
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),
