@@ -30,6 +30,7 @@ pub(crate) use input::SidebarWorkGroupKeyAction;
 mod pane_lifecycle;
 mod popup;
 pub(crate) mod probes;
+mod repo_editor;
 mod repo_routing;
 mod runtime;
 mod runtime_mutations;
@@ -748,6 +749,7 @@ impl App {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             git_root_for_cwd: std::collections::HashMap::new(),
+            repo_editor_argv: repo_editor::resolve_repo_editor_argv(),
             forwarded_pane_input: None,
             status_bar_enabled: config.ui.status_bar.enabled,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
@@ -783,6 +785,7 @@ impl App {
             request_new_workspace: false,
             request_new_tab: false,
             request_pane_toggle: None,
+            request_open_repo_editor: false,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
@@ -854,6 +857,7 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                repo_editor_button_hit_area: Rect::default(),
                 add_action_button_hit_area: Rect::default(),
                 user_action_hit_areas: Vec::new(),
                 add_action_close_hit_area: Rect::default(),
@@ -1574,6 +1578,10 @@ impl App {
             }
 
             if self.apply_pane_toggle_request() {
+                needs_render = true;
+            }
+
+            if self.apply_open_repo_editor_request() {
                 needs_render = true;
             }
 

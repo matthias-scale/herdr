@@ -1807,6 +1807,7 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub repo_editor_button_hit_area: Rect,
     pub add_action_button_hit_area: Rect,
     pub user_action_hit_areas: Vec<(usize, Rect)>,
     pub add_action_close_hit_area: Rect,
@@ -2731,6 +2732,8 @@ pub struct AppState {
     /// without touching the filesystem.
     pub(crate) git_root_for_cwd:
         std::collections::HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+    /// Vim-family command resolved outside the pure render path.
+    pub(crate) repo_editor_argv: Option<Vec<String>>,
     /// Pane whose most recent mouse event was forwarded to its terminal.
     pub(crate) forwarded_pane_input: Option<PaneId>,
     /// Whether the full-width top status row is enabled by configuration.
@@ -2774,6 +2777,8 @@ pub struct AppState {
     /// Set by a click on a tab-row pane toggle, drained by the runtime loop
     /// into the same split/close calls the keybindings use.
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
+    /// The top-bar repository editor button was activated.
+    pub(crate) request_open_repo_editor: bool,
     /// Git action chosen from the tab-row menu, drained by the runtime loop.
     pub(crate) request_git_action: Option<GitAction>,
     pub(crate) request_user_action: Option<usize>,
@@ -4142,6 +4147,7 @@ impl AppState {
             status_focused_cwd: None,
             status_focus_projection_initialized: false,
             git_root_for_cwd: std::collections::HashMap::new(),
+            repo_editor_argv: None,
             forwarded_pane_input: None,
             status_bar_enabled: true,
             status_now_unix: None,
@@ -4173,6 +4179,7 @@ impl AppState {
             request_new_workspace: false,
             request_new_tab: false,
             request_pane_toggle: None,
+            request_open_repo_editor: false,
             request_git_action: None,
             request_user_action: None,
             request_save_add_action: false,
@@ -4249,6 +4256,7 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                repo_editor_button_hit_area: Rect::default(),
                 add_action_button_hit_area: Rect::default(),
                 user_action_hit_areas: Vec::new(),
                 add_action_close_hit_area: Rect::default(),
