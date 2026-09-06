@@ -70,6 +70,20 @@ pub struct CustomThemeColors {
     pub blue: Option<String>,
     pub teal: Option<String>,
     pub peach: Option<String>,
+    /// Status glyph colour for backlog, todo, draft, closed, cancelled and unassigned work.
+    pub work_status_neutral: Option<String>,
+    /// Status glyph colour for work in progress.
+    pub work_status_active: Option<String>,
+    /// Status glyph colour for work in review.
+    pub work_status_review: Option<String>,
+    /// Status glyph colour for finished work.
+    pub work_status_done: Option<String>,
+    /// Status glyph colour for triage.
+    pub work_status_triage: Option<String>,
+    /// Status glyph colour for a merged pull request.
+    pub work_status_merged: Option<String>,
+    /// Status glyph colour for an open pull request or conversation.
+    pub work_status_open: Option<String>,
 }
 
 /// Parse a color string into a ratatui Color.

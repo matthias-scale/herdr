@@ -666,6 +666,109 @@ mod tests {
         assert!(collapsed.contains("src/two.rs"));
     }
 
+    fn scratch_config_path(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "herdr-diff-{name}-{}",
+                crate::config::test_unique_suffix()
+            ))
+            .join("config.toml")
+    }
+
+    fn app_with_focused_terminal(config: &crate::config::Config) -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("diff")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app
+    }
+
+    #[test]
+    fn general_hide_whitespace_row_flips_the_value_the_diff_request_uses() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = scratch_config_path("settings-hide-whitespace");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_with_focused_terminal(&crate::config::Config::default());
+        let row = crate::app::settings_general::GeneralRow::HideWhitespace;
+        assert_eq!(row.value(&app.state), "off");
+        assert!(
+            !app.focused_diff_refresh_request()
+                .expect("focused diff request")
+                .ignore_whitespace
+        );
+
+        // A rendered diff is live when the operator flips the row.
+        app.state.dock_diff_request = app.focused_diff_refresh_request();
+        app.state.dock_diff_active_key = Some(DiffCacheKey {
+            root: PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        });
+
+        let edit = crate::app::settings_general::cycle_general_row(&app.state, row)
+            .expect("hide whitespace row is editable");
+        app.save_config_edit(edit);
+
+        assert!(app.state.dock_diff_ignore_whitespace);
+        // The row reads the same field the dock's own `w` toggle writes.
+        assert_eq!(row.value(&app.state), "on");
+        app.state.toggle_dock_diff_whitespace();
+        assert_eq!(row.value(&app.state), "off");
+        app.state.toggle_dock_diff_whitespace();
+        assert!(app.state.dock_diff_active_key.is_none());
+        assert!(app.state.dock_diff_request.is_none());
+        assert!(
+            app.focused_diff_refresh_request()
+                .expect("focused diff request")
+                .ignore_whitespace
+        );
+
+        env.restore();
+        let _ = std::fs::remove_dir_all(path.parent().expect("config dir"));
+    }
+
+    #[test]
+    fn hide_whitespace_config_key_drives_the_diff_at_startup_and_on_reload() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = scratch_config_path("reload-hide-whitespace");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut config = crate::config::Config::default();
+        config.ui.hide_whitespace_in_diff = true;
+        let app = app_with_focused_terminal(&config);
+        assert!(app.state.dock_diff_ignore_whitespace);
+        assert!(
+            app.focused_diff_refresh_request()
+                .expect("focused diff request")
+                .ignore_whitespace
+        );
+
+        let mut app = app_with_focused_terminal(&crate::config::Config::default());
+        assert!(!app.state.dock_diff_ignore_whitespace);
+        app.state.dock_diff_active_key = Some(DiffCacheKey {
+            root: PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        });
+
+        std::fs::create_dir_all(path.parent().expect("config dir")).expect("config dir");
+        std::fs::write(&path, "[ui]\nhide_whitespace_in_diff = true\n").expect("write config");
+        app.apply_config_from_disk(false);
+
+        assert!(app.state.dock_diff_ignore_whitespace);
+        assert!(app.state.dock_diff_active_key.is_none());
+        assert!(
+            app.focused_diff_refresh_request()
+                .expect("focused diff request")
+                .ignore_whitespace
+        );
+
+        env.restore();
+        let _ = std::fs::remove_dir_all(path.parent().expect("config dir"));
+    }
+
     #[test]
     fn diff_refresh_merges_committed_and_uncommitted_sections() {
         let root = fixture_repo();

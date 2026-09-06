@@ -291,6 +291,34 @@ pub struct CustomCommandKeybind {
     pub height: Option<PopupSize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UserAction {
+    pub name: String,
+    pub command: String,
+    pub bindings: ActionKeybinds,
+    pub run_on_worktree_create: bool,
+    pub open_in_bottom_pane: bool,
+    pub repo: Option<String>,
+}
+
+impl UserAction {
+    pub fn key_label(&self) -> String {
+        self.bindings.label().unwrap_or_else(|| "unset".into())
+    }
+
+    pub fn applies_to_repo(&self, repo: Option<&str>) -> bool {
+        match self.repo.as_deref() {
+            None => true,
+            Some(scope) => repo.is_some_and(|repo| {
+                crate::work_context::repo_slugs_match(scope, repo)
+                    || scope
+                        .rsplit_once('/')
+                        .is_some_and(|(_, name)| name.eq_ignore_ascii_case(repo))
+            }),
+        }
+    }
+}
+
 /// Parsed keybinds for Herdr actions.
 #[derive(Debug, Clone)]
 pub struct NavigateKeybinds {
@@ -377,10 +405,14 @@ pub struct Keybinds {
     pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
     pub work: ActionKeybinds,
+    pub usage: ActionKeybinds,
+    pub tickets: ActionKeybinds,
+    pub missive: ActionKeybinds,
     pub inbox: ActionKeybinds,
     pub home: ActionKeybinds,
     pub toggle_status_detail: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
+    pub user_actions: Vec<UserAction>,
 }
 
 impl Default for Keybinds {
@@ -568,10 +600,14 @@ impl Config {
             toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
             work: empty_action!(),
+            usage: empty_action!(),
+            tickets: empty_action!(),
+            missive: empty_action!(),
             inbox: empty_action!(),
             home: empty_action!(),
             toggle_status_detail: empty_action!(),
             custom_commands: Vec::new(),
+            user_actions: Vec::new(),
         };
 
         macro_rules! field_source {
@@ -746,6 +782,9 @@ impl Config {
             apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.work, work, source);
+            apply_action!(keybinds.usage, usage, source);
+            apply_action!(keybinds.tickets, tickets, source);
+            apply_action!(keybinds.missive, missive, source);
             apply_action!(keybinds.inbox, inbox, source);
             apply_action!(keybinds.home, home, source);
             apply_action!(keybinds.toggle_status_detail, toggle_status_detail, source);
@@ -828,8 +867,126 @@ impl Config {
             keybinds.copy_work_link = keybinds.copy_work_url.clone();
         }
 
+        append_user_actions(self, prefix, &mut keybinds, &mut registry, &mut diagnostics);
+
         (prefix_diag, prefix, diagnostics, keybinds)
     }
+}
+
+pub fn validate_user_action_key(config: &mut Config, key: &str) -> Result<String, String> {
+    let mut suffix = 0usize;
+    let name = loop {
+        let name = format!("__herdr_action_key_capture_{suffix}");
+        if !config
+            .actions
+            .iter()
+            .any(|action| action.name.eq_ignore_ascii_case(&name))
+        {
+            break name;
+        }
+        suffix = suffix.saturating_add(1);
+    };
+    config.actions.push(crate::config::ActionConfig {
+        name: name.clone(),
+        command: "true".into(),
+        key: Some(key.into()),
+        ..Default::default()
+    });
+    let (.., diagnostics, keybinds) = config.validated_keybinds();
+    let result = keybinds
+        .user_actions
+        .iter()
+        .find(|action| action.name == name)
+        .and_then(|action| action.bindings.label())
+        .ok_or_else(|| {
+            diagnostics
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "keybinding is already bound".into())
+        });
+    config.actions.pop();
+    result
+}
+
+fn append_user_actions(
+    config: &Config,
+    prefix: KeyCombo,
+    keybinds: &mut Keybinds,
+    registry: &mut BindingRegistry,
+    diagnostics: &mut Vec<String>,
+) {
+    let mut names = std::collections::HashSet::new();
+    for (index, action) in config.actions.iter().enumerate() {
+        let name = action.name.trim();
+        if name.is_empty() {
+            let diagnostic =
+                format!("empty user action name: actions[{index}].name; disabling action");
+            warn!(message = %diagnostic, "config diagnostic");
+            diagnostics.push(diagnostic);
+            continue;
+        }
+        let command = action.command.trim();
+        if command.is_empty() {
+            let diagnostic =
+                format!("empty user action command: actions[{index}].command; disabling action");
+            warn!(message = %diagnostic, "config diagnostic");
+            diagnostics.push(diagnostic);
+            continue;
+        }
+        if !names.insert(name.to_ascii_lowercase()) {
+            let diagnostic = format!(
+                "duplicate user action name: actions[{index}].name = {name:?}; disabling action"
+            );
+            warn!(message = %diagnostic, "config diagnostic");
+            diagnostics.push(diagnostic);
+            continue;
+        }
+
+        let key_field = format!("actions[{index}].key");
+        let key = action
+            .key
+            .as_deref()
+            .map(|raw| normalize_user_action_key(raw, prefix))
+            .unwrap_or_default();
+        let bindings = parse_action_bindings(
+            &key_field,
+            &BindingConfig::one(key.clone()),
+            registry,
+            diagnostics,
+            BindingSource::User,
+        );
+        if !key.trim().is_empty() && bindings.bindings.is_empty() {
+            let diagnostic = format!("unbound user action key: {key_field} = {key:?}");
+            warn!(message = %diagnostic, "config diagnostic");
+            diagnostics.push(diagnostic);
+        }
+        keybinds.user_actions.push(UserAction {
+            name: name.to_string(),
+            command: command.to_string(),
+            bindings,
+            run_on_worktree_create: action.run_on_worktree_create,
+            open_in_bottom_pane: action.open_in_bottom_pane,
+            repo: action
+                .repo
+                .as_deref()
+                .map(str::trim)
+                .filter(|repo| !repo.is_empty())
+                .map(str::to_string),
+        });
+    }
+}
+
+fn normalize_user_action_key(raw: &str, prefix: KeyCombo) -> String {
+    let parts = raw.split_whitespace().collect::<Vec<_>>();
+    if let [physical_prefix, rhs] = parts.as_slice() {
+        let physical_prefix = physical_prefix.replace('-', "+");
+        if parse_key_combo(&physical_prefix).map(normalize_key_combo)
+            == Some(normalize_key_combo(prefix))
+        {
+            return format!("prefix+{rhs}");
+        }
+    }
+    raw.trim().to_string()
 }
 
 fn reserve_navigate_runtime_keys(registry: &mut BindingRegistry) {
@@ -2567,5 +2724,74 @@ width = "80%"
             .collect_diagnostics()
             .iter()
             .any(|diag| diag.contains("popup size on non-popup custom command")));
+    }
+
+    #[test]
+    fn user_actions_parse_in_order_with_physical_prefix_syntax() {
+        let config: Config = toml::from_str(
+            r#"
+[[actions]]
+name = "test"
+command = "just test"
+key = "ctrl-b t"
+run_on_worktree_create = true
+open_in_bottom_pane = true
+repo = "matthias-scale/herdr"
+
+[[actions]]
+name = "lint"
+command = "just lint"
+"#,
+        )
+        .expect("action config parses");
+
+        let actions = config.keybinds().user_actions;
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].name, "test");
+        assert_eq!(actions[0].key_label(), "prefix+t");
+        assert!(actions[0].run_on_worktree_create);
+        assert!(actions[0].open_in_bottom_pane);
+        assert!(actions[0].applies_to_repo(Some("matthias-scale/herdr")));
+        assert_eq!(actions[1].name, "lint");
+        assert_eq!(actions[1].key_label(), "unset");
+    }
+
+    #[test]
+    fn user_action_diagnostics_keep_valid_buttons_but_unbind_bad_keys() {
+        let config: Config = toml::from_str(
+            r#"
+[[actions]]
+name = "help collision"
+command = "echo collision"
+key = "ctrl-b ?"
+
+[[actions]]
+name = "help collision"
+command = "echo duplicate"
+
+[[actions]]
+name = "empty"
+command = "  "
+"#,
+        )
+        .expect("action config parses");
+
+        let diagnostics = config.collect_diagnostics();
+        let actions = config.keybinds().user_actions;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "help collision");
+        assert!(actions[0].bindings.bindings.is_empty());
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("disabled actions[0].key") && diagnostic.contains("keys.help")
+        }));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unbound user action key")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("duplicate user action name")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("empty user action command")));
     }
 }

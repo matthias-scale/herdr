@@ -69,6 +69,11 @@ pub enum AppEvent {
     ProviderUsageRefreshed {
         snapshot: Box<crate::provider_usage::ProviderUsageSnapshot>,
     },
+    /// A generation-bound local history scan completed off the render thread.
+    UsageScanFinished {
+        generation: u64,
+        result: Result<Box<crate::provider_usage::UsageSnapshot>, String>,
+    },
     /// A bounded background reachability probe completed.
     ConnectivityProbed { reachable: bool },
     /// The local Codex CLI returned an updated account-aware model catalog.
@@ -79,6 +84,10 @@ pub enum AppEvent {
     HomeRefsRefreshed {
         repo_root: std::path::PathBuf,
         result: Result<crate::app::home_refs::HomeRefCacheEntry, String>,
+    },
+    /// Background provider/integration probes for settings finished.
+    ToolProbesFinished {
+        probes: Vec<crate::app::probes::ToolProbe>,
     },
     /// A requested Home checkout completed before agent launch.
     HomeCheckoutFinished {
@@ -214,7 +223,8 @@ pub enum AppEvent {
     /// Background repo-wide GitHub, Linear, and pane work observations completed.
     WorkIndexRefreshed {
         generation: u64,
-        snapshot: crate::work_index::Snapshot,
+        snapshot: Box<crate::work_index::Snapshot>,
+        session: crate::work_index::WorkIndexSession,
     },
     /// One bounded batch of GitHub detail observations completed.
     WorkItemDetailRefreshed {

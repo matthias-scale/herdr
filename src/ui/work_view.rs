@@ -7,8 +7,14 @@ use ratatui::{
 };
 
 use crate::{
-    app::state::{AppState, Palette, PrDetailTab, WorkProjection, WorkViewState},
-    ui::work_list_detail::{sorted_filtered_prs, WorkItem as _, WorkRow},
+    app::state::{
+        AppState, Palette, PrDetailTab, TicketMoreChoice, TicketTransitionChoice, WorkProjection,
+        WorkViewState,
+    },
+    ui::work_list_detail::{
+        comment_header, section_separator, sorted_filtered_conversations, sorted_filtered_prs,
+        sorted_filtered_tickets, ConversationItem, TicketItem, WorkItem as _, WorkRow,
+    },
     work_projection::{project_review_queue, WorkReviewQueueRow},
 };
 
@@ -23,10 +29,364 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
     match state.projection {
         WorkProjection::PullRequests => render_pull_requests(app, state, sections[0], frame),
+        WorkProjection::Tickets => render_tickets(app, state, sections[0], frame),
+        WorkProjection::Missive => render_missive(app, state, sections[0], frame),
         WorkProjection::ReviewQueue => render_review_queue(palette, state, sections[0], frame),
         projection => render_placeholder(palette, projection, sections[0], frame),
     }
     render_footer(palette, state, sections[1], frame);
+}
+
+fn render_missive(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    let palette = &app.palette;
+    let observed_at = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.observed_at)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let items = state.snapshot.as_ref().map(|snapshot| {
+        sorted_filtered_conversations(
+            &snapshot.conversations,
+            &state.search,
+            !state.open_only,
+            observed_at,
+        )
+    });
+    let columns = if area.width >= 96 {
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    };
+    let refresh = if state.refreshing {
+        " · refreshing…"
+    } else {
+        ""
+    };
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Missive{refresh} "))
+        .border_style(Style::default().fg(palette.accent));
+    let left_inner = left.inner(columns[0]);
+    frame.render_widget(left, columns[0]);
+    let cursor = if state.search_focused { "▏" } else { "" };
+    let query = if state.search.is_empty() {
+        "search conversations"
+    } else {
+        &state.search
+    };
+    let filter = if state.open_only { "open" } else { "all" };
+    let query_width = usize::from(left_inner.width).saturating_sub(filter.chars().count() + 9);
+    let mut lines = vec![Line::styled(
+        format!(" 🔍 {}{cursor}  ⚲ {filter}", fit_cell(query, query_width)),
+        Style::default().fg(palette.subtext0),
+    )];
+    let message = if !state.enabled {
+        Some("work index disabled".to_string())
+    } else if state.snapshot.is_none() {
+        Some("work index not yet collected".to_string())
+    } else {
+        state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.unavailable.clone())
+    };
+    if let Some(message) = message {
+        lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
+        frame.render_widget(Paragraph::new(lines), left_inner);
+        return;
+    }
+    let items = items.unwrap_or_default();
+    let selected = state
+        .selected_missive
+        .as_deref()
+        .and_then(|id| items.iter().position(|item| item.key() == id))
+        .unwrap_or(0);
+    let mut current_group = "";
+    let mut selected_line = 0usize;
+    for (index, item) in items.iter().enumerate() {
+        let row = item.row();
+        if row.group != current_group {
+            current_group = row.group;
+            lines.push(Line::styled(
+                format!(" {current_group}"),
+                Style::default()
+                    .fg(palette.subtext0)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if index == selected {
+            selected_line = lines.len();
+        }
+        push_missive_row(
+            &mut lines,
+            item,
+            &row,
+            index == selected,
+            palette,
+            left_inner.width,
+        );
+    }
+    if items.is_empty() {
+        lines.push(Line::styled(
+            " no matching conversations",
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    let list_height = usize::from(left_inner.height);
+    let list_scroll = selected_line
+        .saturating_add(1)
+        .saturating_sub(list_height)
+        .min(usize::from(u16::MAX)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((list_scroll, 0)), left_inner);
+
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Conversation ")
+        .border_style(Style::default().fg(palette.accent));
+    let detail_inner = detail_block.inner(columns[1]);
+    frame.render_widget(detail_block, columns[1]);
+    if let Some(item) = items.get(selected) {
+        render_missive_detail(app, state, item, detail_inner, frame);
+    }
+}
+
+fn render_missive_detail(
+    app: &AppState,
+    state: &WorkViewState,
+    item: &ConversationItem<'_>,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let detail = item.detail();
+    let mut lines = vec![
+        Line::styled(
+            format!(" {}   [Start thread ▾] [Open in Missive]", detail.heading),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(" {}", detail.title),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(" {}", detail.byline),
+            Style::default().fg(app.palette.subtext0),
+        ),
+    ];
+    let visible_sections = detail
+        .sections
+        .iter()
+        .filter(|section| !section.entries.is_empty())
+        .collect::<Vec<_>>();
+    for section in &visible_sections {
+        lines.push(Line::styled(
+            format!(" {}  {}", section.label, section.entries.len()),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for entry in &section.entries {
+            lines.push(Line::styled(
+                format!(
+                    "  {} · {}",
+                    entry.author.as_deref().unwrap_or("unknown"),
+                    relative_time(entry.created_at, item.observed_at)
+                ),
+                Style::default().fg(app.palette.subtext0),
+            ));
+            lines.extend(crate::ui::markdown::body_lines(
+                &app.palette,
+                Some(&entry.body),
+                usize::from(area.width.saturating_sub(4)),
+                "    ",
+            ));
+        }
+    }
+    if visible_sections.is_empty() {
+        lines.push(Line::styled(
+            " no conversation entries indexed",
+            Style::default().fg(app.palette.subtext0),
+        ));
+    }
+    if let Some(hint) = state.hint.as_deref() {
+        lines.push(Line::styled(
+            format!(" {hint}"),
+            Style::default().fg(app.palette.accent),
+        ));
+    }
+    let max_scroll = lines.len().saturating_sub(usize::from(area.height));
+    let scroll = usize::from(state.missive_detail_scroll).min(max_scroll) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+
+    if let Some(choice) = state.missive_start_menu {
+        render_missive_start_menu(app, frame, area, choice);
+    }
+}
+
+fn relative_time(then: Option<std::time::SystemTime>, now: std::time::SystemTime) -> String {
+    let seconds = then
+        .and_then(|then| now.duration_since(then).ok())
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    if seconds >= 86_400 {
+        format!("{}d ago", seconds / 86_400)
+    } else if seconds >= 3_600 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}m ago", seconds / 60)
+    }
+}
+
+fn render_missive_start_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    choice: crate::app::state::PrCheckoutChoice,
+) {
+    let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
+    let Some(layout) = ticket_menu_layout(area, 12, 2, selected, 24) else {
+        return;
+    };
+    let labels = ["Current checkout", "New worktree"];
+    frame.render_widget(
+        Paragraph::new(
+            labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    Line::styled(
+                        format!("{} {label}", if index == selected { "▸" } else { " " }),
+                        Style::default()
+                            .fg(app.palette.text)
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
+fn render_tickets(app: &AppState, state: &WorkViewState, area: Rect, frame: &mut Frame) {
+    let palette = &app.palette;
+    let observed_at = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.observed_at)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let has_context_pr = super::dock::pr::focused_pr_key(app).is_some();
+    let items = state.snapshot.as_ref().map(|snapshot| {
+        sorted_filtered_tickets(
+            &snapshot.items,
+            &app.work_item_detail_cache,
+            &state.search,
+            state.ticket_sort,
+            state.ticket_open_only,
+            observed_at,
+            has_context_pr,
+            Some((&app.sidebar_work_filter, &app.work_index_session)),
+        )
+    });
+    let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {
+        " · refreshing…"
+    } else {
+        ""
+    };
+    let columns = if area.width >= 72 {
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    };
+    let left = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Tickets{refresh} "))
+        .border_style(Style::default().fg(palette.accent));
+    let left_inner = left.inner(columns[0]);
+    frame.render_widget(left, columns[0]);
+    let filter = if state.ticket_open_only {
+        "open"
+    } else {
+        "all"
+    };
+    let cursor = if state.search_focused { "▏" } else { "" };
+    let mut lines = vec![Line::styled(
+        format!(
+            " 🔍 {}{cursor}   ⇅ {}   ⚲ {filter}",
+            if state.search.is_empty() {
+                "search or label:bug"
+            } else {
+                &state.search
+            },
+            state.ticket_sort.label()
+        ),
+        Style::default().fg(palette.subtext0),
+    )];
+    let message = if !state.enabled {
+        Some("work index disabled".to_string())
+    } else if state.snapshot.is_none() {
+        Some("work index not yet collected".to_string())
+    } else {
+        state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.unavailable.clone())
+    };
+    if let Some(message) = message {
+        lines.push(Line::styled(message, Style::default().fg(palette.subtext0)));
+        frame.render_widget(Paragraph::new(lines), left_inner);
+        return;
+    }
+    let items = items.unwrap_or_default();
+    let selected = state
+        .selected
+        .as_ref()
+        .and_then(|key| {
+            key.ticket_id
+                .as_deref()
+                .and_then(|ticket| items.iter().position(|item| item.key() == ticket))
+        })
+        .unwrap_or(0);
+    let mut current_group = "";
+    for (index, item) in items.iter().enumerate() {
+        let row = item.row();
+        if row.group != current_group {
+            current_group = row.group;
+            lines.push(Line::styled(
+                format!(" {current_group}"),
+                Style::default()
+                    .fg(palette.subtext0)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        push_work_row(
+            &mut lines,
+            &row,
+            index == selected,
+            palette,
+            left_inner.width,
+            false,
+        );
+    }
+    if items.is_empty() {
+        lines.push(Line::styled(
+            " no matching tickets",
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), left_inner);
+
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Ticket ")
+        .border_style(Style::default().fg(palette.accent));
+    let detail_inner = detail_block.inner(columns[1]);
+    frame.render_widget(detail_block, columns[1]);
+    if let Some(item) = items.get(selected) {
+        render_ticket_detail(app, state, item, detail_inner, frame);
+    }
 }
 
 fn render_review_queue(palette: &Palette, state: &WorkViewState, area: Rect, frame: &mut Frame) {
@@ -130,6 +490,7 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
             state.open_only,
             observed_at,
             &app.land_approval_label,
+            Some((&app.sidebar_work_filter, &app.work_index_session)),
         )
     });
     let refresh = if state.refreshing || !app.work_item_detail_loading.is_empty() {
@@ -198,12 +559,13 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        push_pr_row(
+        push_work_row(
             &mut lines,
             &row,
             index == selected,
             palette,
             left_inner.width,
+            true,
         );
     }
     if items.is_empty() {
@@ -225,12 +587,13 @@ fn render_pull_requests(app: &AppState, state: &WorkViewState, area: Rect, frame
     }
 }
 
-fn push_pr_row(
+fn push_work_row(
     lines: &mut Vec<Line<'static>>,
     row: &WorkRow,
     selected: bool,
     palette: &Palette,
     width: u16,
+    metadata_on_second_line: bool,
 ) {
     let style = if selected {
         Style::default()
@@ -240,20 +603,199 @@ fn push_pr_row(
     } else {
         Style::default().fg(palette.text)
     };
-    let available = usize::from(width).saturating_sub(row.age.chars().count() + 6);
+    let suffix = if metadata_on_second_line {
+        row.age.clone()
+    } else {
+        format!("{}  {}", row.changes, row.age)
+    };
+    let prefix = if metadata_on_second_line {
+        String::new()
+    } else {
+        format!("{} ", row.metadata)
+    };
+    let available =
+        usize::from(width).saturating_sub(prefix.chars().count() + suffix.chars().count() + 5);
     lines.push(Line::styled(
         format!(
-            " {} {}  {:>3}",
+            " {} {}{}  {}",
             row.glyph,
+            prefix,
             fit_cell(&row.title, available),
-            row.age
+            suffix
         ),
         style,
     ));
+    if metadata_on_second_line {
+        lines.push(Line::styled(
+            format!("   {}  {}", row.metadata, row.changes),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+}
+
+fn push_missive_row(
+    lines: &mut Vec<Line<'static>>,
+    item: &ConversationItem<'_>,
+    row: &WorkRow,
+    selected: bool,
+    palette: &Palette,
+    width: u16,
+) {
+    let base = if selected {
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.surface0)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.text)
+    };
+    let status = crate::ui::work_status::WorkGroupStatus::from_conversation(
+        item.summary.closed,
+        !item.summary.assignees.is_empty(),
+    );
+    let available = usize::from(width).saturating_sub(row.age.chars().count() + 5);
+    lines.push(Line::from(vec![
+        ratatui::text::Span::styled(" ", base),
+        ratatui::text::Span::styled(status.glyph(), base.fg(status.color(palette))),
+        ratatui::text::Span::styled(
+            format!(" {}  {}", fit_cell(&row.title, available), row.age),
+            base,
+        ),
+    ]));
     lines.push(Line::styled(
-        format!("   {}  {}", row.metadata, row.changes),
-        Style::default().fg(palette.subtext0),
+        format!("   {}", row.metadata),
+        if selected {
+            Style::default().fg(palette.subtext0).bg(palette.surface0)
+        } else {
+            Style::default().fg(palette.subtext0)
+        },
     ));
+}
+
+fn render_ticket_detail(
+    app: &AppState,
+    state: &WorkViewState,
+    item: &TicketItem<'_>,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let palette = &app.palette;
+    let detail = item.detail();
+    let link_enabled = item.actions().iter().any(|action| {
+        action.kind == crate::ui::work_list_detail::WorkActionKind::LinkPr && action.enabled
+    });
+    let link_style = if link_enabled {
+        Style::default().fg(palette.accent)
+    } else {
+        Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::DIM)
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            ratatui::text::Span::styled(
+                format!(" {}   [Start thread ▾] [Transition ▾] ", detail.heading),
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ratatui::text::Span::styled("[Link PR] ", link_style),
+            ratatui::text::Span::styled("⋯", Style::default().fg(palette.accent)),
+        ]),
+        Line::styled(
+            format!(" {}", detail.title),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(" {}", detail.byline),
+            Style::default().fg(palette.subtext0),
+        ),
+    ];
+    lines.extend(section_separator(
+        palette,
+        format!("Linked PRs  {}", detail.linked_prs.len()),
+        area.width,
+    ));
+    for pr in &detail.linked_prs {
+        let check = match pr.check_state {
+            crate::work_index::PrCheckState::Passing => "✓",
+            crate::work_index::PrCheckState::Failing => "✗",
+            crate::work_index::PrCheckState::Pending => "◌",
+            crate::work_index::PrCheckState::Unknown => "—",
+        };
+        lines.push(Line::styled(
+            format!("  ⑂ #{} {}  {check}", pr.number, pr.title),
+            Style::default().fg(palette.subtext0),
+        ));
+    }
+    lines.extend(section_separator(palette, "Description", area.width));
+    lines.extend(crate::ui::markdown::body_lines(
+        palette,
+        crate::ui::work_list_detail::description_without_checklist(detail.description.as_deref())
+            .as_deref(),
+        usize::from(area.width.saturating_sub(2)),
+        " ",
+    ));
+    if !detail.checks.is_empty() {
+        lines.extend(section_separator(
+            palette,
+            "Acceptance criteria",
+            area.width,
+        ));
+        for (text, state) in &detail.checks {
+            lines.push(Line::styled(
+                format!("  {} {text}", if state == "done" { "✓" } else { "✗" }),
+                Style::default().fg(palette.subtext0),
+            ));
+        }
+    }
+    lines.extend(section_separator(
+        palette,
+        format!("Comments  {}  newest first", detail.comments.len()),
+        area.width,
+    ));
+    for (index, comment) in detail.comments.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(
+            format!("  {}", comment_header(comment, item.observed_at)),
+            Style::default()
+                .fg(palette.subtext0)
+                .add_modifier(Modifier::DIM),
+        ));
+        lines.extend(crate::ui::markdown::body_lines(
+            palette,
+            Some(&comment.body),
+            usize::from(area.width.saturating_sub(4)),
+            "    ",
+        ));
+    }
+    if let Some(draft) = state.ticket_comment_draft.as_deref() {
+        lines.push(Line::styled(
+            format!(" Comment: {draft}▏  Enter to stage · Esc cancel"),
+            Style::default().fg(palette.yellow),
+        ));
+    }
+    if let Some(write) = state.pending_write.as_ref() {
+        lines.push(Line::styled(
+            format!(" Confirm {}? [y/N]", write.describe()),
+            Style::default()
+                .fg(palette.yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+
+    if let Some(choice) = state.ticket_start_menu {
+        render_ticket_start_menu(app, frame, area, item, choice);
+    } else if let Some(choice) = state.ticket_transition_menu {
+        render_ticket_transition_menu(app, frame, area, item, choice);
+    } else if let Some(choice) = state.ticket_more_menu {
+        render_ticket_more_menu(app, frame, area, choice);
+    }
 }
 
 fn render_pr_detail(
@@ -337,23 +879,17 @@ fn render_pr_detail(
                 format!(" Reviewers  {}", detail.reviewers),
                 Style::default().fg(palette.text),
             ));
-            lines.push(Line::styled(
-                " Description",
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            lines.extend(section_separator(palette, "Description", area.width));
             lines.extend(crate::ui::markdown::body_lines(
                 palette,
                 detail.description.as_deref(),
                 usize::from(area.width.saturating_sub(2)),
                 " ",
             ));
-            lines.push(Line::styled(
-                format!(" Checks  {}", detail.checks.len()),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
+            lines.extend(section_separator(
+                palette,
+                format!("Checks  {}", detail.checks.len()),
+                area.width,
             ));
             for (name, status) in &detail.checks {
                 let glyph = if status == "SUCCESS" {
@@ -368,19 +904,23 @@ fn render_pr_detail(
                     Style::default().fg(palette.subtext0),
                 ));
             }
-            lines.push(Line::styled(
-                format!(" Comments  {}  newest first", detail.comments.len()),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
+            lines.extend(section_separator(
+                palette,
+                format!("Comments  {}  newest first", detail.comments.len()),
+                area.width,
             ));
-            for comment in detail.comments.iter().take(3) {
+            for (index, comment) in detail.comments.iter().take(3).enumerate() {
+                if index > 0 {
+                    lines.push(Line::default());
+                }
                 lines.push(Line::styled(
                     format!(
                         "  ✦ {}  [Fix in a thread]",
-                        comment.author.as_deref().unwrap_or("unknown")
+                        comment_header(comment, item.observed_at)
                     ),
-                    Style::default().fg(palette.subtext0),
+                    Style::default()
+                        .fg(palette.subtext0)
+                        .add_modifier(Modifier::DIM),
                 ));
                 lines.extend(crate::ui::markdown::body_lines(
                     palette,
@@ -391,16 +931,20 @@ fn render_pr_detail(
             }
         }
         PrDetailTab::Timeline => {
-            lines.push(Line::styled(
-                " Timeline · newest first",
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
+            lines.extend(section_separator(
+                palette,
+                "Timeline · newest first",
+                area.width,
             ));
-            for comment in &detail.comments {
+            for (index, comment) in detail.comments.iter().enumerate() {
+                if index > 0 {
+                    lines.push(Line::default());
+                }
                 lines.push(Line::styled(
-                    format!("  {}", comment.author.as_deref().unwrap_or("unknown")),
-                    Style::default().fg(palette.subtext0),
+                    format!("  {}", comment_header(comment, item.observed_at)),
+                    Style::default()
+                        .fg(palette.subtext0)
+                        .add_modifier(Modifier::DIM),
                 ));
                 lines.extend(crate::ui::markdown::body_lines(
                     palette,
@@ -478,6 +1022,152 @@ fn checkout_menu_layout(
     )
 }
 
+fn ticket_menu_layout(
+    area: Rect,
+    anchor_x: u16,
+    item_count: usize,
+    selected: usize,
+    width: u16,
+) -> Option<crate::ui::dropdown::DropdownLayout> {
+    crate::ui::dropdown::layout_dropdown(
+        &crate::ui::dropdown::DropdownSpec {
+            anchor: Rect::new(
+                area.x.saturating_add(anchor_x).min(area.right()),
+                area.y,
+                width.min(area.width),
+                1,
+            ),
+            item_count,
+            selected,
+            has_filter: false,
+            max_rows: item_count,
+            min_width: width,
+        },
+        area,
+    )
+}
+
+fn render_ticket_start_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    item: &TicketItem<'_>,
+    choice: crate::app::state::PrCheckoutChoice,
+) {
+    let selected = usize::from(choice == crate::app::state::PrCheckoutChoice::NewWorktree);
+    let Some(layout) = ticket_menu_layout(area, 12, 2, selected, 42) else {
+        return;
+    };
+    let branch = crate::ui::work_list_detail::ticket_worktree_branch(
+        &app.branch_prefix,
+        &item.summary.identifier,
+        item.summary.title.as_deref().unwrap_or_default(),
+    );
+    let options = [
+        (
+            crate::app::state::PrCheckoutChoice::CurrentCheckout,
+            "Current checkout".to_string(),
+        ),
+        (
+            crate::app::state::PrCheckoutChoice::NewWorktree,
+            format!("New worktree {branch}"),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(
+            options
+                .into_iter()
+                .map(|(option, label)| {
+                    Line::styled(
+                        format!("{} {label}", if option == choice { "▸" } else { " " }),
+                        Style::default()
+                            .fg(app.palette.text)
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
+fn render_ticket_transition_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    item: &TicketItem<'_>,
+    choice: TicketTransitionChoice,
+) {
+    let selected = TicketTransitionChoice::ALL
+        .iter()
+        .position(|option| *option == choice)
+        .unwrap_or(0);
+    let Some(layout) = ticket_menu_layout(area, 29, 4, selected, 20) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(
+            TicketTransitionChoice::ALL
+                .into_iter()
+                .map(|option| {
+                    let enabled = item.transition_enabled(option.label());
+                    Line::styled(
+                        format!(
+                            "{} {}{}",
+                            if option == choice { "▸" } else { " " },
+                            option.label(),
+                            if enabled { "" } else { " · current" }
+                        ),
+                        Style::default()
+                            .fg(if enabled {
+                                app.palette.text
+                            } else {
+                                app.palette.overlay0
+                            })
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
+fn render_ticket_more_menu(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    choice: TicketMoreChoice,
+) {
+    let selected = TicketMoreChoice::ALL
+        .iter()
+        .position(|option| *option == choice)
+        .unwrap_or(0);
+    let Some(layout) = ticket_menu_layout(area, 54, 3, selected, 20) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(
+            TicketMoreChoice::ALL
+                .into_iter()
+                .map(|option| {
+                    Line::styled(
+                        format!(
+                            "{} {}",
+                            if option == choice { "▸" } else { " " },
+                            option.label()
+                        ),
+                        Style::default()
+                            .fg(app.palette.text)
+                            .bg(app.palette.panel_bg),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        layout.rect,
+    );
+}
+
 fn render_placeholder(
     palette: &Palette,
     projection: WorkProjection,
@@ -502,10 +1192,20 @@ fn render_footer(palette: &Palette, state: &WorkViewState, area: Rect, frame: &m
         WorkProjection::PullRequests => {
             " / search   ↑/↓ move   s sort   f open/all   Tab Summary/Timeline/Code   c checkout   l Land   x fix"
         }
-        WorkProjection::Tickets => " ←/→ view PRs [tickets] agents   not yet available",
-        WorkProjection::Agents => " ←/→ view PRs tickets [agents]   not yet available",
+        WorkProjection::Tickets => {
+            " / search   ↑/↓ move   s sort   f open/all   c start   t transition   l link PR   m more"
+        }
+        WorkProjection::Missive => {
+            let wide = " / search   ↑/↓ move   PgUp/PgDn detail   f open/all   c start thread   o Open in Missive   r refresh";
+            if crate::ui::text::display_width(wide) <= usize::from(area.width) {
+                wide
+            } else {
+                " / search  ↑/↓ conversation  PgUp/PgDn detail  c start  o copy  r refresh"
+            }
+        }
+        WorkProjection::Agents => " ←/→ view PRs tickets Missive [agents]   not yet available",
         WorkProjection::ReviewQueue => {
-            " ←/→ view PRs tickets agents [review queue]   ↑/↓ move   f filter repo"
+            " ←/→ view PRs tickets Missive agents [review queue]   ↑/↓ move   f filter repo"
         }
     };
     let text = state
@@ -586,6 +1286,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             author: None,
+            assignees: Vec::new(),
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Other,
@@ -616,8 +1317,101 @@ mod tests {
     fn snapshot(items: Vec<WorkItem>) -> Snapshot {
         Snapshot {
             items,
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn missive_conversation(message_count: usize) -> crate::work_index::MissiveConversation {
+        crate::work_index::MissiveConversation {
+            id: "sample".into(),
+            subject: "Billing question that stays readable".into(),
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            assignees: vec![crate::work_index::MissiveUser {
+                id: "ada".into(),
+                name: "Ada Lovelace".into(),
+                email: None,
+                is_me: true,
+            }],
+            last_activity_at: Some(SystemTime::UNIX_EPOCH),
+            closed: false,
+            messages: (0..message_count)
+                .map(|index| crate::work_index::MissiveEntry {
+                    id: format!("message-{index}"),
+                    author: Some("Customer".into()),
+                    preview: format!("message body {index}"),
+                    created_at: Some(SystemTime::UNIX_EPOCH),
+                })
+                .collect(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        }
+    }
+
+    fn missive_state(message_count: usize) -> WorkViewState {
+        let mut state = WorkViewState::new(
+            true,
+            Some(Snapshot {
+                items: Vec::new(),
+                conversations: vec![missive_conversation(message_count)],
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: SystemTime::UNIX_EPOCH,
+            }),
+        );
+        state.projection = WorkProjection::Missive;
+        state
+    }
+
+    fn ticket(identifier: &str, group: crate::work_index::TicketGroup) -> WorkItem {
+        WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: None,
+            pr_url: None,
+            pr_title: None,
+            pr_state: None,
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 0,
+            deletions: 0,
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Unknown,
+            audience: crate::work_index::PrAudience::Unclassified,
+            ticket_ids: vec![identifier.into()],
+            ticket_title: Some("ticket title".into()),
+            ticket_state: Some("In Progress".into()),
+            ticket_details: vec![crate::work_index::WorkTicket {
+                identifier: identifier.into(),
+                title: Some("ticket title".into()),
+                description: Some(
+                    "Ticket body with https://example.invalid/a/very/long/path/that/must/wrap.\n- [x] done\n- [ ] left"
+                        .into(),
+                ),
+                state: Some("In Progress".into()),
+                assignee: Some("matthias".into()),
+                priority: Some(2),
+                cycle: Some("cycle 34".into()),
+                group,
+                created_at: None,
+                updated_at: None,
+                branch: None,
+                labels: vec!["bug".into()],
+                url: Some(format!("https://linear.app/acme/issue/{identifier}")),
+                parent: None,
+                relations: Vec::new(),
+            }],
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: WorkItemSource::default(),
         }
     }
 
@@ -625,6 +1419,12 @@ mod tests {
         let mut app = AppState::test_new();
         app.work_view = Some(state.clone());
         rendered_app_text(&app)
+    }
+
+    fn rendered_text_at(state: &WorkViewState, width: u16, height: u16) -> String {
+        let mut app = AppState::test_new();
+        app.work_view = Some(state.clone());
+        rendered_app_text_at(&app, width, height)
     }
 
     fn rendered_app_text(app: &AppState) -> String {
@@ -693,6 +1493,8 @@ mod tests {
             true,
             Some(Snapshot {
                 items: Vec::new(),
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: Some("GitHub observation failed".to_string()),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
@@ -701,7 +1503,7 @@ mod tests {
 
         let mut placeholder = WorkViewState::new(true, Some(snapshot(Vec::new())));
         placeholder.projection = WorkProjection::Tickets;
-        assert!(rendered_text(&placeholder).contains("tickets not yet available"));
+        assert!(rendered_text(&placeholder).contains("no matching tickets"));
     }
 
     #[test]
@@ -718,6 +1520,8 @@ mod tests {
             true,
             Some(Snapshot {
                 items: Vec::new(),
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: Some("unavailable".to_string()),
                 observed_at: SystemTime::UNIX_EPOCH,
             }),
@@ -778,7 +1582,7 @@ mod tests {
         assert!(text.contains("In Review"));
         assert!(text.contains("✓"));
         assert!(text.contains("drift 3 PRs awaiting review whose ticket is not In Review"));
-        assert!(text.contains("←/→ view PRs tickets agents [review queue]"));
+        assert!(text.contains("←/→ view PRs tickets Missive agents [review queue]"));
         assert!(text.contains("↑/↓ move"));
         assert!(text.contains("f filter repo"));
     }
@@ -813,5 +1617,200 @@ mod tests {
             crate::app::state::PrCheckoutChoice::CurrentCheckout,
         )
         .is_none());
+    }
+
+    #[test]
+    fn ticket_fixture_renders_list_detail_and_refresh_state() {
+        let mut state = WorkViewState::new(
+            true,
+            Some(snapshot(vec![
+                ticket("SCA-3165", crate::work_index::TicketGroup::Assigned),
+                ticket("SCA-3180", crate::work_index::TicketGroup::Triage),
+            ])),
+        );
+        state.projection = WorkProjection::Tickets;
+        state.refreshing = true;
+        let text = rendered_text_at(&state, 100, 24);
+        assert!(text.contains("Tickets · refreshing…"), "{text}");
+        assert!(text.contains("Assigned to me"), "{text}");
+        assert!(text.contains("Triage"), "{text}");
+        assert!(text.contains("SCA-3165"), "{text}");
+        assert!(
+            text.contains("In Progress · P2 · matthias · cycle 34"),
+            "{text}"
+        );
+        assert!(text.contains("Ticket body with"), "{text}");
+        assert!(text.contains("https://example.invalid"), "{text}");
+        assert!(text.contains("Acceptance criteria"), "{text}");
+        assert!(text.contains("[Start thread ▾]"), "{text}");
+        assert!(text.contains("[Transition ▾]"), "{text}");
+    }
+
+    #[test]
+    fn ticket_dropdowns_open_downward_and_clamp() {
+        let area = Rect::new(10, 4, 60, 8);
+        for (anchor_x, count, selected, width) in [(12, 2, 1, 42), (29, 4, 3, 20), (54, 3, 2, 20)] {
+            let layout = ticket_menu_layout(area, anchor_x, count, selected, width)
+                .expect("ticket menu fits below header");
+            assert_eq!(layout.rect.y, area.y + 1);
+            assert!(layout.rect.bottom() <= area.bottom());
+        }
+        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 1, 2, 0, 20).is_none());
+    }
+
+    #[test]
+    fn missive_fixture_renders_list_detail_actions_and_footer() {
+        let conversation = crate::work_index::MissiveConversation {
+            id: "sample".into(),
+            subject: "Billing question".into(),
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            assignees: vec![crate::work_index::MissiveUser {
+                id: "ada".into(),
+                name: "Ada".into(),
+                email: None,
+                is_me: true,
+            }],
+            last_activity_at: Some(SystemTime::UNIX_EPOCH),
+            closed: false,
+            messages: vec![crate::work_index::MissiveEntry {
+                id: "message".into(),
+                author: Some("Customer".into()),
+                preview: "invoice preview".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
+            }],
+            notes: vec![crate::work_index::MissiveEntry {
+                id: "note".into(),
+                author: Some("Ada".into()),
+                preview: "internal note".into(),
+                created_at: Some(SystemTime::UNIX_EPOCH),
+            }],
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        };
+        let mut state = WorkViewState::new(
+            true,
+            Some(Snapshot {
+                items: Vec::new(),
+                conversations: vec![conversation],
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: SystemTime::UNIX_EPOCH,
+            }),
+        );
+        state.projection = WorkProjection::Missive;
+        let text = rendered_app_text_at(
+            &AppState {
+                work_view: Some(state),
+                ..AppState::test_new()
+            },
+            120,
+            40,
+        );
+        assert!(text.contains("Missive"), "{text}");
+        assert!(text.contains("Billing question"), "{text}");
+        assert!(text.contains("Customer · 0m ago"), "{text}");
+        assert!(text.contains("invoice preview"), "{text}");
+        assert!(text.contains("Internal notes  1"), "{text}");
+        assert!(
+            text.contains("[Start thread ▾] [Open in Missive]"),
+            "{text}"
+        );
+        assert!(text.contains("o Open in Missive"), "{text}");
+    }
+
+    #[test]
+    fn missive_full_view_at_eighty_columns_keeps_subject_actions_and_scroll_hint() {
+        let text = rendered_text_at(&missive_state(8), 80, 24);
+        assert!(text.contains("Billing question"), "{text}");
+        assert!(
+            text.contains("[Start thread ▾] [Open in Missive]"),
+            "{text}"
+        );
+        assert!(text.contains("PgUp/PgDn detail"), "{text}");
+        assert!(text.contains("o copy"), "{text}");
+    }
+
+    #[test]
+    fn missive_detail_scroll_reaches_later_messages_independently() {
+        let mut state = missive_state(10);
+        let initial = rendered_text_at(&state, 80, 24);
+        assert!(initial.contains("message body 0"), "{initial}");
+        assert!(!initial.contains("message body 6"), "{initial}");
+
+        state.missive_detail_scroll = 13;
+        let scrolled = rendered_text_at(&state, 80, 24);
+        assert!(scrolled.contains("message body 6"), "{scrolled}");
+        assert!(!scrolled.contains("message body 0"), "{scrolled}");
+
+        state.missive_detail_scroll = u16::MAX;
+        let clamped = rendered_text_at(&state, 80, 24);
+        assert!(clamped.contains("message body 9"), "{clamped}");
+    }
+
+    #[test]
+    fn missive_controls_fit_each_responsive_layout() {
+        for width in [96, 100, 128] {
+            let text = rendered_text_at(&missive_state(1), width, 24);
+            assert!(text.contains("⚲ open"), "width {width}: {text}");
+            assert!(text.contains("r refresh"), "width {width}: {text}");
+            assert!(!text.contains("teammates"), "width {width}: {text}");
+        }
+    }
+
+    #[test]
+    fn missive_list_status_glyph_uses_palette_state_colour() {
+        let state = missive_state(1);
+        let app = AppState {
+            work_view: Some(state),
+            ..AppState::test_new()
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(&app, frame.area(), frame))
+            .expect("render Missive view");
+        let glyph = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "○")
+            .expect("open conversation glyph");
+        assert_eq!(glyph.fg, app.palette.work_status_open());
+    }
+
+    #[test]
+    fn missive_start_dropdown_opens_downward_and_clamps() {
+        let area = Rect::new(20, 3, 50, 4);
+        let layout = ticket_menu_layout(area, 12, 2, 1, 24).expect("menu fits below anchor");
+        assert_eq!(layout.rect.y, area.y + 1);
+        assert!(layout.rect.bottom() <= area.bottom());
+        assert!(ticket_menu_layout(Rect::new(0, 2, 40, 1), 12, 2, 0, 24).is_none());
+    }
+
+    #[test]
+    fn missive_view_distinguishes_collecting_failure_and_empty_states() {
+        let mut state = WorkViewState::new(true, None);
+        state.projection = WorkProjection::Missive;
+        let collecting = rendered_text(&state);
+        assert!(
+            collecting.contains("work index not yet collected"),
+            "{collecting}"
+        );
+
+        state.snapshot = Some(Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: Some("Missive observation timed out".into()),
+            observed_at: SystemTime::UNIX_EPOCH,
+        });
+        let failed = rendered_text(&state);
+        assert!(failed.contains("Missive observation timed out"), "{failed}");
+
+        state.snapshot.as_mut().expect("snapshot").unavailable = None;
+        let empty = rendered_text(&state);
+        assert!(empty.contains("no matching conversations"), "{empty}");
     }
 }

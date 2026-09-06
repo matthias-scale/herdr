@@ -294,6 +294,12 @@ pub struct SessionConfig {
     pub reap_done_panes: bool,
     /// Settle panes with no activity after this many days. Default: 3.
     pub settle_after_days: u64,
+    /// Settle a pane when the work it is linked to finishes (its pull request
+    /// merged or closed, its ticket done). Default: true.
+    pub auto_settle_finished: bool,
+    /// Settle a pane that has been inactive for `settle_after_days`.
+    /// Default: true.
+    pub auto_settle_inactive: bool,
 }
 
 impl Default for SessionConfig {
@@ -304,6 +310,8 @@ impl Default for SessionConfig {
             reap_done_after_minutes: 4 * 60,
             reap_done_panes: true,
             settle_after_days: 3,
+            auto_settle_finished: true,
+            auto_settle_inactive: true,
         }
     }
 }
@@ -351,8 +359,126 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub missive: MissiveConfig,
+    pub usage: UsageConfig,
     pub land: LandConfig,
+    pub source_control: SourceControlConfig,
     pub files: FilesConfig,
+    pub actions: Vec<ActionConfig>,
+}
+
+/// Read-only Missive API settings.
+///
+/// `team` and `organization` are UUIDs copied from Missive's Settings > API >
+/// Resource IDs page. `token_env` names an environment variable; the token
+/// itself is deliberately absent from this serializable configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct MissiveConfig {
+    pub token_env: String,
+    pub team: Option<String>,
+    pub organization: Option<String>,
+}
+
+impl Default for MissiveConfig {
+    fn default() -> Self {
+        Self {
+            token_env: "MISSIVE_API_TOKEN".into(),
+            team: None,
+            organization: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ActionConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub run_on_worktree_create: bool,
+    pub open_in_bottom_pane: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct UsageModelPricing {
+    /// USD per one million uncached input tokens.
+    pub input: f64,
+    /// USD per one million output tokens.
+    pub output: f64,
+    /// USD per one million cache-write input tokens.
+    pub cache_write: f64,
+    /// USD per one million cache-read input tokens.
+    pub cache_read: f64,
+}
+
+impl Default for UsageModelPricing {
+    fn default() -> Self {
+        Self {
+            input: 0.0,
+            output: 0.0,
+            cache_write: 0.0,
+            cache_read: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageConfig {
+    /// API list-price estimates keyed by the model id written to provider logs.
+    pub pricing: std::collections::BTreeMap<String, UsageModelPricing>,
+}
+
+impl<'de> serde::Deserialize<'de> for UsageConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, serde::Deserialize)]
+        #[serde(default)]
+        struct RawUsageConfig {
+            pricing: std::collections::BTreeMap<String, UsageModelPricing>,
+        }
+
+        let raw = RawUsageConfig::deserialize(deserializer)?;
+        let mut config = UsageConfig::default();
+        config.pricing.extend(raw.pricing);
+        Ok(config)
+    }
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        let entries = [
+            ("claude-fable-5-1", 1.0, 5.0, 1.25, 0.10),
+            ("claude-opus-5", 15.0, 75.0, 18.75, 1.50),
+            ("claude-sonnet-5", 3.0, 15.0, 3.75, 0.30),
+            ("claude-haiku-4-5", 1.0, 5.0, 1.25, 0.10),
+            ("gpt-5.6-sol", 1.25, 10.0, 1.25, 0.125),
+            ("gpt-5.6-luna", 0.25, 2.0, 0.25, 0.025),
+            ("gpt-5.3-codex-spark", 0.25, 2.0, 0.25, 0.025),
+        ];
+        Self {
+            pricing: entries
+                .into_iter()
+                .map(|(model, input, output, cache_write, cache_read)| {
+                    (
+                        model.to_string(),
+                        UsageModelPricing {
+                            input,
+                            output,
+                            cache_write,
+                            cache_read,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -382,6 +508,29 @@ impl Default for LandConfig {
     fn default() -> Self {
         Self {
             approval_label: DEFAULT_LAND_APPROVAL_LABEL.into(),
+        }
+    }
+}
+
+/// Prefix Herdr puts in front of a derived worktree branch name.
+pub const DEFAULT_BRANCH_PREFIX: &str = "issue/";
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SourceControlConfig {
+    /// Model name exported to the Commit action as
+    /// `HERDR_COMMIT_MESSAGE_MODEL`, so a `prepare-commit-msg` hook can draft
+    /// the message with it. Empty leaves `git commit` exactly as it was.
+    pub commit_message_model: String,
+    /// Prefix for branch names Herdr derives from a ticket.
+    pub branch_prefix: String,
+}
+
+impl Default for SourceControlConfig {
+    fn default() -> Self {
+        Self {
+            commit_message_model: String::new(),
+            branch_prefix: DEFAULT_BRANCH_PREFIX.into(),
         }
     }
 }
@@ -602,6 +751,12 @@ pub struct KeysConfig {
     pub symphony: BindingConfig,
     /// Open the work projection view. Default: "prefix+ctrl+w"
     pub work: BindingConfig,
+    /// Open the historical provider usage view. Default: "prefix+ctrl+y"
+    pub usage: BindingConfig,
+    /// Open the Linear Tickets view. Default: "prefix+ctrl+t"
+    pub tickets: BindingConfig,
+    /// Open the read-only Missive conversation view. Default: "prefix+shift+c"
+    pub missive: BindingConfig,
     /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
     pub inbox: BindingConfig,
     /// Open the home view. Default: ["prefix+shift+o", "ctrl+alt+o"]
@@ -774,6 +929,10 @@ pub(crate) struct KeysConfigOverlay {
     symphony: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     work: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<BindingConfig>,
+    tickets: Option<BindingConfig>,
+    missive: Option<BindingConfig>,
     inbox: Option<BindingConfig>,
     home: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -878,6 +1037,9 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(work);
+        apply_field!(usage);
+        apply_field!(tickets);
+        apply_field!(missive);
         apply_field!(inbox);
         apply_field!(home);
         apply_field!(toggle_status_detail);
@@ -1005,6 +1167,9 @@ impl KeysConfig {
         copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(work, keybinds.work);
+        copy_effective_action_field!(usage, keybinds.usage);
+        copy_effective_action_field!(tickets, keybinds.tickets);
+        copy_effective_action_field!(missive, keybinds.missive);
         copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
         copy_effective_action_field!(toggle_status_detail, keybinds.toggle_status_detail);
@@ -1072,6 +1237,33 @@ pub struct WorktreesConfig {
     pub directory: String,
 }
 
+/// Which workspace the Home composer preselects for a new thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NewThreadWorkspaceConfig {
+    /// Launch in the selected directory itself.
+    #[default]
+    CurrentCheckout,
+    /// Create a linked worktree first and launch there.
+    NewWorktree,
+}
+
+impl NewThreadWorkspaceConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentCheckout => "current_checkout",
+            Self::NewWorktree => "new_worktree",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CurrentCheckout => "current checkout",
+            Self::NewWorktree => "new worktree",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TabBarPositionConfig {
@@ -1109,8 +1301,21 @@ pub struct UiConfig {
     pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
     pub mouse_scroll_lines: Option<NonZeroUsize>,
-    /// Ask for confirmation before closing a workspace. Default: true.
+    /// Ask for confirmation before closing a workspace, and before deleting a
+    /// settled thread from the sidebar menu. Default: true.
     pub confirm_close: bool,
+    /// Group workspaces that check out the same repository under one project
+    /// header even when their checkouts live on different hosts or roots.
+    /// Default: false, which keeps one header per checkout root.
+    pub combine_repos_across_hosts: bool,
+    /// Hide whitespace-only changes in the diff surface. Default: false.
+    pub hide_whitespace_in_diff: bool,
+    /// Workspace preselected in the Home composer for a new thread.
+    /// Default: current_checkout.
+    pub new_thread_workspace: NewThreadWorkspaceConfig,
+    /// Directory the add-project / directory picker starts in. Empty means the
+    /// last used directory, which is the current behaviour. Default: empty.
+    pub add_project_start_dir: String,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
     /// Ask for a workspace name before interactive creation. Default: false.
@@ -1397,6 +1602,9 @@ impl Default for KeysConfig {
             toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             work: BindingConfig::one("prefix+ctrl+w"),
+            usage: BindingConfig::one("prefix+ctrl+y"),
+            tickets: BindingConfig::one("prefix+ctrl+t"),
+            missive: BindingConfig::one("prefix+shift+c"),
             inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
             home: BindingConfig::one("ctrl+alt+h"),
             toggle_status_detail: BindingConfig::one("prefix+shift+m"),
@@ -1431,6 +1639,10 @@ impl Default for UiConfig {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
+            combine_repos_across_hosts: false,
+            hide_whitespace_in_diff: false,
+            new_thread_workspace: NewThreadWorkspaceConfig::CurrentCheckout,
+            add_project_start_dir: String::new(),
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
@@ -1633,6 +1845,7 @@ new_cwd = "home"
 "#,
         )
         .unwrap();
+        assert!(config.usage.pricing.contains_key("claude-opus-5"));
         assert_eq!(config.terminal.new_cwd, NewTerminalCwdConfig::Home);
 
         let config: Config = toml::from_str(
@@ -2285,9 +2498,68 @@ scrollback_lines = 12345
     }
 
     #[test]
+    fn source_control_keys_default_to_todays_behaviour_and_parse() {
+        let defaults = Config::default().source_control;
+        assert_eq!(defaults.commit_message_model, "");
+        assert_eq!(defaults.branch_prefix, "issue/");
+
+        let config: Config = toml::from_str(
+            "[source_control]\ncommit_message_model = \"claude-opus-5\"\nbranch_prefix = \"feat/\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.source_control.commit_message_model, "claude-opus-5");
+        assert_eq!(config.source_control.branch_prefix, "feat/");
+    }
+
+    #[test]
     fn land_approval_label_defaults_and_parses() {
         assert_eq!(Config::default().land.approval_label, "approved");
         let config: Config = toml::from_str("[land]\napproval_label = \"ship-it\"\n").unwrap();
         assert_eq!(config.land.approval_label, "ship-it");
+    }
+
+    #[test]
+    fn missive_config_names_token_environment_and_resource_ids() {
+        let defaults = Config::default();
+        assert_eq!(defaults.missive.token_env, "MISSIVE_API_TOKEN");
+        assert_eq!(defaults.missive.team, None);
+        assert_eq!(defaults.missive.organization, None);
+
+        let config: Config = toml::from_str(
+            "[missive]\ntoken_env = 'HERDR_TEST_MISSIVE'\nteam = 'team-id'\norganization = 'org-id'\n",
+        )
+        .unwrap();
+        assert_eq!(config.missive.token_env, "HERDR_TEST_MISSIVE");
+        assert_eq!(config.missive.team.as_deref(), Some("team-id"));
+        assert_eq!(config.missive.organization.as_deref(), Some("org-id"));
+    }
+
+    #[test]
+    fn usage_pricing_has_documented_defaults_and_accepts_model_overrides() {
+        let defaults = Config::default();
+        for model in [
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.3-codex-spark",
+        ] {
+            assert!(defaults.usage.pricing.contains_key(model), "{model}");
+        }
+        let config: Config = toml::from_str(
+            "[usage.pricing]\ncustom = { input = 2.0, output = 4.0, cache_write = 1.0, cache_read = 0.5 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.usage.pricing.get("custom"),
+            Some(&UsageModelPricing {
+                input: 2.0,
+                output: 4.0,
+                cache_write: 1.0,
+                cache_read: 0.5,
+            })
+        );
     }
 }

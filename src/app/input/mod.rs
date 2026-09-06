@@ -49,6 +49,8 @@ mod settings;
 mod sidebar;
 mod terminal;
 
+#[cfg(test)]
+pub(crate) use self::sidebar::SidebarWorkGroupKeyAction;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
@@ -66,7 +68,6 @@ use self::{
         modal_action_from_key, ModalAction, ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
     },
     mouse::MouseAction,
-    settings::SettingsAction,
 };
 use super::state::{AppState, Mode};
 use super::App;
@@ -130,12 +131,14 @@ impl AppState {
 // Key handling
 // ---------------------------------------------------------------------------
 
-/// The three staged pull request actions.
+/// Pull request writes that share the confirm-then-run path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PullRequestAction {
     Approve,
     Merge,
     Close,
+    MarkDraft,
+    MarkReady,
 }
 
 impl App {
@@ -143,6 +146,14 @@ impl App {
         &mut self,
         key: TerminalKey,
     ) -> Option<super::TerminalInputTarget> {
+        let target = self.handle_key_inner(key).await;
+        // Every keyboard path that can enter a probed settings section runs
+        // through here, so the probes start once from one place.
+        self.start_requested_tool_probes();
+        target
+    }
+
+    async fn handle_key_inner(&mut self, key: TerminalKey) -> Option<super::TerminalInputTarget> {
         if self.state.popup_pane.is_some() {
             return self.handle_terminal_key(key).await;
         }
@@ -161,8 +172,13 @@ impl App {
         if self.state.handle_sidebar_filter_menu_key(key_event) {
             return None;
         }
-        if self.state.handle_sidebar_work_group_key(key_event) {
-            return None;
+        match self.state.handle_sidebar_work_group_key(key_event) {
+            sidebar::SidebarWorkGroupKeyAction::Ignored => {}
+            sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
+            sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                self.dispatch_sidebar_work_group_plan(*plan);
+                return None;
+            }
         }
         if self.handle_sidebar_settled_key(key_event) {
             return None;
@@ -171,6 +187,9 @@ impl App {
             return None;
         }
         if self.handle_loop_run_history_key(key_event) {
+            return None;
+        }
+        if self.handle_usage_view_key(key_event) {
             return None;
         }
         if self.handle_work_view_key(key_event) {
@@ -226,6 +245,7 @@ impl App {
                     self.handle_context_menu_key_via_api(key_event);
                 }
                 Mode::GitMenu => handle_git_menu_key(&mut self.state, key_event),
+                Mode::AddAction => self.handle_add_action_key(key_event),
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
                 Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
@@ -465,7 +485,17 @@ impl App {
         if repo.is_empty() {
             return false;
         }
-        self.state.dock_pending_write = Some(match action {
+        self.state.dock_pending_write = Some(Self::pull_request_write(action, repo, number));
+        self.state.dock_write_notice = None;
+        true
+    }
+
+    fn pull_request_write(
+        action: PullRequestAction,
+        repo: String,
+        number: u64,
+    ) -> crate::work_index::WorkItemWrite {
+        match action {
             PullRequestAction::Approve => {
                 crate::work_index::WorkItemWrite::ApprovePullRequest { repo, number }
             }
@@ -475,9 +505,13 @@ impl App {
             PullRequestAction::Close => {
                 crate::work_index::WorkItemWrite::ClosePullRequest { repo, number }
             }
-        });
-        self.state.dock_write_notice = None;
-        true
+            PullRequestAction::MarkDraft => {
+                crate::work_index::WorkItemWrite::MarkPullRequestDraft { repo, number }
+            }
+            PullRequestAction::MarkReady => {
+                crate::work_index::WorkItemWrite::MarkPullRequestReady { repo, number }
+            }
+        }
     }
 
     /// Turn the typed draft into a staged comment on whatever is selected.
@@ -825,6 +859,30 @@ impl App {
             return;
         };
 
+        let dispatch = self.dispatch_home_plan(plan);
+        self.finish_home_dispatch(dispatch);
+    }
+
+    fn dispatch_sidebar_work_group_plan(&mut self, plan: crate::app::home::HomeDispatchPlan) {
+        let mut home = self.state.new_home_state();
+        home.prompt = plan.prompt.clone();
+        home.directory = plan.directory.clone();
+        home.ref_directory = plan.directory.clone();
+        home.workspace = plan.workspace.clone();
+        home.selected_ref = plan.git_ref.clone();
+        home.pr = plan.pr.clone();
+        home.ticket = plan.ticket.clone();
+        home.target = plan.target.clone();
+        self.state.home = Some(home);
+        self.state.inbox = None;
+        let dispatch = self.dispatch_home_plan(plan);
+        self.finish_home_dispatch(dispatch);
+    }
+
+    fn dispatch_home_plan(
+        &mut self,
+        plan: crate::app::home::HomeDispatchPlan,
+    ) -> Result<(), String> {
         crate::logging::home_dispatch_started(
             &format!("{:?}", plan.agent),
             plan.argv.first().map(String::as_str),
@@ -833,7 +891,7 @@ impl App {
             &plan.directory,
         );
 
-        let dispatch = match plan.workspace {
+        match plan.workspace {
             crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),
             crate::app::home::HomeWorkspace::CurrentCheckout
                 if plan
@@ -847,7 +905,10 @@ impl App {
             | crate::app::home::HomeWorkspace::PreviousWorktree(_) => self
                 .dispatch_home_composer(plan)
                 .map_err(|error| error.to_string()),
-        };
+        }
+    }
+
+    fn finish_home_dispatch(&mut self, dispatch: Result<(), String>) {
         match dispatch {
             Ok(()) => {
                 if self
@@ -994,9 +1055,52 @@ impl App {
     }
 
     pub(crate) fn toggle_work_view(&mut self) {
+        self.toggle_work_projection(crate::app::state::WorkProjection::PullRequests);
+    }
+
+    pub(crate) fn toggle_ticket_view(&mut self) {
+        self.toggle_work_projection(crate::app::state::WorkProjection::Tickets);
+    }
+
+    pub(crate) fn toggle_missive_view(&mut self) {
+        self.toggle_work_projection(crate::app::state::WorkProjection::Missive);
+    }
+
+    fn toggle_work_projection(&mut self, projection: crate::app::state::WorkProjection) {
+        self.state.clear_usage_view();
+        if self
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == projection)
+        {
+            self.state.clear_work_view();
+            return;
+        }
         let enabled = self.work_index_config.enabled;
         let snapshot = enabled.then(|| self.work_index_snapshot.clone()).flatten();
-        self.state.toggle_work_view(enabled, snapshot);
+        self.state.work_view = Some(crate::app::state::WorkViewState::new(enabled, snapshot));
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.projection = projection;
+        }
+        self.state.follow_view(match projection {
+            crate::app::state::WorkProjection::PullRequests => {
+                crate::app::state::SidebarGroupMode::RepoPr
+            }
+            crate::app::state::WorkProjection::Tickets => {
+                crate::app::state::SidebarGroupMode::LinearTeam
+            }
+            crate::app::state::WorkProjection::Missive => {
+                crate::app::state::SidebarGroupMode::Missive
+            }
+            crate::app::state::WorkProjection::Agents
+            | crate::app::state::WorkProjection::ReviewQueue => {
+                crate::app::state::SidebarGroupMode::Repo
+            }
+        });
+        self.state.symphony_detail = None;
+        self.state.inbox = None;
+        self.state.home = None;
         if self.state.work_view.is_some() && enabled {
             self.next_work_index_refresh = std::time::Instant::now();
             if let Some(view) = self.state.work_view.as_mut() {
@@ -1005,10 +1109,240 @@ impl App {
         }
     }
 
+    pub(crate) fn toggle_usage_view(&mut self) {
+        self.state.toggle_usage_view();
+        if self.state.usage_view.is_some() {
+            self.start_usage_scan();
+        }
+    }
+
+    pub(crate) fn handle_usage_view_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.usage_view.is_none() {
+            return false;
+        }
+        use crate::app::state::{UsageBreakdown, UsageMetric, UsageRange};
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.state.clear_usage_view();
+                self.state.mode = Mode::Terminal;
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.metric = UsageMetric::Cost;
+                }
+            }
+            KeyCode::Char('t') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.metric = UsageMetric::Tokens;
+                }
+            }
+            KeyCode::Char('1') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Hours24;
+                }
+            }
+            KeyCode::Char('7') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Days7;
+                }
+            }
+            KeyCode::Char('3') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Days30;
+                }
+            }
+            KeyCode::Char('9') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.range = UsageRange::Days90;
+                }
+            }
+            KeyCode::Char('m') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.breakdown = UsageBreakdown::Model;
+                }
+            }
+            KeyCode::Char('d') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.breakdown = UsageBreakdown::Day;
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                if let Some(view) = self.state.usage_view.as_mut() {
+                    view.scanning = true;
+                }
+                self.start_usage_scan();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn activate_usage_hit_target(&mut self, target: crate::app::state::UsageHitTarget) {
+        use crate::app::state::{UsageBreakdown, UsageHitTarget, UsageMetric, UsageRange};
+        let Some(view) = self.state.usage_view.as_mut() else {
+            return;
+        };
+        match target {
+            UsageHitTarget::Cost => view.metric = UsageMetric::Cost,
+            UsageHitTarget::Tokens => view.metric = UsageMetric::Tokens,
+            UsageHitTarget::Hours24 => view.range = UsageRange::Hours24,
+            UsageHitTarget::Days7 => view.range = UsageRange::Days7,
+            UsageHitTarget::Days30 => view.range = UsageRange::Days30,
+            UsageHitTarget::Days90 => view.range = UsageRange::Days90,
+            UsageHitTarget::Model => view.breakdown = UsageBreakdown::Model,
+            UsageHitTarget::Day => view.breakdown = UsageBreakdown::Day,
+            UsageHitTarget::Rescan => {
+                view.scanning = true;
+                self.start_usage_scan();
+            }
+        }
+    }
+
     pub(crate) fn handle_work_view_key(&mut self, key: KeyEvent) -> bool {
         let Some(state) = self.state.work_view.as_ref() else {
             return false;
         };
+        if state.pending_write.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
+                    self.run_pending_work_view_write();
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.pending_write = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if state.ticket_comment_draft.is_some() {
+            match key.code {
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_comment_draft = None;
+                    }
+                }
+                KeyCode::Backspace if key.modifiers.is_empty() => {
+                    if let Some(draft) = self
+                        .state
+                        .work_view
+                        .as_mut()
+                        .and_then(|state| state.ticket_comment_draft.as_mut())
+                    {
+                        draft.pop();
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.stage_ticket_comment(),
+                KeyCode::Char(character)
+                    if key.modifiers.is_empty()
+                        || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    if let Some(draft) = self
+                        .state
+                        .work_view
+                        .as_mut()
+                        .and_then(|state| state.ticket_comment_draft.as_mut())
+                    {
+                        draft.push(character);
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = state.ticket_start_menu {
+            match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_start_menu = Some(match choice {
+                            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                                crate::app::state::PrCheckoutChoice::NewWorktree
+                            }
+                            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                                crate::app::state::PrCheckoutChoice::CurrentCheckout
+                            }
+                        });
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.open_selected_ticket_thread(),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_start_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = state.missive_start_menu {
+            match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.missive_start_menu = Some(match choice {
+                            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                                crate::app::state::PrCheckoutChoice::NewWorktree
+                            }
+                            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                                crate::app::state::PrCheckoutChoice::CurrentCheckout
+                            }
+                        });
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.open_selected_missive_thread(),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.missive_start_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = state.ticket_transition_menu {
+            match key.code {
+                KeyCode::Up if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_transition_menu = Some(choice.move_by(-1));
+                    }
+                }
+                KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_transition_menu = Some(choice.move_by(1));
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.stage_ticket_transition(choice),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_transition_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(choice) = state.ticket_more_menu {
+            match key.code {
+                KeyCode::Up if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_more_menu = Some(choice.move_by(-1));
+                    }
+                }
+                KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_more_menu = Some(choice.move_by(1));
+                    }
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => self.activate_ticket_more(choice),
+                KeyCode::Esc if key.modifiers.is_empty() => {
+                    if let Some(state) = self.state.work_view.as_mut() {
+                        state.ticket_more_menu = None;
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         if state.pending_land.is_some() {
             match key.code {
                 KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() => {
@@ -1058,6 +1392,8 @@ impl App {
                     if let Some(state) = self.state.work_view.as_mut() {
                         state.search.pop();
                         state.selected = None;
+                        state.selected_missive = None;
+                        state.missive_detail_scroll = 0;
                     }
                 }
                 KeyCode::Char(character)
@@ -1067,6 +1403,8 @@ impl App {
                     if let Some(state) = self.state.work_view.as_mut() {
                         state.search.push(character);
                         state.selected = None;
+                        state.selected_missive = None;
+                        state.missive_detail_scroll = 0;
                     }
                 }
                 _ => {}
@@ -1096,6 +1434,20 @@ impl App {
             KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_pr_view_selection(1);
             }
+            KeyCode::PageUp if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    if state.projection == crate::app::state::WorkProjection::Missive {
+                        state.missive_detail_scroll = state.missive_detail_scroll.saturating_sub(5);
+                    }
+                }
+            }
+            KeyCode::PageDown if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    if state.projection == crate::app::state::WorkProjection::Missive {
+                        state.missive_detail_scroll = state.missive_detail_scroll.saturating_add(5);
+                    }
+                }
+            }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
                     state.search_focused = true;
@@ -1103,14 +1455,26 @@ impl App {
             }
             KeyCode::Char('s') if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
-                    state.sort = state.sort.next();
+                    if state.projection == crate::app::state::WorkProjection::Tickets {
+                        state.ticket_sort = state.ticket_sort.next();
+                    } else if state.projection == crate::app::state::WorkProjection::PullRequests {
+                        state.sort = state.sort.next();
+                    }
                     state.selected = None;
+                    state.selected_missive = None;
+                    state.missive_detail_scroll = 0;
                 }
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
-                    state.open_only = !state.open_only;
+                    if state.projection == crate::app::state::WorkProjection::Tickets {
+                        state.ticket_open_only = !state.ticket_open_only;
+                    } else {
+                        state.open_only = !state.open_only;
+                    }
                     state.selected = None;
+                    state.selected_missive = None;
+                    state.missive_detail_scroll = 0;
                 }
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
@@ -1120,10 +1484,45 @@ impl App {
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
-                    state.checkout_menu = Some(Default::default());
+                    if state.projection == crate::app::state::WorkProjection::Tickets {
+                        state.ticket_start_menu = Some(Default::default());
+                    } else if state.projection == crate::app::state::WorkProjection::Missive {
+                        state.missive_start_menu = Some(Default::default());
+                    } else {
+                        state.checkout_menu = Some(Default::default());
+                    }
                 }
             }
-            KeyCode::Char('l') if key.modifiers.is_empty() => self.stage_selected_pr_land(),
+            KeyCode::Char('t') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    if state.projection == crate::app::state::WorkProjection::Tickets {
+                        state.ticket_transition_menu = Some(Default::default());
+                    }
+                }
+            }
+            KeyCode::Char('l') if key.modifiers.is_empty() => {
+                if self.state.work_view.as_ref().is_some_and(|state| {
+                    state.projection == crate::app::state::WorkProjection::Tickets
+                }) {
+                    self.stage_ticket_link_pr();
+                } else {
+                    self.stage_selected_pr_land();
+                }
+            }
+            KeyCode::Char('m') if key.modifiers.is_empty() => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    if state.projection == crate::app::state::WorkProjection::Tickets {
+                        state.ticket_more_menu = Some(Default::default());
+                    }
+                }
+            }
+            KeyCode::Char('o') if key.modifiers.is_empty() => {
+                if self.state.work_view.as_ref().is_some_and(|state| {
+                    state.projection == crate::app::state::WorkProjection::Missive
+                }) {
+                    self.copy_selected_missive_url();
+                }
+            }
             KeyCode::Char('x') if key.modifiers.is_empty() => self.fix_selected_pr_comment(),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 self.next_work_index_refresh = std::time::Instant::now();
@@ -1156,6 +1555,10 @@ impl App {
                     view.open_only,
                     observed_at,
                     &self.state.land_approval_label,
+                    Some((
+                        &self.state.sidebar_work_filter,
+                        &self.state.work_index_session,
+                    )),
                 )
                 .into_iter()
                 .map(|item| crate::app::state::WorkItemKey {
@@ -1170,7 +1573,25 @@ impl App {
     }
 
     fn move_pr_view_selection(&mut self, delta: i64) {
-        let keys = self.visible_pr_view_keys();
+        if self
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Missive)
+        {
+            self.move_missive_view_selection(delta);
+            return;
+        }
+        let keys = if self
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Tickets)
+        {
+            self.visible_ticket_view_keys()
+        } else {
+            self.visible_pr_view_keys()
+        };
         if keys.is_empty() {
             return;
         }
@@ -1185,6 +1606,425 @@ impl App {
         if let Some(view) = self.state.work_view.as_mut() {
             view.selected = keys.get(next).cloned();
             view.hint = None;
+        }
+    }
+
+    fn visible_missive_conversations(&self) -> Vec<crate::work_index::MissiveConversation> {
+        let Some(view) = self.state.work_view.as_ref() else {
+            return Vec::new();
+        };
+        let observed_at = view
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observed_at)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        view.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                crate::ui::work_list_detail::sorted_filtered_conversations(
+                    &snapshot.conversations,
+                    &view.search,
+                    !view.open_only,
+                    observed_at,
+                )
+                .into_iter()
+                .map(|item| item.summary.clone())
+                .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn move_missive_view_selection(&mut self, delta: i64) {
+        let conversations = self.visible_missive_conversations();
+        if conversations.is_empty() {
+            return;
+        }
+        let current = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected_missive.as_deref())
+            .and_then(|selected| {
+                conversations
+                    .iter()
+                    .position(|conversation| conversation.id == selected)
+            })
+            .unwrap_or(0);
+        let next = (current as i64 + delta).clamp(0, conversations.len().saturating_sub(1) as i64)
+            as usize;
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.selected_missive = conversations.get(next).map(|item| item.id.clone());
+            view.hint = None;
+            view.missive_detail_scroll = 0;
+        }
+        self.next_work_index_refresh = std::time::Instant::now();
+    }
+
+    fn selected_missive_conversation(&self) -> Option<crate::work_index::MissiveConversation> {
+        let conversations = self.visible_missive_conversations();
+        let selected = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected_missive.as_deref());
+        selected
+            .and_then(|id| conversations.iter().find(|item| item.id == id))
+            .or_else(|| conversations.first())
+            .cloned()
+    }
+
+    fn copy_selected_missive_url(&mut self) {
+        let Some(conversation) = self.selected_missive_conversation() else {
+            return;
+        };
+        self.state.request_clipboard_write = Some(conversation.app_url.as_bytes().to_vec());
+        if let Some(view) = self.state.work_view.as_mut() {
+            view.hint = Some("Missive link copied".into());
+        }
+    }
+
+    fn open_selected_missive_thread(&mut self) {
+        let Some(conversation) = self.selected_missive_conversation() else {
+            return;
+        };
+        let choice = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|state| state.missive_start_menu)
+            .unwrap_or_default();
+        let directory = self
+            .state
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.values())
+                    .any(|pane| {
+                        self.state
+                            .terminals
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(|terminal| {
+                                terminal
+                                    .effective_work_context()
+                                    .missive_urls
+                                    .iter()
+                                    .any(|url| url == &conversation.app_url)
+                            })
+                    })
+            })
+            .map(|workspace| workspace.identity_cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            });
+        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        home.directory = directory.clone();
+        home.ref_directory = directory;
+        home.workspace = match choice {
+            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                crate::app::home::HomeWorkspace::CurrentCheckout
+            }
+            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                crate::app::home::HomeWorkspace::NewWorktree
+            }
+        };
+        home.prompt = format!("{}\n\n{}", conversation.subject, conversation.web_url);
+        home.missive = Some(crate::app::home::HomeMissiveContext {
+            app_url: conversation.app_url,
+            web_url: conversation.web_url,
+            subject: conversation.subject,
+        });
+        self.state.work_view = None;
+        self.state.inbox = None;
+        self.state.home = Some(home);
+    }
+
+    pub(crate) fn visible_ticket_view_keys(&self) -> Vec<crate::app::state::WorkItemKey> {
+        let Some(view) = self.state.work_view.as_ref() else {
+            return Vec::new();
+        };
+        let observed_at = view
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observed_at)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let has_context_pr = crate::ui::dock::pr::focused_pr_key(&self.state).is_some();
+        view.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                crate::ui::work_list_detail::sorted_filtered_tickets(
+                    &snapshot.items,
+                    &self.state.work_item_detail_cache,
+                    &view.search,
+                    view.ticket_sort,
+                    view.ticket_open_only,
+                    observed_at,
+                    has_context_pr,
+                    Some((
+                        &self.state.sidebar_work_filter,
+                        &self.state.work_index_session,
+                    )),
+                )
+                .into_iter()
+                .map(|item| crate::app::state::WorkItemKey {
+                    repo: String::new(),
+                    pr_number: None,
+                    pr_url: None,
+                    ticket_id: Some(item.summary.identifier.clone()),
+                })
+                .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn selected_ticket_parts(
+        &self,
+    ) -> Option<(
+        crate::app::state::WorkItemKey,
+        crate::work_index::WorkTicket,
+        String,
+    )> {
+        let keys = self.visible_ticket_view_keys();
+        let key = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.selected.clone())
+            .filter(|key| key.ticket_id.is_some())
+            .or_else(|| keys.first().cloned())?;
+        let ticket_id = key.ticket_id.as_deref()?;
+        let source = self
+            .state
+            .work_view
+            .as_ref()?
+            .snapshot
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| {
+                item.ticket_details
+                    .iter()
+                    .any(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))
+            })?;
+        let ticket = source
+            .ticket_details
+            .iter()
+            .find(|ticket| ticket.identifier.eq_ignore_ascii_case(ticket_id))?
+            .clone();
+        Some((key, ticket, source.repo.clone()))
+    }
+
+    fn open_selected_ticket_thread(&mut self) {
+        let Some((_key, ticket, repo)) = self.selected_ticket_parts() else {
+            return;
+        };
+        let choice = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|state| state.ticket_start_menu)
+            .unwrap_or_default();
+        let directory = self.ticket_checkout_directory(&ticket.identifier, &repo);
+        let mut home = crate::app::home::HomeState::with_catalog(self.state.home_catalog.clone());
+        home.directory = directory.clone();
+        home.ref_directory = directory.clone();
+        home.ref_repo_root = self
+            .state
+            .git_root_for_cwd
+            .get(&directory)
+            .and_then(Clone::clone)
+            .or_else(|| crate::app::worktrees::worktree_repo_root(&directory));
+        home.workspace = match choice {
+            crate::app::state::PrCheckoutChoice::CurrentCheckout => {
+                crate::app::home::HomeWorkspace::CurrentCheckout
+            }
+            crate::app::state::PrCheckoutChoice::NewWorktree => {
+                crate::app::home::HomeWorkspace::NewWorktree
+            }
+        };
+        home.ticket = Some(crate::app::home::HomeTicketContext {
+            identifier: ticket.identifier.clone(),
+            title: ticket
+                .title
+                .clone()
+                .unwrap_or_else(|| "(untitled ticket)".into()),
+            url: ticket.url.clone().unwrap_or_else(|| {
+                crate::work_context::linear_ticket_url(&ticket.identifier).unwrap_or_default()
+            }),
+        });
+        home.prompt = match (ticket.title.as_deref(), ticket.description.as_deref()) {
+            (Some(title), Some(description)) if !description.trim().is_empty() => {
+                format!("{title}\n\n{description}")
+            }
+            (Some(title), _) => title.to_string(),
+            (_, Some(description)) => description.to_string(),
+            _ => ticket.identifier,
+        };
+        self.state.work_view = None;
+        self.state.inbox = None;
+        self.state.home = Some(home);
+    }
+
+    fn ticket_checkout_directory(&self, identifier: &str, repo: &str) -> std::path::PathBuf {
+        self.state
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.values())
+                    .any(|pane| {
+                        self.state
+                            .terminals
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(|terminal| {
+                                let context = terminal.effective_work_context();
+                                context
+                                    .ticket_ids
+                                    .iter()
+                                    .any(|ticket| ticket.eq_ignore_ascii_case(identifier))
+                                    || (!repo.is_empty()
+                                        && context.repo.as_deref().is_some_and(|candidate| {
+                                            crate::work_context::repo_slugs_match(candidate, repo)
+                                        }))
+                            })
+                    })
+            })
+            .map(|workspace| workspace.identity_cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            })
+    }
+
+    fn stage_ticket_transition(&mut self, choice: crate::app::state::TicketTransitionChoice) {
+        let Some((_key, ticket, _repo)) = self.selected_ticket_parts() else {
+            return;
+        };
+        if ticket
+            .state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case(choice.label()))
+        {
+            return;
+        }
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.ticket_transition_menu = None;
+            state.pending_write = Some(crate::work_index::WorkItemWrite::TransitionTicket {
+                identifier: ticket.identifier,
+                state: choice.label().to_string(),
+            });
+        }
+    }
+
+    fn stage_ticket_link_pr(&mut self) {
+        let Some((_key, ticket, _repo)) = self.selected_ticket_parts() else {
+            return;
+        };
+        let Some(pr) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return;
+        };
+        let (Some(number), Some(url)) = (pr.pr_number, pr.pr_url) else {
+            return;
+        };
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.pending_write = Some(crate::work_index::WorkItemWrite::LinkTicketPullRequest {
+                identifier: ticket.identifier,
+                title: format!("{}#{number}", pr.repo),
+                url,
+            });
+        }
+    }
+
+    fn activate_ticket_more(&mut self, choice: crate::app::state::TicketMoreChoice) {
+        let Some((key, ticket, _repo)) = self.selected_ticket_parts() else {
+            return;
+        };
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.ticket_more_menu = None;
+        }
+        match choice {
+            crate::app::state::TicketMoreChoice::Open => {
+                let url = self
+                    .state
+                    .work_item_detail_cache
+                    .get(&key)
+                    .and_then(|detail| detail.url.as_deref())
+                    .or(ticket.url.as_deref());
+                if let Some(url) = url {
+                    if let Err(error) = crate::platform::open_url(url) {
+                        if let Some(state) = self.state.work_view.as_mut() {
+                            state.hint = Some(format!("could not open ticket: {error}"));
+                        }
+                    }
+                }
+            }
+            crate::app::state::TicketMoreChoice::CopyIdentifier => {
+                self.state.request_clipboard_write = Some(ticket.identifier.into_bytes());
+            }
+            crate::app::state::TicketMoreChoice::Comment => {
+                if let Some(state) = self.state.work_view.as_mut() {
+                    state.ticket_comment_draft = Some(String::new());
+                }
+            }
+        }
+    }
+
+    fn stage_ticket_comment(&mut self) {
+        let Some((_key, ticket, _repo)) = self.selected_ticket_parts() else {
+            return;
+        };
+        let Some(body) = self
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|state| state.ticket_comment_draft.as_deref())
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.ticket_comment_draft = None;
+            state.pending_write = Some(crate::work_index::WorkItemWrite::CommentOnTicket {
+                identifier: ticket.identifier,
+                body,
+            });
+        }
+    }
+
+    fn run_pending_work_view_write(&mut self) {
+        let Some(write) = self
+            .state
+            .work_view
+            .as_mut()
+            .and_then(|state| state.pending_write.take())
+        else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let result = crate::work_index::run_work_item_write(
+            &write,
+            &self.work_index_gh_program(),
+            &self.work_index_linearis_program(),
+            deadline,
+        );
+        if let Some(key) = write.target() {
+            self.state.work_item_detail_cache.remove(&key);
+        }
+        let succeeded = result.is_ok();
+        let message = match result {
+            Ok(message) | Err(message) => message,
+        };
+        if let Some(state) = self.state.work_view.as_mut() {
+            state.hint = Some(message);
+            state.refreshing = succeeded;
+        }
+        if succeeded {
+            self.next_work_index_refresh = std::time::Instant::now();
         }
     }
 
@@ -1398,6 +2238,17 @@ impl App {
         if !event.modifiers.is_empty() {
             return false;
         }
+        if self.state.dock_pending_write.is_some() {
+            match event.code {
+                KeyCode::Char('y' | 'Y') => self.run_pending_dock_write(),
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    self.state.dock_pending_write = None;
+                    self.state.dock_write_notice = Some("cancelled".to_string());
+                }
+                _ => {}
+            }
+            return true;
+        }
         if self.state.dock_pr_pending_land.is_some() {
             match event.code {
                 KeyCode::Char('y' | 'Y') => {
@@ -1431,6 +2282,15 @@ impl App {
                 self.state.dock_pr_checkout_menu = Some(Default::default());
             }
             KeyCode::Char('l') => self.stage_dock_pr_land(),
+            KeyCode::Char('x') => {
+                return self.stage_dock_pr_action(PullRequestAction::Close);
+            }
+            KeyCode::Char('d') => {
+                return self.stage_dock_pr_action(PullRequestAction::MarkDraft);
+            }
+            KeyCode::Char('r') => {
+                return self.stage_dock_pr_action(PullRequestAction::MarkReady);
+            }
             KeyCode::Esc => self.state.dock_pr_focused = false,
             _ => return false,
         }
@@ -1464,6 +2324,21 @@ impl App {
             return;
         };
         self.state.dock_pr_pending_land = self.pr_land_confirmation(&key);
+    }
+
+    fn stage_dock_pr_action(&mut self, action: PullRequestAction) -> bool {
+        let Some(key) = crate::ui::dock::pr::focused_pr_key(&self.state) else {
+            return false;
+        };
+        let Some(number) = key.pr_number else {
+            return false;
+        };
+        if key.repo.is_empty() {
+            return false;
+        }
+        self.state.dock_pending_write = Some(Self::pull_request_write(action, key.repo, number));
+        self.state.dock_write_notice = None;
+        true
     }
 
     fn open_selected_symphony_workflow(&mut self) {
@@ -1809,6 +2684,26 @@ impl App {
         source_id: super::InputSourceId,
         mouse: MouseEvent,
     ) {
+        if self.state.usage_view.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let target = self
+                    .state
+                    .view
+                    .usage_hit_areas
+                    .iter()
+                    .find(|hit| {
+                        mouse.column >= hit.rect.x
+                            && mouse.column < hit.rect.right()
+                            && mouse.row >= hit.rect.y
+                            && mouse.row < hit.rect.bottom()
+                    })
+                    .map(|hit| hit.target);
+                if let Some(target) = target {
+                    self.activate_usage_hit_target(target);
+                }
+            }
+            return;
+        }
         if self.state.symphony_detail.is_some() || self.state.work_view.is_some() {
             return;
         }
@@ -1847,6 +2742,33 @@ impl App {
                 && mouse.row < work.y.saturating_add(work.height)
             {
                 self.toggle_work_view();
+                return;
+            }
+            let tickets = self.state.view.sidebar_footer_ticket_hit_area;
+            if mouse.column >= tickets.x
+                && mouse.column < tickets.x.saturating_add(tickets.width)
+                && mouse.row >= tickets.y
+                && mouse.row < tickets.y.saturating_add(tickets.height)
+            {
+                self.toggle_ticket_view();
+                return;
+            }
+            let usage = self.state.view.sidebar_footer_usage_hit_area;
+            if mouse.column >= usage.x
+                && mouse.column < usage.right()
+                && mouse.row >= usage.y
+                && mouse.row < usage.bottom()
+            {
+                self.toggle_usage_view();
+                return;
+            }
+            let missive = self.state.view.sidebar_footer_missive_hit_area;
+            if mouse.column >= missive.x
+                && mouse.column < missive.right()
+                && mouse.row >= missive.y
+                && mouse.row < missive.bottom()
+            {
+                self.toggle_missive_view();
                 return;
             }
 
@@ -1981,22 +2903,10 @@ impl App {
                     MouseAction::NewWorkspace => {
                         self.begin_tui_workspace_create("tui.mouse.workspace.create")
                     }
-                    MouseAction::Settings(action) => match action {
-                        SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                        SettingsAction::SaveStatusIndicators(style) => {
-                            self.save_status_indicators(style)
-                        }
-                        SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                        SettingsAction::SaveToastDelivery(delivery) => {
-                            self.save_toast_delivery(delivery)
-                        }
-                        SettingsAction::SaveAgentBorderLabels(enabled) => {
-                            self.save_agent_border_labels(enabled)
-                        }
-                        SettingsAction::InstallRecommendedIntegrations => {
-                            self.install_recommended_integrations()
-                        }
-                    },
+                    MouseAction::DispatchSidebarWork(plan) => {
+                        self.dispatch_sidebar_work_group_plan(*plan)
+                    }
+                    MouseAction::Settings(action) => self.apply_settings_action(action),
                     // Home is a full-terminal overlay, but the sidebar sits
                     // outside it and its clicks fall through. Picking a session
                     // there used to move focus behind the overlay, leaving home
@@ -2060,6 +2970,7 @@ impl App {
         {
             self.refresh_integration_recommendations();
         }
+        self.start_requested_tool_probes();
         if self.state.agent_panel_sort != previous_agent_panel_sort {
             self.save_agent_panel_sort(self.state.agent_panel_sort);
         }
@@ -2748,6 +3659,49 @@ mod tests {
     }
 
     #[test]
+    fn compact_pr_state_writes_wait_for_confirmation() {
+        let mut app = dock_home_test_app(&[42]);
+        app.state.dock_tab = Some(crate::app::DockSurface::Pr);
+        app.state.dock_home_focused = false;
+        app.state.dock_pr_focused = true;
+        app.work_index_gh_program_override = Some(std::path::PathBuf::from("/usr/bin/false"));
+
+        for (key, expected) in [
+            (
+                'x',
+                crate::work_index::WorkItemWrite::ClosePullRequest {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+            ),
+            (
+                'd',
+                crate::work_index::WorkItemWrite::MarkPullRequestDraft {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+            ),
+            (
+                'r',
+                crate::work_index::WorkItemWrite::MarkPullRequestReady {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+            ),
+        ] {
+            assert!(app
+                .handle_dock_pr_key(&TerminalKey::new(KeyCode::Char(key), KeyModifiers::empty(),)));
+            assert_eq!(app.state.dock_pending_write.as_ref(), Some(&expected));
+            assert!(
+                app.state.dock_write_notice.is_none(),
+                "staging must not invoke the configured gh program"
+            );
+            assert!(app.handle_dock_pr_key(&TerminalKey::new(KeyCode::Esc, KeyModifiers::empty(),)));
+            assert!(app.state.dock_pending_write.is_none());
+        }
+    }
+
+    #[test]
     fn compact_pr_land_gate_matches_the_full_screen_matrix() {
         let mut app = test_app();
         let key = crate::app::state::WorkItemKey {
@@ -2777,6 +3731,112 @@ mod tests {
             app.state.work_item_detail_cache.insert(key.clone(), detail);
             assert_eq!(app.pr_land_confirmation(&key).is_some(), expected);
         }
+    }
+
+    #[test]
+    fn usage_view_keys_change_metric_range_breakdown_and_close() {
+        use crate::app::state::{UsageBreakdown, UsageMetric, UsageRange};
+
+        let mut app = test_app();
+        app.toggle_usage_view();
+        assert!(app.state.usage_view.is_some());
+        for (key, metric, range, breakdown) in [
+            (
+                't',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+            (
+                '1',
+                UsageMetric::Tokens,
+                UsageRange::Hours24,
+                UsageBreakdown::Model,
+            ),
+            (
+                '7',
+                UsageMetric::Tokens,
+                UsageRange::Days7,
+                UsageBreakdown::Model,
+            ),
+            (
+                '9',
+                UsageMetric::Tokens,
+                UsageRange::Days90,
+                UsageBreakdown::Model,
+            ),
+            (
+                '3',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+            (
+                'd',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Day,
+            ),
+            (
+                'm',
+                UsageMetric::Tokens,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+            (
+                'c',
+                UsageMetric::Cost,
+                UsageRange::Days30,
+                UsageBreakdown::Model,
+            ),
+        ] {
+            assert!(app
+                .handle_usage_view_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::empty(),)));
+            let view = app.state.usage_view.as_ref().expect("usage view");
+            assert_eq!(
+                (view.metric, view.range, view.breakdown),
+                (metric, range, breakdown)
+            );
+        }
+        assert!(app.handle_usage_view_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.state.usage_view.is_none());
+    }
+
+    #[test]
+    fn usage_view_opens_from_cached_snapshot_while_rescan_runs() {
+        let mut app = test_app();
+        app.state.usage_snapshot = Some(crate::provider_usage::UsageSnapshot::default());
+        app.toggle_usage_view();
+        let view = app.state.usage_view.as_ref().expect("usage view");
+        assert!(view.snapshot.is_some());
+        assert!(view.scanning, "cached rows remain visible during rescan");
+        assert_eq!(app.usage_scan_in_flight, Some(1));
+    }
+
+    #[test]
+    fn usage_scan_ignores_stale_generation_and_applies_current_result() {
+        let mut app = test_app();
+        app.toggle_usage_view();
+        app.start_usage_scan();
+        assert_eq!(app.usage_scan_in_flight, Some(2));
+        assert!(!app.handle_usage_scan_finished(
+            1,
+            Ok(Box::new(crate::provider_usage::UsageSnapshot::default())),
+        ));
+        assert!(app
+            .state
+            .usage_view
+            .as_ref()
+            .is_some_and(|view| view.scanning));
+        assert!(app.handle_usage_scan_finished(
+            2,
+            Ok(Box::new(crate::provider_usage::UsageSnapshot::default())),
+        ));
+        assert!(app
+            .state
+            .usage_view
+            .as_ref()
+            .is_some_and(|view| !view.scanning && view.snapshot.is_some()));
     }
 
     #[test]
@@ -2869,6 +3929,7 @@ mod tests {
             additions: 1,
             deletions: 0,
             author: Some("ada".into()),
+            assignees: vec!["ada".into()],
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Passing,
             audience: crate::work_index::PrAudience::Authored,
@@ -2885,6 +3946,8 @@ mod tests {
             true,
             Some(crate::work_index::Snapshot {
                 items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: None,
                 observed_at: std::time::SystemTime::now(),
             }),
@@ -2903,6 +3966,141 @@ mod tests {
         );
         home.prompt = "continue the review".into();
         assert_eq!(home.dispatch_plan().expect("dispatch plan").pr, home.pr);
+    }
+
+    fn ticket_view_app() -> App {
+        let mut app = test_app();
+        let ticket = crate::work_index::WorkTicket {
+            identifier: "SCA-3165".into(),
+            title: Some("image edit reference".into()),
+            description: Some("Add the reference.\n- [ ] registry entry".into()),
+            state: Some("In Progress".into()),
+            assignee: Some("matthias".into()),
+            priority: Some(2),
+            cycle: Some("cycle 34".into()),
+            group: crate::work_index::TicketGroup::Assigned,
+            created_at: None,
+            updated_at: None,
+            branch: None,
+            labels: Vec::new(),
+            url: Some("https://linear.app/scalable/issue/SCA-3165".into()),
+            parent: None,
+            relations: Vec::new(),
+        };
+        let item = crate::work_index::WorkItem {
+            repo: "owner/repo".into(),
+            pr_number: None,
+            pr_url: None,
+            pr_title: None,
+            pr_state: None,
+            draft: false,
+            review_decision: None,
+            created_at: None,
+            updated_at: None,
+            additions: 0,
+            deletions: 0,
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            check_state: crate::work_index::PrCheckState::Unknown,
+            audience: crate::work_index::PrAudience::Unclassified,
+            ticket_ids: vec![ticket.identifier.clone()],
+            ticket_title: ticket.title.clone(),
+            ticket_state: ticket.state.clone(),
+            ticket_details: vec![ticket],
+            branch: None,
+            preview_urls: Vec::new(),
+            panes: Vec::new(),
+            source: Default::default(),
+        };
+        let mut view = crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: vec![item],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::now(),
+            }),
+        );
+        view.projection = crate::app::state::WorkProjection::Tickets;
+        app.state.work_view = Some(view);
+        app
+    }
+
+    #[test]
+    fn selected_ticket_thread_carries_context_prompt_and_worktree_choice() {
+        let mut app = ticket_view_app();
+        app.state
+            .work_view
+            .as_mut()
+            .expect("ticket view")
+            .ticket_start_menu = Some(crate::app::state::PrCheckoutChoice::NewWorktree);
+
+        app.open_selected_ticket_thread();
+
+        let home = app.state.home.as_ref().expect("thread should open home");
+        assert_eq!(home.workspace, crate::app::home::HomeWorkspace::NewWorktree);
+        assert_eq!(
+            home.ticket
+                .as_ref()
+                .map(|ticket| ticket.identifier.as_str()),
+            Some("SCA-3165")
+        );
+        assert!(home
+            .prompt
+            .starts_with("image edit reference\n\nAdd the reference."));
+        assert_eq!(
+            home.dispatch_plan().expect("dispatch plan").ticket,
+            home.ticket
+        );
+    }
+
+    #[test]
+    fn f12_6_full_screen_work_views_follow_their_compact_surfaces() {
+        let mut app = test_app();
+        app.state.dock_collapsed = true;
+
+        app.toggle_ticket_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Linear));
+        assert!(!app.state.dock_collapsed);
+
+        app.state.open_dock_surface(crate::app::DockSurface::Files);
+        assert!(app.state.dock_surface_override);
+        app.toggle_work_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Pr));
+        assert!(!app.state.dock_surface_override);
+        app.toggle_missive_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Missive));
+        assert!(!app.state.dock_surface_override);
+
+        app.state.open_dock_surface(crate::app::DockSurface::Files);
+        app.toggle_usage_view();
+        assert_eq!(app.state.dock_tab, Some(crate::app::DockSurface::Files));
+        assert!(!app.state.dock_surface_override);
+    }
+
+    #[test]
+    fn ticket_transition_is_staged_until_confirmation() {
+        let mut app = ticket_view_app();
+        app.stage_ticket_transition(crate::app::state::TicketTransitionChoice::Done);
+        let pending = app
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.pending_write.as_ref())
+            .expect("transition should be staged");
+        assert!(matches!(
+            pending,
+            crate::work_index::WorkItemWrite::TransitionTicket { identifier, state }
+                if identifier == "SCA-3165" && state == "Done"
+        ));
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.pending_write.is_none()));
     }
 
     fn dock_home_test_app(pr_numbers: &[u64]) -> App {
@@ -3909,5 +5107,157 @@ navigate_workspace_down = "ctrl+j"
 
         state.mode = Mode::ConfirmClose;
         assert!(!modal_paste_target_active(&state));
+    }
+
+    fn app_with_missive_view() -> App {
+        let mut app = test_app();
+        let conversation = crate::work_index::MissiveConversation {
+            id: "sample".into(),
+            subject: "Billing question".into(),
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            assignees: Vec::new(),
+            last_activity_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            closed: false,
+            messages: Vec::new(),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+            posts: Vec::new(),
+        };
+        let mut view = crate::app::state::WorkViewState::new(
+            true,
+            Some(crate::work_index::Snapshot {
+                items: Vec::new(),
+                conversations: vec![conversation],
+                missive_users: Vec::new(),
+                unavailable: None,
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+            }),
+        );
+        view.projection = crate::app::state::WorkProjection::Missive;
+        app.state.work_view = Some(view);
+        app
+    }
+
+    #[test]
+    fn missive_view_copies_app_url_without_opening_a_browser() {
+        let mut app = app_with_missive_view();
+        assert!(app.handle_work_view_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty(),)));
+        assert_eq!(
+            app.state.request_clipboard_write,
+            Some(b"missive://mail.missiveapp.com/#inbox/conversations/sample".to_vec())
+        );
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.hint.as_deref()),
+            Some("Missive link copied")
+        );
+
+        app.state.request_clipboard_write = None;
+        let view = app.state.work_view.as_mut().expect("work view");
+        view.projection = crate::app::state::WorkProjection::PullRequests;
+        view.hint = None;
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert!(app.state.request_clipboard_write.is_none());
+        assert!(app
+            .state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| view.hint.is_none()));
+    }
+
+    #[test]
+    fn missive_selection_schedules_selected_detail_hydration() {
+        let mut app = app_with_missive_view();
+        let mut second = app
+            .state
+            .work_view
+            .as_ref()
+            .and_then(|view| view.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.conversations.first())
+            .cloned()
+            .expect("first conversation");
+        second.id = "second".into();
+        second.subject = "Second conversation".into();
+        app.state
+            .work_view
+            .as_mut()
+            .and_then(|view| view.snapshot.as_mut())
+            .expect("work snapshot")
+            .conversations
+            .push(second);
+        app.next_work_index_refresh =
+            std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.state
+            .work_view
+            .as_mut()
+            .expect("Missive view")
+            .missive_detail_scroll = 9;
+
+        app.move_missive_view_selection(1);
+
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .and_then(|view| view.selected_missive.as_deref()),
+            Some("second")
+        );
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| view.missive_detail_scroll),
+            Some(0)
+        );
+        assert!(app.next_work_index_refresh <= std::time::Instant::now());
+    }
+
+    #[test]
+    fn missive_page_keys_scroll_detail_without_moving_the_conversation() {
+        let mut app = app_with_missive_view();
+        app.handle_work_view_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()));
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| (view.selected_missive.as_deref(), view.missive_detail_scroll)),
+            Some((None, 5))
+        );
+        app.handle_work_view_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert_eq!(
+            app.state
+                .work_view
+                .as_ref()
+                .map(|view| view.missive_detail_scroll),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn missive_start_thread_opens_home_with_conversation_context() {
+        let mut app = app_with_missive_view();
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert!(app.state.work_view.as_ref().is_some_and(|view| {
+            view.missive_start_menu == Some(crate::app::state::PrCheckoutChoice::CurrentCheckout)
+        }));
+        app.handle_work_view_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let home = app.state.home.as_ref().expect("home composer");
+        assert_eq!(
+            home.missive
+                .as_ref()
+                .map(|context| context.app_url.as_str()),
+            Some("missive://mail.missiveapp.com/#inbox/conversations/sample")
+        );
+        assert_eq!(
+            home.missive
+                .as_ref()
+                .map(|context| context.web_url.as_str()),
+            Some("https://mail.missiveapp.com/#inbox/conversations/sample")
+        );
+        assert!(home.prompt.contains("Billing question"));
+        assert!(home.prompt.contains("https://mail.missiveapp.com"));
     }
 }

@@ -15,6 +15,12 @@ pub(crate) enum SettledMenuAction {
     Delete(crate::app::state::PaneFocusTarget),
 }
 
+pub(crate) enum SidebarWorkGroupKeyAction {
+    Ignored,
+    Consumed,
+    Dispatch(Box<crate::app::home::HomeDispatchPlan>),
+}
+
 impl AppState {
     pub(crate) fn sidebar_settled_target_at(
         &self,
@@ -44,7 +50,18 @@ impl AppState {
         crate::ui::dropdown::hit_test(&layout, col, row)
     }
 
+    /// Resolve a settled-menu row press into an action.
+    ///
+    /// The delete row asks once first while `ui.confirm_close` is on: the first
+    /// press arms the row and returns nothing, the second press deletes. Every
+    /// other row disarms it, so an armed delete cannot fire from a later press
+    /// on a different row.
     pub(crate) fn select_settled_menu_action(&mut self, index: usize) -> Option<SettledMenuAction> {
+        let delete_armed = std::mem::take(&mut self.sidebar_settled_menu_delete_armed);
+        if index == 3 && self.confirm_close && !delete_armed {
+            self.sidebar_settled_menu_delete_armed = true;
+            return None;
+        }
         let target = self.sidebar_settled_menu_target.take()?;
         self.sidebar_selected_settled = None;
         let ws_idx = self
@@ -78,7 +95,7 @@ impl AppState {
     }
 
     pub(crate) fn open_sidebar_group_menu(&mut self) {
-        self.sidebar_group_menu_selected = self.sidebar_group_mode.index();
+        self.sidebar_group_menu_selected = self.sidebar_group_mode.view_index();
         self.sidebar_group_menu_open = true;
     }
 
@@ -109,13 +126,43 @@ impl AppState {
             return;
         };
         let mut filter = self.sidebar_work_filter.clone();
+        let mut keep_open = false;
         match option {
-            crate::ui::SidebarFilterOption::AllTeams => filter.team = None,
-            crate::ui::SidebarFilterOption::Team(team) => filter.team = Some(team),
-            crate::ui::SidebarFilterOption::AllAssignees => filter.assignee = None,
-            crate::ui::SidebarFilterOption::Assignee(assignee) => filter.assignee = Some(assignee),
+            crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
+            crate::ui::SidebarFilterOption::LinearAssignee(assignee) => {
+                filter.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::LinearStatus(status, selected) => {
+                if selected {
+                    filter.linear_statuses.remove(&status);
+                } else {
+                    filter.linear_statuses.insert(status);
+                }
+                keep_open = true;
+            }
+            crate::ui::SidebarFilterOption::GithubAssignee(assignee) => {
+                filter.github.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::GithubDrafts(shown) => {
+                filter.github.show_drafts = !shown;
+                keep_open = true;
+            }
+            crate::ui::SidebarFilterOption::GithubState(state) => {
+                filter.github.state = state;
+            }
+            crate::ui::SidebarFilterOption::MissiveAssignee(assignee) => {
+                filter.missive.assignee = assignee;
+            }
+            crate::ui::SidebarFilterOption::MissiveClosed(shown) => {
+                filter.missive.show_closed = !shown;
+                keep_open = true;
+            }
         }
         self.set_sidebar_work_filter(filter);
+        if keep_open {
+            self.sidebar_filter_menu_open = true;
+            self.sidebar_filter_menu_selected = index;
+        }
     }
 
     pub(crate) fn handle_sidebar_filter_menu_key(&mut self, key: KeyEvent) -> bool {
@@ -141,24 +188,58 @@ impl AppState {
         true
     }
 
-    /// `Enter` on a selected dim work-item header starts its thread. The
-    /// selection only exists while one is selected, so this never swallows a
-    /// keystroke meant for a pane.
-    pub(crate) fn handle_sidebar_work_group_key(&mut self, key: KeyEvent) -> bool {
+    /// `Enter` on a selected dim Linear or Missive item opens its composer;
+    /// `n` dispatches immediately. The selection only exists while one is
+    /// selected, so this never swallows a keystroke meant for a pane.
+    pub(crate) fn handle_sidebar_work_group_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> SidebarWorkGroupKeyAction {
         let Some(selected) = self.sidebar_selected_work_group.clone() else {
-            return false;
+            return SidebarWorkGroupKeyAction::Ignored;
         };
         match key.code {
-            KeyCode::Enter => {
+            KeyCode::Enter
+                if key.modifiers.is_empty()
+                    && selected != crate::ui::sidebar_show_more_key(self.sidebar_group_mode)
+                    && matches!(
+                        self.sidebar_group_mode,
+                        crate::app::state::SidebarGroupMode::LinearTeam
+                            | crate::app::state::SidebarGroupMode::Missive
+                    ) =>
+            {
                 self.sidebar_selected_work_group = None;
-                self.open_home_composer_for_work_group(&selected);
-                true
+                if !self.open_home_composer_for_work_group(&selected) {
+                    self.config_diagnostic =
+                        Some("unassigned object is no longer available".to_string());
+                }
+                SidebarWorkGroupKeyAction::Consumed
+            }
+            KeyCode::Enter | KeyCode::Char('n') if key.modifiers.is_empty() => {
+                self.sidebar_selected_work_group = None;
+                if selected == crate::ui::sidebar_show_more_key(self.sidebar_group_mode) {
+                    self.sidebar_unassigned_expanded_views
+                        .insert(self.sidebar_group_mode);
+                    self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                        self,
+                        self.view.sidebar_rect,
+                        self.workspace_scroll,
+                    );
+                    return SidebarWorkGroupKeyAction::Consumed;
+                }
+                match self.sidebar_unassigned_dispatch_plan(&selected) {
+                    Ok(plan) => SidebarWorkGroupKeyAction::Dispatch(Box::new(plan)),
+                    Err(error) => {
+                        self.config_diagnostic = Some(error);
+                        SidebarWorkGroupKeyAction::Consumed
+                    }
+                }
             }
             KeyCode::Esc => {
                 self.sidebar_selected_work_group = None;
-                true
+                SidebarWorkGroupKeyAction::Consumed
             }
-            _ => false,
+            _ => SidebarWorkGroupKeyAction::Ignored,
         }
     }
 
@@ -175,13 +256,13 @@ impl AppState {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.sidebar_group_menu_selected =
                     self.sidebar_group_menu_selected.saturating_add(1).min(
-                        crate::app::state::SidebarGroupMode::ALL
+                        crate::app::state::SidebarGroupMode::VIEWS
                             .len()
                             .saturating_sub(1),
                     );
             }
             KeyCode::Enter => {
-                if let Some(mode) = crate::app::state::SidebarGroupMode::ALL
+                if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
                     .get(self.sidebar_group_menu_selected)
                     .copied()
                 {
@@ -620,12 +701,17 @@ impl super::super::App {
     pub(crate) fn handle_sidebar_settled_key(&mut self, key: KeyEvent) -> bool {
         if self.state.sidebar_settled_menu_target.is_some() {
             match key.code {
-                KeyCode::Esc => self.state.sidebar_settled_menu_target = None,
+                KeyCode::Esc => {
+                    self.state.sidebar_settled_menu_target = None;
+                    self.state.sidebar_settled_menu_delete_armed = false;
+                }
                 KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.sidebar_settled_menu_delete_armed = false;
                     self.state.sidebar_settled_menu_selected =
                         self.state.sidebar_settled_menu_selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.sidebar_settled_menu_delete_armed = false;
                     self.state.sidebar_settled_menu_selected = self
                         .state
                         .sidebar_settled_menu_selected
@@ -647,6 +733,7 @@ impl super::super::App {
             KeyCode::Enter => {
                 self.state.sidebar_settled_menu_target = Some(target);
                 self.state.sidebar_settled_menu_selected = 0;
+                self.state.sidebar_settled_menu_delete_armed = false;
                 true
             }
             KeyCode::Esc => {
@@ -884,11 +971,15 @@ mod tests {
             app.state.select_settled_menu_action(0),
             Some(super::SettledMenuAction::Resume(target.clone()))
         );
+        // Delete asks once while ui.confirm_close is on.
         app.state.sidebar_settled_menu_target = Some(target.clone());
+        assert_eq!(app.state.select_settled_menu_action(3), None);
+        assert!(app.state.sidebar_settled_menu_delete_armed);
         assert_eq!(
             app.state.select_settled_menu_action(3),
             Some(super::SettledMenuAction::Delete(target.clone()))
         );
+        assert!(!app.state.sidebar_settled_menu_delete_armed);
 
         for (index, expected_workspace) in [
             (1, crate::app::home::HomeWorkspace::CurrentCheckout),
@@ -911,6 +1002,52 @@ mod tests {
             assert_eq!(plan.directory, directory);
             assert_eq!(plan.workspace, expected_workspace);
         }
+    }
+
+    #[test]
+    fn settled_menu_delete_is_immediate_when_confirmation_is_off() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.confirm_close = false;
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+
+        assert_eq!(
+            app.state.select_settled_menu_action(3),
+            Some(super::SettledMenuAction::Delete(target))
+        );
+    }
+
+    #[test]
+    fn settled_menu_delete_disarms_when_another_row_is_pressed() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+
+        assert_eq!(app.state.select_settled_menu_action(3), None);
+        assert_eq!(
+            app.state.select_settled_menu_action(0),
+            Some(super::SettledMenuAction::Resume(target.clone()))
+        );
+        assert!(!app.state.sidebar_settled_menu_delete_armed);
+
+        app.state.sidebar_settled_menu_target = Some(target);
+        assert_eq!(app.state.select_settled_menu_action(3), None);
+    }
+
+    #[test]
+    fn settled_menu_resume_clears_settled_at() {
+        let mut app = app_for_mouse_test();
+        let target = settled_target(&mut app);
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+
+        app.apply_sidebar_settled_menu_action(0);
+
+        assert!(!app.state.pane_is_settled(0, target.pane_id));
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(target.pane_id)
+        );
     }
 
     #[test]
@@ -964,7 +1101,7 @@ mod tests {
         ));
         assert_eq!(
             app.state.sidebar_group_mode,
-            crate::app::state::SidebarGroupMode::RepoPr
+            crate::app::state::SidebarGroupMode::LinearTeam
         );
         assert!(!app.state.sidebar_group_menu_open);
     }
@@ -2049,9 +2186,9 @@ mod tests {
         app.state.selected = 0;
         app.state.tab_scroll = usize::MAX;
         app.state.tab_scroll_follow_active = false;
-        // 81 columns leaves the same tab strip as 65 did before the tab row
-        // gained the git button and two pane-toggle buttons at its right end.
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 81, 20));
+        // 91 columns leaves the same tab strip as 65 did before the tab row
+        // gained the action, git, and pane-toggle buttons at its right end.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 91, 20));
 
         let last_idx = app.state.workspaces[0].tabs.len() - 1;
         let target = app.state.view.tab_hit_areas[last_idx];

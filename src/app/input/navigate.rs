@@ -97,6 +97,12 @@ impl App {
             return;
         }
 
+        if let Some(index) = user_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
+            self.state.request_user_action = Some(index);
+            leave_command_mode(&mut self.state);
+            return;
+        }
+
         if let Some(action) =
             indexed_navigation_action(&self.state, &raw_key, BindingDispatch::Prefix)
         {
@@ -175,6 +181,12 @@ impl App {
 
         if let Some(binding) = command_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
             self.launch_custom_command(binding, ActionContext::Navigate);
+            return;
+        }
+
+        if let Some(index) = user_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
+            self.state.request_user_action = Some(index);
+            leave_navigate_mode(&mut self.state);
             return;
         }
 
@@ -556,6 +568,18 @@ impl App {
             }
             NavigateAction::OpenWorkView => {
                 self.toggle_work_view();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::OpenUsageView => {
+                self.toggle_usage_view();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::OpenTicketView => {
+                self.toggle_ticket_view();
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::OpenMissiveView => {
+                self.toggle_missive_view();
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenInbox => {
@@ -1596,6 +1620,27 @@ pub(crate) fn command_for_key(
         .cloned()
 }
 
+pub(crate) fn user_action_for_key(
+    state: &AppState,
+    key: &TerminalKey,
+    dispatch: BindingDispatch,
+) -> Option<usize> {
+    let repo = state.focused_repo_slug();
+    state
+        .keybinds
+        .user_actions
+        .iter()
+        .enumerate()
+        .find(|(_, action)| {
+            action.applies_to_repo(repo.as_deref())
+                && match dispatch {
+                    BindingDispatch::Direct => action.bindings.matches_direct_key(key),
+                    BindingDispatch::Prefix => action.bindings.matches_prefix_key(key),
+                }
+        })
+        .map(|(index, _)| index)
+}
+
 fn unmodified_digit_for_key(key: &TerminalKey) -> Option<char> {
     ('1'..='9').find(|digit| {
         crate::config::terminal_key_matches_combo(
@@ -1871,6 +1916,9 @@ pub(crate) enum NavigateAction {
     ToggleInfoPanel,
     OpenSymphony,
     OpenWorkView,
+    OpenUsageView,
+    OpenTicketView,
+    OpenMissiveView,
     Detach,
     OpenNavigator,
 }
@@ -2080,6 +2128,9 @@ fn non_indexed_action_for_key(
         (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
         (&kb.symphony, NavigateAction::OpenSymphony),
         (&kb.work, NavigateAction::OpenWorkView),
+        (&kb.usage, NavigateAction::OpenUsageView),
+        (&kb.tickets, NavigateAction::OpenTicketView),
+        (&kb.missive, NavigateAction::OpenMissiveView),
         (&kb.inbox, NavigateAction::OpenInbox),
         (&kb.home, NavigateAction::OpenHome),
         (&kb.reload_config, NavigateAction::ReloadConfig),
@@ -2497,7 +2548,25 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenWorkView => {
-            state.toggle_work_view(false, None);
+            state.work_view = Some(crate::app::state::WorkViewState::new(false, None));
+            state.follow_view(crate::app::state::SidebarGroupMode::RepoPr);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenTicketView => {
+            let mut view = crate::app::state::WorkViewState::new(false, None);
+            view.projection = crate::app::state::WorkProjection::Tickets;
+            state.work_view = Some(view);
+            state.follow_view(crate::app::state::SidebarGroupMode::LinearTeam);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenMissiveView => {
+            let mut view = crate::app::state::WorkViewState::new(false, None);
+            view.projection = crate::app::state::WorkProjection::Missive;
+            state.work_view = Some(view);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenUsageView => {
+            state.toggle_usage_view();
             leave_navigate_mode(state);
         }
         NavigateAction::OpenInbox => {
@@ -3016,11 +3085,11 @@ mod tests {
         execute_navigate_action(&mut state, NavigateAction::CycleSidebarGroupMode);
         assert_eq!(
             state.sidebar_group_mode,
-            crate::app::state::SidebarGroupMode::RepoPr
+            crate::app::state::SidebarGroupMode::LinearTeam
         );
         assert_eq!(
             state.take_sidebar_group_mode_persistence_request(),
-            Some(crate::app::state::SidebarGroupMode::RepoPr)
+            Some(crate::app::state::SidebarGroupMode::LinearTeam)
         );
     }
 
@@ -3515,6 +3584,54 @@ mod tests {
             ),
             Some(NavigateAction::ReloadConfig)
         );
+    }
+
+    #[test]
+    fn default_ticket_keybinding_opens_ticket_projection() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::OpenTicketView)
+        );
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::OpenTicketView,
+            ActionContext::Prefix,
+        );
+        assert!(state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| { view.projection == crate::app::state::WorkProjection::Tickets }));
+    }
+
+    #[test]
+    fn default_missive_keybinding_opens_missive_projection() {
+        let mut state = app_with_test_workspaces(&["one"]).state;
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('c'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::OpenMissiveView)
+        );
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut runtimes,
+            NavigateAction::OpenMissiveView,
+            ActionContext::Prefix,
+        );
+        assert!(state
+            .work_view
+            .as_ref()
+            .is_some_and(|view| { view.projection == crate::app::state::WorkProjection::Missive }));
     }
 
     #[test]
@@ -4746,6 +4863,17 @@ last_pane = "prefix+tab"
     }
 
     #[test]
+    fn default_usage_keybinding_maps_to_the_usage_view() {
+        let state = state_with_workspaces(&["test"]);
+        let action = action_for_key(
+            &state,
+            TerminalKey::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            BindingDispatch::Prefix,
+        );
+        assert_eq!(action, Some(NavigateAction::OpenUsageView));
+    }
+
+    #[test]
     fn terminal_direct_indexed_tab_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
         let config: Config = toml::from_str("[keys]\nswitch_tab = \"ctrl+3\"\n").unwrap();
@@ -5647,5 +5775,33 @@ navigate_pane_down = "ctrl+j"
 
         assert!(state.detach_requested);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn user_action_key_dispatch_respects_trigger_and_repo_scope() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.user_actions = vec![crate::config::UserAction {
+            name: "test".into(),
+            command: "just test".into(),
+            bindings: crate::config::ActionKeybinds::prefix("t"),
+            run_on_worktree_create: false,
+            open_in_bottom_pane: true,
+            repo: None,
+        }];
+        let key = TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty());
+
+        assert_eq!(
+            user_action_for_key(&state, &key, BindingDispatch::Prefix),
+            Some(0)
+        );
+        assert_eq!(
+            user_action_for_key(&state, &key, BindingDispatch::Direct),
+            None
+        );
+        state.keybinds.user_actions[0].repo = Some("other/repo".into());
+        assert_eq!(
+            user_action_for_key(&state, &key, BindingDispatch::Prefix),
+            None
+        );
     }
 }

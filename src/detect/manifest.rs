@@ -1513,6 +1513,67 @@ fn above_prompt_box(content: &str) -> &str {
     &content[..end.min(content.len())]
 }
 
+/// Return the stable terminal text that represents pane work rather than the
+/// live agent controls below it.
+///
+/// Claude-family prompt boxes delimit their controls with two horizontal
+/// rules. Codex uses its current composer marker instead. User input is tracked
+/// at the PTY write boundary, so excluding composer text here cannot hide it.
+pub(crate) fn non_chrome_activity_content(agent: Option<Agent>, content: &str) -> String {
+    let above_box = above_prompt_box(content);
+    let stable = if above_box.len() != content.len() {
+        above_box
+    } else if agent == Some(Agent::Codex) {
+        before_current_prompt_marker(content)
+    } else {
+        content
+    };
+    if agent == Some(Agent::Claude) {
+        return without_claude_startup_chrome(stable)
+            .lines()
+            .filter(|line| !is_claude_chrome_line(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+    }
+    stable.trim_end().to_string()
+}
+
+fn without_claude_startup_chrome(content: &str) -> &str {
+    let lines = content.lines().collect::<Vec<_>>();
+    let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return "";
+    };
+    if !lines[start].trim_start().starts_with("Claude Code v") {
+        return content;
+    }
+
+    let mut non_empty = 0usize;
+    let end = lines[start..]
+        .iter()
+        .position(|line| {
+            if line.trim().is_empty() {
+                non_empty >= 4
+            } else {
+                non_empty += 1;
+                false
+            }
+        })
+        .map(|relative| start + relative + 1)
+        .unwrap_or(lines.len());
+    slice_from_line_index(content, &lines, end)
+}
+
+fn is_claude_chrome_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let has_spinner = trimmed
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '\u{25d0}'..='\u{25d3}' | '\u{2800}'..='\u{28ff}'));
+    has_spinner && trimmed.contains("/effort")
+}
+
 fn after_last_horizontal_rule(content: &str) -> &str {
     let mut last_rule_end = 0usize;
     let mut offset = 0usize;

@@ -11,19 +11,22 @@ pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
         remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
-        upsert_section_value,
+        upsert_section_value, write_actions_atomically,
     },
     keybinds::{
-        format_key_combo, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
-        BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
-        IndexedKeybind, Keybinds, LiveKeybindConfig,
+        format_key_combo, normalize_key_combo, terminal_key_matches_combo,
+        validate_user_action_key, ActionKeybinds, BindingConfig, CommandKeybindConfig,
+        CustomCommandAction, CustomCommandKeybind, IndexedKeybind, Keybinds, LiveKeybindConfig,
+        UserAction,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
+        validated_sidebar_bounds, ActionConfig, AgentPanelSortConfig, Config, ConfigReloadReport,
         ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
-        NewTerminalCwdConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
-        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
-        ToastHerdrPosition, UpdateChannelConfig, WorkIndexConfig, MAX_TOAST_DELAY_SECONDS,
+        MissiveConfig, NewTerminalCwdConfig, NewThreadWorkspaceConfig, ShellModeConfig,
+        SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
+        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
+        UpdateChannelConfig, UsageConfig, UsageModelPricing, WorkIndexConfig,
+        MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
@@ -34,7 +37,7 @@ pub use self::{
 };
 
 #[cfg(test)]
-pub(crate) use self::model::DEFAULT_LAND_APPROVAL_LABEL;
+pub(crate) use self::model::{DEFAULT_BRANCH_PREFIX, DEFAULT_LAND_APPROVAL_LABEL};
 
 pub(crate) use self::io::upsert_top_level_bool;
 pub(crate) use self::keybinds::parse_key_combo;

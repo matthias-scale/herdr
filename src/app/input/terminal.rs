@@ -51,6 +51,15 @@ impl App {
             }
         }
 
+        match self.state.handle_sidebar_work_group_key(key.as_key_event()) {
+            super::sidebar::SidebarWorkGroupKeyAction::Ignored => {}
+            super::sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
+            super::sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                self.dispatch_sidebar_work_group_plan(*plan);
+                return None;
+            }
+        }
+
         let key_for_draft = key.clone();
         let input = self.prepare_terminal_key_forward(source_id, key)?;
         let has_bytes = !input.bytes.is_empty();
@@ -114,6 +123,16 @@ impl App {
                 "intercepted terminal direct custom command before forwarding to pane"
             );
             self.launch_custom_command(binding, super::navigate::ActionContext::Direct);
+            return None;
+        }
+
+        if let Some(index) = super::navigate::user_action_for_key(
+            &self.state,
+            &key,
+            super::navigate::BindingDispatch::Direct,
+        ) {
+            debug!(index, "intercepted terminal user action keybinding");
+            self.state.request_user_action = Some(index);
             return None;
         }
 
@@ -538,6 +557,38 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.view.pane_infos = pane_infos;
         (app, info)
+    }
+
+    #[test]
+    fn headless_enter_on_selected_missive_row_opens_prefilled_composer() {
+        let mut app = app_for_mouse_test();
+        let workspace = Workspace::test_new("missive");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .replace_prevalidated_manual_work_context(crate::work_context::PaneWorkContext {
+                missive_urls: vec!["https://mail.missiveapp.com/#inbox/conversations/fix1".into()],
+                work_title: Some("restore Enter composer".into()),
+                ..Default::default()
+            });
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::Missive;
+        app.state.sidebar_selected_work_group =
+            Some("missive:https://mail.missiveapp.com/#inbox/conversations/fix1".into());
+
+        app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let home = app.state.home.as_ref().expect("composer stays open");
+        assert_eq!(home.prompt, "fix1: restore Enter composer");
+        assert!(home.pending_dispatch.is_none());
     }
 
     #[tokio::test]
@@ -1742,6 +1793,34 @@ mod tests {
         let bytes = rx.try_recv().unwrap();
         assert_eq!(bytes.as_ref(), b"\x1b\x7f");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn typing_bytes_into_settled_pane_clears_settled_at() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("settled-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
+            pane_infos[0].inner_rect.width,
+            pane_infos[0].inner_rect.height,
+        );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        ));
+
+        assert_eq!(rx.try_recv().expect("forwarded input").as_ref(), b"x");
+        assert!(!app.state.pane_is_settled(0, pane_id));
     }
 
     #[tokio::test(flavor = "current_thread")]

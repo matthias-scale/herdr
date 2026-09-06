@@ -1,0 +1,21 @@
+{
+  "posts": [
+    {
+      "id": "post-1",
+      "username": "Billing bot",
+      "created_at": 1788688650,
+      "notification": {
+        "title": "Invoice lookup",
+        "body": "Invoice lookup completed."
+      }
+    }
+  ],
+  "comments": [
+    {
+      "id": "comment-1",
+      "author": {"name": "Ada Example"},
+      "created_at": 1788688725,
+      "body": "Internal note for the account team."
+    }
+  ]
+}

@@ -106,11 +106,17 @@ hide_done_after_minutes = 30
 reap_done_after_minutes = 240
 reap_done_panes = true
 settle_after_days = 3
+auto_settle_finished = true
+auto_settle_inactive = true
 ```
 
 Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose status is not Done. When the pane owns a linked Git worktree, Herdr removes that checkout only when it is clean and its commits are present on the configured upstream branch. Set `reap_done_panes = false` to keep automatic reaping disabled while retaining the Recently done section.
 
 Herdr moves panes into the collapsible Settled section when their primary pull request closes or merges, a linked ticket reaches Done, or they have no activity for `settle_after_days`. New pane input, output, or agent-state activity returns a settled pane to the active sidebar without stopping its terminal.
+
+The two triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, and `auto_settle_inactive = false` to stop settling panes that only went quiet. Both are on by default, and both are toggles in **Settings → General**.
+
+Settled panes are also listed in **Settings → Archive**, where `enter` restores one to the active sidebar and `d` closes it. When `ui.confirm_close` is on, `d` asks once before it closes anything.
 
 ## Remote attach
 
@@ -261,6 +267,22 @@ Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WOR
 
 On Windows, custom command strings use `cmd.exe /d /c`, so environment variables use `%HERDR_BIN_PATH%` syntax. To run PowerShell syntax, invoke it explicitly, for example `powershell.exe -NoProfile -Command "..."`.
 
+## User-defined actions
+
+User-defined actions appear after `+ Action` in the top bar and under **User actions** in keybinding help. Add them through the top-bar modal or as `[[actions]]` tables:
+
+```toml
+[[actions]]
+name = "test"
+command = "just test"
+key = "ctrl-b t" # optional; uses the normal keybinding syntax
+run_on_worktree_create = false
+open_in_bottom_pane = true
+repo = "owner/project" # optional; omit to show the action in every repository
+```
+
+An action runs in the focused terminal only when `open_in_bottom_pane = false` and that pane's foreground process is a shell. Otherwise Herdr opens the shared bottom command pane. Worktree-create actions run sequentially before the new agent starts; a failed command leaves a warning without blocking the agent.
+
 ## Theme
 
 Choose a built-in theme:
@@ -350,6 +372,62 @@ status_indicators = "symbols"
 ```
 
 The symbols are static, so this option does not enable spinner animation.
+
+### Usage view
+
+The sidebar footer `▥` and `keys.usage` open a local usage dashboard. Herdr reads
+Claude Code history from `~/.claude/projects/**/*.jsonl` and Codex history from
+`~/.codex/sessions/**` on a background thread. Codex totals use incremental
+`token_usage_record.payload.usage` values, with the model taken from the matching
+`turn_context.payload.model`. The view stores per-file aggregates in
+`<state-dir>/usage-cache.json`; unchanged path, modification time, and size entries
+are reused on later scans.
+
+Costs are API list-price estimates. They do not describe subscription charges.
+Override the built-in USD-per-million-token defaults with `[usage.pricing]`:
+
+```toml
+[usage.pricing]
+claude-fable-5-1 = { input = 1.0, output = 5.0, cache_write = 1.25, cache_read = 0.10 }
+claude-opus-5 = { input = 15.0, output = 75.0, cache_write = 18.75, cache_read = 1.50 }
+claude-sonnet-5 = { input = 3.0, output = 15.0, cache_write = 3.75, cache_read = 0.30 }
+claude-haiku-4-5 = { input = 1.0, output = 5.0, cache_write = 1.25, cache_read = 0.10 }
+gpt-5.6-sol = { input = 1.25, output = 10.0, cache_write = 1.25, cache_read = 0.125 }
+gpt-5.6-luna = { input = 0.25, output = 2.0, cache_write = 0.25, cache_read = 0.025 }
+gpt-5.3-codex-spark = { input = 0.25, output = 2.0, cache_write = 0.25, cache_read = 0.025 }
+```
+
+Unknown model ids still count toward token and session totals. Their cost is shown
+as `—` until a pricing entry is added.
+
+### General settings keys
+
+Every row in **Settings → General** writes exactly one key. Herdr rewrites only
+that key and leaves the rest of the config file byte for byte as it was.
+
+```toml
+[ui]
+# Group workspaces that check out the same repository under one project header
+# even when their checkout roots differ, for example the same repo mounted from
+# two hosts. Default: false, one header per checkout root.
+combine_repos_across_hosts = false
+
+# Hide whitespace-only changes in the diff surface. Default: false.
+hide_whitespace_in_diff = false
+
+# Workspace preselected in the Home composer for a new thread.
+# "current_checkout" launches in the selected directory; "new_worktree" creates
+# a linked worktree first. Default: "current_checkout".
+new_thread_workspace = "current_checkout"
+
+# Directory the add-project picker starts in. Empty keeps the last used
+# directory, which is the default.
+add_project_start_dir = ""
+
+# Ask before closing a workspace, and before deleting a settled thread from the
+# sidebar menu or the settings archive. Default: true.
+confirm_close = true
+```
 
 ### Sidebar row layouts
 
@@ -482,6 +560,39 @@ font includes Nerd Font glyphs, opt in to file icons:
 ```toml
 [files]
 icons = "nerd"
+```
+
+## Source control
+
+Settings → Source control shows these keys. Both defaults keep Herdr's previous
+behaviour:
+
+```toml
+[source_control]
+# Model exported to the Commit action as HERDR_COMMIT_MESSAGE_MODEL, so a
+# prepare-commit-msg hook can draft the message with it. Empty, the default,
+# runs `git commit` unchanged. Only bare model tokens are exported.
+commit_message_model = ""
+
+# Prefix Herdr puts in front of a branch name derived from a ticket, for
+# example issue/sca-3165-image-edit. Default: "issue/".
+branch_prefix = "issue/"
+```
+
+The worktree root shown next to them is `worktrees.directory`.
+
+## Missive
+
+Missive reads use the public API and never write conversation state. `team` and
+`organization` are resource IDs from Missive's Settings > API > Resource IDs
+page. `token_env` names the environment variable Herdr reads when each request
+runs. Do not put the token value in this file.
+
+```toml
+[missive]
+token_env = "MISSIVE_API_TOKEN"
+team = "team-uuid"
+organization = "organization-uuid"
 ```
 
 ## Pull request landing

@@ -371,7 +371,7 @@ impl WorkViewState {
                 let next = (index as i64 + delta).clamp(0, last) as usize;
                 projection.rows.get(next).map(|row| row.key.clone())
             }
-            WorkProjection::Tickets | WorkProjection::Agents => return,
+            WorkProjection::Tickets | WorkProjection::Missive | WorkProjection::Agents => return,
         };
         self.selected = next_key;
     }
@@ -722,6 +722,9 @@ fn push_ticket_row(
             description: None,
             state: None,
             assignee: None,
+            priority: None,
+            cycle: None,
+            group: crate::work_index::TicketGroup::Assigned,
             created_at: None,
             updated_at: None,
             branch: None,
@@ -1210,6 +1213,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             author: None,
+            assignees: Vec::new(),
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Unclassified,
@@ -1238,6 +1242,8 @@ mod tests {
     fn snapshot(items: Vec<WorkItem>) -> Snapshot {
         Snapshot {
             items,
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: std::time::SystemTime::UNIX_EPOCH,
         }
@@ -1967,13 +1973,13 @@ mod tests {
         view.move_selection(1);
         let selected = view.selected_row().expect("selected row");
         assert_eq!(selected.title, "two");
-        for _ in 0..4 {
+        for _ in 0..5 {
             view.rotate(true);
         }
         assert_eq!(view.projection, WorkProjection::PullRequests);
         let after = view.selected_row().expect("selected row after rotation");
         assert_eq!(after.key, selected.key);
-        for _ in 0..4 {
+        for _ in 0..5 {
             view.rotate(false);
         }
         assert_eq!(view.projection, WorkProjection::PullRequests);

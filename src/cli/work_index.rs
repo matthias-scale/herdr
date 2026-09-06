@@ -2,7 +2,7 @@ use std::io;
 use std::time::Instant;
 
 use crate::config::Config;
-use crate::work_index::{refresh_work_index, WorkItem};
+use crate::work_index::{refresh_work_index_with_missive, WorkItem};
 
 pub(super) fn run_work_index_command(args: &[String]) -> io::Result<i32> {
     match args.first().map(String::as_str) {
@@ -46,14 +46,18 @@ fn list_work_index(args: &[String]) -> io::Result<i32> {
         eprintln!("work index disabled. Set [work_index] enabled = true to collect it.");
         return Ok(0);
     }
-    let snapshot = refresh_work_index(
+    let snapshot = refresh_work_index_with_missive(
         &config.work_index,
+        &config.missive,
         &[],
+        None,
+        None,
         Instant::now(),
         Instant::now() + crate::work_index::WORK_INDEX_BATCH_TIMEOUT,
         crate::work_index::WORK_INDEX_TARGET_TIMEOUT,
         std::path::Path::new("gh"),
         std::path::Path::new("linearis"),
+        std::path::Path::new("curl"),
     );
     if let Some(unavailable) = snapshot.unavailable.as_deref() {
         eprintln!("work index unavailable: {unavailable}");

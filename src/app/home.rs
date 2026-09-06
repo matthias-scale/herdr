@@ -310,6 +310,20 @@ pub(crate) struct HomePrContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeTicketContext {
+    pub(crate) identifier: String,
+    pub(crate) title: String,
+    pub(crate) url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HomeMissiveContext {
+    pub(crate) app_url: String,
+    pub(crate) web_url: String,
+    pub(crate) subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeDispatchPlan {
     pub(crate) agent: Agent,
     pub(crate) model: String,
@@ -318,6 +332,10 @@ pub(crate) struct HomeDispatchPlan {
     pub(crate) workspace: HomeWorkspace,
     pub(crate) git_ref: Option<HomeRef>,
     pub(crate) pr: Option<HomePrContext>,
+    pub(crate) ticket: Option<HomeTicketContext>,
+    pub(crate) missive: Option<HomeMissiveContext>,
+    /// Manual context bound to the spawned pane in the same operation.
+    pub(crate) work_context_patch: crate::work_context::PaneWorkContextPatch,
     pub(crate) target: HomeTarget,
     pub(crate) prompt: String,
     pub(crate) argv: Vec<String>,
@@ -395,6 +413,10 @@ pub(crate) struct HomeState {
     pub(crate) selected_ref: Option<HomeRef>,
     /// Pull request that opened this composer. TUI-only launch context.
     pub(crate) pr: Option<HomePrContext>,
+    /// Linear ticket that opened this composer. TUI-only launch context.
+    pub(crate) ticket: Option<HomeTicketContext>,
+    /// Missive conversation that opened this composer. TUI-only launch context.
+    pub(crate) missive: Option<HomeMissiveContext>,
     pub(crate) ref_repo_root: Option<PathBuf>,
     pub(crate) ref_directory: PathBuf,
     workspace_options: Vec<HomeWorkspace>,
@@ -426,6 +448,8 @@ impl Default for HomeState {
             ref_filter: DropdownFilterState::default(),
             selected_ref: None,
             pr: None,
+            ticket: None,
+            missive: None,
             ref_repo_root: None,
             ref_directory: default_directory(),
             workspace_options: vec![HomeWorkspace::CurrentCheckout, HomeWorkspace::NewWorktree],
@@ -455,6 +479,20 @@ impl HomeState {
     pub(crate) fn with_catalog(catalog: HomeCatalog) -> Self {
         Self {
             catalog,
+            ..Self::default()
+        }
+    }
+
+    /// A fresh composer whose workspace picker starts on the configured
+    /// default (`ui.new_thread_workspace`) rather than always on the current
+    /// checkout.
+    pub(crate) fn with_catalog_and_workspace(
+        catalog: HomeCatalog,
+        workspace: HomeWorkspace,
+    ) -> Self {
+        Self {
+            catalog,
+            workspace,
             ..Self::default()
         }
     }
@@ -692,6 +730,19 @@ impl HomeState {
         self.dispatch_error = None;
     }
 
+    /// The flags a dispatch would pass to the selected agent right now, for
+    /// the settings Providers rows.
+    pub(crate) fn launch_flags(&self) -> Option<Vec<String>> {
+        let catalog = self.catalog.provider(self.agent)?;
+        agent_launch_flags(
+            self.agent,
+            catalog,
+            &self.model,
+            self.effort.as_deref().unwrap_or(AUTO_EFFORT),
+            self.context_window.as_deref(),
+        )
+    }
+
     pub(crate) fn dispatch_plan(&self) -> Result<HomeDispatchPlan, String> {
         let prompt = self.prompt.trim();
         if prompt.is_empty() {
@@ -717,39 +768,16 @@ impl HomeState {
         }
 
         let mut argv = vec![crate::detect::interactive_agent_executable(self.agent).into()];
-        match self.agent {
-            Agent::Claude => {
-                let large_context = self.context_window.as_deref() == Some(LARGE_CONTEXT_WINDOW);
-                let context_form = catalog.claude_context_form.as_ref();
-                let model_arg = if large_context
-                    && !matches!(context_form, Some(ClaudeContextWindowForm::Flag(_)))
-                {
-                    format!("{}[1m]", self.model)
-                } else {
-                    self.model.clone()
-                };
-                if self.model != DEFAULT_MODEL {
-                    argv.extend(["--model".into(), model_arg]);
-                }
-                if large_context {
-                    if let Some(ClaudeContextWindowForm::Flag(flag)) = context_form {
-                        argv.extend([flag.clone(), "1m".into()]);
-                    }
-                }
-                if effort != AUTO_EFFORT {
-                    argv.extend(["--effort".into(), effort.into()]);
-                }
-            }
-            Agent::Codex => {
-                if self.model != DEFAULT_MODEL {
-                    argv.extend(["--model".into(), self.model.clone()]);
-                }
-                if effort != AUTO_EFFORT {
-                    argv.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
-                }
-            }
-            _ => return Err("that agent cannot be dispatched from home".into()),
-        }
+        let Some(flags) = agent_launch_flags(
+            self.agent,
+            catalog,
+            &self.model,
+            effort,
+            self.context_window.as_deref(),
+        ) else {
+            return Err("that agent cannot be dispatched from home".into());
+        };
+        argv.extend(flags);
         argv.push(prompt.into());
 
         let directory = match &self.workspace {
@@ -764,11 +792,76 @@ impl HomeState {
             workspace: self.workspace.clone(),
             git_ref: self.selected_ref.clone(),
             pr: self.pr.clone(),
+            ticket: self.ticket.clone(),
+            missive: self.missive.clone(),
+            work_context_patch: crate::work_context::PaneWorkContextPatch {
+                repo: self.pr.as_ref().map(|pr| pr.repo.clone()),
+                pr_urls: self.pr.as_ref().map(|pr| vec![pr.url.clone()]),
+                ticket_ids: self
+                    .ticket
+                    .as_ref()
+                    .map(|ticket| vec![ticket.identifier.clone()]),
+                missive_urls: self
+                    .missive
+                    .as_ref()
+                    .map(|conversation| vec![conversation.web_url.clone()]),
+                ..Default::default()
+            },
             target: self.target.clone(),
             prompt: prompt.into(),
             argv,
         })
     }
+}
+
+/// The flags Herdr passes to an agent after its executable, for the given
+/// model, effort and context window.
+///
+/// The dispatch path and the settings Providers section read the same builder,
+/// so the flags a row advertises are the flags a launch actually uses.
+/// `None` means Herdr cannot launch that agent.
+pub(crate) fn agent_launch_flags(
+    agent: Agent,
+    catalog: &crate::app::home_catalog::HomeProviderCatalog,
+    model: &str,
+    effort: &str,
+    context_window: Option<&str>,
+) -> Option<Vec<String>> {
+    let mut flags: Vec<String> = Vec::new();
+    match agent {
+        Agent::Claude => {
+            let large_context = context_window == Some(LARGE_CONTEXT_WINDOW);
+            let context_form = catalog.claude_context_form.as_ref();
+            let model_arg = if large_context
+                && !matches!(context_form, Some(ClaudeContextWindowForm::Flag(_)))
+            {
+                format!("{model}[1m]")
+            } else {
+                model.to_string()
+            };
+            if model != DEFAULT_MODEL {
+                flags.extend(["--model".into(), model_arg]);
+            }
+            if large_context {
+                if let Some(ClaudeContextWindowForm::Flag(flag)) = context_form {
+                    flags.extend([flag.clone(), "1m".into()]);
+                }
+            }
+            if effort != AUTO_EFFORT {
+                flags.extend(["--effort".into(), effort.into()]);
+            }
+        }
+        Agent::Codex => {
+            if model != DEFAULT_MODEL {
+                flags.extend(["--model".into(), model.to_string()]);
+            }
+            if effort != AUTO_EFFORT {
+                flags.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
+            }
+        }
+        _ => return None,
+    }
+    Some(flags)
 }
 
 /// Fleet-wide counts for the header line.
@@ -872,7 +965,7 @@ impl crate::app::state::AppState {
                 // Home and the inbox both want the whole frame; opening one puts
                 // the other away rather than stacking two overlays.
                 self.inbox = None;
-                Some(HomeState::with_catalog(self.home_catalog.clone()))
+                Some(self.new_home_state())
             }
         };
         if self.home.is_some() {
@@ -880,6 +973,24 @@ impl crate::app::state::AppState {
             // it on every frame and the render path must not run `git`.
             self.reset_home_ref_context(false);
         }
+    }
+
+    /// The workspace a freshly opened composer preselects, from
+    /// `ui.new_thread_workspace`.
+    pub(crate) fn default_home_workspace(&self) -> HomeWorkspace {
+        match self.new_thread_workspace {
+            crate::config::NewThreadWorkspaceConfig::CurrentCheckout => {
+                HomeWorkspace::CurrentCheckout
+            }
+            crate::config::NewThreadWorkspaceConfig::NewWorktree => HomeWorkspace::NewWorktree,
+        }
+    }
+
+    pub(crate) fn new_home_state(&self) -> HomeState {
+        HomeState::with_catalog_and_workspace(
+            self.home_catalog.clone(),
+            self.default_home_workspace(),
+        )
     }
 
     /// Open home as the launch screen, if the config wants it.
@@ -890,23 +1001,19 @@ impl crate::app::state::AppState {
     /// is a concern of the thing that starts a session, not of the constructor.
     pub(crate) fn open_home_on_launch(&mut self, config: &crate::config::Config) {
         if config.ui.show_home_on_start {
-            self.home = Some(HomeState::with_catalog(self.home_catalog.clone()));
+            self.home = Some(self.new_home_state());
             self.inbox = None;
             self.reset_home_ref_context(false);
         }
     }
 
-    /// Start a thread for a work item that has no pane yet: home opens with the
-    /// item as the prompt, in the checkout the item is linked to when one is
-    /// known and on the last used directory otherwise.
+    /// Open the composer for a dim Linear ticket or Missive conversation.
+    /// The operator can edit the prefilled identifier and title before spawn.
     pub(crate) fn open_home_composer_for_work_group(&mut self, key: &str) -> bool {
         let Some(activation) = crate::ui::sidebar_work_group_activation(self, key) else {
             return false;
         };
-        let mut home = self
-            .home
-            .take()
-            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt = activation.prompt;
         home.focus = Some(HomeFocus::Prompt);
         home.picker = None;
@@ -919,15 +1026,53 @@ impl crate::app::state::AppState {
         true
     }
 
+    /// Build the same launch plan as the home composer without opening it.
+    /// Unassigned sidebar rows use this for their one-key spawn action.
+    pub(crate) fn sidebar_unassigned_dispatch_plan(
+        &self,
+        key: &str,
+    ) -> Result<HomeDispatchPlan, String> {
+        let activation = crate::ui::sidebar_work_group_activation(self, key)
+            .ok_or_else(|| "unassigned object is no longer available".to_string())?;
+        let mut home = self.new_home_state();
+        home.prompt = activation.spawn_prompt;
+        home.pr = activation.pr;
+        home.ticket = activation.ticket;
+        home.selected_ref = activation.git_ref;
+        if let Some(directory) = activation.directory {
+            home.directory = directory.clone();
+            home.ref_directory = directory.clone();
+            if home.workspace == HomeWorkspace::CurrentCheckout {
+                home.target = self
+                    .workspaces
+                    .iter()
+                    .find(|workspace| {
+                        workspace.identity_cwd == directory
+                            || workspace
+                                .tabs
+                                .iter()
+                                .flat_map(|tab| tab.panes.values())
+                                .any(|pane| {
+                                    self.terminals
+                                        .get(&pane.attached_terminal_id)
+                                        .is_some_and(|terminal| terminal.cwd == directory)
+                                })
+                    })
+                    .map(|workspace| HomeTarget::Existing(workspace.id.clone()))
+                    .unwrap_or(HomeTarget::NewSpace);
+            }
+        }
+        let mut plan = home.dispatch_plan()?;
+        plan.work_context_patch = activation.work_context_patch;
+        Ok(plan)
+    }
+
     pub(crate) fn open_home_composer_in_directory(
         &mut self,
         directory: PathBuf,
         workspace: HomeWorkspace,
     ) {
-        let mut home = self
-            .home
-            .take()
-            .unwrap_or_else(|| HomeState::with_catalog(self.home_catalog.clone()));
+        let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt.clear();
         home.directory = directory;
         home.workspace = workspace;
@@ -1039,6 +1184,22 @@ impl crate::app::state::AppState {
             .flat_map(|tab| tab.panes.values())
             .filter_map(|pane| self.terminals.get(&pane.attached_terminal_id))
             .map(|terminal| terminal.effective_work_context())
+    }
+
+    /// Where `Browse…` opens: the configured `ui.add_project_start_dir` when
+    /// it names a real directory, otherwise the directory Home already shows.
+    ///
+    /// The key is a user-typed path, so `~` is expanded and a stale or
+    /// non-directory value falls back rather than opening on nothing.
+    pub(crate) fn home_browse_start_directory(&self) -> PathBuf {
+        let configured = self.add_project_start_dir.trim();
+        if !configured.is_empty() {
+            let expanded = crate::worktree::expand_tilde_path(configured);
+            if expanded.is_dir() {
+                return expanded;
+            }
+        }
+        self.home_directory()
     }
 
     fn home_directory(&self) -> PathBuf {
@@ -1180,6 +1341,7 @@ impl crate::app::state::AppState {
     }
 
     fn refresh_home_workspace_options(&mut self) {
+        let default_workspace = self.default_home_workspace();
         let directory = self.home_directory();
         let entries = super::worktrees::worktree_repo_root(&directory)
             .and_then(|repo_root| {
@@ -1190,7 +1352,7 @@ impl crate::app::state::AppState {
         if let Some(home) = self.home.as_mut() {
             home.workspace_options = options;
             if !home.workspace_options.contains(&home.workspace) {
-                home.workspace = HomeWorkspace::CurrentCheckout;
+                home.workspace = default_workspace;
             }
         }
     }
@@ -1547,7 +1709,7 @@ impl crate::app::state::AppState {
                     Some(HomeDirectoryOption::Browse) => {
                         // Browsing replaces the filter line rather than closing
                         // the picker, so the card stays open on the path input.
-                        let directory = self.home_directory();
+                        let directory = self.home_browse_start_directory();
                         if let Some(home) = self.home.as_mut() {
                             home.browse = Some(HomeBrowse::starting_at(&directory));
                         }
@@ -1871,6 +2033,23 @@ mod tests {
         assert_eq!(plan.pr, home.pr);
     }
 
+    #[test]
+    fn dispatch_plan_carries_missive_conversation_context() {
+        let mut home = home_with_codex_catalog();
+        home.prompt = "reply to the linked conversation".into();
+        home.missive = Some(HomeMissiveContext {
+            app_url: "missive://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            web_url: "https://mail.missiveapp.com/#inbox/conversations/sample".into(),
+            subject: "Billing question".into(),
+        });
+
+        let plan = home
+            .dispatch_plan()
+            .expect("Missive context should dispatch");
+
+        assert_eq!(plan.missive, home.missive);
+    }
+
     /// Characterization: pins `dispatch_plan()` before the T3 card layout moves
     /// the fields around. Layout may change; the plan for the same inputs may
     /// not.
@@ -1896,6 +2075,9 @@ mod tests {
                 workspace: HomeWorkspace::CurrentCheckout,
                 git_ref: None,
                 pr: None,
+                ticket: None,
+                missive: None,
+                work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
                 target: HomeTarget::Existing("space-7".into()),
                 prompt: "cap the retry loop\nand log it".into(),
                 argv: vec![
@@ -2231,6 +2413,55 @@ mod tests {
             options.last().map(HomeDirectoryOption::label),
             Some(BROWSE_OPTION_LABEL.to_string())
         );
+    }
+
+    #[test]
+    fn browse_starts_in_the_configured_add_project_start_dir() {
+        let directory = browse_fixture("home");
+        let configured = browse_fixture("configured");
+        let mut app = app_with_home(&directory);
+        app.add_project_start_dir = configured.display().to_string();
+
+        assert_eq!(app.home_browse_start_directory(), configured);
+
+        app.home_open_picker(HomePicker::Directory);
+        let browse_index = app
+            .home_directory_picker_options()
+            .iter()
+            .position(|option| *option == HomeDirectoryOption::Browse)
+            .expect("browse option");
+        app.home.as_mut().expect("home").directory_filter.selected = browse_index;
+        app.home_accept_picker();
+
+        let browse = app.home_browse().expect("path input");
+        assert!(
+            browse.input.starts_with(&configured.display().to_string()),
+            "the input starts on the configured directory: {:?}",
+            browse.input
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&configured);
+    }
+
+    #[test]
+    fn browse_falls_back_when_the_configured_start_dir_is_unset_or_missing() {
+        let directory = browse_fixture("fallback");
+        let mut app = app_with_home(&directory);
+
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        app.add_project_start_dir = "   ".to_string();
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        app.add_project_start_dir = directory.join("does-not-exist").display().to_string();
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        // A file is not a directory the picker can open.
+        app.add_project_start_dir = directory.join("alpha.txt").display().to_string();
+        assert_eq!(app.home_browse_start_directory(), directory);
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

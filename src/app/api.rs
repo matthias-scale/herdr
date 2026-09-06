@@ -107,6 +107,7 @@ impl App {
             AppEvent::HomeRefsRefreshed { repo_root, result } => {
                 self.handle_home_refs_refreshed(repo_root, result)
             }
+            AppEvent::ToolProbesFinished { probes } => self.handle_tool_probes_finished(probes),
             AppEvent::HomeCheckoutFinished { plan, result } => {
                 self.handle_home_checkout_finished(*plan, result)
             }
@@ -136,7 +137,11 @@ impl App {
             AppEvent::WorkIndexRefreshed {
                 generation,
                 snapshot,
-            } => self.handle_work_index_refreshed(generation, snapshot),
+                session,
+            } => self.handle_work_index_refreshed(generation, *snapshot, session),
+            AppEvent::UsageScanFinished { generation, result } => {
+                self.handle_usage_scan_finished(generation, result)
+            }
             AppEvent::WorkItemDetailRefreshed {
                 generation,
                 details,
@@ -277,6 +282,11 @@ impl App {
             return None;
         }
 
+        if let AppEvent::ToolProbesFinished { probes } = ev {
+            self.handle_tool_probes_finished(probes);
+            return None;
+        }
+
         if let AppEvent::HomeCheckoutFinished { plan, result } = ev {
             self.handle_home_checkout_finished(*plan, result);
             return None;
@@ -345,9 +355,15 @@ impl App {
         if let AppEvent::WorkIndexRefreshed {
             generation,
             snapshot,
+            session,
         } = ev
         {
-            self.handle_work_index_refreshed(generation, snapshot);
+            self.handle_work_index_refreshed(generation, *snapshot, session);
+            return None;
+        }
+
+        if let AppEvent::UsageScanFinished { generation, result } = ev {
+            self.handle_usage_scan_finished(generation, result);
             return None;
         }
 

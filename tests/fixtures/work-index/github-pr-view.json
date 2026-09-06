@@ -1,0 +1,100 @@
+{
+  "number": 125,
+  "title": "Render pull request details from the CLI response",
+  "state": "MERGED",
+  "body": "## Summary\n\nMaps the real GitHub response and wraps https://example.invalid/a/very/long/pull/request/link/without/overflow.",
+  "author": {
+    "id": "author_redacted",
+    "is_bot": false,
+    "login": "example-author",
+    "name": "Example Author"
+  },
+  "baseRefName": "main",
+  "headRefName": "fix/pr-detail",
+  "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+  "createdAt": "2026-08-30T11:22:33Z",
+  "updatedAt": "2026-09-05T12:34:56Z",
+  "labels": [],
+  "url": "https://github.com/example/project/pull/125",
+  "reviewDecision": "APPROVED",
+  "isDraft": false,
+  "mergeable": "UNKNOWN",
+  "mergeStateStatus": "UNKNOWN",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-09-05T12:30:00Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/project/actions/runs/1",
+      "name": "test",
+      "startedAt": "2026-09-05T12:20:00Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "review-bot",
+      "startedAt": "2026-09-05T12:21:00Z",
+      "state": "SUCCESS",
+      "targetUrl": "https://example.invalid/reviews/1"
+    }
+  ],
+  "reviews": [
+    {
+      "author": {
+        "login": "example-reviewer"
+      },
+      "authorAssociation": "COLLABORATOR",
+      "body": "Approved after the mapping check.",
+      "commit": {
+        "oid": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "id": "review_redacted",
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "APPROVED",
+      "submittedAt": "2026-09-05T12:31:00Z"
+    }
+  ],
+  "comments": [
+    {
+      "author": {
+        "login": "example-commenter"
+      },
+      "authorAssociation": "COLLABORATOR",
+      "body": "The real response uses this comment shape.",
+      "createdAt": "2026-09-05T12:32:00Z",
+      "id": "comment_redacted",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/example/project/pull/125#issuecomment-1",
+      "viewerDidAuthor": false
+    }
+  ],
+  "files": [
+    {
+      "path": "src/ui/work_list_detail.rs",
+      "additions": 20,
+      "deletions": 4
+    }
+  ],
+  "commits": [
+    {
+      "authoredDate": "2026-09-05T12:00:00Z",
+      "authors": [
+        {
+          "email": "redacted@example.invalid",
+          "id": "commit_author_redacted",
+          "login": "example-author",
+          "name": "Example Author"
+        }
+      ],
+      "committedDate": "2026-09-05T12:00:00Z",
+      "messageBody": "",
+      "messageHeadline": "fix pull request mapping",
+      "oid": "0123456789abcdef0123456789abcdef01234567"
+    }
+  ]
+}

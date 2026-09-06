@@ -107,6 +107,44 @@ use crate::workspace::Workspace;
 // Theme palette — all UI colors in one place, ready for theming
 // ---------------------------------------------------------------------------
 
+/// Group-header status colours (F12-3): the glyph tint for a Linear ticket
+/// state, a pull request state, or a Missive conversation state.
+///
+/// Every entry is an override. `None` follows the theme tone named on the
+/// accessor, so a theme that retints `yellow` retints "in progress" with it
+/// and only a user who wants a different status vocabulary has to say so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkStatusColors {
+    /// Backlog, todo, draft, closed, cancelled, unassigned.
+    pub neutral: Option<Color>,
+    /// In progress.
+    pub active: Option<Color>,
+    /// In review.
+    pub review: Option<Color>,
+    /// Done, closed conversation.
+    pub done: Option<Color>,
+    /// Triage.
+    pub triage: Option<Color>,
+    /// Merged pull request.
+    pub merged: Option<Color>,
+    /// Open pull request, open conversation.
+    pub open: Option<Color>,
+}
+
+impl WorkStatusColors {
+    /// Every entry unset: the built-in themes tint status glyphs from their
+    /// own tokens rather than carrying a second copy of them.
+    pub const DEFAULT: Self = Self {
+        neutral: None,
+        active: None,
+        review: None,
+        done: None,
+        triage: None,
+        merged: None,
+        open: None,
+    };
+}
+
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +185,8 @@ pub struct Palette {
     pub teal: Color,
     /// Interrupted / warning states.
     pub peach: Color,
+    /// Group-header status glyph colours. Unset entries follow the theme.
+    pub work_status: WorkStatusColors,
 }
 
 /// Resolve a ratatui color to concrete channels for legibility decisions.
@@ -233,6 +273,7 @@ impl Palette {
             blue: Color::Rgb(137, 180, 250),
             teal: Color::Rgb(148, 226, 213),
             peach: Color::Rgb(250, 179, 135),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -256,6 +297,7 @@ impl Palette {
             blue: Color::Rgb(30, 102, 245),
             teal: Color::Rgb(23, 146, 153),
             peach: Color::Rgb(254, 100, 11),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -279,6 +321,7 @@ impl Palette {
             blue: Color::Blue,
             teal: Color::Cyan,
             peach: Color::Yellow,
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -302,6 +345,7 @@ impl Palette {
             blue: Color::Rgb(122, 162, 247),
             teal: Color::Rgb(125, 207, 255),
             peach: Color::Rgb(255, 158, 100),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -325,6 +369,7 @@ impl Palette {
             blue: Color::Rgb(46, 125, 233),
             teal: Color::Rgb(17, 140, 116),
             peach: Color::Rgb(177, 92, 0),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -348,6 +393,7 @@ impl Palette {
             blue: Color::Rgb(139, 233, 253), // cyan-ish
             teal: Color::Rgb(139, 233, 253),
             peach: Color::Rgb(255, 184, 108),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -374,6 +420,7 @@ impl Palette {
             blue: Color::Rgb(129, 161, 193),
             teal: Color::Rgb(143, 188, 187),
             peach: Color::Rgb(208, 135, 112),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -397,6 +444,7 @@ impl Palette {
             blue: Color::Rgb(131, 165, 152),
             teal: Color::Rgb(142, 192, 124),
             peach: Color::Rgb(254, 128, 25),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -420,6 +468,7 @@ impl Palette {
             blue: Color::Rgb(7, 102, 120),
             teal: Color::Rgb(66, 123, 88),
             peach: Color::Rgb(175, 58, 3),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -443,6 +492,7 @@ impl Palette {
             blue: Color::Rgb(97, 175, 239),
             teal: Color::Rgb(86, 182, 194),
             peach: Color::Rgb(209, 154, 102),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -466,6 +516,7 @@ impl Palette {
             blue: Color::Rgb(64, 120, 242),
             teal: Color::Rgb(1, 132, 188),
             peach: Color::Rgb(152, 104, 1),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -489,6 +540,7 @@ impl Palette {
             blue: Color::Rgb(113, 183, 255),
             teal: Color::Rgb(57, 197, 207),
             peach: Color::Rgb(255, 183, 87),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -512,6 +564,7 @@ impl Palette {
             blue: Color::Rgb(3, 73, 180),
             teal: Color::Rgb(27, 124, 131),
             peach: Color::Rgb(112, 44, 0),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -535,6 +588,7 @@ impl Palette {
             blue: Color::Rgb(38, 139, 210),
             teal: Color::Rgb(42, 161, 152),
             peach: Color::Rgb(203, 75, 22),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -558,6 +612,7 @@ impl Palette {
             blue: Color::Rgb(38, 139, 210),
             teal: Color::Rgb(42, 161, 152),
             peach: Color::Rgb(203, 75, 22),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -581,6 +636,7 @@ impl Palette {
             blue: Color::Rgb(126, 156, 216),
             teal: Color::Rgb(127, 180, 202),
             peach: Color::Rgb(255, 160, 102),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -604,6 +660,7 @@ impl Palette {
             blue: Color::Rgb(77, 105, 155),
             teal: Color::Rgb(78, 140, 162),
             peach: Color::Rgb(204, 109, 0),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -627,6 +684,7 @@ impl Palette {
             blue: Color::Rgb(49, 116, 143),    // pine
             teal: Color::Rgb(156, 207, 216),   // foam
             peach: Color::Rgb(234, 154, 151),  // rose
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -650,6 +708,7 @@ impl Palette {
             blue: Color::Rgb(40, 105, 131),
             teal: Color::Rgb(86, 148, 159),
             peach: Color::Rgb(215, 130, 126),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -673,6 +732,7 @@ impl Palette {
             blue: Color::Rgb(176, 176, 176),
             teal: Color::Rgb(102, 221, 204),
             peach: Color::Rgb(255, 199, 153),
+            work_status: WorkStatusColors::DEFAULT,
         }
     }
 
@@ -697,6 +757,43 @@ impl Palette {
     }
 
     /// Resolve a theme by name. Returns None for unknown names.
+    /// Status glyph colour for backlog, todo, draft, closed, cancelled and
+    /// unassigned work. Defaults to the muted chrome tone (gray).
+    pub fn work_status_neutral(&self) -> Color {
+        self.work_status.neutral.unwrap_or(self.overlay0)
+    }
+
+    /// Status glyph colour for work in progress. Defaults to yellow.
+    pub fn work_status_active(&self) -> Color {
+        self.work_status.active.unwrap_or(self.yellow)
+    }
+
+    /// Status glyph colour for work in review. Defaults to green.
+    pub fn work_status_review(&self) -> Color {
+        self.work_status.review.unwrap_or(self.green)
+    }
+
+    /// Status glyph colour for finished work. Defaults to blue.
+    pub fn work_status_done(&self) -> Color {
+        self.work_status.done.unwrap_or(self.blue)
+    }
+
+    /// Status glyph colour for triage. Defaults to orange.
+    pub fn work_status_triage(&self) -> Color {
+        self.work_status.triage.unwrap_or(self.peach)
+    }
+
+    /// Status glyph colour for a merged pull request. Defaults to purple.
+    pub fn work_status_merged(&self) -> Color {
+        self.work_status.merged.unwrap_or(self.mauve)
+    }
+
+    /// Status glyph colour for an open pull request or conversation.
+    /// Defaults to green.
+    pub fn work_status_open(&self) -> Color {
+        self.work_status.open.unwrap_or(self.green)
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
             "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
@@ -783,6 +880,27 @@ impl Palette {
         if let Some(c) = &custom.peach {
             self.peach = parse_color(c);
         }
+        if let Some(c) = &custom.work_status_neutral {
+            self.work_status.neutral = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_active {
+            self.work_status.active = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_review {
+            self.work_status.review = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_done {
+            self.work_status.done = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_triage {
+            self.work_status.triage = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_merged {
+            self.work_status.merged = Some(parse_color(c));
+        }
+        if let Some(c) = &custom.work_status_open {
+            self.work_status.open = Some(parse_color(c));
+        }
         self
     }
 }
@@ -815,28 +933,300 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
-/// Team / assignee narrowing for the work-item grouping modes. TUI-only
-/// presentation state: it selects which of the projection's tickets the
-/// sidebar shows and never reaches the server.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+/// Per-view narrowing for work-item projections. This remains TUI-only state:
+/// provider observations are shared runtime facts, while each attached client
+/// chooses its own filters.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub(crate) struct SidebarWorkFilter {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy field names preserve existing 2b presentation files.
     pub(crate) team: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) assignee: Option<String>,
+    pub(crate) linear_statuses: std::collections::BTreeSet<LinearStatusFilter>,
+    pub(crate) github: GithubSidebarFilter,
+    pub(crate) missive: MissiveSidebarFilter,
 }
 
 impl SidebarWorkFilter {
-    /// Header chip: what the current narrowing is, in the operator's words.
-    pub(crate) fn label(&self) -> String {
-        match (self.team.as_deref(), self.assignee.as_deref()) {
-            (_, Some(assignee)) => format!("assigned to {assignee}"),
-            (_, None) => "all assignees".into(),
+    pub(crate) fn linear_label(&self) -> String {
+        format!(
+            "{} · {} · {}",
+            self.team.as_deref().unwrap_or("all teams"),
+            assignee_filter_label(self.assignee.as_deref()),
+            if self.linear_statuses == default_linear_statuses() {
+                "active".into()
+            } else {
+                format!("{} statuses", self.linear_statuses.len())
+            }
+        )
+    }
+
+    pub(crate) fn github_label(&self) -> String {
+        format!(
+            "{} · drafts {} · {}",
+            assignee_filter_label(self.github.assignee.as_deref()),
+            if self.github.show_drafts {
+                "shown"
+            } else {
+                "hidden"
+            },
+            self.github.state.label(),
+        )
+    }
+
+    pub(crate) fn missive_label(&self) -> String {
+        format!(
+            "{} · closed {}",
+            assignee_filter_label(self.missive.assignee.as_deref()),
+            if self.missive.show_closed {
+                "shown"
+            } else {
+                "hidden"
+            },
+        )
+    }
+
+    pub(crate) fn matches_linear(
+        &self,
+        ticket: &crate::work_index::WorkTicket,
+        session: &crate::work_index::WorkIndexSession,
+    ) -> bool {
+        if let Some(team) = self.team.as_deref() {
+            let actual_team = ticket.identifier.split_once('-').map(|(team, _)| team);
+            if actual_team != Some(team) {
+                return false;
+            }
+        }
+        if !assignee_filter_matches(
+            self.assignee.as_deref(),
+            ticket.assignee.as_deref(),
+            session.linear.viewer.as_deref(),
+        ) {
+            return false;
+        }
+        ticket
+            .state
+            .as_deref()
+            .and_then(LinearStatusFilter::from_name)
+            .is_none_or(|status| self.linear_statuses.contains(&status))
+    }
+
+    pub(crate) fn matches_github(
+        &self,
+        item: &crate::work_index::WorkItem,
+        session: &crate::work_index::WorkIndexSession,
+    ) -> bool {
+        if !item.source.github {
+            return true;
+        }
+        if item.draft && !self.github.show_drafts {
+            return false;
+        }
+        if item
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| !state.eq_ignore_ascii_case(self.github.state.label()))
+        {
+            return false;
+        }
+        let selected = self.github.assignee.as_deref();
+        if selected.is_none() {
+            return true;
+        }
+        let resolved = if selected == Some("me") {
+            let Some(viewer) = session.github.viewer.as_deref() else {
+                return true;
+            };
+            viewer
+        } else {
+            selected.unwrap_or_default()
+        };
+        item.assignees
+            .iter()
+            .any(|assignee| assignee.eq_ignore_ascii_case(resolved))
+    }
+
+    pub(crate) fn matches_missive_conversation(
+        &self,
+        conversation: Option<&crate::work_index::MissiveConversation>,
+        session: &crate::work_index::WorkIndexSession,
+    ) -> bool {
+        let Some(conversation) = conversation else {
+            return true;
+        };
+        if conversation.closed && !self.missive.show_closed {
+            return false;
+        }
+        let Some(selected) = self.missive.assignee.as_deref() else {
+            return true;
+        };
+        let resolved = if selected == "me" {
+            let Some(viewer) = session.missive.viewer.as_deref() else {
+                return true;
+            };
+            viewer
+        } else {
+            selected
+        };
+        conversation
+            .assignees
+            .iter()
+            .any(|user| user.name.eq_ignore_ascii_case(resolved))
+    }
+}
+
+impl Default for SidebarWorkFilter {
+    fn default() -> Self {
+        Self {
+            team: Some("SCA".into()),
+            assignee: Some("me".into()),
+            linear_statuses: default_linear_statuses(),
+            github: GithubSidebarFilter::default(),
+            missive: MissiveSidebarFilter::default(),
+        }
+    }
+}
+
+fn assignee_filter_label(value: Option<&str>) -> &str {
+    value.unwrap_or("all")
+}
+
+fn assignee_filter_matches(
+    selected: Option<&str>,
+    actual: Option<&str>,
+    viewer: Option<&str>,
+) -> bool {
+    let Some(selected) = selected else {
+        return true;
+    };
+    let selected = if selected == "me" {
+        let Some(viewer) = viewer else {
+            return true;
+        };
+        viewer
+    } else {
+        selected
+    };
+    actual.is_some_and(|actual| actual.eq_ignore_ascii_case(selected))
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LinearStatusFilter {
+    Draft,
+    Backlog,
+    Ready,
+    Todo,
+    InProgress,
+    InReview,
+    Done,
+    Canceled,
+    Duplicate,
+    Triage,
+}
+
+impl LinearStatusFilter {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Draft,
+        Self::Backlog,
+        Self::Ready,
+        Self::Todo,
+        Self::InProgress,
+        Self::InReview,
+        Self::Done,
+        Self::Canceled,
+        Self::Duplicate,
+        Self::Triage,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "Draft",
+            Self::Backlog => "Backlog",
+            Self::Ready => "Ready",
+            Self::Todo => "Todo",
+            Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
+            Self::Done => "Done",
+            Self::Canceled => "Canceled",
+            Self::Duplicate => "Duplicate",
+            Self::Triage => "Triage",
         }
     }
 
-    pub(crate) fn team_label(&self) -> String {
-        self.team.clone().unwrap_or_else(|| "all teams".into())
+    fn from_name(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|status| status.label().eq_ignore_ascii_case(value))
+    }
+}
+
+fn default_linear_statuses() -> std::collections::BTreeSet<LinearStatusFilter> {
+    LinearStatusFilter::ALL
+        .into_iter()
+        .filter(|status| {
+            !matches!(
+                status,
+                LinearStatusFilter::Canceled | LinearStatusFilter::Duplicate
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub(crate) struct GithubSidebarFilter {
+    pub(crate) assignee: Option<String>,
+    pub(crate) show_drafts: bool,
+    pub(crate) state: GithubStateFilter,
+}
+
+impl Default for GithubSidebarFilter {
+    fn default() -> Self {
+        Self {
+            assignee: Some("me".into()),
+            show_drafts: false,
+            state: GithubStateFilter::Open,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GithubStateFilter {
+    #[default]
+    Open,
+    Merged,
+    Closed,
+}
+
+impl GithubStateFilter {
+    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::Merged, Self::Closed];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub(crate) struct MissiveSidebarFilter {
+    pub(crate) assignee: Option<String>,
+    pub(crate) show_closed: bool,
+}
+
+impl Default for MissiveSidebarFilter {
+    fn default() -> Self {
+        Self {
+            assignee: Some("me".into()),
+            show_closed: false,
+        }
     }
 }
 
@@ -854,6 +1244,7 @@ pub(crate) enum SidebarGroupMode {
 }
 
 impl SidebarGroupMode {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 5] = [
         Self::Repo,
         Self::RepoPr,
@@ -862,33 +1253,27 @@ impl SidebarGroupMode {
         Self::Missive,
     ];
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Repo => "Repo",
-            Self::RepoPr => "Repo / PR",
-            Self::RepoWorktree => "Repo / worktree",
-            Self::LinearTeam => "Linear team",
-            Self::Missive => "Missive threads",
-        }
-    }
+    pub(crate) const VIEWS: [Self; 4] = [Self::Repo, Self::LinearTeam, Self::RepoPr, Self::Missive];
 
-    pub(crate) fn icon(self) -> &'static str {
+    pub(crate) fn view_label(self) -> &'static str {
         match self {
-            Self::Repo => "⊞",
-            Self::RepoPr => "⑂",
-            Self::RepoWorktree => "⎇",
-            Self::LinearTeam => "◎",
-            Self::Missive => "✉",
+            Self::Repo | Self::RepoWorktree => "Repo",
+            Self::LinearTeam => "Linear",
+            Self::RepoPr => "GitHub",
+            Self::Missive => "Missive",
         }
     }
 
     pub(crate) fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+        let index = self.view_index();
+        Self::VIEWS[(index + 1) % Self::VIEWS.len()]
     }
 
-    pub(crate) fn index(self) -> usize {
-        Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0)
+    pub(crate) fn view_index(self) -> usize {
+        Self::VIEWS
+            .iter()
+            .position(|mode| *mode == self)
+            .unwrap_or(0)
     }
 
     pub(crate) fn collapse_namespace(self) -> &'static str {
@@ -925,6 +1310,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
     pub(crate) selected_work_group: Option<String>,
+    pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
@@ -936,6 +1322,8 @@ pub(crate) struct SidebarPresentationState {
 pub(crate) struct DockPresentationState {
     pub(crate) width: u16,
     pub(crate) collapsed: bool,
+    /// An explicit surface pick wins until the next sidebar/work view change.
+    pub(crate) surface_override: bool,
     /// Active surface. `None` while the dock is a chooser with nothing open.
     pub(crate) tab: Option<DockSurface>,
     pub(crate) open_surfaces: Vec<DockSurface>,
@@ -973,6 +1361,7 @@ impl Default for DockPresentationState {
         Self {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
+            surface_override: false,
             tab: Some(DockSurface::Home),
             open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
             maximized: false,
@@ -1160,6 +1549,7 @@ pub enum DockSurface {
     Diff,
     Pr,
     Linear,
+    Missive,
     Agents,
     Editor,
     Shortcuts,
@@ -1169,12 +1559,13 @@ pub enum DockSurface {
 
 impl DockSurface {
     /// Every surface the chooser can open, in menu order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Terminal,
         Self::Files,
         Self::Diff,
         Self::Pr,
         Self::Linear,
+        Self::Missive,
         Self::Agents,
         Self::Home,
         Self::Editor,
@@ -1216,6 +1607,7 @@ impl DockSurface {
             Self::Diff => "diff",
             Self::Pr => "pr",
             Self::Linear => "linear",
+            Self::Missive => "missive",
             Self::Agents => "agents",
         }
     }
@@ -1233,6 +1625,7 @@ impl DockSurface {
             Self::Diff => "Diff",
             Self::Pr => "PR",
             Self::Linear => "Linear",
+            Self::Missive => "Missive",
             Self::Agents => "Agents",
         }
     }
@@ -1249,6 +1642,7 @@ impl DockSurface {
             Self::Diff => "vs base",
             Self::Pr => "this branch",
             Self::Linear => "ticket",
+            Self::Missive => "conversation",
             Self::Agents => "subagents",
         }
     }
@@ -1262,6 +1656,7 @@ impl DockSurface {
             Self::Pr => Some('P'),
             Self::Linear => Some('L'),
             Self::Agents => Some('A'),
+            Self::Missive => None,
             _ => None,
         }
     }
@@ -1275,11 +1670,8 @@ impl DockSurface {
 
     /// Placeholder body until the surface gets its implementation slice.
     pub fn placeholder(self) -> Option<String> {
-        matches!(
-            self,
-            Self::Terminal | Self::Files | Self::Linear | Self::Agents
-        )
-        .then(|| format!("{}: coming in a later slice", self.title()))
+        matches!(self, Self::Terminal | Self::Files | Self::Agents)
+            .then(|| format!("{}: coming in a later slice", self.title()))
     }
 }
 
@@ -1349,6 +1741,25 @@ pub(crate) struct HomeHitArea {
     pub(crate) rect: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum UsageHitTarget {
+    Cost,
+    Tokens,
+    Hours24,
+    Days7,
+    Days30,
+    Days90,
+    Model,
+    Day,
+    Rescan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsageHitArea {
+    pub(crate) target: UsageHitTarget,
+    pub(crate) rect: Rect,
+}
+
 /// Which pane-toggle button in the tab row was pressed. TUI-only presentation
 /// state: it is resolved into the existing split/close runtime calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1380,6 +1791,14 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
+    /// Sidebar-footer entry for the client-local historical usage view.
+    pub(crate) sidebar_footer_usage_hit_area: Rect,
+    /// Header and breakdown controls inside the historical usage view.
+    pub(crate) usage_hit_areas: Vec<UsageHitArea>,
+    /// Sidebar-footer entry for the full-screen Linear ticket view.
+    pub(crate) sidebar_footer_ticket_hit_area: Rect,
+    /// Sidebar-footer entry for the full-screen Missive conversation view.
+    pub(crate) sidebar_footer_missive_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
@@ -1388,6 +1807,12 @@ pub struct ViewState {
     pub tab_scroll_left_hit_area: Rect,
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
+    pub add_action_button_hit_area: Rect,
+    pub user_action_hit_areas: Vec<(usize, Rect)>,
+    pub add_action_close_hit_area: Rect,
+    pub add_action_field_hit_areas: Vec<(AddActionField, Rect)>,
+    pub add_action_cancel_hit_area: Rect,
+    pub add_action_save_hit_area: Rect,
     pub git_menu_button_hit_area: Rect,
     pub git_menu_popup_rect: Rect,
     pub git_menu_first_visible: usize,
@@ -1499,11 +1924,56 @@ pub enum Mode {
     ConfirmClose,
     ContextMenu,
     GitMenu,
+    AddAction,
     Settings,
     GlobalMenu,
     KeybindHelp,
     Navigator,
     WorkLinkPicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddActionField {
+    Name,
+    Key,
+    Command,
+    RunOnWorktreeCreate,
+    OpenInBottomPane,
+}
+
+impl AddActionField {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Key,
+        Self::Command,
+        Self::RunOnWorktreeCreate,
+        Self::OpenInBottomPane,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddActionState {
+    pub(crate) name: String,
+    pub(crate) key: String,
+    pub(crate) command: String,
+    pub(crate) run_on_worktree_create: bool,
+    pub(crate) open_in_bottom_pane: bool,
+    pub(crate) field: AddActionField,
+    pub(crate) error: Option<String>,
+}
+
+impl Default for AddActionState {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            key: String::new(),
+            command: String::new(),
+            run_on_worktree_create: false,
+            open_in_bottom_pane: true,
+            field: AddActionField::Name,
+            error: None,
+        }
+    }
 }
 
 impl Mode {
@@ -1717,34 +2187,95 @@ pub enum AgentPanelSort {
 /// Which section of the settings panel is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
+    General,
     Theme,
     Indicators,
     Sound,
     Toast,
     PaneLabels,
+    Keybindings,
+    Providers,
     Integrations,
+    SourceControl,
+    Archive,
+    About,
 }
 
 impl SettingsSection {
     pub const ALL: &[Self] = &[
+        Self::General,
         Self::Theme,
         Self::Indicators,
         Self::Sound,
         Self::Toast,
         Self::PaneLabels,
+        Self::Keybindings,
+        Self::Providers,
         Self::Integrations,
+        Self::SourceControl,
+        Self::Archive,
+        Self::About,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::General => "general",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
+            Self::Keybindings => "keybindings",
+            Self::Providers => "providers",
             Self::Integrations => "integrations",
+            Self::SourceControl => "source control",
+            Self::Archive => "archive",
+            Self::About => "about",
         }
     }
+
+    /// The glyph in front of the nav row, mirroring the design's icon column.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::General => "⚙",
+            Self::Theme => "◐",
+            Self::Indicators => "●",
+            Self::Sound => "♪",
+            Self::Toast => "▣",
+            Self::PaneLabels => "▭",
+            Self::Keybindings => "⌨",
+            Self::Providers => "⚛",
+            Self::Integrations => "⊞",
+            Self::SourceControl => "⑂",
+            Self::Archive => "▤",
+            Self::About => "ⓘ",
+        }
+    }
+
+    /// Position in the unfiltered nav column.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|section| *section == self)
+            .unwrap_or(0)
+    }
+}
+
+/// The sections a search query leaves in the nav column, in nav order.
+///
+/// An empty query is not a filter, it is the whole list. A query that matches
+/// nothing returns nothing, so the column shows the operator that their query
+/// is the reason the list is empty rather than silently ignoring it.
+pub fn settings_sections_matching(query: &str) -> Vec<SettingsSection> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return SettingsSection::ALL.to_vec();
+    }
+    SettingsSection::ALL
+        .iter()
+        .copied()
+        .filter(|section| section.label().contains(&query))
+        .collect()
 }
 
 /// All built-in theme names in display order.
@@ -1842,6 +2373,27 @@ pub struct SettingsState {
     pub original_palette: Option<Palette>,
     /// The theme name before opening settings.
     pub original_theme: Option<String>,
+    /// The archive row's delete has been pressed once and waits for the
+    /// confirming second press. Only armed while `ui.confirm_close` is on.
+    pub archive_delete_armed: bool,
+    /// The section-nav filter query. TUI-only: nothing outside the settings
+    /// screen reads it and it is never persisted.
+    pub search: String,
+    /// Typed characters go to the filter line rather than the section list.
+    pub search_active: bool,
+    /// The keybindings row whose chord is being captured, if any. TUI-only:
+    /// capture is a settings-screen interaction, not a session fact.
+    pub keybind_capture: Option<KeybindCapture>,
+}
+
+/// A keybindings row waiting for the operator to press the chord they want.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindCapture {
+    /// Index into `settings_keybinding_rows`.
+    pub row: usize,
+    /// The refusal shown inline under the row, from the same validator the
+    /// add-action modal uses.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2136,6 +2688,14 @@ pub struct AppState {
     /// Open work projection view. `Some` means the view owns the screen and the
     /// keyboard, like the Symphony and loop-history details above it.
     pub(crate) work_view: Option<WorkViewState>,
+    /// Client-local historical usage view and its scan result.
+    pub(crate) usage_view: Option<UsageViewState>,
+    /// Cached local usage loaded before the first background rescan.
+    pub(crate) usage_snapshot: Option<crate::provider_usage::UsageSnapshot>,
+    /// Local list-price table used only by the usage presentation.
+    pub(crate) usage_pricing: crate::config::UsageConfig,
+    /// Set by client-local input and drained into the background scan job.
+    pub(crate) request_usage_scan: bool,
     /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
@@ -2149,6 +2709,10 @@ pub struct AppState {
         std::collections::HashMap<std::path::PathBuf, crate::app::home_refs::HomeRefCacheEntry>,
     /// Opening the ref picker asks the runtime layer to refresh this repository.
     pub(crate) request_home_ref_refresh: Option<std::path::PathBuf>,
+    /// A settings section that needs the tool probes was entered.
+    /// Drained by `App::start_requested_tool_probes`, which owns the
+    /// thread the pure state layer cannot spawn.
+    pub(crate) request_tool_probes: bool,
     /// Unsent text typed by a human in each pane. Home replies must not touch a
     /// pane while this draft exists because the terminal owns that edit buffer.
     pub(crate) pending_human_drafts: std::collections::HashMap<PaneId, String>,
@@ -2212,6 +2776,8 @@ pub struct AppState {
     pub(crate) request_pane_toggle: Option<PaneToggleDirection>,
     /// Git action chosen from the tab-row menu, drained by the runtime loop.
     pub(crate) request_git_action: Option<GitAction>,
+    pub(crate) request_user_action: Option<usize>,
+    pub(crate) request_save_add_action: bool,
     pub(crate) request_pr_land: Option<PrLandConfirmation>,
     /// A click landed on a tab's pin glyph. Drained by the app loop, which is
     /// the layer that owns the API client the mutation has to travel through.
@@ -2257,9 +2823,15 @@ pub struct AppState {
     /// Dim work-item header the operator selected with the mouse. Enter on it
     /// starts a thread for that ticket or conversation.
     pub(crate) sidebar_selected_work_group: Option<String>,
+    /// Views whose Unassigned section has expanded past its ten newest rows.
+    /// Attach-local TUI state; provider objects remain shared work-index facts.
+    pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
+    /// The settled menu's delete row has been pressed once and is waiting for
+    /// the confirming second press. Only armed while `ui.confirm_close` is on.
+    pub(crate) sidebar_settled_menu_delete_armed: bool,
     pub(crate) pending_pane_settlement_changes: Vec<PaneSettlementChange>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
@@ -2272,6 +2844,7 @@ pub struct AppState {
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
     pub work_link_picker: Option<WorkLinkPickerState>,
+    pub(crate) add_action: Option<AddActionState>,
     pub copy_mode: Option<CopyModeState>,
     pub(crate) sidebar_presentation: SidebarPresentationState,
     /// Monotonic client-only revision for changes that replace the sidebar row
@@ -2312,6 +2885,9 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub dock_width: u16,
     pub dock_collapsed: bool,
+    /// Set by an explicit dock pick and cleared by `follow_view`.
+    /// Attach-local TUI state; it never enters server state or the JSON API.
+    pub(crate) dock_surface_override: bool,
     /// Active dock surface, `None` when nothing is open and the dock shows the
     /// surface chooser. TUI presentation state; never leaves the client.
     pub dock_tab: Option<DockSurface>,
@@ -2334,6 +2910,9 @@ pub struct AppState {
     pub(crate) dock_pr_focused: bool,
     pub(crate) dock_pr_checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) dock_pr_pending_land: Option<PrLandConfirmation>,
+    /// `git diff -w` for the Diff surface. Initialised from
+    /// `ui.hide_whitespace_in_diff` and written by both the dock's own
+    /// whitespace toggle and the General settings row, so the two never drift.
     pub(crate) dock_diff_ignore_whitespace: bool,
     pub(crate) dock_diff_selected: usize,
     pub(crate) dock_diff_collapsed: std::collections::HashSet<String>,
@@ -2380,6 +2959,9 @@ pub struct AppState {
     /// Server-global work index snapshot. Set on every applied
     /// `WorkIndexRefreshed`; the dock home enriches rows from it.
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    /// Provider viewers and assignee directories resolved by the work-index
+    /// runtime once for this app session.
+    pub(crate) work_index_session: crate::work_index::WorkIndexSession,
     /// Server-global on-demand detail facts, keyed by stable work identity.
     /// Client-local selection decides which entry is rendered, but never owns
     /// or duplicates the fetched data.
@@ -2393,6 +2975,12 @@ pub struct AppState {
     pub(crate) work_index_enabled: bool,
     /// Client-local approval label used by the PR landing gate.
     pub(crate) land_approval_label: String,
+    /// `source_control.branch_prefix`: the prefix Herdr puts in front of a
+    /// branch name derived from a ticket.
+    pub(crate) branch_prefix: String,
+    /// `source_control.commit_message_model`: exported to the Commit action so
+    /// a hook can draft the message. Empty leaves `git commit` unchanged.
+    pub(crate) commit_message_model: String,
     pub(crate) work_index_linear_team_configured: bool,
     pub(crate) dock_editor_sessions: std::collections::HashMap<PaneId, DockEditorSession>,
     pub(crate) dock_editor_errors: std::collections::HashMap<PaneId, String>,
@@ -2427,6 +3015,18 @@ pub struct AppState {
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
+    /// Group workspaces that check out the same repository under one project
+    /// header even when the checkout roots differ (`ui.combine_repos_across_hosts`).
+    pub combine_repos_across_hosts: bool,
+    /// Workspace preselected for a new Home thread (`ui.new_thread_workspace`).
+    pub new_thread_workspace: crate::config::NewThreadWorkspaceConfig,
+    /// Directory the add-project picker starts in (`ui.add_project_start_dir`).
+    /// Empty keeps the last used directory.
+    pub add_project_start_dir: String,
+    /// Settle a pane when its linked work finishes (`session.auto_settle_finished`).
+    pub auto_settle_finished: bool,
+    /// Settle a pane after `settle_after` of inactivity (`session.auto_settle_inactive`).
+    pub auto_settle_inactive: bool,
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
@@ -2478,6 +3078,9 @@ pub struct AppState {
     pub theme_appearance_mismatch: Option<String>,
     /// Settings panel state.
     pub settings: SettingsState,
+    /// Session cache of the settings Providers/Integrations probes. TUI-only:
+    /// nothing outside the settings screen reads it.
+    pub tool_probes: crate::app::probes::ToolProbeState,
     /// Cached integration recommendations for onboarding/settings UI.
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
     /// Cached detection manifest source/version summaries for runtime/API status.
@@ -2558,6 +3161,7 @@ impl SymphonyDetail {
 pub(crate) enum WorkProjection {
     PullRequests,
     Tickets,
+    Missive,
     Agents,
     ReviewQueue,
 }
@@ -2567,6 +3171,7 @@ impl WorkProjection {
         match self {
             Self::PullRequests => "PRs",
             Self::Tickets => "tickets",
+            Self::Missive => "Missive",
             Self::Agents => "agents",
             Self::ReviewQueue => "review queue",
         }
@@ -2576,7 +3181,8 @@ impl WorkProjection {
         match self {
             Self::PullRequests => Self::ReviewQueue,
             Self::Tickets => Self::PullRequests,
-            Self::Agents => Self::Tickets,
+            Self::Missive => Self::Tickets,
+            Self::Agents => Self::Missive,
             Self::ReviewQueue => Self::Agents,
         }
     }
@@ -2584,7 +3190,8 @@ impl WorkProjection {
     pub(crate) fn rotate_right(self) -> Self {
         match self {
             Self::PullRequests => Self::Tickets,
-            Self::Tickets => Self::Agents,
+            Self::Tickets => Self::Missive,
+            Self::Missive => Self::Agents,
             Self::Agents => Self::ReviewQueue,
             Self::ReviewQueue => Self::PullRequests,
         }
@@ -2657,11 +3264,135 @@ pub(crate) struct WorkViewState {
     pub(crate) search: String,
     pub(crate) search_focused: bool,
     pub(crate) sort: crate::ui::work_list_detail::PrSort,
+    pub(crate) ticket_sort: crate::ui::work_list_detail::TicketSort,
     pub(crate) open_only: bool,
+    pub(crate) ticket_open_only: bool,
     pub(crate) detail_tab: PrDetailTab,
     pub(crate) checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) pending_land: Option<PrLandConfirmation>,
+    pub(crate) ticket_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) ticket_transition_menu: Option<TicketTransitionChoice>,
+    pub(crate) ticket_more_menu: Option<TicketMoreChoice>,
+    pub(crate) missive_start_menu: Option<PrCheckoutChoice>,
+    pub(crate) selected_missive: Option<String>,
+    pub(crate) missive_detail_scroll: u16,
+    pub(crate) ticket_comment_draft: Option<String>,
+    pub(crate) pending_write: Option<crate::work_index::WorkItemWrite>,
     pub(crate) refreshing: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UsageMetric {
+    #[default]
+    Cost,
+    Tokens,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UsageRange {
+    Hours24,
+    Days7,
+    #[default]
+    Days30,
+    Days90,
+}
+
+impl UsageRange {
+    pub(crate) fn seconds(self) -> i64 {
+        match self {
+            Self::Hours24 => 24 * 60 * 60,
+            Self::Days7 => 7 * 24 * 60 * 60,
+            Self::Days30 => 30 * 24 * 60 * 60,
+            Self::Days90 => 90 * 24 * 60 * 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum UsageBreakdown {
+    #[default]
+    Model,
+    Day,
+}
+
+/// Client-local controls and scan data for the full-screen usage view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsageViewState {
+    pub(crate) metric: UsageMetric,
+    pub(crate) range: UsageRange,
+    pub(crate) breakdown: UsageBreakdown,
+    pub(crate) snapshot: Option<crate::provider_usage::UsageSnapshot>,
+    pub(crate) scanning: bool,
+}
+
+impl UsageViewState {
+    pub(crate) fn new(snapshot: Option<crate::provider_usage::UsageSnapshot>) -> Self {
+        Self {
+            metric: UsageMetric::default(),
+            range: UsageRange::default(),
+            breakdown: UsageBreakdown::default(),
+            scanning: snapshot.is_none(),
+            snapshot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TicketTransitionChoice {
+    #[default]
+    Todo,
+    InProgress,
+    InReview,
+    Done,
+}
+
+impl TicketTransitionChoice {
+    pub(crate) const ALL: [Self; 4] = [Self::Todo, Self::InProgress, Self::InReview, Self::Done];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Todo => "Todo",
+            Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
+            Self::Done => "Done",
+        }
+    }
+
+    pub(crate) fn move_by(self, delta: i8) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|choice| *choice == self)
+            .unwrap_or(0) as i8;
+        Self::ALL[(index + delta).clamp(0, 3) as usize]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TicketMoreChoice {
+    #[default]
+    Open,
+    CopyIdentifier,
+    Comment,
+}
+
+impl TicketMoreChoice {
+    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::CopyIdentifier, Self::Comment];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open in browser",
+            Self::CopyIdentifier => "Copy identifier",
+            Self::Comment => "Comment",
+        }
+    }
+
+    pub(crate) fn move_by(self, delta: i8) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|choice| *choice == self)
+            .unwrap_or(0) as i8;
+        Self::ALL[(index + delta).clamp(0, 2) as usize]
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2709,10 +3440,20 @@ impl WorkViewState {
             search: String::new(),
             search_focused: false,
             sort: crate::ui::work_list_detail::PrSort::Updated,
+            ticket_sort: crate::ui::work_list_detail::TicketSort::Updated,
             open_only: true,
+            ticket_open_only: false,
             detail_tab: PrDetailTab::Summary,
             checkout_menu: None,
             pending_land: None,
+            ticket_start_menu: None,
+            ticket_transition_menu: None,
+            ticket_more_menu: None,
+            missive_start_menu: None,
+            selected_missive: None,
+            missive_detail_scroll: 0,
+            ticket_comment_draft: None,
+            pending_write: None,
             refreshing: false,
         }
     }
@@ -2743,20 +3484,27 @@ impl AppState {
         std::mem::swap(&mut self.work_view, other);
     }
 
-    pub(crate) fn toggle_work_view(
-        &mut self,
-        enabled: bool,
-        snapshot: Option<crate::work_index::Snapshot>,
-    ) {
-        if self.work_view.is_some() {
-            self.work_view = None;
-            return;
-        }
-        self.work_view = Some(WorkViewState::new(enabled, snapshot));
-    }
-
     pub(crate) fn clear_work_view(&mut self) {
         self.work_view = None;
+    }
+
+    pub(crate) fn swap_usage_view(&mut self, other: &mut Option<UsageViewState>) {
+        std::mem::swap(&mut self.usage_view, other);
+    }
+
+    pub(crate) fn toggle_usage_view(&mut self) {
+        if self.usage_view.is_some() {
+            self.usage_view = None;
+            return;
+        }
+        self.work_view = None;
+        self.usage_view = Some(UsageViewState::new(self.usage_snapshot.clone()));
+        self.request_usage_scan = true;
+        self.follow_view(SidebarGroupMode::Repo);
+    }
+
+    pub(crate) fn clear_usage_view(&mut self) {
+        self.usage_view = None;
     }
 
     pub(crate) fn swap_loop_run_history_detail(
@@ -2828,12 +3576,14 @@ impl AppState {
             return;
         }
         self.sidebar_group_mode = mode;
-        self.sidebar_group_menu_selected = mode.index();
+        self.follow_view(mode);
+        self.sidebar_group_menu_selected = mode.view_index();
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
         self.sidebar_selected_work_group = None;
         self.sidebar_selected_settled = None;
         self.sidebar_settled_menu_target = None;
+        self.sidebar_settled_menu_delete_armed = false;
         self.sidebar_filter_menu_open = false;
         self.workspace_scroll = 0;
         self.mark_sidebar_projection_changed();
@@ -2912,6 +3662,10 @@ impl AppState {
             &mut other.selected_work_group,
         );
         std::mem::swap(
+            &mut self.sidebar_unassigned_expanded_views,
+            &mut other.unassigned_expanded_views,
+        );
+        std::mem::swap(
             &mut self.sidebar_selected_settled,
             &mut other.selected_settled,
         );
@@ -2928,6 +3682,11 @@ impl AppState {
     /// Open `surface` as a tab and make it active. Already-open surfaces are
     /// only reactivated, so the strip order never shuffles under the user.
     pub(crate) fn open_dock_surface(&mut self, surface: DockSurface) {
+        self.dock_surface_override = true;
+        self.select_dock_surface(surface);
+    }
+
+    fn select_dock_surface(&mut self, surface: DockSurface) {
         if !self.dock_open_surfaces.contains(&surface) {
             self.dock_open_surfaces.push(surface);
         }
@@ -2937,6 +3696,20 @@ impl AppState {
         if surface == DockSurface::Editor {
             self.retry_dock_editor();
         }
+    }
+
+    /// Keep the dock on the compact companion for a sidebar or full-screen
+    /// work view. A later explicit surface pick remains visible until another
+    /// view change calls this function.
+    pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
+        self.dock_collapsed = false;
+        match view {
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {}
+            SidebarGroupMode::LinearTeam => self.select_dock_surface(DockSurface::Linear),
+            SidebarGroupMode::RepoPr => self.select_dock_surface(DockSurface::Pr),
+            SidebarGroupMode::Missive => self.select_dock_surface(DockSurface::Missive),
+        }
+        self.dock_surface_override = false;
     }
 
     /// Close `surface`. The active surface moves to the neighbour that took its
@@ -2993,6 +3766,7 @@ impl AppState {
     pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
         std::mem::swap(&mut self.dock_width, &mut other.width);
         std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
+        std::mem::swap(&mut self.dock_surface_override, &mut other.surface_override);
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
         std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
         std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
@@ -3347,11 +4121,16 @@ impl AppState {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            usage_view: None,
+            usage_snapshot: None,
+            usage_pricing: crate::config::UsageConfig::default(),
+            request_usage_scan: false,
             inbox: None,
             home: None,
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
+            request_tool_probes: false,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: Some(crate::platform::status_metrics::StatusMetricsSnapshot {
                 metrics: crate::platform::status_metrics::status_metrics_fixture(),
@@ -3395,6 +4174,8 @@ impl AppState {
             request_new_tab: false,
             request_pane_toggle: None,
             request_git_action: None,
+            request_user_action: None,
+            request_save_add_action: false,
             request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
@@ -3427,9 +4208,11 @@ impl AppState {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
+            sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
@@ -3440,6 +4223,7 @@ impl AppState {
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
             work_link_picker: None,
+            add_action: None,
             copy_mode: None,
             sidebar_presentation: SidebarPresentationState::default(),
             sidebar_projection_revision: 0,
@@ -3453,6 +4237,10 @@ impl AppState {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
+                sidebar_footer_usage_hit_area: Rect::default(),
+                usage_hit_areas: Vec::new(),
+                sidebar_footer_ticket_hit_area: Rect::default(),
+                sidebar_footer_missive_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -3461,6 +4249,12 @@ impl AppState {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                add_action_button_hit_area: Rect::default(),
+                user_action_hit_areas: Vec::new(),
+                add_action_close_hit_area: Rect::default(),
+                add_action_field_hit_areas: Vec::new(),
+                add_action_cancel_hit_area: Rect::default(),
+                add_action_save_hit_area: Rect::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,
@@ -3520,6 +4314,7 @@ impl AppState {
             sidebar_max_width: 36,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
+            dock_surface_override: false,
             dock_tab: Some(DockSurface::Home),
             dock_open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
             dock_maximized: false,
@@ -3559,10 +4354,13 @@ impl AppState {
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: None,
+            work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: false,
             land_approval_label: crate::config::DEFAULT_LAND_APPROVAL_LABEL.into(),
+            branch_prefix: crate::config::DEFAULT_BRANCH_PREFIX.into(),
+            commit_message_model: String::new(),
             work_index_linear_team_configured: false,
             dock_editor_sessions: std::collections::HashMap::new(),
             dock_editor_errors: std::collections::HashMap::new(),
@@ -3591,6 +4389,11 @@ impl AppState {
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
+            combine_repos_across_hosts: false,
+            new_thread_workspace: crate::config::NewThreadWorkspaceConfig::CurrentCheckout,
+            add_project_start_dir: String::new(),
+            auto_settle_finished: true,
+            auto_settle_inactive: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
@@ -3634,11 +4437,16 @@ impl AppState {
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
             theme_appearance_mismatch: None,
+            tool_probes: crate::app::probes::ToolProbeState::Idle,
             settings: SettingsState {
                 section: SettingsSection::Theme,
                 list: SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
+                archive_delete_armed: false,
+                search: String::new(),
+                search_active: false,
+                keybind_capture: None,
             },
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),
@@ -4007,6 +4815,30 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn work_projection_rotation_includes_missive_in_both_directions() {
+        assert_eq!(
+            WorkProjection::Tickets.rotate_right(),
+            WorkProjection::Missive
+        );
+        assert_eq!(
+            WorkProjection::Missive.rotate_right(),
+            WorkProjection::Agents
+        );
+        assert_eq!(
+            WorkProjection::Agents.rotate_left(),
+            WorkProjection::Missive
+        );
+        assert_eq!(
+            WorkProjection::Missive.rotate_left(),
+            WorkProjection::Tickets
+        );
+        assert_eq!(
+            WorkProjection::ReviewQueue.rotate_left(),
+            WorkProjection::Agents
+        );
+    }
 
     #[test]
     fn symphony_refresh_preserves_selection_by_workflow_identity() {

@@ -42,9 +42,12 @@ mod symphony;
 mod tab_surface;
 mod tabs;
 mod text;
+pub(crate) mod usage;
+mod user_actions;
 mod widgets;
 mod work_link_picker;
 pub(crate) mod work_list_detail;
+mod work_status;
 mod work_view;
 
 use self::dialogs::{
@@ -103,6 +106,8 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::{render_git_menu, render_tab_action_buttons, render_tab_bar};
+use self::usage::render as render_usage;
+use self::user_actions::render_add_action_overlay;
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
@@ -115,8 +120,8 @@ pub(crate) use self::{
         remove_worktree_popup_rect, rename_button_rects,
     },
     settings::{
-        settings_button_rects, settings_popup_height, settings_show_primary_action,
-        SETTINGS_POPUP_WIDTH,
+        general_row_offsets, settings_areas, settings_button_rects, settings_nav_scroll,
+        settings_popup_height, settings_show_primary_action, SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
@@ -128,7 +133,8 @@ pub(crate) use self::{
         sidebar_group_mode_anchor_rect, sidebar_header_new_space_rect,
         sidebar_header_overflow_rect, sidebar_nested_header_at, sidebar_row_index_for_workspace,
         sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
-        sidebar_settled_menu_layout, sidebar_thread_entries, sidebar_work_group_activation,
+        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
+        sidebar_thread_entries, sidebar_unassigned_spawn_at, sidebar_work_group_activation,
         workspace_agent_chevron_rect, workspace_drop_slots, workspace_list_entries,
         workspace_list_entries_expanded, workspace_list_rect_for_app,
         workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
@@ -145,7 +151,7 @@ pub(crate) use self::{
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
-    tabs::{compute_tab_bar_view, tab_action_fallback_hit_areas},
+    tabs::{compute_tab_bar_view, tab_action_fallback_hit_areas, visible_user_actions},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
 use crate::app::state::ViewLayout;
@@ -371,6 +377,7 @@ fn compute_view_internal(
         compute_workspace_card_areas(app, sidebar_area)
     };
 
+    let visible_user_actions = tabs::visible_user_actions(app);
     let tab_bar_view = app
         .active
         .and_then(|ws_idx| app.workspaces.get(ws_idx))
@@ -382,23 +389,41 @@ fn compute_view_internal(
                 app.tab_scroll,
                 app.tab_scroll_follow_active,
                 app.mouse_capture,
+                &visible_user_actions,
             )
         })
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
     // A hidden tab row leaves the toggles homeless; the status row takes them.
-    let (git_menu_button_hit_area, pane_toggle_below_hit_area, pane_toggle_right_hit_area) =
-        if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
-            (
-                tab_bar_view.git_menu_button_hit_area,
-                tab_bar_view.pane_toggle_below_hit_area,
-                tab_bar_view.pane_toggle_right_hit_area,
-            )
-        } else if app.active.is_some() {
-            tabs::tab_action_fallback_hit_areas(status_bar_rect, app.mouse_capture)
-        } else {
-            (Rect::default(), Rect::default(), Rect::default())
-        };
+    let (
+        add_action_button_hit_area,
+        user_action_hit_areas,
+        git_menu_button_hit_area,
+        pane_toggle_below_hit_area,
+        pane_toggle_right_hit_area,
+    ) = if tab_bar_view.pane_toggle_below_hit_area.width > 0 {
+        (
+            tab_bar_view.add_action_button_hit_area,
+            tab_bar_view.user_action_hit_areas.clone(),
+            tab_bar_view.git_menu_button_hit_area,
+            tab_bar_view.pane_toggle_below_hit_area,
+            tab_bar_view.pane_toggle_right_hit_area,
+        )
+    } else if app.active.is_some() {
+        tabs::tab_action_fallback_hit_areas(
+            status_bar_rect,
+            app.mouse_capture,
+            &visible_user_actions,
+        )
+    } else {
+        (
+            Rect::default(),
+            Vec::new(),
+            Rect::default(),
+            Rect::default(),
+            Rect::default(),
+        )
+    };
 
     let git_menu_layout = (app.mode == Mode::GitMenu).then(|| {
         let in_git_repo = dock::chooser::focused_in_git_repo(app);
@@ -476,6 +501,26 @@ fn compute_view_internal(
         Rect::default()
     } else {
         sidebar::sidebar_footer_work_hit_area(sidebar_area)
+    };
+    let sidebar_footer_usage_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_usage_hit_area(sidebar_area)
+    };
+    let usage_hit_areas = if app.usage_view.is_some() {
+        usage::hit_areas(terminal_area)
+    } else {
+        Vec::new()
+    };
+    let sidebar_footer_ticket_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_ticket_hit_area(sidebar_area)
+    };
+    let sidebar_footer_missive_hit_area = if app.sidebar_collapsed {
+        Rect::default()
+    } else {
+        sidebar::sidebar_footer_missive_hit_area(sidebar_area)
     };
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
@@ -567,11 +612,20 @@ fn compute_view_internal(
             Vec::new()
         };
 
+    let add_action_layout = if app.mode == Mode::AddAction {
+        user_actions::add_action_layout(area)
+    } else {
+        user_actions::AddActionLayout::default()
+    };
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         status_bar_rect,
         sidebar_rect: sidebar_area,
         sidebar_footer_work_hit_area,
+        sidebar_footer_usage_hit_area,
+        usage_hit_areas,
+        sidebar_footer_ticket_hit_area,
+        sidebar_footer_missive_hit_area,
         workspace_card_areas,
         agent_card_areas,
         visible_agent_activity_instants,
@@ -580,6 +634,12 @@ fn compute_view_internal(
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
+        add_action_button_hit_area,
+        user_action_hit_areas,
+        add_action_close_hit_area: add_action_layout.close,
+        add_action_field_hit_areas: add_action_layout.fields,
+        add_action_cancel_hit_area: add_action_layout.cancel,
+        add_action_save_hit_area: add_action_layout.save,
         git_menu_button_hit_area,
         git_menu_popup_rect,
         git_menu_first_visible,
@@ -820,6 +880,10 @@ fn compute_mobile_view(
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
         sidebar_footer_work_hit_area: Rect::default(),
+        sidebar_footer_usage_hit_area: Rect::default(),
+        usage_hit_areas: Vec::new(),
+        sidebar_footer_ticket_hit_area: Rect::default(),
+        sidebar_footer_missive_hit_area: Rect::default(),
         workspace_card_areas: Vec::new(),
         agent_card_areas: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
@@ -828,6 +892,12 @@ fn compute_mobile_view(
         tab_scroll_left_hit_area: Rect::default(),
         tab_scroll_right_hit_area: Rect::default(),
         new_tab_hit_area: Rect::default(),
+        add_action_button_hit_area: Rect::default(),
+        user_action_hit_areas: Vec::new(),
+        add_action_close_hit_area: Rect::default(),
+        add_action_field_hit_areas: Vec::new(),
+        add_action_cancel_hit_area: Rect::default(),
+        add_action_save_hit_area: Rect::default(),
         git_menu_button_hit_area: Rect::default(),
         git_menu_popup_rect: Rect::default(),
         git_menu_first_visible: 0,
@@ -942,6 +1012,8 @@ fn render_with_runtime_registry_inner(
             detail.observed_at,
             frame,
         );
+    } else if app.usage_view.is_some() {
+        render_usage(app, terminal_area, frame);
     } else if app.work_view.is_some() {
         render_work_view(app, terminal_area, frame);
     } else if app.home.is_some() {
@@ -1007,6 +1079,7 @@ fn render_with_runtime_registry_inner(
             render_context_menu(app, frame);
         }
         Mode::GitMenu => render_git_menu(app, frame),
+        Mode::AddAction => render_add_action_overlay(app, frame),
         Mode::Settings => render_settings_overlay(app, frame, frame.area()),
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
             render_rename_overlay(app, frame, frame.area())

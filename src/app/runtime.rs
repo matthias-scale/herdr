@@ -410,29 +410,45 @@ impl App {
 
         self.start_git_work_context_refresh_if_due(now);
         self.start_work_index_refresh_if_due(now);
-        let work_view_selection = self
-            .state
-            .work_view
-            .as_ref()
-            .and_then(|view| view.selected.clone());
+        self.start_usage_scan_if_requested();
+        let work_view_selection = self.state.work_view.as_ref().and_then(|view| {
+            view.selected.clone().or_else(|| {
+                (view.projection == crate::app::state::WorkProjection::Tickets)
+                    .then(|| self.visible_ticket_view_keys().into_iter().next())
+                    .flatten()
+            })
+        });
         let dock_pr_visible =
             !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
         let dock_pr_selection = dock_pr_visible
             .then(|| crate::ui::dock::pr::focused_pr_key(&self.state))
             .flatten();
+        let dock_linear_visible = !self.state.dock_collapsed
+            && self.state.dock_tab == Some(crate::app::DockSurface::Linear);
+        let dock_linear_selection = dock_linear_visible
+            .then(|| crate::ui::dock::linear::focused_ticket_key(&self.state))
+            .flatten();
         let detail_visible = self.state.work_view.is_some()
             || dock_pr_visible
+            || dock_linear_visible
             || !self.state.dock_collapsed
                 && self.state.dock_tab == Some(crate::app::DockSurface::Home);
         self.start_work_item_detail_refresh_if_due(
             now,
-            if self.state.work_view.is_some() || dock_pr_visible {
+            if dock_linear_visible
+                || self.state.work_view.as_ref().is_some_and(|view| {
+                    view.projection == crate::app::state::WorkProjection::Tickets
+                })
+            {
+                crate::app::state::DockHomeSection::Tickets
+            } else if self.state.work_view.is_some() || dock_pr_visible {
                 crate::app::state::DockHomeSection::Prs
             } else {
                 self.state.dock_home_section
             },
             work_view_selection
                 .or(dock_pr_selection)
+                .or(dock_linear_selection)
                 .or_else(|| self.state.dock_home_active_selection()),
             detail_visible,
         );
@@ -602,6 +618,71 @@ impl App {
         if spawned {
             self.provider_usage_refreshed_at = Some(now);
         }
+    }
+
+    pub(crate) fn start_usage_scan_if_requested(&mut self) {
+        if !self.state.request_usage_scan {
+            return;
+        }
+        self.start_usage_scan();
+    }
+
+    pub(crate) fn start_usage_scan(&mut self) {
+        self.state.request_usage_scan = false;
+        self.usage_scan_generation = self.usage_scan_generation.wrapping_add(1);
+        let generation = self.usage_scan_generation;
+        self.usage_scan_in_flight = Some(generation);
+        if let Some(view) = self.state.usage_view.as_mut() {
+            view.scanning = true;
+        }
+        if cfg!(test) {
+            return;
+        }
+        let tx = self.event_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("herdr-usage-scan".into())
+            .spawn(move || {
+                let result = crate::provider_usage::scan_historical_usage()
+                    .map(Box::new)
+                    .map_err(|error| error.to_string());
+                let _ = tx.blocking_send(crate::events::AppEvent::UsageScanFinished {
+                    generation,
+                    result,
+                });
+            })
+            .is_ok();
+        if !spawned {
+            self.usage_scan_in_flight = None;
+            if let Some(view) = self.state.usage_view.as_mut() {
+                view.scanning = false;
+            }
+        }
+    }
+
+    pub(crate) fn handle_usage_scan_finished(
+        &mut self,
+        generation: u64,
+        result: Result<Box<crate::provider_usage::UsageSnapshot>, String>,
+    ) -> bool {
+        if self.usage_scan_in_flight != Some(generation) {
+            return false;
+        }
+        self.usage_scan_in_flight = None;
+        self.state.status_now_unix = crate::provider_usage::now_unix();
+        let mut changed = false;
+        if let Ok(snapshot) = result {
+            changed = self.state.usage_snapshot.as_ref() != Some(snapshot.as_ref());
+            self.state.usage_snapshot = Some((*snapshot).clone());
+            if let Some(view) = self.state.usage_view.as_mut() {
+                view.snapshot = Some(*snapshot);
+                view.scanning = false;
+                changed = true;
+            }
+        } else if let Some(view) = self.state.usage_view.as_mut() {
+            view.scanning = false;
+            changed = true;
+        }
+        changed
     }
 
     fn schedule_connectivity_probe(&mut self, now: Instant) {

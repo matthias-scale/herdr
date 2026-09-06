@@ -18,31 +18,62 @@ pub(super) enum SettingsAction {
     SaveSound(bool),
     SaveToastDelivery(ToastDelivery),
     SaveAgentBorderLabels(bool),
+    SaveConfigEdit(crate::app::settings_general::ConfigEdit),
+    RestoreArchived(crate::app::state::PaneFocusTarget),
+    DeleteArchived(crate::app::state::PaneFocusTarget),
     InstallRecommendedIntegrations,
+    SaveKeybinding {
+        target: crate::app::settings_keybindings::KeybindTarget,
+        key: String,
+    },
 }
 
 impl App {
+    /// The one place a settings action is applied, whether it came from the
+    /// keyboard or the mouse.
+    pub(super) fn apply_settings_action(&mut self, action: SettingsAction) {
+        match action {
+            SettingsAction::SaveTheme(name) => self.save_theme(&name),
+            SettingsAction::SaveStatusIndicators(style) => self.save_status_indicators(style),
+            SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
+            SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
+            SettingsAction::SaveAgentBorderLabels(enabled) => {
+                self.save_agent_border_labels(enabled)
+            }
+            SettingsAction::SaveConfigEdit(edit) => self.save_config_edit(edit),
+            SettingsAction::RestoreArchived(target) => {
+                self.restore_archived_pane(&target);
+            }
+            SettingsAction::DeleteArchived(target) => {
+                self.delete_archived_pane(&target);
+            }
+            SettingsAction::InstallRecommendedIntegrations => {
+                self.install_recommended_integrations()
+            }
+            SettingsAction::SaveKeybinding { target, key } => {
+                match self.save_keybinding(&target, &key) {
+                    Ok(()) => self.state.settings.keybind_capture = None,
+                    Err(error) => {
+                        if let Some(capture) = self.state.settings.keybind_capture.as_mut() {
+                            capture.error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn handle_settings_key(&mut self, key: KeyEvent) {
         let previous_section = self.state.settings.section;
         if let Some(action) = update_settings_state(&mut self.state, key) {
-            match action {
-                SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                SettingsAction::SaveStatusIndicators(style) => self.save_status_indicators(style),
-                SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
-                SettingsAction::SaveAgentBorderLabels(enabled) => {
-                    self.save_agent_border_labels(enabled)
-                }
-                SettingsAction::InstallRecommendedIntegrations => {
-                    self.install_recommended_integrations()
-                }
-            }
+            self.apply_settings_action(action);
         }
         if previous_section != SettingsSection::Integrations
             && self.state.settings.section == SettingsSection::Integrations
         {
             self.refresh_integration_recommendations();
         }
+        self.start_requested_tool_probes();
     }
 }
 
@@ -144,172 +175,289 @@ fn apply_settings(state: &mut AppState) -> Option<SettingsAction> {
     }
 }
 
-pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+/// How many selectable rows the section's content column has. Sections that
+/// only display facts have none, so `up`/`down` are inert there rather than
+/// moving an invisible cursor.
+pub(crate) fn settings_section_item_count(state: &AppState, section: SettingsSection) -> usize {
+    match section {
+        SettingsSection::General => crate::app::settings_general::GeneralRow::ALL.len(),
+        SettingsSection::Theme => THEME_NAMES.len(),
+        SettingsSection::Indicators | SettingsSection::Sound | SettingsSection::PaneLabels => 2,
+        SettingsSection::Toast => 4,
+        SettingsSection::Archive => state.archive_entries().len(),
+        SettingsSection::Keybindings => {
+            crate::app::settings_keybindings::settings_keybinding_rows(state).len()
+        }
+        SettingsSection::Providers
+        | SettingsSection::Integrations
+        | SettingsSection::SourceControl
+        | SettingsSection::About => 0,
+    }
+}
+
+/// Where the cursor lands when a section is opened: on the current value, so
+/// the screen tells the operator what is set without them having to read it.
+fn default_selected_index(state: &AppState, section: SettingsSection) -> usize {
+    match section {
+        SettingsSection::Theme => current_theme_index(&state.theme_name),
+        SettingsSection::Indicators => status_indicator_index(state.status_indicators),
+        SettingsSection::Sound => usize::from(!state.sound_enabled()),
+        SettingsSection::Toast => toast_delivery_index(state.toast_delivery()),
+        SettingsSection::PaneLabels => usize::from(!state.agent_border_labels_enabled()),
+        _ => 0,
+    }
+}
+
+/// The one way a settings section is entered, from the keyboard, the mouse, or
+/// `open_settings_at`. Sections backed by CLI probes request them here so no
+/// entry path can reach them unprobed.
+fn select_section(state: &mut AppState, section: SettingsSection) {
+    state.settings.section = section;
+    state.settings.keybind_capture = None;
+    state.settings.list.selected = default_selected_index(state, section);
+    state.settings.archive_delete_armed = false;
+    if matches!(
+        section,
+        SettingsSection::Providers | SettingsSection::Integrations
+    ) {
+        state.request_tool_probes = true;
+    }
+}
+
+/// The next/previous section in the filtered nav column. With no filter this
+/// is exactly `SettingsSection::next`/`prev`.
+fn adjacent_section(state: &AppState, delta: isize) -> SettingsSection {
+    let sections = crate::app::state::settings_sections_matching(&state.settings.search);
+    if sections.is_empty() {
+        return state.settings.section;
+    }
+    let current = sections
+        .iter()
+        .position(|section| *section == state.settings.section)
+        .unwrap_or(0);
+    let len = sections.len();
+    let next = if delta < 0 {
+        (current + len - 1) % len
+    } else {
+        (current + 1) % len
+    };
+    sections[next]
+}
+
+/// Typing in the filter line. Returns true when the key was consumed.
+fn update_settings_search(state: &mut AppState, key: KeyEvent) -> bool {
+    if !state.settings.search_active {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char(character)
+            if key.modifiers.is_empty()
+                || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+        {
+            state.settings.search.push(character);
+        }
+        KeyCode::Backspace => {
+            state.settings.search.pop();
+        }
+        KeyCode::Enter | KeyCode::Down | KeyCode::Up | KeyCode::Tab | KeyCode::BackTab => {
+            state.settings.search_active = false;
+            return key.code == KeyCode::Enter;
+        }
+        KeyCode::Esc => {
+            state.settings.search.clear();
+            state.settings.search_active = false;
+            return true;
+        }
+        _ => return false,
+    }
+    // The filtered list may no longer contain the active section; land on the
+    // first match so the body always matches the visible nav.
+    let sections = crate::app::state::settings_sections_matching(&state.settings.search);
+    if !sections.is_empty() && !sections.contains(&state.settings.section) {
+        select_section(state, sections[0]);
+    }
+    true
+}
+
+fn move_selection(state: &mut AppState, delta: isize) {
+    let count = settings_section_item_count(state, state.settings.section);
+    if count == 0 {
+        return;
+    }
+    let previous = state.settings.list.selected;
+    if delta < 0 {
+        state.settings.list.move_prev();
+    } else {
+        state.settings.list.move_next(count);
+    }
+    if state.settings.list.selected != previous {
+        state.settings.archive_delete_armed = false;
+        state.settings.keybind_capture = None;
+        if state.settings.section == SettingsSection::Theme {
+            preview_selected_theme(state);
+        }
+    }
+}
+
+/// `enter` / `space` on the selected row.
+fn activate_selection(state: &mut AppState) -> Option<SettingsAction> {
+    let idx = state.settings.list.selected;
     match state.settings.section {
-        SettingsSection::Theme => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let previous = state.settings.list.selected;
-                state.settings.list.move_prev();
-                if state.settings.list.selected != previous {
-                    preview_selected_theme(state);
-                }
+        SettingsSection::General => {
+            let row = *crate::app::settings_general::GeneralRow::ALL.get(idx)?;
+            crate::app::settings_general::cycle_general_row(state, row)
+                .map(SettingsAction::SaveConfigEdit)
+        }
+        SettingsSection::Indicators => Some(SettingsAction::SaveStatusIndicators(
+            status_indicator_for_index(idx),
+        )),
+        SettingsSection::Sound => Some(SettingsAction::SaveSound(idx == 0)),
+        SettingsSection::Toast => Some(SettingsAction::SaveToastDelivery(
+            toast_delivery_for_index(idx),
+        )),
+        SettingsSection::PaneLabels => Some(SettingsAction::SaveAgentBorderLabels(idx == 0)),
+        SettingsSection::Archive => {
+            let entry = state.archive_entries().into_iter().nth(idx)?;
+            state.settings.archive_delete_armed = false;
+            Some(SettingsAction::RestoreArchived(entry.target))
+        }
+        SettingsSection::Integrations if integrations_need_install(state) => {
+            Some(SettingsAction::InstallRecommendedIntegrations)
+        }
+        SettingsSection::Keybindings => {
+            crate::app::settings_keybindings::keybinding_target(state, idx)?;
+            state.settings.keybind_capture = Some(crate::app::state::KeybindCapture {
+                row: idx,
+                error: None,
+            });
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The chord the operator pressed while a keybindings row is capturing.
+///
+/// The chord is validated with the same function the 6b add-action modal uses,
+/// so a chord that is already bound is refused here for exactly the reason it
+/// would be refused there, and the refusal is shown on the row.
+fn capture_keybinding(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    let row = state.settings.keybind_capture.as_ref()?.row;
+    if key.code == KeyCode::Esc {
+        state.settings.keybind_capture = None;
+        return None;
+    }
+    if matches!(key.code, KeyCode::Modifier(_)) {
+        return None;
+    }
+    let target = crate::app::settings_keybindings::keybinding_target(state, row)?;
+    let label = crate::config::format_key_combo((key.code, key.modifiers));
+    let mut config = crate::config::Config::load().config;
+    match crate::config::validate_user_action_key(&mut config, &label) {
+        Ok(label) => Some(SettingsAction::SaveKeybinding { target, key: label }),
+        Err(diagnostic) => {
+            // The validator phrases its refusal in terms of the temporary
+            // action it probes with, which means nothing on this row.
+            tracing::debug!(message = %diagnostic, "keybinding capture refused");
+            if let Some(capture) = state.settings.keybind_capture.as_mut() {
+                capture.error = Some(format!("{label} is already bound; press another chord"));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let previous = state.settings.list.selected;
-                state.settings.list.move_next(THEME_NAMES.len());
-                if state.settings.list.selected != previous {
-                    preview_selected_theme(state);
-                }
+            None
+        }
+    }
+}
+
+/// `d` on an archive row. Confirms once first while `ui.confirm_close` is on,
+/// the same rule the sidebar's settled menu follows.
+fn delete_archive_selection(state: &mut AppState) -> Option<SettingsAction> {
+    if state.settings.section != SettingsSection::Archive {
+        return None;
+    }
+    let entry = state
+        .archive_entries()
+        .into_iter()
+        .nth(state.settings.list.selected)?;
+    if state.confirm_close && !std::mem::take(&mut state.settings.archive_delete_armed) {
+        state.settings.archive_delete_armed = true;
+        return None;
+    }
+    state.settings.archive_delete_armed = false;
+    Some(SettingsAction::DeleteArchived(entry.target))
+}
+
+pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    if update_settings_search(state, key) {
+        return None;
+    }
+    if state.settings.keybind_capture.is_some() {
+        return capture_keybinding(state, key);
+    }
+    match key.code {
+        KeyCode::Char('/') => {
+            state.settings.search_active = true;
+            return None;
+        }
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+            select_section(state, adjacent_section(state, 1));
+            return None;
+        }
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+            select_section(state, adjacent_section(state, -1));
+            return None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            move_selection(state, -1);
+            return None;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            move_selection(state, 1);
+            return None;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if let Some(action) = activate_selection(state) {
+                return Some(action);
             }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::Indicators;
-                state.settings.list.selected = status_indicator_index(state.status_indicators);
+            if state.settings.section == SettingsSection::Theme {
+                return apply_settings(state);
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Integrations;
-                state.settings.list.selected = 0;
+            return None;
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(action) = delete_archive_selection(state) {
+                return Some(action);
             }
-            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
-                Some(super::modal::ModalAction::Apply) => return apply_settings(state),
-                Some(super::modal::ModalAction::Close) => cancel_settings(state),
-                _ => {}
-            },
-        },
-        SettingsSection::Indicators => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
+            if key.code == KeyCode::Char('d') {
+                return None;
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let style = status_indicator_for_index(state.settings.list.selected);
-                return Some(SettingsAction::SaveStatusIndicators(style));
-            }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Theme;
-                state.settings.list.selected = current_theme_index(&state.theme_name);
-            }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::Sound;
-                state.settings.list.selected = usize::from(!state.sound_enabled());
-            }
-            _ => {
-                if let Some(super::modal::ModalAction::Close) =
-                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
-                {
-                    cancel_settings(state);
-                }
-            }
-        },
-        SettingsSection::Sound => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let enabled = state.settings.list.selected == 0;
-                return Some(SettingsAction::SaveSound(enabled));
-            }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::Toast;
-                state.settings.list.selected = toast_delivery_index(state.toast_delivery());
-            }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Indicators;
-                state.settings.list.selected = status_indicator_index(state.status_indicators);
-            }
-            _ => {
-                if let Some(super::modal::ModalAction::Close) =
-                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
-                {
-                    cancel_settings(state);
-                }
-            }
-        },
-        SettingsSection::Toast => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
-            KeyCode::Down | KeyCode::Char('j') => state.settings.list.move_next(4),
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let delivery = toast_delivery_for_index(state.settings.list.selected);
-                return Some(SettingsAction::SaveToastDelivery(delivery));
-            }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Sound;
-                state.settings.list.selected = usize::from(!state.sound_enabled());
-            }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::PaneLabels;
-                state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
-            }
-            _ => {
-                if let Some(super::modal::ModalAction::Close) =
-                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
-                {
-                    cancel_settings(state);
-                }
-            }
-        },
-        SettingsSection::PaneLabels => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let enabled = state.settings.list.selected == 0;
-                return Some(SettingsAction::SaveAgentBorderLabels(enabled));
-            }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::Toast;
-                state.settings.list.selected = toast_delivery_index(state.toast_delivery());
-            }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::Integrations;
-                state.settings.list.selected = 0;
-            }
-            _ => {
-                if let Some(super::modal::ModalAction::Close) =
-                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
-                {
-                    cancel_settings(state);
-                }
-            }
-        },
-        SettingsSection::Integrations => match key.code {
-            KeyCode::Enter | KeyCode::Char(' ') if integrations_need_install(state) => {
-                return Some(SettingsAction::InstallRecommendedIntegrations);
-            }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                state.settings.section = SettingsSection::PaneLabels;
-                state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
-            }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                state.settings.section = SettingsSection::Theme;
-                state.settings.list.selected = current_theme_index(&state.theme_name);
-            }
-            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
-                Some(super::modal::ModalAction::Apply) => return apply_settings(state),
-                Some(super::modal::ModalAction::Close) => cancel_settings(state),
-                _ => {}
-            },
-        },
+        }
+        _ => {}
     }
 
-    None
+    match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
+        Some(super::modal::ModalAction::Apply) => apply_settings(state),
+        Some(super::modal::ModalAction::Close) => {
+            if !state.settings.search.is_empty() {
+                state.settings.search.clear();
+                return None;
+            }
+            cancel_settings(state);
+            None
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn open_settings(state: &mut AppState) {
-    open_settings_at(state, SettingsSection::Theme);
+    open_settings_at(state, SettingsSection::General);
 }
 
 pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
     state.integration_install_messages.clear();
     state.settings.original_palette = Some(state.palette.clone());
     state.settings.original_theme = Some(state.theme_name.clone());
-    state.settings.section = section;
-    state.settings.list.selected = match section {
-        SettingsSection::Theme => current_theme_index(&state.theme_name),
-        SettingsSection::Indicators => status_indicator_index(state.status_indicators),
-        SettingsSection::Sound => usize::from(!state.sound_enabled()),
-        SettingsSection::Toast => toast_delivery_index(state.toast_delivery()),
-        SettingsSection::PaneLabels => usize::from(!state.agent_border_labels_enabled()),
-        SettingsSection::Integrations => 0,
-    };
+    state.settings.search.clear();
+    state.settings.search_active = false;
+    select_section(state, section);
     state.mode = Mode::Settings;
 }
 
@@ -333,31 +481,29 @@ impl AppState {
         )
     }
 
+    /// The section under a click in the left nav column.
     fn settings_tab_at(&self, col: u16, row: u16) -> Option<SettingsSection> {
-        let inner = self.settings_inner_rect();
-        let tab_y = inner.y + 1;
-        if row != tab_y {
+        let nav = crate::ui::settings_areas(self.settings_inner_rect()).nav;
+        if col < nav.x || col >= nav.x + nav.width || row < nav.y || row >= nav.y + nav.height {
             return None;
         }
-        let mut x = inner.x;
-        for section in SettingsSection::ALL {
-            let badge_width = if self.settings_section_has_badge(*section) {
-                2
-            } else {
-                0
-            };
-            let width = section.label().len() as u16 + 2 + badge_width;
-            if col >= x && col < x + width {
-                return Some(*section);
-            }
-            x += width + 1;
-        }
-        None
+        let index = crate::ui::settings_nav_scroll(self, nav) + (row - nav.y) as usize;
+        crate::app::state::settings_sections_matching(&self.settings.search)
+            .get(index)
+            .copied()
+    }
+
+    /// A click on the filter line focuses it rather than closing the screen.
+    fn settings_search_hit(&self, col: u16, row: u16) -> bool {
+        let search = crate::ui::settings_areas(self.settings_inner_rect()).search;
+        col >= search.x
+            && col < search.x + search.width
+            && row >= search.y
+            && row < search.y + search.height
     }
 
     pub(crate) fn settings_content_rect(&self) -> Rect {
-        let inner = self.settings_inner_rect();
-        crate::ui::modal_stack_areas(inner, 3, 2, 0, 1).content
+        crate::ui::settings_areas(self.settings_inner_rect()).content
     }
 
     fn settings_list_index_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -368,6 +514,13 @@ impl AppState {
         }
 
         match self.settings.section {
+            SettingsSection::General => {
+                let list_y = area.y + 2;
+                let offset = row.checked_sub(list_y)?;
+                crate::ui::general_row_offsets()
+                    .into_iter()
+                    .position(|(start, height)| offset >= start && offset < start + height)
+            }
             SettingsSection::Theme => {
                 let max_visible = area.height as usize;
                 let scroll = if self.settings.list.selected >= max_visible {
@@ -378,7 +531,7 @@ impl AppState {
                 let idx = scroll + (row - area.y) as usize;
                 (idx < THEME_NAMES.len()).then_some(idx)
             }
-            SettingsSection::Indicators | SettingsSection::Sound => {
+            SettingsSection::Indicators | SettingsSection::Sound | SettingsSection::PaneLabels => {
                 let list_y = area.y + 3;
                 if row >= list_y && row < list_y + 2 {
                     Some((row - list_y) as usize)
@@ -394,61 +547,44 @@ impl AppState {
                     None
                 }
             }
-            SettingsSection::PaneLabels => {
-                let list_y = area.y + 3;
-                if row >= list_y && row < list_y + 2 {
-                    Some((row - list_y) as usize)
-                } else {
-                    None
-                }
+            SettingsSection::Archive | SettingsSection::Keybindings => {
+                let list_y = area.y + 2;
+                let visible = area.height.saturating_sub(2) as usize;
+                let offset = row.checked_sub(list_y)? as usize;
+                let count = settings_section_item_count(self, self.settings.section);
+                let scroll = self
+                    .settings
+                    .list
+                    .selected
+                    .saturating_sub(visible.saturating_sub(1));
+                let idx = scroll + offset;
+                (idx < count).then_some(idx)
             }
-            SettingsSection::Integrations => None,
+            SettingsSection::Providers
+            | SettingsSection::Integrations
+            | SettingsSection::SourceControl
+            | SettingsSection::About => None,
         }
     }
 
     pub(super) fn handle_settings_mouse(&mut self, mouse: MouseEvent) -> Option<SettingsAction> {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.settings_search_hit(mouse.column, mouse.row) {
+                    self.settings.search_active = true;
+                    return None;
+                }
                 if let Some(section) = self.settings_tab_at(mouse.column, mouse.row) {
-                    self.settings.section = section;
-                    self.settings.list.select(match section {
-                        SettingsSection::Theme => current_theme_index(&self.theme_name),
-                        SettingsSection::Indicators => {
-                            status_indicator_index(self.status_indicators)
-                        }
-                        SettingsSection::Sound => usize::from(!self.sound_enabled()),
-                        SettingsSection::Toast => toast_delivery_index(self.toast_delivery()),
-                        SettingsSection::PaneLabels => {
-                            usize::from(!self.agent_border_labels_enabled())
-                        }
-                        SettingsSection::Integrations => 0,
-                    });
+                    select_section(self, section);
                     return None;
                 }
                 if let Some(idx) = self.settings_list_index_at(mouse.column, mouse.row) {
                     self.settings.list.select(idx);
-                    return match self.settings.section {
-                        SettingsSection::Theme => {
-                            preview_selected_theme(self);
-                            None
-                        }
-                        SettingsSection::Indicators => Some(SettingsAction::SaveStatusIndicators(
-                            status_indicator_for_index(idx),
-                        )),
-                        SettingsSection::Sound => {
-                            let enabled = idx == 0;
-                            Some(SettingsAction::SaveSound(enabled))
-                        }
-                        SettingsSection::Toast => {
-                            let delivery = toast_delivery_for_index(idx);
-                            Some(SettingsAction::SaveToastDelivery(delivery))
-                        }
-                        SettingsSection::PaneLabels => {
-                            let enabled = idx == 0;
-                            Some(SettingsAction::SaveAgentBorderLabels(enabled))
-                        }
-                        SettingsSection::Integrations => None,
-                    };
+                    if self.settings.section == SettingsSection::Theme {
+                        preview_selected_theme(self);
+                        return None;
+                    }
+                    return activate_selection(self);
                 }
 
                 let inner = self.settings_inner_rect();
@@ -486,6 +622,87 @@ mod tests {
     use super::super::{app_for_mouse_test, mouse, state_with_workspaces};
     use super::*;
 
+    fn press(state: &mut AppState, code: KeyCode) -> Option<SettingsAction> {
+        update_settings_state(state, KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    fn type_search(state: &mut AppState, text: &str) {
+        for character in text.chars() {
+            press(state, KeyCode::Char(character));
+        }
+    }
+
+    #[test]
+    fn the_section_filter_narrows_the_nav_and_esc_clears_it_before_closing() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        assert_eq!(state.settings.section, SettingsSection::General);
+
+        press(&mut state, KeyCode::Char('/'));
+        assert!(state.settings.search_active);
+        type_search(&mut state, "arch");
+        assert_eq!(state.settings.search, "arch");
+        assert_eq!(
+            crate::app::state::settings_sections_matching(&state.settings.search),
+            vec![SettingsSection::Archive]
+        );
+        // The body follows the filter instead of showing a hidden section.
+        assert_eq!(state.settings.section, SettingsSection::Archive);
+
+        // Esc leaves the filter line but keeps the query and the screen.
+        press(&mut state, KeyCode::Esc);
+        assert!(!state.settings.search_active);
+        assert!(state.settings.search.is_empty());
+        assert_eq!(state.mode, Mode::Settings);
+
+        // With no query left, Esc closes.
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn an_esc_with_a_query_but_an_unfocused_filter_clears_before_closing() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        state.settings.search = "keys".into();
+
+        press(&mut state, KeyCode::Esc);
+        assert!(state.settings.search.is_empty());
+        assert_eq!(state.mode, Mode::Settings);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn section_cycling_stays_inside_the_filtered_list() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        state.settings.search = "so".into();
+        let visible = crate::app::state::settings_sections_matching(&state.settings.search);
+        assert_eq!(
+            visible,
+            vec![SettingsSection::Sound, SettingsSection::SourceControl]
+        );
+
+        select_section(&mut state, SettingsSection::Sound);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.settings.section, SettingsSection::SourceControl);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.settings.section, SettingsSection::Sound);
+        press(&mut state, KeyCode::BackTab);
+        assert_eq!(state.settings.section, SettingsSection::SourceControl);
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_leaves_the_section_alone() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings(&mut state);
+        press(&mut state, KeyCode::Char('/'));
+        type_search(&mut state, "zzz");
+        assert!(crate::app::state::settings_sections_matching(&state.settings.search).is_empty());
+        assert_eq!(state.settings.section, SettingsSection::General);
+    }
+
     #[test]
     fn desktop_clamped_settings_hit_geometry_includes_status_row() {
         let mut state = state_with_workspaces(&["test"]);
@@ -495,7 +712,7 @@ mod tests {
         open_settings(&mut state);
 
         assert_eq!(state.screen_rect(), Rect::new(0, 0, 106, 20));
-        assert_eq!(state.settings_popup_rect(), Rect::new(15, 1, 76, 18));
+        assert_eq!(state.settings_popup_rect(), Rect::new(5, 1, 96, 18));
         let inner = state.settings_inner_rect();
         let (_, close) = crate::ui::settings_button_rects(
             inner,
@@ -519,7 +736,7 @@ mod tests {
         let original_palette = state.palette.clone();
         let original_theme = state.theme_name.clone();
 
-        open_settings(&mut state);
+        open_settings_at(&mut state, SettingsSection::Theme);
         update_settings_state(
             &mut state,
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
@@ -585,33 +802,27 @@ mod tests {
     }
 
     #[test]
-    fn settings_tab_cycle_wraps_after_integrations() {
+    fn settings_tab_cycle_wraps_around_the_section_list() {
         let mut state = state_with_workspaces(&["test"]);
-        open_settings_at(&mut state, SettingsSection::PaneLabels);
+        open_settings_at(&mut state, SettingsSection::About);
 
         update_settings_state(
             &mut state,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
         );
-        assert_eq!(state.settings.section, SettingsSection::Integrations);
-
-        update_settings_state(
-            &mut state,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
-        );
-        assert_eq!(state.settings.section, SettingsSection::Theme);
+        assert_eq!(state.settings.section, SettingsSection::General);
 
         update_settings_state(
             &mut state,
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
         );
-        assert_eq!(state.settings.section, SettingsSection::Integrations);
+        assert_eq!(state.settings.section, SettingsSection::About);
 
         update_settings_state(
             &mut state,
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()),
         );
-        assert_eq!(state.settings.section, SettingsSection::PaneLabels);
+        assert_eq!(state.settings.section, SettingsSection::Archive);
     }
 
     #[test]
@@ -672,8 +883,79 @@ mod tests {
         assert!(state.integration_updates_available());
     }
 
+    /// The nav-row coordinate for `section`, or `None` when it is scrolled out.
+    fn nav_row_for(state: &AppState, section: SettingsSection) -> Option<(u16, u16)> {
+        let nav = crate::ui::settings_areas(state.settings_inner_rect()).nav;
+        let scroll = crate::ui::settings_nav_scroll(state, nav);
+        let index = SettingsSection::ALL.iter().position(|s| *s == section)?;
+        let offset = index.checked_sub(scroll)?;
+        if offset >= nav.height as usize {
+            return None;
+        }
+        Some((nav.x, nav.y + offset as u16))
+    }
+
     #[test]
-    fn settings_tab_hit_area_includes_integration_update_badge() {
+    fn clicking_the_providers_nav_row_starts_the_tool_probes() {
+        let mut app = app_for_mouse_test();
+        open_settings_at(&mut app.state, SettingsSection::General);
+        // Opening on an unprobed section leaves nothing requested.
+        assert!(!app.state.request_tool_probes);
+
+        let (col, row) =
+            nav_row_for(&app.state, SettingsSection::Providers).expect("providers nav row");
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert_eq!(app.state.settings.section, SettingsSection::Providers);
+        assert!(
+            app.state.tool_probes_pending(),
+            "the probes are pending until the worker answers"
+        );
+        assert!(
+            matches!(
+                app.state.tool_probes,
+                crate::app::probes::ToolProbeState::Running
+            ),
+            "the mouse path starts the probes: {:?}",
+            app.state.tool_probes
+        );
+        assert!(
+            !app.state.request_tool_probes,
+            "the request is drained once it is served"
+        );
+    }
+
+    #[test]
+    fn entering_a_probed_section_requests_the_probes_from_every_path() {
+        let mut state = app_for_mouse_test().state;
+
+        open_settings_at(&mut state, SettingsSection::Providers);
+        assert!(state.request_tool_probes, "open_settings_at requests");
+
+        state.request_tool_probes = false;
+        open_settings_at(&mut state, SettingsSection::General);
+        assert!(!state.request_tool_probes, "an unprobed section does not");
+
+        // Keyboard: tab through to Integrations.
+        while state.settings.section != SettingsSection::Integrations {
+            update_settings_state(
+                &mut state,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            );
+        }
+        assert!(state.request_tool_probes, "the keyboard path requests");
+
+        state.request_tool_probes = false;
+        open_settings_at(&mut state, SettingsSection::General);
+        let (col, row) =
+            nav_row_for(&state, SettingsSection::Providers).expect("providers nav row");
+        state.handle_settings_mouse(mouse_down(col, row));
+        assert_eq!(state.settings.section, SettingsSection::Providers);
+        assert!(state.request_tool_probes, "the mouse path requests");
+    }
+
+    #[test]
+    fn every_nav_row_maps_back_to_its_section() {
         let mut state = state_with_workspaces(&["test"]);
         state.integration_recommendations = vec![integration_recommendation(
             crate::integration::IntegrationStatusKind::Outdated,
@@ -681,30 +963,186 @@ mod tests {
         )];
         open_settings(&mut state);
 
-        let inner = state.settings_inner_rect();
-        let tab_y = inner.y + 1;
-        let integrations_idx = SettingsSection::ALL
+        let nav = crate::ui::settings_areas(state.settings_inner_rect()).nav;
+        let scroll = crate::ui::settings_nav_scroll(&state, nav);
+        for (offset, section) in SettingsSection::ALL
             .iter()
-            .position(|section| *section == SettingsSection::Integrations)
-            .expect("integrations section should be present");
-        let integrations_x = inner.x
-            + SettingsSection::ALL[..integrations_idx]
-                .iter()
-                .map(|section| {
-                    let badge_width = if state.settings_section_has_badge(*section) {
-                        2
-                    } else {
-                        0
-                    };
-                    section.label().len() as u16 + 3 + badge_width
-                })
-                .sum::<u16>();
-        let dotted_width = SettingsSection::Integrations.label().len() as u16 + 4;
+            .enumerate()
+            .skip(scroll)
+            .take(nav.height as usize)
+        {
+            let row = nav.y + (offset - scroll) as u16;
+            assert_eq!(state.settings_tab_at(nav.x, row), Some(*section));
+            assert_eq!(
+                state.settings_tab_at(nav.x + nav.width - 1, row),
+                Some(*section)
+            );
+        }
+        assert_eq!(state.settings_tab_at(nav.x + nav.width, nav.y), None);
+    }
 
-        assert_eq!(
-            state.settings_tab_at(integrations_x + dotted_width - 1, tab_y),
-            Some(SettingsSection::Integrations)
+    #[test]
+    fn general_enter_returns_the_config_edit_for_the_selected_row() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_settings_at(&mut state, SettingsSection::General);
+        assert_eq!(state.settings.section, SettingsSection::General);
+
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
+        assert_eq!(
+            action,
+            Some(SettingsAction::SaveConfigEdit(
+                crate::app::settings_general::ConfigEdit::Bool {
+                    section: "ui",
+                    key: "combine_repos_across_hosts",
+                    value: true,
+                }
+            ))
+        );
+
+        // The read-only path row writes nothing.
+        state.settings.list.select(
+            crate::app::settings_general::GeneralRow::ALL
+                .iter()
+                .position(|row| {
+                    *row == crate::app::settings_general::GeneralRow::AddProjectStartDir
+                })
+                .expect("row"),
+        );
+        assert_eq!(
+            update_settings_state(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clicking_a_general_row_selects_it_and_returns_its_edit() {
+        let mut app = app_for_mouse_test();
+        open_settings_at(&mut app.state, SettingsSection::General);
+
+        let area = app.state.settings_content_rect();
+        // Every row that fits maps back to itself, including the hinted first
+        // row whose second line belongs to the same row.
+        for (index, (offset, height)) in crate::ui::general_row_offsets().into_iter().enumerate() {
+            for line in 0..height {
+                let row = area.y + 2 + offset + line;
+                if row >= area.y + area.height {
+                    continue;
+                }
+                assert_eq!(
+                    app.state.settings_list_index_at(area.x + 1, row),
+                    Some(index),
+                    "row {index} line {line}"
+                );
+            }
+        }
+
+        let hide_whitespace = crate::app::settings_general::GeneralRow::ALL
+            .iter()
+            .position(|row| *row == crate::app::settings_general::GeneralRow::HideWhitespace)
+            .expect("row");
+        let (offset, _) = crate::ui::general_row_offsets()[hide_whitespace];
+        let action = app
+            .state
+            .handle_settings_mouse(mouse_down(area.x + 1, area.y + 2 + offset));
+
+        assert_eq!(app.state.settings.list.selected, hide_whitespace);
+        assert_eq!(
+            action,
+            Some(SettingsAction::SaveConfigEdit(
+                crate::app::settings_general::ConfigEdit::Bool {
+                    section: "ui",
+                    key: "hide_whitespace_in_diff",
+                    value: true,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn archive_delete_asks_once_while_confirm_close_is_on() {
+        let mut state = state_with_workspaces(&["test"]);
+        let ws_idx = state.active.expect("active workspace");
+        let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+        assert!(state.settle_pane_at(ws_idx, pane_id, 1_700_000_000));
+        open_settings_at(&mut state, SettingsSection::Archive);
+        assert_eq!(state.archive_entries().len(), 1);
+
+        assert!(state.confirm_close);
+        let armed = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()),
+        );
+        assert_eq!(armed, None);
+        assert!(state.settings.archive_delete_armed);
+
+        let deleted = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()),
+        );
+        assert!(matches!(deleted, Some(SettingsAction::DeleteArchived(_))));
+        assert!(!state.settings.archive_delete_armed);
+    }
+
+    #[test]
+    fn archive_delete_is_immediate_when_confirmation_is_off() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.confirm_close = false;
+        let ws_idx = state.active.expect("active workspace");
+        let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+        assert!(state.settle_pane_at(ws_idx, pane_id, 1_700_000_000));
+        open_settings_at(&mut state, SettingsSection::Archive);
+
+        let deleted = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()),
+        );
+        assert!(matches!(deleted, Some(SettingsAction::DeleteArchived(_))));
+    }
+
+    #[test]
+    fn archive_enter_restores_the_selected_thread() {
+        let mut state = state_with_workspaces(&["test"]);
+        let ws_idx = state.active.expect("active workspace");
+        let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+        assert!(state.settle_pane_at(ws_idx, pane_id, 1_700_000_000));
+        open_settings_at(&mut state, SettingsSection::Archive);
+
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        match action {
+            Some(SettingsAction::RestoreArchived(target)) => {
+                assert_eq!(target.pane_id, pane_id);
+            }
+            other => panic!("expected a restore action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keybindings_lists_actions_with_their_keys() {
+        let state = state_with_workspaces(&["test"]);
+        let rows = crate::app::settings_keybindings::settings_keybinding_rows(&state);
+
+        assert!(rows.iter().any(|row| row.heading && row.label == "global"));
+        assert!(rows
+            .iter()
+            .any(|row| !row.heading && row.label == "settings" && !row.key.is_empty()));
+    }
+
+    fn mouse_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
     }
 
     fn integration_recommendation(

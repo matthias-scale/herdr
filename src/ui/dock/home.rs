@@ -1402,6 +1402,7 @@ mod tests {
                     additions: 0,
                     deletions: 0,
                     author: None,
+                    assignees: Vec::new(),
                     labels: Vec::new(),
                     check_state: crate::work_index::PrCheckState::Unknown,
                     audience: crate::work_index::PrAudience::Unclassified,
@@ -1414,6 +1415,9 @@ mod tests {
                         description: Some("Ticket body from Linear.".into()),
                         state: Some("In Progress".into()),
                         assignee: None,
+                        priority: None,
+                        cycle: None,
+                        group: crate::work_index::TicketGroup::Assigned,
                         created_at: None,
                         updated_at: None,
                         branch: None,
@@ -1435,6 +1439,8 @@ mod tests {
                     }],
                     source: crate::work_index::WorkItemSource::default(),
                 }],
+                conversations: Vec::new(),
+                missive_users: Vec::new(),
                 unavailable: None,
                 observed_at: SystemTime::now(),
             });
@@ -1483,6 +1489,9 @@ mod tests {
             description: full.then(|| "A complete Linear description body.".into()),
             state: full.then(|| "In Progress".into()),
             assignee: full.then(|| "Matthias".into()),
+            priority: full.then_some(2),
+            cycle: full.then(|| "cycle 34".into()),
+            group: crate::work_index::TicketGroup::Assigned,
             created_at: full.then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
             updated_at: full.then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(120)),
             branch: full.then(|| "sca-3084-dock-ticket".into()),
@@ -1512,6 +1521,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             author: None,
+            assignees: Vec::new(),
             labels: Vec::new(),
             check_state: crate::work_index::PrCheckState::Unknown,
             audience: crate::work_index::PrAudience::Unclassified,
@@ -1538,6 +1548,7 @@ mod tests {
                 additions: 0,
                 deletions: 0,
                 author: None,
+                assignees: Vec::new(),
                 labels: Vec::new(),
                 check_state: crate::work_index::PrCheckState::Unknown,
                 audience: crate::work_index::PrAudience::Unclassified,
@@ -1553,6 +1564,8 @@ mod tests {
         }
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items,
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::now(),
         });
@@ -1571,6 +1584,9 @@ mod tests {
                         description: None,
                         state: None,
                         assignee: None,
+                        priority: None,
+                        cycle: None,
+                        group: crate::work_index::TicketGroup::Assigned,
                         created_at: None,
                         updated_at: None,
                         branch: None,
@@ -1592,6 +1608,7 @@ mod tests {
                         additions: 0,
                         deletions: 0,
                         author: None,
+                        assignees: Vec::new(),
                         labels: Vec::new(),
                         check_state: crate::work_index::PrCheckState::Unknown,
                         audience: crate::work_index::PrAudience::Unclassified,
@@ -1606,6 +1623,8 @@ mod tests {
                     }
                 })
                 .collect(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: SystemTime::now(),
         });
@@ -1845,6 +1864,8 @@ mod tests {
 
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: Some("Linear observation timed out".into()),
             observed_at: SystemTime::now(),
         });
@@ -1884,6 +1905,8 @@ mod tests {
         let mut app = AppState::test_new();
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: Some("github timed out".into()),
             observed_at: SystemTime::now(),
         });

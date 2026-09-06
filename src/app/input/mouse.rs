@@ -5,9 +5,9 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, HomeHitTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AddActionState, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
+        HomeHitTarget, MenuListState, Mode, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -38,6 +38,7 @@ pub(super) enum MouseAction {
         index: usize,
     },
     NewWorkspace,
+    DispatchSidebarWork(Box<crate::app::home::HomeDispatchPlan>),
     Settings(SettingsAction),
     FocusWorkspace {
         ws_idx: usize,
@@ -126,6 +127,44 @@ impl AppState {
         self.forwarded_pane_input = None;
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
+            return None;
+        }
+        if self.mode == Mode::AddAction {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if rect_contains(self.view.add_action_close_hit_area, mouse.column, mouse.row)
+                    || rect_contains(
+                        self.view.add_action_cancel_hit_area,
+                        mouse.column,
+                        mouse.row,
+                    )
+                {
+                    self.add_action = None;
+                    self.mode = Mode::Terminal;
+                } else if rect_contains(self.view.add_action_save_hit_area, mouse.column, mouse.row)
+                {
+                    self.request_save_add_action = true;
+                } else if let Some(field) =
+                    self.view
+                        .add_action_field_hit_areas
+                        .iter()
+                        .find_map(|(field, rect)| {
+                            rect_contains(*rect, mouse.column, mouse.row).then_some(*field)
+                        })
+                {
+                    if let Some(action) = self.add_action.as_mut() {
+                        action.field = field;
+                        match field {
+                            crate::app::state::AddActionField::RunOnWorktreeCreate => {
+                                action.run_on_worktree_create = !action.run_on_worktree_create;
+                            }
+                            crate::app::state::AddActionField::OpenInBottomPane => {
+                                action.open_in_bottom_pane = !action.open_in_bottom_pane;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             return None;
         }
 
@@ -234,6 +273,9 @@ impl AppState {
         if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
         {
             if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                if index != self.sidebar_settled_menu_selected {
+                    self.sidebar_settled_menu_delete_armed = false;
+                }
                 self.sidebar_settled_menu_selected = index;
             }
             return None;
@@ -244,6 +286,7 @@ impl AppState {
                     return Some(MouseAction::SettledMenu { index });
                 }
                 self.sidebar_settled_menu_target = None;
+                self.sidebar_settled_menu_delete_armed = false;
             }
             return None;
         }
@@ -287,7 +330,9 @@ impl AppState {
         if self.sidebar_group_menu_open {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
-                    if let Some(mode) = crate::app::state::SidebarGroupMode::ALL.get(index).copied()
+                    if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
+                        .get(index)
+                        .copied()
                     {
                         self.set_sidebar_group_mode(mode);
                     }
@@ -342,6 +387,36 @@ impl AppState {
                 }
             }
             return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && rect_contains(
+                self.view.add_action_button_hit_area,
+                mouse.column,
+                mouse.row,
+            )
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+        {
+            self.add_action = Some(AddActionState::default());
+            self.mode = Mode::AddAction;
+            return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && matches!(self.mode, Mode::Terminal | Mode::Navigate)
+        {
+            if let Some(index) = self
+                .view
+                .user_action_hit_areas
+                .iter()
+                .find_map(|(index, rect)| {
+                    rect_contains(*rect, mouse.column, mouse.row).then_some(*index)
+                })
+            {
+                self.request_user_action = Some(index);
+                self.mode = Mode::Terminal;
+                return None;
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -964,6 +1039,29 @@ impl AppState {
                     }
                     if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
                         self.toggle_sidebar_group(&key);
+                        return None;
+                    }
+                    if let Some(key) =
+                        crate::ui::sidebar_unassigned_spawn_at(self, mouse.column, mouse.row)
+                    {
+                        self.sidebar_selected_work_group = None;
+                        match self.sidebar_unassigned_dispatch_plan(&key) {
+                            Ok(plan) => {
+                                return Some(MouseAction::DispatchSidebarWork(Box::new(plan)));
+                            }
+                            Err(error) => self.config_diagnostic = Some(error),
+                        }
+                        return None;
+                    }
+                    if crate::ui::sidebar_show_more_at(self, mouse.row) {
+                        self.sidebar_unassigned_expanded_views
+                            .insert(self.sidebar_group_mode);
+                        self.sidebar_selected_work_group = None;
+                        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                            self,
+                            self.view.sidebar_rect,
+                            self.workspace_scroll,
+                        );
                         return None;
                     }
                     if let Some(key) = crate::ui::sidebar_dim_header_at(self, mouse.row) {
@@ -5087,6 +5185,118 @@ mod tests {
                 app.state.work_view.is_some(),
                 "footer click at {width} columns"
             );
+        }
+    }
+
+    #[test]
+    fn sidebar_footer_ticket_entry_opens_tickets_at_supported_widths() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let work = app.state.view.sidebar_footer_work_hit_area;
+            let hit = app.state.view.sidebar_footer_ticket_hit_area;
+            assert_eq!(
+                hit.height, 1,
+                "ticket footer must render at {width} columns"
+            );
+            assert_eq!(hit.x, work.right(), "ticket entry follows PR entry");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+
+            assert!(app.state.work_view.as_ref().is_some_and(|view| {
+                view.projection == crate::app::state::WorkProjection::Tickets
+            }));
+        }
+    }
+
+    #[test]
+    fn sidebar_footer_missive_entry_follows_usage_and_opens_at_supported_widths() {
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let usage = app.state.view.sidebar_footer_usage_hit_area;
+            let hit = app.state.view.sidebar_footer_missive_hit_area;
+            assert_eq!(hit.height, 1, "Missive footer renders at {width} columns");
+            assert_eq!(hit.x, usage.right(), "Missive entry follows usage");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                hit.x + 1,
+                hit.y,
+            ));
+
+            assert!(app.state.work_view.as_ref().is_some_and(|view| {
+                view.projection == crate::app::state::WorkProjection::Missive
+            }));
+        }
+    }
+
+    #[test]
+    fn sidebar_footer_usage_entry_and_every_view_toggle_are_clickable() {
+        use crate::app::state::{UsageBreakdown, UsageHitTarget, UsageMetric, UsageRange};
+
+        for width in [80, 120] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("one")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+            let tickets = app.state.view.sidebar_footer_ticket_hit_area;
+            let footer = app.state.view.sidebar_footer_usage_hit_area;
+            assert!(footer.width > 0);
+            assert_eq!(footer.x, tickets.right(), "usage entry follows tickets");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                footer.x,
+                footer.y,
+            ));
+            assert!(app.state.usage_view.is_some());
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, width, 24));
+
+            for target in [
+                UsageHitTarget::Tokens,
+                UsageHitTarget::Hours24,
+                UsageHitTarget::Days7,
+                UsageHitTarget::Days30,
+                UsageHitTarget::Days90,
+                UsageHitTarget::Day,
+                UsageHitTarget::Model,
+                UsageHitTarget::Cost,
+                UsageHitTarget::Rescan,
+            ] {
+                let rect = app
+                    .state
+                    .view
+                    .usage_hit_areas
+                    .iter()
+                    .find(|hit| hit.target == target)
+                    .map(|hit| hit.rect)
+                    .unwrap_or_else(|| panic!("usage hit area for {target:?}"));
+                app.handle_mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    rect.x,
+                    rect.y,
+                ));
+            }
+            let view = app.state.usage_view.as_ref().expect("usage view");
+            assert_eq!(view.metric, UsageMetric::Cost);
+            assert_eq!(view.range, UsageRange::Days90);
+            assert_eq!(view.breakdown, UsageBreakdown::Model);
+            assert!(view.scanning);
         }
     }
 

@@ -25,17 +25,25 @@ pub(crate) mod home_refs;
 mod ids;
 pub(crate) mod inbox;
 mod input;
+#[cfg(test)]
+pub(crate) use input::SidebarWorkGroupKeyAction;
 mod pane_lifecycle;
 mod popup;
+pub(crate) mod probes;
 mod repo_routing;
 mod runtime;
 mod runtime_mutations;
 mod session;
+pub(crate) mod settings_archive;
+pub(crate) mod settings_general;
+pub(crate) mod settings_keybindings;
+pub(crate) mod settings_providers;
 mod settled;
 pub mod state;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+mod user_actions;
 pub(crate) mod work_context_git;
 mod worktrees;
 
@@ -130,10 +138,12 @@ pub struct App {
     pub(crate) status_metrics_visible: bool,
     pub(crate) provider_usage_refreshed_at: Option<Instant>,
     pub(crate) provider_usage_in_flight: bool,
+    pub(crate) usage_scan_generation: u64,
+    pub(crate) usage_scan_in_flight: Option<u64>,
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
-    /// Runtime-only markers for shell panes launched from the git menu.
+    /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
@@ -184,11 +194,13 @@ pub struct App {
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
     pub(crate) work_index_config: crate::config::WorkIndexConfig,
+    pub(crate) missive_config: crate::config::MissiveConfig,
     pub(crate) work_index_refresh_in_flight: Option<crate::work_index::WorkIndexRefreshInFlight>,
     pub(crate) last_work_index_refresh_generation: u64,
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
+    pub(crate) work_index_session: crate::work_index::WorkIndexSession,
     pub(crate) work_item_detail_refresh_in_flight:
         Option<crate::work_index::WorkItemDetailRefreshInFlight>,
     pub(crate) last_work_item_detail_refresh_generation: u64,
@@ -212,6 +224,8 @@ pub struct App {
     pub(crate) work_index_gh_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) work_index_linearis_program_override: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    pub(crate) work_index_curl_program_override: Option<std::path::PathBuf>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -646,8 +660,13 @@ impl App {
         let update_install_command = crate::update::update_install_command().to_string();
         let startup_product_announcement =
             crate::product_announcements::load_unseen_for_current_version();
+        // Cold-start snapshot comes from the host state dir; unit tests must not
+        // observe whatever work index the developer machine has persisted.
+        #[cfg(not(test))]
         let work_index_snapshot =
             crate::work_index::load_snapshot(&crate::work_index::work_index_snapshot_path());
+        #[cfg(test)]
+        let work_index_snapshot: Option<crate::work_index::Snapshot> = None;
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
@@ -685,14 +704,16 @@ impl App {
             .collect(),
             sidebar_group_mode,
             sidebar_group_menu_open: false,
-            sidebar_group_menu_selected: sidebar_group_mode.index(),
+            sidebar_group_menu_selected: sidebar_group_mode.view_index(),
             sidebar_work_filter,
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_selected_work_group: None,
+            sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
+            sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
             view_observed_at: Instant::now(),
             loop_run_history: initial_loop_history,
@@ -701,6 +722,14 @@ impl App {
             symphony_snapshot: crate::symphony::Snapshot::default(),
             symphony_detail: None,
             work_view: None,
+            usage_view: None,
+            usage_snapshot: if cfg!(test) {
+                None
+            } else {
+                crate::provider_usage::load_cached_usage()
+            },
+            usage_pricing: config.usage.clone(),
+            request_usage_scan: false,
             inbox: None,
             home: None,
             home_catalog: if cfg!(test) {
@@ -710,6 +739,7 @@ impl App {
             },
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
+            request_tool_probes: false,
             pending_human_drafts: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,
@@ -754,6 +784,8 @@ impl App {
             request_new_tab: false,
             request_pane_toggle: None,
             request_git_action: None,
+            request_user_action: None,
+            request_save_add_action: false,
             request_pr_land: None,
             request_pin_toggle: None,
             request_new_linked_worktree: None,
@@ -796,6 +828,7 @@ impl App {
             keybind_help: state::KeybindHelpState::default(),
             navigator: state::NavigatorState::default(),
             work_link_picker: None,
+            add_action: None,
             copy_mode: None,
             sidebar_presentation: state::SidebarPresentationState::default(),
             sidebar_projection_revision: 0,
@@ -809,6 +842,10 @@ impl App {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
+                sidebar_footer_usage_hit_area: Rect::default(),
+                usage_hit_areas: Vec::new(),
+                sidebar_footer_ticket_hit_area: Rect::default(),
+                sidebar_footer_missive_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
@@ -817,6 +854,12 @@ impl App {
                 tab_scroll_left_hit_area: Rect::default(),
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
+                add_action_button_hit_area: Rect::default(),
+                user_action_hit_areas: Vec::new(),
+                add_action_close_hit_area: Rect::default(),
+                add_action_field_hit_areas: Vec::new(),
+                add_action_cancel_hit_area: Rect::default(),
+                add_action_save_hit_area: Rect::default(),
                 git_menu_button_hit_area: Rect::default(),
                 git_menu_popup_rect: Rect::default(),
                 git_menu_first_visible: 0,
@@ -876,6 +919,7 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
+            dock_surface_override: false,
             dock_tab: Some(state::DockSurface::Home),
             dock_open_surfaces: state::DockSurface::DEFAULT_OPEN.to_vec(),
             dock_maximized: false,
@@ -887,7 +931,7 @@ impl App {
             dock_pr_focused: false,
             dock_pr_checkout_menu: None,
             dock_pr_pending_land: None,
-            dock_diff_ignore_whitespace: false,
+            dock_diff_ignore_whitespace: config.ui.hide_whitespace_in_diff,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
             dock_diff_request: None,
@@ -915,10 +959,13 @@ impl App {
             dock_home_focused: false,
             dock_home_followed_pane: None,
             work_index_snapshot: work_index_snapshot.clone(),
+            work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
             work_index_enabled: config.work_index.enabled,
             land_approval_label: config.land.approval_label.clone(),
+            branch_prefix: config.source_control.branch_prefix.clone(),
+            commit_message_model: config.source_control.commit_message_model.clone(),
             work_index_linear_team_configured: config
                 .work_index
                 .linear_team
@@ -951,6 +998,11 @@ impl App {
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
+            combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
+            new_thread_workspace: config.ui.new_thread_workspace,
+            add_project_start_dir: config.ui.add_project_start_dir.clone(),
+            auto_settle_finished: config.session.auto_settle_finished,
+            auto_settle_inactive: config.session.auto_settle_inactive,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             pane_borders: config.ui.pane_borders,
@@ -994,7 +1046,12 @@ impl App {
                 list: state::SelectionListState::new(0),
                 original_palette: None,
                 original_theme: None,
+                archive_delete_armed: false,
+                search: String::new(),
+                search_active: false,
+                keybind_capture: None,
             },
+            tool_probes: crate::app::probes::ToolProbeState::Idle,
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
@@ -1078,6 +1135,8 @@ impl App {
             status_metrics_visible: false,
             provider_usage_refreshed_at: cfg!(test).then(Instant::now),
             provider_usage_in_flight: false,
+            usage_scan_generation: 0,
+            usage_scan_in_flight: None,
             connectivity_probed_at: cfg!(test).then(Instant::now),
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
@@ -1113,11 +1172,13 @@ impl App {
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
             work_index_config: config.work_index.clone(),
+            missive_config: config.missive.clone(),
             work_index_refresh_in_flight: None,
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
             work_index_snapshot,
+            work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_refresh_in_flight: None,
             last_work_item_detail_refresh_generation: 0,
             last_applied_work_item_detail_refresh_generation: 0,
@@ -1138,6 +1199,8 @@ impl App {
             work_index_gh_program_override: None,
             #[cfg(test)]
             work_index_linearis_program_override: None,
+            #[cfg(test)]
+            work_index_curl_program_override: None,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
@@ -1515,6 +1578,12 @@ impl App {
             }
 
             if self.apply_git_action_request() {
+                needs_render = true;
+            }
+            if self.apply_user_action_request() {
+                needs_render = true;
+            }
+            if self.apply_save_add_action_request() {
                 needs_render = true;
             }
             if self.apply_pr_land_request() {
@@ -1981,6 +2050,8 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
+            self.state.auto_settle_finished = config.session.auto_settle_finished;
+            self.state.auto_settle_inactive = config.session.auto_settle_inactive;
             self.state.settle_after = std::time::Duration::from_secs(
                 config
                     .session
@@ -1994,7 +2065,10 @@ impl App {
 
         if !invalid_section("keys") {
             match config.live_keybinds_with_diagnostics() {
-                Ok((live, keybind_diagnostics)) => {
+                Ok((mut live, keybind_diagnostics)) => {
+                    if invalid_section("actions") {
+                        live.keybinds.user_actions = self.state.keybinds.user_actions.clone();
+                    }
                     self.state.prefix_code = live.prefix.0;
                     self.state.prefix_mods = live.prefix.1;
                     self.state.keybinds = live.keybinds;
@@ -2048,6 +2122,18 @@ impl App {
                 self.state.right_click_passthrough_modifiers =
                     config.ui.right_click_passthrough_modifiers();
                 self.state.confirm_close = config.ui.confirm_close;
+                if self.state.combine_repos_across_hosts != config.ui.combine_repos_across_hosts {
+                    self.state.combine_repos_across_hosts = config.ui.combine_repos_across_hosts;
+                    self.state.mark_sidebar_projection_changed();
+                }
+                if self.state.dock_diff_ignore_whitespace != config.ui.hide_whitespace_in_diff {
+                    self.state.dock_diff_ignore_whitespace = config.ui.hide_whitespace_in_diff;
+                    self.state.invalidate_dock_diff();
+                }
+                self.state.new_thread_workspace = config.ui.new_thread_workspace;
+                self.state
+                    .add_project_start_dir
+                    .clone_from(&config.ui.add_project_start_dir);
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.prompt_new_workspace_name = config.ui.prompt_new_workspace_name;
                 self.state.pane_borders = config.ui.pane_borders;
@@ -2171,8 +2257,14 @@ impl App {
             self.state.files_icons = config.files.icons;
         }
 
+        if !invalid_section("usage") {
+            self.state.usage_pricing = config.usage.clone();
+        }
+
         if !invalid_section("land") {
             self.state.land_approval_label = config.land.approval_label.clone();
+            self.state.branch_prefix = config.source_control.branch_prefix.clone();
+            self.state.commit_message_model = config.source_control.commit_message_model.clone();
         }
 
         if !invalid_section("work_index") {
@@ -2187,6 +2279,11 @@ impl App {
             if !self.work_index_config.enabled {
                 self.work_index_refresh_in_flight = None;
             }
+        }
+
+        if !invalid_section("missive") {
+            self.missive_config = config.missive.clone();
+            self.next_work_index_refresh = Instant::now();
         }
 
         if !invalid_section("theme") {
@@ -2250,6 +2347,7 @@ impl App {
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
             || self.state.work_view.is_some()
+            || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
             || self.state.home.is_some()
         {
@@ -2543,6 +2641,9 @@ impl App {
         if self.handle_loop_run_history_key(key_event) {
             return;
         }
+        if self.handle_usage_view_key(key_event) {
+            return;
+        }
         if self.handle_work_view_key(key_event) {
             return;
         }
@@ -2593,6 +2694,9 @@ impl App {
             }
             Mode::GitMenu => {
                 input::handle_git_menu_key(&mut self.state, key_event);
+            }
+            Mode::AddAction => {
+                self.handle_add_action_key(key_event);
             }
             Mode::KeybindHelp => {
                 input::handle_keybind_help_key(&mut self.state, key);
@@ -2909,10 +3013,16 @@ mod tests {
         app.last_applied_work_index_refresh_generation = 4;
         let snapshot = crate::work_index::Snapshot {
             items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
             unavailable: None,
             observed_at: std::time::SystemTime::now(),
         };
-        assert!(!app.handle_work_index_refreshed(3, snapshot));
+        assert!(!app.handle_work_index_refreshed(
+            3,
+            snapshot,
+            crate::work_index::WorkIndexSession::default(),
+        ));
         assert!(app.work_index_snapshot.is_none());
     }
 

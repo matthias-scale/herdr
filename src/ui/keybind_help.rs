@@ -183,6 +183,9 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.toggle_info_panel), "toggle info panel"),
         help_entry(keybind_label(&kb.symphony), "open Symphony dashboard"),
         help_entry(keybind_label(&kb.work), "open work projection view"),
+        help_entry(keybind_label(&kb.usage), "open usage view"),
+        help_entry(keybind_label(&kb.tickets), "open Linear tickets"),
+        help_entry(keybind_label(&kb.missive), "open Missive conversations"),
         help_entry(keybind_label(&kb.inbox), "open blocked inbox"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
@@ -212,6 +215,16 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
                             .unwrap_or(Cow::Borrowed("custom command")),
                     )
                 })
+                .collect(),
+        ));
+    }
+
+    if !kb.user_actions.is_empty() {
+        groups.push((
+            "User actions",
+            kb.user_actions
+                .iter()
+                .map(|action| (action.key_label(), Cow::Owned(action.name.clone())))
                 .collect(),
         ));
     }
@@ -479,5 +492,28 @@ mod tests {
         assert!(entries
             .iter()
             .any(|(key, label)| { key == "prefix+ctrl+n" && label == "next tab in this Space" }));
+    }
+
+    #[test]
+    fn user_actions_have_their_own_help_group() {
+        let mut app = AppState::test_new();
+        app.keybinds.user_actions = vec![crate::config::UserAction {
+            name: "test".into(),
+            command: "just test".into(),
+            bindings: crate::config::ActionKeybinds::prefix("t"),
+            run_on_worktree_create: false,
+            open_in_bottom_pane: true,
+            repo: None,
+        }];
+
+        let entries = keybind_help_groups(&app)
+            .into_iter()
+            .find(|(title, _)| *title == "User actions")
+            .expect("user action help group")
+            .1;
+        assert_eq!(
+            entries,
+            vec![("prefix+t".into(), Cow::Owned("test".into()))]
+        );
     }
 }
