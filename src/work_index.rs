@@ -482,6 +482,7 @@ pub(crate) struct WorkIndexSession {
 pub(crate) struct ProviderDirectory {
     pub(crate) viewer: Option<String>,
     pub(crate) assignees: Vec<String>,
+    query_identity: Option<String>,
     resolved: bool,
 }
 
@@ -1147,6 +1148,7 @@ pub(crate) struct WorkIndexRefreshContext<'a> {
     pub(crate) selected_missive: Option<&'a str>,
     pub(crate) session_missive_users: Option<&'a [MissiveUser]>,
     pub(crate) previous: Option<&'a Snapshot>,
+    pub(crate) linear_assignee: Option<&'a str>,
 }
 
 pub(crate) fn refresh_work_index_with_missive(
@@ -1165,6 +1167,7 @@ pub(crate) fn refresh_work_index_with_missive(
         selected_missive,
         session_missive_users,
         previous,
+        linear_assignee,
     } = context;
     if !config.enabled {
         return Snapshot {
@@ -1295,6 +1298,7 @@ pub(crate) fn refresh_work_index_with_missive(
     let mut tickets = match config.linear_team.as_deref() {
         Some(team) if !team.trim().is_empty() => match fetch_linear_tickets(
             team,
+            linear_assignee,
             linearis_program,
             target_deadline(batch_deadline, target_timeout),
         ) {
@@ -1611,14 +1615,20 @@ pub(crate) fn resolve_work_index_session(
 }
 
 fn fetch_linear_directory(program: &Path, deadline: Instant) -> ProviderDirectory {
-    let viewer = {
+    let (viewer, query_identity) = {
         let mut command = crate::noninteractive_process::command(program);
         command.args(["auth", "status", "--compact"]);
         crate::noninteractive_process::output_with_deadline(command, deadline)
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-            .and_then(|value| nested_text(value.get("user"), "name"))
+            .and_then(|value| {
+                let user = value.get("user")?;
+                let name = nested_text(Some(user), "name");
+                let identity = nested_text(Some(user), "id").or_else(|| name.clone());
+                Some((name, identity))
+            })
+            .unwrap_or_default()
     };
     let mut assignees = {
         let mut command = crate::noninteractive_process::command(program);
@@ -1637,6 +1647,7 @@ fn fetch_linear_directory(program: &Path, deadline: Instant) -> ProviderDirector
     ProviderDirectory {
         viewer,
         assignees,
+        query_identity,
         resolved: true,
     }
 }
@@ -1686,6 +1697,7 @@ fn fetch_github_directory(
     ProviderDirectory {
         viewer,
         assignees,
+        query_identity: None,
         resolved: true,
     }
 }
@@ -1724,6 +1736,7 @@ pub(crate) fn resolve_missive_assignees(users: &[MissiveUser]) -> ProviderDirect
     ProviderDirectory {
         viewer,
         assignees,
+        query_identity: None,
         resolved: true,
     }
 }
@@ -2374,16 +2387,20 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> u64 {
 
 fn fetch_linear_tickets(
     team: &str,
+    assignee: Option<&str>,
     program: &Path,
     deadline: Instant,
 ) -> Result<Vec<LinearTicket>, RefreshError> {
     let mut tickets = Vec::new();
+    let assignee_filter = assignee
+        .map(|assignee| vec!["--assignee", assignee])
+        .unwrap_or_default();
     tickets.extend(fetch_linear_ticket_group(
         team,
         program,
         deadline,
         TicketGroup::Assigned,
-        &["--assignee", "me"],
+        &assignee_filter,
     )?);
     tickets.extend(fetch_linear_ticket_group(
         team,
@@ -3016,7 +3033,7 @@ impl crate::app::App {
         let event_tx = self.event_tx.clone();
         let gh_program = self.work_index_gh_program();
         let linearis_program = self.work_index_linearis_program();
-        let session = self.work_index_session.clone();
+        let mut session = self.work_index_session.clone();
         let curl_program = self.work_index_curl_program();
         let missive = self.missive_config.clone();
         let session_missive_users =
@@ -3025,6 +3042,13 @@ impl crate::app::App {
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
+                if !session.linear.resolved {
+                    session.linear = fetch_linear_directory(
+                        &linearis_program,
+                        target_deadline(deadline, WORK_INDEX_TARGET_TIMEOUT),
+                    );
+                    session.linear.resolved = true;
+                }
                 let snapshot = refresh_work_index_with_missive(
                     &config,
                     &missive,
@@ -3033,6 +3057,7 @@ impl crate::app::App {
                         selected_missive: selected_missive.as_deref(),
                         session_missive_users: session_missive_users.as_deref(),
                         previous: previous_snapshot.as_ref(),
+                        linear_assignee: session.linear.query_identity.as_deref(),
                     },
                     Instant::now(),
                     deadline,
@@ -4159,7 +4184,7 @@ esac
 "#,
             r#"#!/bin/sh
 case "$*" in
-  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"name":"Matthias"}}' ;;
+  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"id":"linear-user-1","name":"Matthias"}}' ;;
   "users list --active -l 250 --compact") printf '%s' '{"nodes":[{"name":"Ada"},{"name":"Matthias"}]}' ;;
   *) exit 42 ;;
 esac
@@ -4183,6 +4208,10 @@ esac
         );
 
         assert_eq!(session.linear.viewer.as_deref(), Some("Matthias"));
+        assert_eq!(
+            session.linear.query_identity.as_deref(),
+            Some("linear-user-1")
+        );
         assert_eq!(session.linear.assignees, ["Ada", "Matthias"]);
         assert_eq!(session.github.viewer.as_deref(), Some("matthias"));
         assert_eq!(session.github.assignees, ["grace", "matthias"]);
@@ -4203,6 +4232,72 @@ esac
             "resolved providers are not queried twice"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn linear_viewer_name_fallback_and_unresolved_query_omission() {
+        let fallback_dir = fixture_dir("linear-viewer-name-fallback");
+        let (_, fallback_linearis) = fake_programs(
+            &fallback_dir,
+            "#!/bin/sh\nexit 42\n",
+            r#"#!/bin/sh
+case "$*" in
+  "auth status --compact") printf '%s' '{"authenticated":true,"user":{"name":"Matthias"}}' ;;
+  "users list --active -l 250 --compact") printf '%s' '{"nodes":[]}' ;;
+  *) exit 42 ;;
+esac
+"#,
+        );
+        let fallback = fetch_linear_directory(
+            &fallback_linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        );
+        assert_eq!(fallback.viewer.as_deref(), Some("Matthias"));
+        assert_eq!(fallback.query_identity.as_deref(), Some("Matthias"));
+
+        let unresolved_dir = fixture_dir("linear-viewer-unresolved");
+        let argv_log = unresolved_dir.join("linearis-argv.log");
+        let (_, unresolved_linearis) = fake_programs(
+            &unresolved_dir,
+            "#!/bin/sh\nexit 42\n",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "auth status --compact") printf '%s' '{{"authenticated":true}}' ;;
+  "users list --active -l 250 --compact") printf '%s' '{{"nodes":[]}}' ;;
+  "issues list --team SCA -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"unfiltered","state":{{"name":"In Progress"}},"assignee":{{"name":"Ada"}}}}]}}' ;;
+  "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[]}}' ;;
+  "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[]}}' ;;
+  *) exit 42 ;;
+esac
+"#,
+                argv_log.display()
+            ),
+        );
+        let unresolved = fetch_linear_directory(
+            &unresolved_linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        );
+        assert!(unresolved.viewer.is_none());
+        assert!(unresolved.query_identity.is_none());
+        let tickets = fetch_linear_tickets(
+            "SCA",
+            unresolved.query_identity.as_deref(),
+            &unresolved_linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("unfiltered Linear tickets");
+        assert_eq!(tickets.len(), 1);
+        let session = WorkIndexSession::default();
+        assert!(
+            crate::app::state::SidebarWorkFilter::default().matches_linear(&tickets[0], &session)
+        );
+        let argv = std::fs::read_to_string(argv_log).expect("Linear argv");
+        assert!(argv
+            .lines()
+            .any(|call| call == "issues list --team SCA -l 100 --compact"));
+        assert!(!argv.split_whitespace().any(|argument| argument == "me"));
     }
 
     #[test]
@@ -4350,9 +4445,13 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
 "#,
         );
 
-        let tickets =
-            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
-                .expect("Linear ticket fetch");
+        let tickets = fetch_linear_tickets(
+            "SCA",
+            None,
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("Linear ticket fetch");
 
         assert_eq!(
             tickets[0].relations,
@@ -4375,7 +4474,7 @@ printf '%s' '{"nodes":[{"identifier":"SCA-7","relations":{"nodes":[{"type":"bloc
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 case "$*" in
-  "issues list --team SCA --assignee me -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
+  "issues list --team SCA --assignee linear-user-1 -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-1","title":"assigned","state":{{"name":"In Progress"}},"priority":2}}]}}' ;;
   "issues list --team SCA --status Triage -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-2","title":"triage","state":{{"name":"Triage"}},"priority":3}}]}}' ;;
   "cycles list --team SCA --active --compact") printf '%s' '{{"nodes":[{{"name":"cycle 34"}}]}}' ;;
   "issues list --team SCA --cycle cycle 34 --status Done -l 100 --compact") printf '%s' '{{"nodes":[{{"identifier":"SCA-3","title":"done","state":{{"name":"Done"}},"priority":4,"cycle":{{"name":"cycle 34"}}}}]}}' ;;
@@ -4386,9 +4485,13 @@ esac
             ),
         );
 
-        let tickets =
-            fetch_linear_tickets("SCA", &linearis, Instant::now() + WORK_INDEX_TARGET_TIMEOUT)
-                .expect("Linear ticket sets");
+        let tickets = fetch_linear_tickets(
+            "SCA",
+            Some("linear-user-1"),
+            &linearis,
+            Instant::now() + WORK_INDEX_TARGET_TIMEOUT,
+        )
+        .expect("Linear ticket sets");
 
         assert_eq!(tickets.len(), 3);
         assert_eq!(tickets[0].group, TicketGroup::Assigned);
@@ -4397,7 +4500,8 @@ esac
         assert_eq!(tickets[0].priority, Some(2));
         assert_eq!(tickets[2].cycle.as_deref(), Some("cycle 34"));
         let argv = std::fs::read_to_string(log).expect("read argv log");
-        assert!(argv.contains("--assignee me"));
+        assert!(argv.contains("--assignee linear-user-1"));
+        assert!(!argv.split_whitespace().any(|argument| argument == "me"));
         assert!(argv.contains("--status Triage"));
         assert!(argv.contains("--cycle cycle 34 --status Done"));
     }
