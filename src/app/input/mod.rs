@@ -5137,6 +5137,7 @@ navigate_workspace_down = "ctrl+j"
             assignees: Vec::new(),
             last_activity_at: Some(std::time::SystemTime::UNIX_EPOCH),
             closed: false,
+            pane_bound: false,
             messages: Vec::new(),
             notes: Vec::new(),
             drafts: Vec::new(),
