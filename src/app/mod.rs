@@ -660,6 +660,8 @@ impl App {
         let update_install_command = crate::update::update_install_command().to_string();
         let startup_product_announcement =
             crate::product_announcements::load_unseen_for_current_version();
+        let work_index_snapshot =
+            crate::work_index::load_snapshot(&crate::work_index::work_index_snapshot_path());
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
@@ -951,7 +953,7 @@ impl App {
             dock_home_detail_tab: state::DockHomeDetailTab::Overview,
             dock_home_focused: false,
             dock_home_followed_pane: None,
-            work_index_snapshot: None,
+            work_index_snapshot: work_index_snapshot.clone(),
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_cache: crate::work_index::WorkItemDetailCache::default(),
             work_item_detail_loading: std::collections::HashSet::new(),
@@ -1170,7 +1172,7 @@ impl App {
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
-            work_index_snapshot: None,
+            work_index_snapshot,
             work_index_session: crate::work_index::WorkIndexSession::default(),
             work_item_detail_refresh_in_flight: None,
             last_work_item_detail_refresh_generation: 0,

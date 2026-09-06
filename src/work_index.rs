@@ -1505,11 +1505,11 @@ fn fetch_github_pull_request_detail(
     deadline: Instant,
 ) -> Result<WorkItemDetail, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
-    let number = number.to_string();
+    let number_arg = number.to_string();
     command.args([
         "pr",
         "view",
-        &number,
+        &number_arg,
         "--repo",
         repo,
         "--json",
@@ -1588,10 +1588,68 @@ fn fetch_github_pull_request_detail(
         actions: github_actions(value.get("statusCheckRollup")),
         files: github_files(value.get("files")),
         commits: github_commits(value.get("commits")),
-        unresolved_review_threads: None,
+        unresolved_review_threads: fetch_unresolved_review_thread_count(
+            repo, number, program, deadline,
+        ),
         unavailable: None,
         observed_at: SystemTime::now(),
     })
+}
+
+/// GraphQL query for a PR's review-thread resolution state. `gh pr view --json`
+/// does not expose this, so it takes a second call, kept small (thread
+/// resolution only) and best-effort: a failure here must never fail or delay
+/// the PR detail it's attached to.
+const UNRESOLVED_REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }";
+
+/// Count a pull request's unresolved review threads via `gh api graphql`.
+/// Degrades to `None` on any failure (bad repo slug, non-zero exit, timeout,
+/// malformed JSON) so the caller's detail fetch is never blocked by it.
+fn fetch_unresolved_review_thread_count(
+    repo: &str,
+    number: u64,
+    program: &Path,
+    deadline: Instant,
+) -> Option<usize> {
+    let (owner, name) = repo.split_once('/')?;
+    let mut command = crate::noninteractive_process::command(program);
+    command.args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={UNRESOLVED_REVIEW_THREADS_QUERY}"),
+        "-F",
+        &format!("owner={owner}"),
+        "-F",
+        &format!("name={name}"),
+        "-F",
+        &format!("number={number}"),
+    ]);
+    let output = crate::noninteractive_process::output_with_deadline(command, deadline).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).ok()?;
+    parse_unresolved_review_thread_count(&value)
+}
+
+/// Pure parse of the `unresolvedReviewThreadsQuery` GraphQL response. Kept
+/// separate from the `gh` shellout so it can be exercised with a fixture
+/// instead of a live network call.
+fn parse_unresolved_review_thread_count(value: &Value) -> Option<usize> {
+    let nodes = value
+        .get("data")?
+        .get("repository")?
+        .get("pullRequest")?
+        .get("reviewThreads")?
+        .get("nodes")?
+        .as_array()?;
+    Some(
+        nodes
+            .iter()
+            .filter(|node| node.get("isResolved").and_then(Value::as_bool) == Some(false))
+            .count(),
+    )
 }
 
 /// Read one Linear issue with its comment threads.
@@ -2327,12 +2385,27 @@ fn join_panes(items: &mut Vec<WorkItem>, panes: &[AgentInfo]) {
     }
 }
 
+pub(crate) fn work_index_snapshot_path() -> std::path::PathBuf {
+    crate::config::state_dir().join("work-index.json")
+}
+
 pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot).map_err(io::Error::other)?;
     std::fs::write(path, bytes)
+}
+
+/// Read back a snapshot persisted by [`write_snapshot`].
+///
+/// Cold start should show the last known work index rather than an empty
+/// view until the first refresh completes, but the persisted file is best
+/// effort: a missing or corrupt file (partial write, format change) must
+/// fall back to `None` rather than panic or block startup.
+pub(crate) fn load_snapshot(path: &Path) -> Option<Snapshot> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Locate a CLI herdr shells out to.
@@ -2506,10 +2579,7 @@ impl crate::app::App {
         }
         self.work_index_refresh_in_flight = None;
         self.last_applied_work_index_refresh_generation = generation;
-        if let Err(error) = write_snapshot(
-            &crate::config::state_dir().join("work-index.json"),
-            &snapshot,
-        ) {
+        if let Err(error) = write_snapshot(&work_index_snapshot_path(), &snapshot) {
             tracing::warn!(error = %error, "failed to persist work index snapshot");
         }
         if let Some(work_view) = self.state.work_view.as_mut() {
@@ -2745,6 +2815,40 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unresolved_review_thread_count_counts_only_unresolved_nodes() {
+        let value: Value = serde_json::from_str(
+            r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+                 {"isResolved":false},
+                 {"isResolved":true},
+                 {"isResolved":false}
+               ]}}}}}"#,
+        )
+        .expect("valid fixture");
+
+        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(2));
+    }
+
+    #[test]
+    fn unresolved_review_thread_count_is_zero_when_every_thread_is_resolved() {
+        let value: Value = serde_json::from_str(
+            r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+                 {"isResolved":true}
+               ]}}}}}"#,
+        )
+        .expect("valid fixture");
+
+        assert_eq!(super::parse_unresolved_review_thread_count(&value), Some(0));
+    }
+
+    #[test]
+    fn unresolved_review_thread_count_is_none_on_a_malformed_response() {
+        let value: Value = serde_json::from_str(r#"{"data":null,"errors":[{"message":"boom"}]}"#)
+            .expect("valid fixture");
+
+        assert_eq!(super::parse_unresolved_review_thread_count(&value), None);
     }
 
     #[test]
@@ -4012,6 +4116,39 @@ printf '%s' '[{"number":7,"title":"Live PR","headRefName":"b","isDraft":false,"r
             serde_json::from_str(&std::fs::read_to_string(path).expect("read snapshot"))
                 .expect("valid JSON");
         assert!(value.get("items").is_some());
+    }
+
+    #[test]
+    fn load_snapshot_round_trips_a_written_snapshot() {
+        let dir = fixture_dir("load-round-trip");
+        let path = dir.join("work-index.json");
+        let snapshot = Snapshot {
+            items: Vec::new(),
+            unavailable: Some("Linear observation timed out".to_string()),
+            observed_at: SystemTime::now(),
+        };
+        write_snapshot(&path, &snapshot).expect("write snapshot");
+
+        let loaded = load_snapshot(&path).expect("snapshot loads back");
+
+        assert_eq!(loaded, snapshot);
+    }
+
+    #[test]
+    fn load_snapshot_returns_none_for_missing_file() {
+        let dir = fixture_dir("load-missing");
+        let path = dir.join("does-not-exist.json");
+
+        assert!(load_snapshot(&path).is_none());
+    }
+
+    #[test]
+    fn load_snapshot_returns_none_for_corrupt_file() {
+        let dir = fixture_dir("load-corrupt");
+        let path = dir.join("work-index.json");
+        std::fs::write(&path, b"not valid json").expect("write corrupt fixture");
+
+        assert!(load_snapshot(&path).is_none());
     }
 }
 
