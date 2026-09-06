@@ -354,6 +354,20 @@ pub struct Config {
     pub usage: UsageConfig,
     pub land: LandConfig,
     pub files: FilesConfig,
+    pub actions: Vec<ActionConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ActionConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub run_on_worktree_create: bool,
+    pub open_in_bottom_pane: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]

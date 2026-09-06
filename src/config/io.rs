@@ -1,10 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use tracing::warn;
 
 use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
+    "actions",
     "advanced",
     "agent_detection",
     "experimental",
@@ -280,6 +285,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.keys = section,
+    );
+    load_live_section(
+        table,
+        "actions",
+        "user action config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.actions = section,
     );
     load_live_section(
         table,
@@ -672,6 +685,101 @@ pub fn remove_keybinding_config_sections(content: &str) -> (String, bool) {
         updated.push('\n');
     }
     (updated, removed)
+}
+
+pub fn replace_actions_tables(
+    content: &str,
+    actions: &[crate::config::ActionConfig],
+) -> Result<String, toml::ser::Error> {
+    let mut replacement = String::new();
+    for action in actions {
+        replacement.push_str("[[actions]]\n");
+        replacement.push_str(&toml::to_string(action)?);
+    }
+
+    let mut updated = String::with_capacity(content.len().saturating_add(replacement.len()));
+    let mut skipping_action = false;
+    let mut inserted = false;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if toml_table_header_name(trimmed).is_some() {
+            if trimmed == "[[actions]]" {
+                if !inserted {
+                    updated.push_str(&replacement);
+                    inserted = true;
+                }
+                skipping_action = true;
+                continue;
+            }
+            skipping_action = false;
+        }
+        if !skipping_action {
+            updated.push_str(line);
+        }
+    }
+
+    if !inserted && !replacement.is_empty() {
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        if !updated.is_empty() && !updated.ends_with("\n\n") {
+            updated.push('\n');
+        }
+        updated.push_str(&replacement);
+    }
+    Ok(updated)
+}
+
+static ACTION_SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub fn write_actions_atomically(
+    path: &Path,
+    actions: &[crate::config::ActionConfig],
+) -> std::io::Result<()> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
+    let updated = replace_actions_tables(&content, actions)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    updated
+        .parse::<toml::Value>()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let temp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        ACTION_SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let _ = file.set_permissions(metadata.permissions());
+    }
+    if let Err(err) = file
+        .write_all(updated.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    drop(file);
+    if let Err(err) = crate::platform::replace_file_durably(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn toml_table_header_name(trimmed: &str) -> Option<&str> {
@@ -1163,5 +1271,61 @@ mouse_capture = false
                 .full_lifecycle_hook_authority_timeout_seconds,
             600
         );
+    }
+
+    #[test]
+    fn replace_actions_tables_preserves_every_non_action_byte() {
+        let content = "onboarding = false\n\n[[actions]]\nname = \"old\"\ncommand = \"false\"\n\n[ui]\nmouse_capture = true\n";
+        let actions = vec![crate::config::ActionConfig {
+            name: "test".into(),
+            command: "just test".into(),
+            key: Some("ctrl-b t".into()),
+            run_on_worktree_create: true,
+            open_in_bottom_pane: true,
+            repo: Some("matthias-scale/herdr".into()),
+        }];
+
+        let updated = replace_actions_tables(content, &actions).expect("serialize actions");
+
+        assert!(updated.starts_with("onboarding = false\n\n[[actions]]\n"));
+        assert!(updated.ends_with("[ui]\nmouse_capture = true\n"));
+        assert!(!updated.contains("name = \"old\""));
+        assert!(updated.contains("name = \"test\""));
+        assert!(updated.contains("key = \"ctrl-b t\""));
+    }
+
+    #[test]
+    fn atomic_action_save_round_trips_through_config_loader() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-action-save-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let path = root.join("config.toml");
+        std::fs::create_dir_all(&root).expect("create fixture root");
+        std::fs::write(&path, "onboarding = false\n\n[ui]\nmouse_capture = true\n")
+            .expect("seed config");
+        let actions = vec![crate::config::ActionConfig {
+            name: "lint".into(),
+            command: "just lint".into(),
+            key: None,
+            run_on_worktree_create: false,
+            open_in_bottom_pane: true,
+            repo: None,
+        }];
+
+        write_actions_atomically(&path, &actions).expect("save actions");
+
+        let content = std::fs::read_to_string(&path).expect("read saved config");
+        let parsed: Config = toml::from_str(&content).expect("parse saved config");
+        assert_eq!(parsed.actions, actions);
+        assert!(content.starts_with("onboarding = false\n\n[ui]\nmouse_capture = true\n"));
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .expect("read fixture root")
+                .filter_map(Result::ok)
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
