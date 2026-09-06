@@ -1855,19 +1855,12 @@ impl SettingsSection {
         }
     }
 
+    /// Position in the unfiltered nav column.
     pub fn index(self) -> usize {
         Self::ALL
             .iter()
             .position(|section| *section == self)
             .unwrap_or(0)
-    }
-
-    pub fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
-    }
-
-    pub fn prev(self) -> Self {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -1991,6 +1984,19 @@ pub struct SettingsState {
     pub search: String,
     /// Typed characters go to the filter line rather than the section list.
     pub search_active: bool,
+    /// The keybindings row whose chord is being captured, if any. TUI-only:
+    /// capture is a settings-screen interaction, not a session fact.
+    pub keybind_capture: Option<KeybindCapture>,
+}
+
+/// A keybindings row waiting for the operator to press the chord they want.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindCapture {
+    /// Index into `settings_keybinding_rows`.
+    pub row: usize,
+    /// The refusal shown inline under the row, from the same validator the
+    /// add-action modal uses.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3986,6 +3992,7 @@ impl AppState {
                 archive_delete_armed: false,
                 search: String::new(),
                 search_active: false,
+                keybind_capture: None,
             },
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),

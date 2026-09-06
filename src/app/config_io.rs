@@ -110,6 +110,62 @@ impl App {
         }
     }
 
+    /// Persist one captured keybinding and reload.
+    ///
+    /// Built-ins go through the same single config-edit path every other
+    /// settings row uses; user actions go through 6b's atomic `[[actions]]`
+    /// rewrite, because their key lives inside their own table.
+    pub(super) fn save_keybinding(
+        &mut self,
+        target: &crate::app::settings_keybindings::KeybindTarget,
+        key: &str,
+    ) -> Result<(), String> {
+        use crate::app::settings_keybindings::KeybindTarget;
+
+        match target {
+            KeybindTarget::BuiltIn { field } => {
+                let field = *field;
+                let value = format!("\"{key}\"");
+                if !self.update_config_file(field, |content| {
+                    crate::config::upsert_section_value(content, "keys", field, &value)
+                }) {
+                    return Err(format!("failed to save {field}"));
+                }
+            }
+            KeybindTarget::UserAction { name } => {
+                let path = crate::config::config_path();
+                let mut config = match std::fs::read_to_string(&path) {
+                    Ok(content) => toml::from_str::<crate::config::Config>(&content)
+                        .map_err(|error| format!("Config parse failed: {error}"))?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        crate::config::Config::default()
+                    }
+                    Err(error) => return Err(format!("Config read failed: {error}")),
+                };
+                let Some(action) = config
+                    .actions
+                    .iter_mut()
+                    .find(|action| action.name.trim().eq_ignore_ascii_case(name.trim()))
+                else {
+                    return Err(format!("action {name:?} is no longer in the config"));
+                };
+                action.key = Some(key.to_string());
+                crate::config::write_actions_atomically(&path, &config.actions)
+                    .map_err(|error| format!("Action save failed: {error}"))?;
+            }
+        }
+
+        let report = self.apply_config_from_disk(false);
+        if report.status == crate::config::ConfigReloadStatus::Failed {
+            return Err(report
+                .diagnostics
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Config reload failed".into()));
+        }
+        Ok(())
+    }
+
     pub(super) fn mark_onboarding_complete(&mut self) {
         self.update_config_file("onboarding setting", |content| {
             crate::config::upsert_top_level_bool(content, "onboarding", false)
@@ -245,5 +301,159 @@ mod tests {
             updated,
             "# a comment kept verbatim\n[ui]\nsidebar_width = 30\nconfirm_close = false\n\n[session]\nsettle_after_days = 7\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod keybinding_capture_tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::app::{
+        settings_keybindings::{settings_keybinding_rows, KeybindTarget},
+        state::SettingsSection,
+        App,
+    };
+
+    struct Scratch {
+        env: crate::config::TestConfigEnvGuard,
+        directory: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl Scratch {
+        fn new(seed: &str) -> Self {
+            let mut env = crate::config::TestConfigEnvGuard::acquire();
+            let directory = std::env::temp_dir().join(format!(
+                "herdr-keybind-capture-{}",
+                crate::config::test_unique_suffix()
+            ));
+            std::fs::create_dir_all(&directory).expect("temp config directory");
+            let path = directory.join("config.toml");
+            std::fs::write(&path, seed).expect("seed config");
+            env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+            Self {
+                env,
+                directory,
+                path,
+            }
+        }
+
+        fn app(&self) -> App {
+            App::new(
+                &crate::config::Config::load().config,
+                true,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                crate::api::EventHub::default(),
+            )
+        }
+
+        fn read(&self) -> String {
+            std::fs::read_to_string(&self.path).expect("config")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            self.env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+            std::fs::remove_dir_all(&self.directory).ok();
+        }
+    }
+
+    fn select_row(app: &mut App, matches: impl Fn(&KeybindTarget) -> bool) -> usize {
+        let row = settings_keybinding_rows(&app.state)
+            .into_iter()
+            .position(|row| row.target.as_ref().is_some_and(&matches))
+            .expect("row exists");
+        app.state.settings.list.select(row);
+        row
+    }
+
+    #[test]
+    fn keybinding_capture_writes_a_free_chord_and_refuses_a_bound_one() {
+        let scratch = Scratch::new("# keep this comment\n[ui]\nsidebar_width = 31\n");
+        let mut app = scratch.app();
+        crate::app::input::open_settings_at(&mut app.state, SettingsSection::Keybindings);
+        let row = select_row(&mut app, |target| {
+            *target == KeybindTarget::BuiltIn { field: "usage" }
+        });
+
+        // Enter arms the row rather than saving anything.
+        app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(
+            app.state
+                .settings
+                .keybind_capture
+                .as_ref()
+                .map(|capture| capture.row),
+            Some(row)
+        );
+
+        // A chord that navigate mode reserves is refused on the row.
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
+        assert!(app
+            .state
+            .settings
+            .keybind_capture
+            .as_ref()
+            .and_then(|capture| capture.error.as_deref())
+            .is_some());
+        assert_eq!(
+            scratch.read(),
+            "# keep this comment\n[ui]\nsidebar_width = 31\n"
+        );
+
+        // A free chord is written under [keys] and reloaded.
+        app.handle_settings_key(KeyEvent::new(KeyCode::F(9), KeyModifiers::empty()));
+        assert_eq!(app.state.settings.keybind_capture, None);
+        let saved = scratch.read();
+        assert!(saved.starts_with("# keep this comment\n"), "{saved}");
+        assert!(saved.contains("[keys]"), "{saved}");
+        assert!(saved.contains("usage = \"f9\""), "{saved}");
+        assert_eq!(app.state.keybinds.usage.label().as_deref(), Some("f9"));
+    }
+
+    #[test]
+    fn keybinding_capture_writes_a_user_action_key_into_its_actions_table() {
+        let scratch = Scratch::new("[[actions]]\nname = \"tests\"\ncommand = \"just test\"\n");
+        let mut app = scratch.app();
+        crate::app::input::open_settings_at(&mut app.state, SettingsSection::Keybindings);
+        assert_eq!(app.state.keybinds.user_actions.len(), 1);
+        select_row(
+            &mut app,
+            |target| matches!(target, KeybindTarget::UserAction { name } if name == "tests"),
+        );
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.handle_settings_key(KeyEvent::new(KeyCode::F(9), KeyModifiers::empty()));
+
+        assert_eq!(app.state.settings.keybind_capture, None);
+        let saved = scratch.read();
+        assert!(saved.contains("key = \"f9\""), "{saved}");
+        assert!(!saved.contains("[keys]"), "{saved}");
+        assert_eq!(
+            app.state.keybinds.user_actions[0]
+                .bindings
+                .label()
+                .as_deref(),
+            Some("f9")
+        );
+    }
+
+    #[test]
+    fn esc_cancels_a_capture_without_writing() {
+        let scratch = Scratch::new("[ui]\nsidebar_width = 31\n");
+        let mut app = scratch.app();
+        crate::app::input::open_settings_at(&mut app.state, SettingsSection::Keybindings);
+        select_row(&mut app, |target| {
+            *target == KeybindTarget::BuiltIn { field: "usage" }
+        });
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.handle_settings_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert_eq!(app.state.settings.keybind_capture, None);
+        assert_eq!(app.state.mode, crate::app::Mode::Settings);
+        assert_eq!(scratch.read(), "[ui]\nsidebar_width = 31\n");
     }
 }

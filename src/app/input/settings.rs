@@ -22,31 +22,51 @@ pub(super) enum SettingsAction {
     RestoreArchived(crate::app::state::PaneFocusTarget),
     DeleteArchived(crate::app::state::PaneFocusTarget),
     InstallRecommendedIntegrations,
+    SaveKeybinding {
+        target: crate::app::settings_keybindings::KeybindTarget,
+        key: String,
+    },
 }
 
 impl App {
+    /// The one place a settings action is applied, whether it came from the
+    /// keyboard or the mouse.
+    pub(super) fn apply_settings_action(&mut self, action: SettingsAction) {
+        match action {
+            SettingsAction::SaveTheme(name) => self.save_theme(&name),
+            SettingsAction::SaveStatusIndicators(style) => self.save_status_indicators(style),
+            SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
+            SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
+            SettingsAction::SaveAgentBorderLabels(enabled) => {
+                self.save_agent_border_labels(enabled)
+            }
+            SettingsAction::SaveConfigEdit(edit) => self.save_config_edit(edit),
+            SettingsAction::RestoreArchived(target) => {
+                self.restore_archived_pane(&target);
+            }
+            SettingsAction::DeleteArchived(target) => {
+                self.delete_archived_pane(&target);
+            }
+            SettingsAction::InstallRecommendedIntegrations => {
+                self.install_recommended_integrations()
+            }
+            SettingsAction::SaveKeybinding { target, key } => {
+                match self.save_keybinding(&target, &key) {
+                    Ok(()) => self.state.settings.keybind_capture = None,
+                    Err(error) => {
+                        if let Some(capture) = self.state.settings.keybind_capture.as_mut() {
+                            capture.error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn handle_settings_key(&mut self, key: KeyEvent) {
         let previous_section = self.state.settings.section;
         if let Some(action) = update_settings_state(&mut self.state, key) {
-            match action {
-                SettingsAction::SaveTheme(name) => self.save_theme(&name),
-                SettingsAction::SaveStatusIndicators(style) => self.save_status_indicators(style),
-                SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
-                SettingsAction::SaveAgentBorderLabels(enabled) => {
-                    self.save_agent_border_labels(enabled)
-                }
-                SettingsAction::SaveConfigEdit(edit) => self.save_config_edit(edit),
-                SettingsAction::RestoreArchived(target) => {
-                    self.restore_archived_pane(&target);
-                }
-                SettingsAction::DeleteArchived(target) => {
-                    self.delete_archived_pane(&target);
-                }
-                SettingsAction::InstallRecommendedIntegrations => {
-                    self.install_recommended_integrations()
-                }
-            }
+            self.apply_settings_action(action);
         }
         if previous_section != SettingsSection::Integrations
             && self.state.settings.section == SettingsSection::Integrations
@@ -165,7 +185,9 @@ pub(crate) fn settings_section_item_count(state: &AppState, section: SettingsSec
         SettingsSection::Indicators | SettingsSection::Sound | SettingsSection::PaneLabels => 2,
         SettingsSection::Toast => 4,
         SettingsSection::Archive => state.archive_entries().len(),
-        SettingsSection::Keybindings => crate::ui::settings_keybinding_rows(state).len(),
+        SettingsSection::Keybindings => {
+            crate::app::settings_keybindings::settings_keybinding_rows(state).len()
+        }
         SettingsSection::Providers
         | SettingsSection::Integrations
         | SettingsSection::SourceControl
@@ -191,6 +213,7 @@ fn default_selected_index(state: &AppState, section: SettingsSection) -> usize {
 /// entry path can reach them unprobed.
 fn select_section(state: &mut AppState, section: SettingsSection) {
     state.settings.section = section;
+    state.settings.keybind_capture = None;
     state.settings.list.selected = default_selected_index(state, section);
     state.settings.archive_delete_armed = false;
     if matches!(
@@ -269,6 +292,7 @@ fn move_selection(state: &mut AppState, delta: isize) {
     }
     if state.settings.list.selected != previous {
         state.settings.archive_delete_armed = false;
+        state.settings.keybind_capture = None;
         if state.settings.section == SettingsSection::Theme {
             preview_selected_theme(state);
         }
@@ -300,7 +324,43 @@ fn activate_selection(state: &mut AppState) -> Option<SettingsAction> {
         SettingsSection::Integrations if integrations_need_install(state) => {
             Some(SettingsAction::InstallRecommendedIntegrations)
         }
+        SettingsSection::Keybindings => {
+            crate::app::settings_keybindings::keybinding_target(state, idx)?;
+            state.settings.keybind_capture = Some(crate::app::state::KeybindCapture {
+                row: idx,
+                error: None,
+            });
+            None
+        }
         _ => None,
+    }
+}
+
+/// The chord the operator pressed while a keybindings row is capturing.
+///
+/// The chord is validated with the same function the 6b add-action modal uses,
+/// so a chord that is already bound is refused here for exactly the reason it
+/// would be refused there, and the refusal is shown on the row.
+fn capture_keybinding(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
+    let row = state.settings.keybind_capture.as_ref()?.row;
+    if key.code == KeyCode::Esc {
+        state.settings.keybind_capture = None;
+        return None;
+    }
+    if matches!(key.code, KeyCode::Modifier(_)) {
+        return None;
+    }
+    let target = crate::app::settings_keybindings::keybinding_target(state, row)?;
+    let label = crate::config::format_key_combo((key.code, key.modifiers));
+    let mut config = crate::config::Config::load().config;
+    match crate::config::validate_user_action_key(&mut config, &label) {
+        Ok(label) => Some(SettingsAction::SaveKeybinding { target, key: label }),
+        Err(error) => {
+            if let Some(capture) = state.settings.keybind_capture.as_mut() {
+                capture.error = Some(error);
+            }
+            None
+        }
     }
 }
 
@@ -325,6 +385,9 @@ fn delete_archive_selection(state: &mut AppState) -> Option<SettingsAction> {
 pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<SettingsAction> {
     if update_settings_search(state, key) {
         return None;
+    }
+    if state.settings.keybind_capture.is_some() {
+        return capture_keybinding(state, key);
     }
     match key.code {
         KeyCode::Char('/') => {
@@ -1062,7 +1125,7 @@ mod tests {
     #[test]
     fn keybindings_lists_actions_with_their_keys() {
         let state = state_with_workspaces(&["test"]);
-        let rows = crate::ui::settings_keybinding_rows(&state);
+        let rows = crate::app::settings_keybindings::settings_keybinding_rows(&state);
 
         assert!(rows.iter().any(|row| row.heading && row.label == "global"));
         assert!(rows
