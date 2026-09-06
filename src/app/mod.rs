@@ -909,6 +909,7 @@ impl App {
             sidebar_max_width,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
+            dock_surface_override: false,
             dock_tab: Some(state::DockSurface::Home),
             dock_open_surfaces: state::DockSurface::DEFAULT_OPEN.to_vec(),
             dock_maximized: false,

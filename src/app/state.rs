@@ -1321,6 +1321,8 @@ pub(crate) struct SidebarPresentationState {
 pub(crate) struct DockPresentationState {
     pub(crate) width: u16,
     pub(crate) collapsed: bool,
+    /// An explicit surface pick wins until the next sidebar/work view change.
+    pub(crate) surface_override: bool,
     /// Active surface. `None` while the dock is a chooser with nothing open.
     pub(crate) tab: Option<DockSurface>,
     pub(crate) open_surfaces: Vec<DockSurface>,
@@ -1358,6 +1360,7 @@ impl Default for DockPresentationState {
         Self {
             width: crate::ui::DOCK_DEFAULT_WIDTH,
             collapsed: true,
+            surface_override: false,
             tab: Some(DockSurface::Home),
             open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
             maximized: false,
@@ -2878,6 +2881,9 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub dock_width: u16,
     pub dock_collapsed: bool,
+    /// Set by an explicit dock pick and cleared by `follow_view`.
+    /// Attach-local TUI state; it never enters server state or the JSON API.
+    pub(crate) dock_surface_override: bool,
     /// Active dock surface, `None` when nothing is open and the dock shows the
     /// surface chooser. TUI presentation state; never leaves the client.
     pub dock_tab: Option<DockSurface>,
@@ -3565,6 +3571,7 @@ impl AppState {
             return;
         }
         self.sidebar_group_mode = mode;
+        self.follow_view(mode);
         self.sidebar_group_menu_selected = mode.view_index();
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
@@ -3666,6 +3673,11 @@ impl AppState {
     /// Open `surface` as a tab and make it active. Already-open surfaces are
     /// only reactivated, so the strip order never shuffles under the user.
     pub(crate) fn open_dock_surface(&mut self, surface: DockSurface) {
+        self.dock_surface_override = true;
+        self.select_dock_surface(surface);
+    }
+
+    fn select_dock_surface(&mut self, surface: DockSurface) {
         if !self.dock_open_surfaces.contains(&surface) {
             self.dock_open_surfaces.push(surface);
         }
@@ -3675,6 +3687,21 @@ impl AppState {
         if surface == DockSurface::Editor {
             self.retry_dock_editor();
         }
+    }
+
+    /// Keep the dock on the compact companion for a sidebar or full-screen
+    /// work view. A later explicit surface pick remains visible until another
+    /// view change calls this function.
+    pub(crate) fn follow_view(&mut self, view: SidebarGroupMode) {
+        let surface = match view {
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => DockSurface::Agents,
+            SidebarGroupMode::LinearTeam => DockSurface::Linear,
+            SidebarGroupMode::RepoPr => DockSurface::Pr,
+            SidebarGroupMode::Missive => DockSurface::Missive,
+        };
+        self.dock_collapsed = false;
+        self.select_dock_surface(surface);
+        self.dock_surface_override = false;
     }
 
     /// Close `surface`. The active surface moves to the neighbour that took its
@@ -3731,6 +3758,7 @@ impl AppState {
     pub(crate) fn swap_dock_presentation(&mut self, other: &mut DockPresentationState) {
         std::mem::swap(&mut self.dock_width, &mut other.width);
         std::mem::swap(&mut self.dock_collapsed, &mut other.collapsed);
+        std::mem::swap(&mut self.dock_surface_override, &mut other.surface_override);
         std::mem::swap(&mut self.dock_tab, &mut other.tab);
         std::mem::swap(&mut self.dock_open_surfaces, &mut other.open_surfaces);
         std::mem::swap(&mut self.dock_maximized, &mut other.maximized);
@@ -4277,6 +4305,7 @@ impl AppState {
             sidebar_max_width: 36,
             dock_width: crate::ui::DOCK_DEFAULT_WIDTH,
             dock_collapsed: true,
+            dock_surface_override: false,
             dock_tab: Some(DockSurface::Home),
             dock_open_surfaces: DockSurface::DEFAULT_OPEN.to_vec(),
             dock_maximized: false,
