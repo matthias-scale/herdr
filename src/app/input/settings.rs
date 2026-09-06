@@ -355,9 +355,12 @@ fn capture_keybinding(state: &mut AppState, key: KeyEvent) -> Option<SettingsAct
     let mut config = crate::config::Config::load().config;
     match crate::config::validate_user_action_key(&mut config, &label) {
         Ok(label) => Some(SettingsAction::SaveKeybinding { target, key: label }),
-        Err(error) => {
+        Err(diagnostic) => {
+            // The validator phrases its refusal in terms of the temporary
+            // action it probes with, which means nothing on this row.
+            tracing::debug!(message = %diagnostic, "keybinding capture refused");
             if let Some(capture) = state.settings.keybind_capture.as_mut() {
-                capture.error = Some(error);
+                capture.error = Some(format!("{label} is already bound; press another chord"));
             }
             None
         }
