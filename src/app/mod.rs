@@ -912,7 +912,7 @@ impl App {
             dock_pr_focused: false,
             dock_pr_checkout_menu: None,
             dock_pr_pending_land: None,
-            dock_diff_ignore_whitespace: false,
+            dock_diff_ignore_whitespace: config.ui.hide_whitespace_in_diff,
             dock_diff_selected: 0,
             dock_diff_collapsed: std::collections::HashSet::new(),
             dock_diff_request: None,
@@ -977,7 +977,6 @@ impl App {
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
             combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
-            hide_whitespace_in_diff: config.ui.hide_whitespace_in_diff,
             new_thread_workspace: config.ui.new_thread_workspace,
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
@@ -2098,7 +2097,10 @@ impl App {
                     self.state.combine_repos_across_hosts = config.ui.combine_repos_across_hosts;
                     self.state.mark_sidebar_projection_changed();
                 }
-                self.state.hide_whitespace_in_diff = config.ui.hide_whitespace_in_diff;
+                if self.state.dock_diff_ignore_whitespace != config.ui.hide_whitespace_in_diff {
+                    self.state.dock_diff_ignore_whitespace = config.ui.hide_whitespace_in_diff;
+                    self.state.invalidate_dock_diff();
+                }
                 self.state.new_thread_workspace = config.ui.new_thread_workspace;
                 self.state
                     .add_project_start_dir

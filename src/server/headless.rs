@@ -1543,10 +1543,34 @@ impl HeadlessServer {
     #[cfg(not(unix))]
     fn nudge_handoff_panes_on_first_client_attach(&mut self) {}
 
+    /// Give a fresh attach the dock state the server holds, so a client starts
+    /// from the config rather than from the struct default.
+    fn seed_client_dock_presentation(&mut self, client_id: u64) {
+        let ignore_whitespace = self.app.state.dock_diff_ignore_whitespace;
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.dock_presentation.diff_ignore_whitespace = ignore_whitespace;
+        }
+    }
+
+    /// A reloaded `ui.hide_whitespace_in_diff` reaches every attach, not only
+    /// the one that happens to be swapped into `AppState`, and drops the diff
+    /// each of them has rendered.
+    fn apply_dock_diff_whitespace_to_clients(&mut self, ignore_whitespace: bool) {
+        for client in self.clients.values_mut() {
+            client.dock_presentation.diff_ignore_whitespace = ignore_whitespace;
+            client.dock_presentation.diff_active_key = None;
+            client.dock_presentation.diff_request = None;
+        }
+    }
+
     fn reload_server_config(&mut self, notify_success: bool) -> crate::config::ConfigReloadReport {
         let server_keybindings = self.server_keybindings.clone();
         apply_keybindings(&mut self.app, &server_keybindings);
+        let previous_diff_whitespace = self.app.state.dock_diff_ignore_whitespace;
         let report = self.app.apply_config_from_disk(notify_success);
+        if self.app.state.dock_diff_ignore_whitespace != previous_diff_whitespace {
+            self.apply_dock_diff_whitespace_to_clients(self.app.state.dock_diff_ignore_whitespace);
+        }
         self.app.take_config_reloaded_from_disk();
         self.server_keybindings = app_keybindings(&self.app);
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
@@ -3186,6 +3210,7 @@ impl HeadlessServer {
                         Some(writer),
                     ),
                 );
+                self.seed_client_dock_presentation(client_id);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
                     client.sidebar_presentation.group_mode = group_mode;
@@ -5663,6 +5688,60 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+        }
+    }
+
+    #[test]
+    fn a_fresh_attach_starts_from_the_config_diff_whitespace_choice() {
+        let mut server = test_headless_server();
+        server.app.state.dock_diff_ignore_whitespace = true;
+        server.clients.insert(
+            7,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                7,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        assert!(!server.clients[&7].dock_presentation.diff_ignore_whitespace);
+
+        server.seed_client_dock_presentation(7);
+
+        assert!(server.clients[&7].dock_presentation.diff_ignore_whitespace);
+    }
+
+    #[test]
+    fn a_reloaded_diff_whitespace_choice_reaches_every_attach_and_drops_its_diff() {
+        let mut server = test_headless_server();
+        for client_id in [1, 2] {
+            let mut client = ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                client_id,
+                RenderEncoding::SemanticFrame,
+                None,
+            );
+            client.dock_presentation.diff_active_key = Some(crate::app::state::DiffCacheKey {
+                root: std::path::PathBuf::from("/repo"),
+                base: "main".into(),
+                ignore_whitespace: false,
+            });
+            server.clients.insert(client_id, client);
+        }
+
+        server.apply_dock_diff_whitespace_to_clients(true);
+
+        for client_id in [1, 2] {
+            let presentation = &server.clients[&client_id].dock_presentation;
+            assert!(presentation.diff_ignore_whitespace);
+            assert!(presentation.diff_active_key.is_none());
+            assert!(presentation.diff_request.is_none());
         }
     }
 
