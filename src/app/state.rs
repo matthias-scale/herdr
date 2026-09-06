@@ -933,28 +933,289 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
-/// Team / assignee narrowing for the work-item grouping modes. TUI-only
-/// presentation state: it selects which of the projection's tickets the
-/// sidebar shows and never reaches the server.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+/// Per-view narrowing for work-item projections. This remains TUI-only state:
+/// provider observations are shared runtime facts, while each attached client
+/// chooses its own filters.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub(crate) struct SidebarWorkFilter {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy field names preserve existing 2b presentation files.
     pub(crate) team: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) assignee: Option<String>,
+    pub(crate) linear_statuses: std::collections::BTreeSet<LinearStatusFilter>,
+    pub(crate) github: GithubSidebarFilter,
+    pub(crate) missive: MissiveSidebarFilter,
 }
 
 impl SidebarWorkFilter {
-    /// Header chip: what the current narrowing is, in the operator's words.
-    pub(crate) fn label(&self) -> String {
-        match (self.team.as_deref(), self.assignee.as_deref()) {
-            (_, Some(assignee)) => format!("assigned to {assignee}"),
-            (_, None) => "all assignees".into(),
+    pub(crate) fn linear_label(&self) -> String {
+        format!(
+            "{} · {} · {}",
+            self.team.as_deref().unwrap_or("all teams"),
+            assignee_filter_label(self.assignee.as_deref()),
+            if self.linear_statuses == default_linear_statuses() {
+                "active".into()
+            } else {
+                format!("{} statuses", self.linear_statuses.len())
+            }
+        )
+    }
+
+    pub(crate) fn github_label(&self) -> String {
+        format!(
+            "{} · drafts {} · {}",
+            assignee_filter_label(self.github.assignee.as_deref()),
+            if self.github.show_drafts {
+                "shown"
+            } else {
+                "hidden"
+            },
+            self.github.state.label(),
+        )
+    }
+
+    pub(crate) fn missive_label(&self) -> String {
+        format!(
+            "{} · closed {}",
+            assignee_filter_label(self.missive.assignee.as_deref()),
+            if self.missive.show_closed {
+                "shown"
+            } else {
+                "hidden"
+            },
+        )
+    }
+
+    pub(crate) fn matches_linear(
+        &self,
+        ticket: &crate::work_index::WorkTicket,
+        session: &crate::work_index::WorkIndexSession,
+    ) -> bool {
+        if let Some(team) = self.team.as_deref() {
+            let actual_team = ticket.identifier.split_once('-').map(|(team, _)| team);
+            if actual_team != Some(team) {
+                return false;
+            }
+        }
+        if !assignee_filter_matches(
+            self.assignee.as_deref(),
+            ticket.assignee.as_deref(),
+            session.linear.viewer.as_deref(),
+        ) {
+            return false;
+        }
+        ticket
+            .state
+            .as_deref()
+            .and_then(LinearStatusFilter::from_name)
+            .is_none_or(|status| self.linear_statuses.contains(&status))
+    }
+
+    pub(crate) fn matches_github(
+        &self,
+        item: &crate::work_index::WorkItem,
+        session: &crate::work_index::WorkIndexSession,
+    ) -> bool {
+        if !item.source.github {
+            return true;
+        }
+        if item.draft && !self.github.show_drafts {
+            return false;
+        }
+        if item
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| !state.eq_ignore_ascii_case(self.github.state.label()))
+        {
+            return false;
+        }
+        let selected = self.github.assignee.as_deref();
+        if selected.is_none() {
+            return true;
+        }
+        let resolved = if selected == Some("me") {
+            let Some(viewer) = session.github.viewer.as_deref() else {
+                return true;
+            };
+            viewer
+        } else {
+            selected.unwrap_or_default()
+        };
+        item.assignees
+            .iter()
+            .any(|assignee| assignee.eq_ignore_ascii_case(resolved))
+    }
+
+    pub(crate) fn matches_missive(
+        &self,
+        assignee: Option<&str>,
+        closed: Option<bool>,
+        session: &crate::work_index::WorkIndexSession,
+    ) -> bool {
+        let assignee_matches = assignee.is_none_or(|actual| {
+            assignee_filter_matches(
+                self.missive.assignee.as_deref(),
+                Some(actual),
+                session.missive.viewer.as_deref(),
+            )
+        });
+        let closed_matches = closed.is_none_or(|closed| self.missive.show_closed || !closed);
+        assignee_matches && closed_matches
+    }
+}
+
+impl Default for SidebarWorkFilter {
+    fn default() -> Self {
+        Self {
+            team: Some("SCA".into()),
+            assignee: Some("me".into()),
+            linear_statuses: default_linear_statuses(),
+            github: GithubSidebarFilter::default(),
+            missive: MissiveSidebarFilter::default(),
+        }
+    }
+}
+
+fn assignee_filter_label(value: Option<&str>) -> &str {
+    value.unwrap_or("all")
+}
+
+fn assignee_filter_matches(
+    selected: Option<&str>,
+    actual: Option<&str>,
+    viewer: Option<&str>,
+) -> bool {
+    let Some(selected) = selected else {
+        return true;
+    };
+    let selected = if selected == "me" {
+        let Some(viewer) = viewer else {
+            return true;
+        };
+        viewer
+    } else {
+        selected
+    };
+    actual.is_some_and(|actual| actual.eq_ignore_ascii_case(selected))
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LinearStatusFilter {
+    Draft,
+    Backlog,
+    Ready,
+    Todo,
+    InProgress,
+    InReview,
+    Done,
+    Canceled,
+    Duplicate,
+    Triage,
+}
+
+impl LinearStatusFilter {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Draft,
+        Self::Backlog,
+        Self::Ready,
+        Self::Todo,
+        Self::InProgress,
+        Self::InReview,
+        Self::Done,
+        Self::Canceled,
+        Self::Duplicate,
+        Self::Triage,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "Draft",
+            Self::Backlog => "Backlog",
+            Self::Ready => "Ready",
+            Self::Todo => "Todo",
+            Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
+            Self::Done => "Done",
+            Self::Canceled => "Canceled",
+            Self::Duplicate => "Duplicate",
+            Self::Triage => "Triage",
         }
     }
 
-    pub(crate) fn team_label(&self) -> String {
-        self.team.clone().unwrap_or_else(|| "all teams".into())
+    fn from_name(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|status| status.label().eq_ignore_ascii_case(value))
+    }
+}
+
+fn default_linear_statuses() -> std::collections::BTreeSet<LinearStatusFilter> {
+    LinearStatusFilter::ALL
+        .into_iter()
+        .filter(|status| {
+            !matches!(
+                status,
+                LinearStatusFilter::Canceled | LinearStatusFilter::Duplicate
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub(crate) struct GithubSidebarFilter {
+    pub(crate) assignee: Option<String>,
+    pub(crate) show_drafts: bool,
+    pub(crate) state: GithubStateFilter,
+}
+
+impl Default for GithubSidebarFilter {
+    fn default() -> Self {
+        Self {
+            assignee: Some("me".into()),
+            show_drafts: false,
+            state: GithubStateFilter::Open,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GithubStateFilter {
+    #[default]
+    Open,
+    Merged,
+    Closed,
+}
+
+impl GithubStateFilter {
+    pub(crate) const ALL: [Self; 3] = [Self::Open, Self::Merged, Self::Closed];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub(crate) struct MissiveSidebarFilter {
+    pub(crate) assignee: Option<String>,
+    pub(crate) show_closed: bool,
+}
+
+impl Default for MissiveSidebarFilter {
+    fn default() -> Self {
+        Self {
+            assignee: Some("me".into()),
+            show_closed: false,
+        }
     }
 }
 
@@ -972,6 +1233,7 @@ pub(crate) enum SidebarGroupMode {
 }
 
 impl SidebarGroupMode {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 5] = [
         Self::Repo,
         Self::RepoPr,
@@ -980,33 +1242,27 @@ impl SidebarGroupMode {
         Self::Missive,
     ];
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Repo => "Repo",
-            Self::RepoPr => "Repo / PR",
-            Self::RepoWorktree => "Repo / worktree",
-            Self::LinearTeam => "Linear team",
-            Self::Missive => "Missive threads",
-        }
-    }
+    pub(crate) const VIEWS: [Self; 4] = [Self::Repo, Self::LinearTeam, Self::RepoPr, Self::Missive];
 
-    pub(crate) fn icon(self) -> &'static str {
+    pub(crate) fn view_label(self) -> &'static str {
         match self {
-            Self::Repo => "⊞",
-            Self::RepoPr => "⑂",
-            Self::RepoWorktree => "⎇",
-            Self::LinearTeam => "◎",
-            Self::Missive => "✉",
+            Self::Repo | Self::RepoWorktree => "Repo",
+            Self::LinearTeam => "Linear",
+            Self::RepoPr => "GitHub",
+            Self::Missive => "Missive",
         }
     }
 
     pub(crate) fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+        let index = self.view_index();
+        Self::VIEWS[(index + 1) % Self::VIEWS.len()]
     }
 
-    pub(crate) fn index(self) -> usize {
-        Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0)
+    pub(crate) fn view_index(self) -> usize {
+        Self::VIEWS
+            .iter()
+            .position(|mode| *mode == self)
+            .unwrap_or(0)
     }
 
     pub(crate) fn collapse_namespace(self) -> &'static str {
@@ -3280,7 +3536,7 @@ impl AppState {
             return;
         }
         self.sidebar_group_mode = mode;
-        self.sidebar_group_menu_selected = mode.index();
+        self.sidebar_group_menu_selected = mode.view_index();
         self.sidebar_group_menu_open = false;
         self.sidebar_group_mode_persistence_request = Some(mode);
         self.sidebar_selected_work_group = None;

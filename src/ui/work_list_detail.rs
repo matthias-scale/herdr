@@ -560,6 +560,10 @@ pub(crate) fn sorted_filtered_tickets<'a>(
     open_only: bool,
     observed_at: SystemTime,
     has_context_pr: bool,
+    sidebar_filter: Option<(
+        &crate::app::state::SidebarWorkFilter,
+        &crate::work_index::WorkIndexSession,
+    )>,
 ) -> Vec<TicketItem<'a>> {
     let mut seen = std::collections::HashSet::new();
     let tickets = items
@@ -593,7 +597,12 @@ pub(crate) fn sorted_filtered_tickets<'a>(
                 has_context_pr,
             }
         })
-        .filter(|item| (!open_only || item.is_open()) && item.matches(query))
+        .filter(|item| {
+            (!open_only || item.is_open())
+                && item.matches(query)
+                && sidebar_filter
+                    .is_none_or(|(filter, session)| filter.matches_linear(item.summary, session))
+        })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
         ticket_group_rank(left.summary.group)
@@ -694,6 +703,10 @@ pub(crate) fn sorted_filtered_prs<'a>(
     open_only: bool,
     observed_at: SystemTime,
     approval_label: &'a str,
+    sidebar_filter: Option<(
+        &crate::app::state::SidebarWorkFilter,
+        &crate::work_index::WorkIndexSession,
+    )>,
 ) -> Vec<PrItem<'a>> {
     let mut rows = items
         .iter()
@@ -712,7 +725,12 @@ pub(crate) fn sorted_filtered_prs<'a>(
                 approval_label,
             }
         })
-        .filter(|item| (!open_only || item.is_open()) && item.matches(query))
+        .filter(|item| {
+            (!open_only || item.is_open())
+                && item.matches(query)
+                && sidebar_filter
+                    .is_none_or(|(filter, session)| filter.matches_github(item.summary, session))
+        })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
         left.row()
@@ -871,6 +889,7 @@ mod tests {
             true,
             SystemTime::UNIX_EPOCH + Duration::from_secs(60),
             "approved",
+            None,
         );
         assert_eq!(
             rows.iter().map(|item| item.row().group).collect::<Vec<_>>(),
@@ -883,6 +902,47 @@ mod tests {
             [Some(3), Some(1), Some(2)]
         );
         assert!(rows[0].matches("#3"));
+    }
+
+    #[test]
+    fn pr_projection_applies_github_assignee_draft_and_state_filters() {
+        let mut visible = item(1, PrAudience::Authored, 10);
+        visible.source.github = true;
+        visible.assignees = vec!["Matthias".into()];
+        let mut draft = item(2, PrAudience::Authored, 20);
+        draft.source.github = true;
+        draft.assignees = vec!["Matthias".into()];
+        draft.draft = true;
+        let mut merged = item(3, PrAudience::Authored, 30);
+        merged.source.github = true;
+        merged.assignees = vec!["Matthias".into()];
+        merged.pr_state = Some("merged".into());
+        let mut other = item(4, PrAudience::Authored, 40);
+        other.source.github = true;
+        other.assignees = vec!["Ada".into()];
+        let items = vec![visible, draft, merged, other];
+        let filters = crate::app::state::SidebarWorkFilter::default();
+        let mut session = crate::work_index::WorkIndexSession::default();
+        session.github.viewer = Some("Matthias".into());
+        let cache = crate::work_index::WorkItemDetailCache::default();
+
+        let rows = sorted_filtered_prs(
+            &items,
+            &cache,
+            "",
+            PrSort::Number,
+            false,
+            SystemTime::UNIX_EPOCH,
+            "approved",
+            Some((&filters, &session)),
+        );
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.summary.pr_number)
+                .collect::<Vec<_>>(),
+            [Some(1)]
+        );
     }
 
     #[test]
@@ -1041,6 +1101,7 @@ mod tests {
             false,
             SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             false,
+            None,
         );
         assert_eq!(
             rows.iter().map(|item| item.row().group).collect::<Vec<_>>(),
@@ -1068,8 +1129,48 @@ mod tests {
             true,
             SystemTime::UNIX_EPOCH,
             false,
+            None,
         );
         assert!(open.is_empty());
+    }
+
+    #[test]
+    fn ticket_projection_applies_linear_team_assignee_and_status_filters() {
+        let mut assigned = ticket("SCA-1", TicketGroup::Assigned, 1, 10);
+        assigned.assignee = Some("Matthias".into());
+        assigned.state = Some("In Progress".into());
+        let mut canceled = ticket("SCA-2", TicketGroup::Assigned, 2, 20);
+        canceled.assignee = Some("Matthias".into());
+        canceled.state = Some("Canceled".into());
+        let mut other = ticket("OPS-3", TicketGroup::Assigned, 3, 30);
+        other.assignee = Some("Matthias".into());
+        let items = vec![
+            ticket_item(assigned),
+            ticket_item(canceled),
+            ticket_item(other),
+        ];
+        let filters = crate::app::state::SidebarWorkFilter::default();
+        let mut session = crate::work_index::WorkIndexSession::default();
+        session.linear.viewer = Some("Matthias".into());
+        let cache = crate::work_index::WorkItemDetailCache::default();
+
+        let rows = sorted_filtered_tickets(
+            &items,
+            &cache,
+            "",
+            TicketSort::Identifier,
+            false,
+            SystemTime::UNIX_EPOCH,
+            false,
+            Some((&filters, &session)),
+        );
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.summary.identifier.as_str())
+                .collect::<Vec<_>>(),
+            ["SCA-1"]
+        );
     }
 
     #[test]
