@@ -1,0 +1,79 @@
+{
+  "id": "issue_redacted",
+  "identifier": "SCA-3165",
+  "title": "Render ticket details from the CLI response",
+  "description": "## What it does\n\nShows the full ticket body and wraps https://example.invalid/a/very/long/path/that/continues/past/the/detail-width.\n\n- [x] Parse ticket fields\n- [ ] Render every section",
+  "priority": 2,
+  "state": {
+    "id": "state_redacted",
+    "name": "In Progress"
+  },
+  "assignee": {
+    "id": "user_redacted",
+    "name": "Example User"
+  },
+  "team": {
+    "id": "team_redacted",
+    "key": "SCA",
+    "name": "Example Team"
+  },
+  "cycle": {
+    "id": "cycle_redacted",
+    "number": 42,
+    "name": null
+  },
+  "createdAt": "2026-09-01T08:00:00.000Z",
+  "updatedAt": "2026-09-05T10:30:00.000Z",
+  "branchName": "issue/sca-3165-ticket-details",
+  "dueDate": null,
+  "estimate": null,
+  "project": null,
+  "projectMilestone": null,
+  "parent": null,
+  "labels": {
+    "nodes": []
+  },
+  "children": {
+    "nodes": []
+  },
+  "relations": {
+    "nodes": [
+      {
+        "id": "relation_redacted",
+        "type": "blocks",
+        "relatedIssue": {
+          "id": "related_issue_redacted",
+          "identifier": "SCA-3200"
+        }
+      }
+    ]
+  },
+  "inverseRelations": {
+    "nodes": [
+      {
+        "id": "inverse_relation_redacted",
+        "type": "blocks",
+        "issue": {
+          "id": "inverse_issue_redacted",
+          "identifier": "SCA-3100"
+        }
+      }
+    ]
+  },
+  "comments": {
+    "nodes": [
+      {
+        "id": "comment_redacted",
+        "body": "The parser now sees this comment.",
+        "createdAt": "2026-09-05T11:00:00.000Z",
+        "editedAt": null,
+        "parentId": null,
+        "user": {
+          "id": "comment_user_redacted",
+          "displayName": "Example Reviewer"
+        },
+        "replies": []
+      }
+    ]
+  }
+}
