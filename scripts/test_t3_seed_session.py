@@ -196,7 +196,11 @@ class T3SeedSessionTest(unittest.TestCase):
                 (panes["sample-settled"]["pane_id"], str(self.claude_fixture)),
             ],
         )
-        self.assertEqual(self.sleep_log.read_text().splitlines(), ["5", "5", "5"])
+        # Three 5 s gaps between agent starts, then the quiet wait before
+        # settling polls twice more with the same 5 s pause.
+        self.assertEqual(
+            self.sleep_log.read_text().splitlines(), ["5", "5", "5", "5", "5"]
+        )
 
         repeated = self.run_seed("--agents")
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
