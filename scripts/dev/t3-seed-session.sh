@@ -48,13 +48,15 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 2
 fi
 
-live_socket=$(realpath -m -- "$HOME/.config/herdr/herdr.sock")
+# realpath -m is GNU-only; macOS CI lacks it, so normalise with python.
+abs_path() { python3 -c "import os,sys;print(os.path.abspath(os.path.expanduser(sys.argv[1])))" "$1"; }
+live_socket=$(abs_path "$HOME/.config/herdr/herdr.sock")
 for socket_var in HERDR_SOCKET_PATH HERDR_CLIENT_SOCKET_PATH; do
     socket_path=${!socket_var:-}
     if [[ ${socket_path:0:1} == "~" && ${socket_path:1:1} == "/" ]]; then
         socket_path=$HOME/${socket_path#\~/}
     fi
-    if [[ -n $socket_path && $(realpath -m -- "$socket_path") == "$live_socket" ]]; then
+    if [[ -n $socket_path && $(abs_path "$socket_path") == "$live_socket" ]]; then
         printf 'refusing to run while %s points at the live server socket\n' "$socket_var" >&2
         exit 2
     fi
