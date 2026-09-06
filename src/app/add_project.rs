@@ -418,6 +418,7 @@ impl App {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn fake_program(name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
@@ -432,6 +433,7 @@ mod tests {
         program
     }
 
+    #[cfg(unix)]
     #[test]
     fn github_repo_list_uses_injected_gh_and_owner() {
         let gh = fake_program(
