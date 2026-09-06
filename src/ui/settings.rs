@@ -623,7 +623,7 @@ fn render_settings_search(app: &AppState, frame: &mut Frame, area: Rect) {
         )
     } else if query.is_empty() {
         (
-            "🔍 search           /".to_string(),
+            "🔍 / to search".to_string(),
             Style::default().fg(p.overlay1),
         )
     } else {
