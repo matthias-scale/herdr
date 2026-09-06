@@ -13,8 +13,8 @@ use crate::work_context::{
     repo_slugs_match, PaneWorkRole,
 };
 
-pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const WORK_INDEX_BATCH_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const WORK_INDEX_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const WORK_ITEM_DETAIL_CACHE_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1021,6 +1021,23 @@ fn pane_pr_urls(panes: &[AgentInfo]) -> Vec<String> {
     urls
 }
 
+fn pane_pr_target(url: &str) -> Option<(String, u64)> {
+    let repo = repo_slug_from_pr_url(url)?;
+    let number = url.trim_end_matches('/').rsplit('/').next()?.parse().ok()?;
+    Some((repo, number))
+}
+
+fn upsert_github(pull_requests: &mut Vec<GithubPullRequest>, pull_request: GithubPullRequest) {
+    if let Some(index) = pull_requests
+        .iter()
+        .position(|existing| existing.url == pull_request.url)
+    {
+        pull_requests[index] = pull_request;
+    } else {
+        pull_requests.push(pull_request);
+    }
+}
+
 fn pane_ticket_ids(panes: &[AgentInfo]) -> Vec<String> {
     let mut ids = panes
         .iter()
@@ -1163,7 +1180,41 @@ pub(crate) fn refresh_work_index_with_missive(
     let mut degraded = WorkIndexUnavailable::default();
     let previous_github = previous_github(previous);
     let mut github = Vec::new();
-    let mut listed_pr_urls = HashSet::new();
+    for url in pane_pr_urls(panes) {
+        let Some((repo, number)) = pane_pr_target(&url) else {
+            degraded.record(WorkIndexSource::Github, "pane pull request URL is invalid");
+            continue;
+        };
+        match fetch_github_pull_request(
+            &repo,
+            number,
+            gh_program,
+            target_deadline(batch_deadline, target_timeout),
+        ) {
+            Ok(pull_request) => upsert_github(&mut github, pull_request),
+            Err(RefreshError::TimedOut) => {
+                degraded.record(
+                    WorkIndexSource::Github,
+                    "pull request observation timed out",
+                );
+                if let Some(pull_request) = previous_github
+                    .iter()
+                    .find(|pull_request| pull_request.url == url)
+                {
+                    upsert_github(&mut github, pull_request.clone());
+                }
+            }
+            Err(RefreshError::Failed(message)) => {
+                degraded.record(WorkIndexSource::Github, message);
+                if let Some(pull_request) = previous_github
+                    .iter()
+                    .find(|pull_request| pull_request.url == url)
+                {
+                    upsert_github(&mut github, pull_request.clone());
+                }
+            }
+        }
+    }
     for repo in &repos {
         match fetch_github_pull_requests(
             repo,
@@ -1171,7 +1222,6 @@ pub(crate) fn refresh_work_index_with_missive(
             target_deadline(batch_deadline, target_timeout),
         ) {
             Ok(mut values) => {
-                listed_pr_urls.extend(values.iter().map(|value| value.url.clone()));
                 let authored = match fetch_github_pr_numbers(
                     repo,
                     gh_program,
@@ -1213,70 +1263,28 @@ pub(crate) fn refresh_work_index_with_missive(
                         PrAudience::Unclassified
                     };
                 }
-                github.append(&mut values)
+                for value in values {
+                    upsert_github(&mut github, value);
+                }
             }
             Err(RefreshError::TimedOut) => {
-                degraded.record(WorkIndexSource::Github, "observation timed out");
-                github.extend(
-                    previous_github
-                        .iter()
-                        .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
-                        .cloned(),
-                );
-            }
-            Err(RefreshError::Failed(message)) => {
-                degraded.record(WorkIndexSource::Github, message);
-                github.extend(
-                    previous_github
-                        .iter()
-                        .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
-                        .cloned(),
-                );
-            }
-        }
-    }
-    for url in pane_pr_urls(panes) {
-        if listed_pr_urls.contains(&url) {
-            continue;
-        }
-        match fetch_github_pull_request(
-            &url,
-            gh_program,
-            target_deadline(batch_deadline, target_timeout),
-        ) {
-            Ok(pull_request) => {
-                if let Some(index) = github
+                degraded.record(WorkIndexSource::Github, "list observation timed out");
+                for pull_request in previous_github
                     .iter()
-                    .position(|existing| existing.url == pull_request.url)
+                    .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
+                    .cloned()
                 {
-                    github[index] = pull_request;
-                } else {
-                    github.push(pull_request);
-                }
-            }
-            Err(RefreshError::TimedOut) => {
-                degraded.record(
-                    WorkIndexSource::Github,
-                    "pull request observation timed out",
-                );
-                if !github.iter().any(|pull_request| pull_request.url == url) {
-                    if let Some(pull_request) = previous_github
-                        .iter()
-                        .find(|pull_request| pull_request.url == url)
-                    {
-                        github.push(pull_request.clone());
-                    }
+                    upsert_github(&mut github, pull_request);
                 }
             }
             Err(RefreshError::Failed(message)) => {
                 degraded.record(WorkIndexSource::Github, message);
-                if !github.iter().any(|pull_request| pull_request.url == url) {
-                    if let Some(pull_request) = previous_github
-                        .iter()
-                        .find(|pull_request| pull_request.url == url)
-                    {
-                        github.push(pull_request.clone());
-                    }
+                for pull_request in previous_github
+                    .iter()
+                    .filter(|pull_request| repo_slugs_match(&pull_request.repo, repo))
+                    .cloned()
+                {
+                    upsert_github(&mut github, pull_request);
                 }
             }
         }
@@ -1720,7 +1728,7 @@ pub(crate) fn resolve_missive_assignees(users: &[MissiveUser]) -> ProviderDirect
     }
 }
 
-const GITHUB_PULL_REQUEST_SUMMARY_FIELDS: &str = "number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url";
+const GITHUB_PULL_REQUEST_SUMMARY_FIELDS: &str = "number,title,author,assignees,state,updatedAt,createdAt,reviewDecision,labels,isDraft,headRefName,url";
 
 fn parse_github_pull_request(value: Value, fallback_repo: &str) -> Option<GithubPullRequest> {
     let url = value.get("url")?.as_str()?.to_string();
@@ -1729,7 +1737,7 @@ fn parse_github_pull_request(value: Value, fallback_repo: &str) -> Option<Github
         number: value.get("number")?.as_u64()?,
         url,
         title: value.get("title")?.as_str()?.to_string(),
-        body: value_text(value.get("body")).unwrap_or_default(),
+        body: String::new(),
         branch: value.get("headRefName")?.as_str()?.to_string(),
         draft: value
             .get("isDraft")
@@ -1791,7 +1799,7 @@ fn fetch_github_pull_requests(
         "--repo",
         repo,
         "--state",
-        "all",
+        "open",
         "--limit",
         "200",
         "--json",
@@ -1821,15 +1829,19 @@ fn fetch_github_pull_requests(
 }
 
 fn fetch_github_pull_request(
-    url: &str,
+    repo: &str,
+    number: u64,
     program: &Path,
     deadline: Instant,
 ) -> Result<GithubPullRequest, RefreshError> {
     let mut command = crate::noninteractive_process::command(program);
+    let number_arg = number.to_string();
     command.args([
         "pr",
         "view",
-        url,
+        &number_arg,
+        "--repo",
+        repo,
         "--json",
         GITHUB_PULL_REQUEST_SUMMARY_FIELDS,
     ]);
@@ -1851,8 +1863,7 @@ fn fetch_github_pull_request(
     let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|_| {
         RefreshError::Failed("GitHub pull request observation returned invalid JSON".into())
     })?;
-    let fallback_repo = repo_slug_from_pr_url(url).unwrap_or_default();
-    parse_github_pull_request(value, &fallback_repo).ok_or_else(|| {
+    parse_github_pull_request(value, repo).ok_or_else(|| {
         RefreshError::Failed("GitHub pull request observation returned an invalid item".into())
     })
 }
@@ -3819,9 +3830,9 @@ esac
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 case "$*" in
-  "pr list --repo pane/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[]' ;;
+  "pr list --repo pane/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[]' ;;
   "pr list --repo pane/repo --state open"*) printf '%s' '[]' ;;
-  "pr view https://github.com/pane/repo/pull/77 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":77,"title":"Merged pane PR","body":"","state":"MERGED","headRefName":"issue/out-9","url":"https://github.com/pane/repo/pull/77"}}' ;;
+  "pr view 77 --repo pane/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":77,"title":"Merged pane PR","state":"MERGED","headRefName":"issue/out-9","url":"https://github.com/pane/repo/pull/77"}}' ;;
   *) exit 42 ;;
 esac
 "#,
@@ -3880,14 +3891,116 @@ esac
             item.source.linear && item.source.pane && item.ticket_ids == ["SCA-9999"]
         }));
         let gh_argv = std::fs::read_to_string(gh_log).expect("GitHub argv");
-        assert!(gh_argv.contains("pr list --repo pane/repo --state all"));
+        assert!(gh_argv.contains("pr list --repo pane/repo --state open"));
         assert!(gh_argv.contains(&format!(
-            "pr view https://github.com/pane/repo/pull/77 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}"
+            "pr view 77 --repo pane/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}"
         )));
         let linear_argv = std::fs::read_to_string(linear_log).expect("Linear argv");
         assert!(linear_argv
             .lines()
             .any(|line| line == "issues read SCA-9999"));
+    }
+
+    #[test]
+    fn observation_budgets_cover_real_provider_latency() {
+        assert!(WORK_INDEX_TARGET_TIMEOUT >= Duration::from_secs(20));
+        assert!(WORK_INDEX_BATCH_TIMEOUT >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn pane_pull_request_finishes_before_slow_list_and_previous_list_items_survive() {
+        let dir = fixture_dir("pane-before-slow-list");
+        let argv_log = dir.join("gh-argv.log");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  "pr view 159 --repo owner/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":159,"title":"Pane first","state":"MERGED","headRefName":"t3/f15","url":"https://github.com/owner/repo/pull/159"}}' ;;
+  "pr list --repo owner/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") exec sleep 1 ;;
+  *) exit 42 ;;
+esac
+"#,
+                argv_log.display()
+            ),
+            "#!/bin/sh\ncase \"$*\" in *\"issues list\"*) printf '%s' '{\"nodes\":[]}' ;; *\"cycles list\"*) printf '%s' '{\"nodes\":[]}' ;; *) printf '%s' '[]' ;; esac\n",
+        );
+        let panes = panes_with_context(crate::work_context::PaneWorkContext {
+            repo: Some("owner/repo".into()),
+            pr_urls: vec!["https://github.com/owner/repo/pull/159".into()],
+            ..Default::default()
+        });
+        let previous = Snapshot {
+            items: vec![WorkItem {
+                repo: "owner/repo".into(),
+                pr_number: Some(7),
+                pr_url: Some("https://github.com/owner/repo/pull/7".into()),
+                pr_title: Some("Previous list item".into()),
+                pr_state: Some("open".into()),
+                draft: false,
+                review_decision: None,
+                created_at: None,
+                updated_at: None,
+                additions: 0,
+                deletions: 0,
+                author: None,
+                assignees: Vec::new(),
+                labels: Vec::new(),
+                check_state: PrCheckState::Unknown,
+                audience: PrAudience::Unclassified,
+                ticket_ids: Vec::new(),
+                ticket_title: None,
+                ticket_state: None,
+                ticket_details: Vec::new(),
+                branch: Some("previous".into()),
+                preview_urls: Vec::new(),
+                panes: Vec::new(),
+                source: WorkItemSource {
+                    github: true,
+                    ..WorkItemSource::default()
+                },
+            }],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        let snapshot = refresh_work_index_with_missive(
+            &config(),
+            &MissiveConfig::default(),
+            &panes,
+            WorkIndexRefreshContext {
+                previous: Some(&previous),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_millis(100),
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        assert!(snapshot.items.iter().any(|item| {
+            item.pr_number == Some(159)
+                && item.pr_title.as_deref() == Some("Pane first")
+                && item.source.pane
+        }));
+        assert!(snapshot.items.iter().any(|item| item.pr_number == Some(7)));
+        assert_eq!(
+            snapshot.unavailable_reason(WorkIndexSource::Github),
+            Some("list observation timed out")
+        );
+        let argv = std::fs::read_to_string(argv_log).expect("GitHub argv");
+        let mut calls = argv.lines();
+        assert!(calls
+            .next()
+            .is_some_and(|call| call.starts_with("pr view 159 --repo owner/repo")));
+        assert!(calls
+            .next()
+            .is_some_and(|call| call.starts_with("pr list --repo owner/repo")));
     }
 
     #[test]
@@ -3917,8 +4030,9 @@ esac
             &format!(
                 r#"#!/bin/sh
 case "$*" in
-  "pr list --repo good/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[{{"number":77,"title":"Fresh pane PR","body":"","state":"MERGED","headRefName":"issue/77","url":"https://github.com/good/repo/pull/77"}}]' ;;
-  "pr list --repo bad/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' 'rate limited' >&2; exit 42 ;;
+  "pr view 77 --repo good/repo --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":77,"title":"Fresh pane PR","state":"MERGED","headRefName":"issue/77","url":"https://github.com/good/repo/pull/77"}}' ;;
+  "pr list --repo good/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[]' ;;
+  "pr list --repo bad/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' 'rate limited' >&2; exit 42 ;;
   *"--state open"*) printf '%s' '[]' ;;
   *) exit 43 ;;
 esac
@@ -3962,7 +4076,7 @@ esac
             &format!(
                 r#"#!/bin/sh
 case "$*" in
-  "pr list --repo owner/repo --state all --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[{{"number":7,"title":"Visible PR","body":"","state":"OPEN","headRefName":"issue/7","url":"https://github.com/owner/repo/pull/7"}}]' ;;
+  "pr list --repo owner/repo --state open --limit 200 --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '[{{"number":7,"title":"Visible PR","state":"OPEN","headRefName":"issue/7","url":"https://github.com/owner/repo/pull/7"}}]' ;;
   *"--state open"*) printf '%s' 'audience unavailable' >&2; exit 42 ;;
   *) exit 43 ;;
 esac
@@ -4092,13 +4206,13 @@ esac
     }
 
     #[test]
-    fn github_pull_request_fetch_requests_created_at() {
+    fn github_pull_request_list_uses_lean_open_query() {
         let dir = fixture_dir("github-created-at");
         let (gh, _linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
-test "$*" = "pr list --repo owner/repo --state all --limit 200 --json number,title,body,author,assignees,state,updatedAt,createdAt,additions,deletions,reviewDecision,statusCheckRollup,labels,isDraft,baseRefName,headRefName,url" || exit 42
-printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"login":"grace"}],"state":"MERGED","headRefName":"branch","baseRefName":"main","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","additions":12,"deletions":3,"labels":[{"name":"bug"}],"statusCheckRollup":[{"name":"test","conclusion":"SUCCESS"}]}]'
+test "$*" = "pr list --repo owner/repo --state open --limit 200 --json number,title,author,assignees,state,updatedAt,createdAt,reviewDecision,labels,isDraft,headRefName,url" || exit 42
+printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"login":"grace"}],"state":"OPEN","headRefName":"branch","isDraft":false,"reviewDecision":"","url":"https://github.com/owner/repo/pull/7","createdAt":"2026-08-30T11:22:33Z","updatedAt":"2026-08-31T11:22:33Z","labels":[{"name":"bug"}]}]'
 "#,
             "#!/bin/sh\nprintf '%s' '[]'\n",
         );
@@ -4117,13 +4231,13 @@ printf '%s' '[{"number":7,"title":"PR","author":{"login":"ada"},"assignees":[{"l
         );
         assert_eq!(pull_requests[0].author.as_deref(), Some("ada"));
         assert_eq!(pull_requests[0].assignees, vec!["grace"]);
-        assert_eq!(pull_requests[0].state, "merged");
+        assert_eq!(pull_requests[0].state, "open");
         assert_eq!(
             (pull_requests[0].additions, pull_requests[0].deletions),
-            (12, 3)
+            (0, 0)
         );
         assert_eq!(pull_requests[0].labels, vec!["bug"]);
-        assert_eq!(pull_requests[0].check_state, PrCheckState::Passing);
+        assert_eq!(pull_requests[0].check_state, PrCheckState::Unknown);
     }
 
     #[test]
@@ -4345,14 +4459,14 @@ printf '%s' '{"title":"ticket","description":"- [ ] ship","url":"https://linear.
     }
 
     #[test]
-    fn branch_and_body_mentions_join_pull_requests_to_tickets() {
+    fn lean_pull_request_summaries_join_tickets_from_branch_only() {
         let dir = fixture_dir("ticket-pr-join");
         let (gh, linearis) = fake_programs(
             &dir,
             r#"#!/bin/sh
 case "$*" in
   *"--author @me"*|*"review-requested:@me"*) printf '%s' '[]' ;;
-  *) printf '%s' '[{"number":7,"title":"branch match","body":"","headRefName":"issue/sca-7-fix","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"body match","body":"Tracks SCA-7.","headRefName":"plain","url":"https://github.com/owner/repo/pull/8"}]' ;;
+  *) printf '%s' '[{"number":7,"title":"branch match","headRefName":"issue/sca-7-fix","url":"https://github.com/owner/repo/pull/7"},{"number":8,"title":"body unavailable in list","headRefName":"plain","url":"https://github.com/owner/repo/pull/8"}]' ;;
 esac
 "#,
             r#"#!/bin/sh
@@ -4378,7 +4492,8 @@ esac
             .filter(|item| item.pr_number.is_some())
             .collect::<Vec<_>>();
         assert_eq!(linked.len(), 2);
-        assert!(linked.iter().all(|item| item.ticket_ids == ["SCA-7"]));
+        assert_eq!(linked[0].ticket_ids, ["SCA-7"]);
+        assert!(linked[1].ticket_ids.is_empty());
     }
 
     #[test]
