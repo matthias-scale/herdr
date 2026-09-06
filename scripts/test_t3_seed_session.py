@@ -144,6 +144,7 @@ class T3SeedSessionTest(unittest.TestCase):
             "FAKE_HERDR_STATE": str(self.state_path),
             "FAKE_HERDR_LOG": str(self.log_path),
             "FAKE_SLEEP_LOG": str(self.sleep_log),
+            "HERDR_SEED_SETTLE_HOLD": "0",
         }
 
     def tearDown(self):

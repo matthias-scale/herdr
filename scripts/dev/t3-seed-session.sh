@@ -197,7 +197,34 @@ start_sample_agents() {
     done
     wait_for_agent_startup "$sample_settled"
     wait_for_agent_quiet "$sample_settled"
-    settle_and_assert "$sample_settled"
+    settle_and_hold "$sample_settled"
+}
+
+# A late startup screen change from the agent can still clear the settle
+# after the quiet window. Settle, then watch for HERDR_SEED_SETTLE_HOLD
+# seconds (0 skips the hold, used by the fixture tests) and re-settle up to
+# three times if it was cleared.
+settle_and_hold() {
+    local pane_id=$1
+    local hold=${HERDR_SEED_SETTLE_HOLD:-60}
+    local round elapsed pane_json
+    for round in 1 2 3; do
+        settle_and_assert "$pane_id"
+        elapsed=0
+        while [[ $elapsed -lt $hold ]]; do
+            sleep 10
+            elapsed=$((elapsed + 10))
+            pane_json=$(run_herdr pane get "$pane_id")
+            if ! jq -e '.result.pane.settled_at != null' <<<"$pane_json" >/dev/null; then
+                printf 'sample-settled %s was cleared after %ss; settling again (round %s)\n' \
+                    "$pane_id" "$elapsed" "$round" >&2
+                continue 2
+            fi
+        done
+        return 0
+    done
+    printf 'sample-settled pane %s did not stay settled for %ss\n' "$pane_id" "$hold" >&2
+    return 1
 }
 
 settle_and_assert() {
